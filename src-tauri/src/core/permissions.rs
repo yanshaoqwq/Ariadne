@@ -13,6 +13,7 @@ pub struct AutoModeState {
 }
 
 impl Default for AutoModeState {
+    /// 默认关闭 Auto Mode，且不预授权预算。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -31,6 +32,7 @@ pub struct ApprovalPolicy {
 }
 
 impl Default for ApprovalPolicy {
+    /// 默认需要人工审批，冲突必须人工处理。
     fn default() -> Self {
         Self {
             allow_auto_approval: false,
@@ -64,6 +66,7 @@ pub struct PermissionPolicy {
 }
 
 impl Default for PermissionPolicy {
+    /// 默认拒绝所有敏感能力，由配置显式开放。
     fn default() -> Self {
         Self {
             allow_network: false,
@@ -217,6 +220,7 @@ fn is_under_any_root(path: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
+/// 纯词法规范化绝对路径，先消解 `.` 和 `..` 防止父目录逃逸。
 fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
@@ -241,6 +245,7 @@ fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
     Some(normalized)
 }
 
+/// canonicalize 已存在的前缀，允许目标文件本身尚未创建。
 fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     if let Ok(canonical) = path.canonicalize() {
         return Some(canonical);

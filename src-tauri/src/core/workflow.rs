@@ -17,22 +17,26 @@ macro_rules! string_id {
         pub struct $name(pub String);
 
         impl $name {
+            /// 创建新的强类型 ID。
             pub fn new(value: impl Into<String>) -> Self {
                 Self(value.into())
             }
 
+            /// 返回底层字符串引用。
             pub fn as_str(&self) -> &str {
                 &self.0
             }
         }
 
         impl From<&str> for $name {
+            /// 从字符串切片创建强类型 ID。
             fn from(value: &str) -> Self {
                 Self(value.to_owned())
             }
         }
 
         impl From<String> for $name {
+            /// 从 String 创建强类型 ID。
             fn from(value: String) -> Self {
                 Self(value)
             }

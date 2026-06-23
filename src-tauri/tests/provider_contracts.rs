@@ -18,6 +18,7 @@ struct MockLlmProvider {
 }
 
 impl Provider for MockLlmProvider {
+    /// 返回测试 provider 的基础定义。
     fn definition(&self) -> ProviderDefinition {
         ProviderDefinition {
             provider_id: self.provider_id.clone(),
@@ -28,12 +29,14 @@ impl Provider for MockLlmProvider {
         }
     }
 
+    /// 测试 provider 始终报告健康。
     fn health_check(&self) -> CoreResult<ProviderHealth> {
         Ok(ProviderHealth::Healthy)
     }
 }
 
 impl LlmProvider for MockLlmProvider {
+    /// 返回预设 LLM 响应并附带可选成本。
     fn complete(
         &self,
         _context: &ProviderCallContext,

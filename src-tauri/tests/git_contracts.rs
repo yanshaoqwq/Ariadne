@@ -2,6 +2,7 @@ use std::fs;
 
 use ariadne::git::{GitHealthStatus, GitService};
 
+/// 初始化带本地提交身份的临时 Git 仓库。
 fn init_test_repo() -> (tempfile::TempDir, GitService) {
     let temp_dir = tempfile::tempdir().unwrap();
     let service = GitService::new(temp_dir.path());
@@ -14,6 +15,7 @@ fn init_test_repo() -> (tempfile::TempDir, GitService) {
     (temp_dir, service)
 }
 
+/// 在临时仓库里执行 git 命令并断言成功。
 fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
     let output = std::process::Command::new("git")
         .args(args)

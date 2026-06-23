@@ -17,6 +17,7 @@ pub struct BudgetLimits {
 }
 
 impl Default for BudgetLimits {
+    /// 创建默认预算限制，默认仅对高成本操作要求确认。
     fn default() -> Self {
         Self {
             single_call_usd: None,

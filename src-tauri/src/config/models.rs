@@ -30,6 +30,7 @@ pub struct ProjectConfig {
 }
 
 impl Default for ProjectConfig {
+    /// 创建完整项目配置的默认值。
     fn default() -> Self {
         Self {
             app: AppConfig::default(),
@@ -73,6 +74,7 @@ pub struct AppConfig {
 }
 
 impl Default for AppConfig {
+    /// 创建应用基础配置默认值。
     fn default() -> Self {
         Self {
             schema_version: current_schema_version(),
@@ -104,6 +106,7 @@ pub struct ProvidersConfig {
 }
 
 impl Default for ProvidersConfig {
+    /// 创建 provider 配置默认值。
     fn default() -> Self {
         Self {
             schema_version: current_schema_version(),
@@ -254,6 +257,7 @@ pub struct PermissionsConfig {
 }
 
 impl Default for PermissionsConfig {
+    /// 创建权限配置默认值。
     fn default() -> Self {
         Self {
             schema_version: current_schema_version(),
@@ -280,6 +284,7 @@ pub struct RagConfig {
 }
 
 impl Default for RagConfig {
+    /// 创建 RAG 配置默认值。
     fn default() -> Self {
         Self {
             schema_version: current_schema_version(),
@@ -319,6 +324,7 @@ pub struct VectorStoreConfig {
 }
 
 impl Default for VectorStoreConfig {
+    /// 创建向量存储配置默认值。
     fn default() -> Self {
         Self {
             backend: VectorStoreBackend::QdrantSidecar,
@@ -336,6 +342,7 @@ pub enum VectorStoreBackend {
 }
 
 impl Default for VectorStoreBackend {
+    /// 默认使用本地 Qdrant sidecar。
     fn default() -> Self {
         Self::QdrantSidecar
     }
@@ -353,6 +360,7 @@ pub struct SidecarConfig {
 }
 
 impl Default for SidecarConfig {
+    /// 创建 sidecar 配置默认值。
     fn default() -> Self {
         Self {
             host: default_qdrant_host(),
@@ -372,6 +380,7 @@ pub struct FullTextStoreConfig {
 }
 
 impl Default for FullTextStoreConfig {
+    /// 创建全文索引配置默认值。
     fn default() -> Self {
         Self {
             backend: FullTextStoreBackend::Tantivy,
@@ -388,6 +397,7 @@ pub enum FullTextStoreBackend {
 }
 
 impl Default for FullTextStoreBackend {
+    /// 默认使用 Tantivy 全文索引。
     fn default() -> Self {
         Self::Tantivy
     }
@@ -411,6 +421,7 @@ pub struct WorkflowConfig {
 }
 
 impl Default for WorkflowConfig {
+    /// 创建工作流运行配置默认值。
     fn default() -> Self {
         Self {
             schema_version: current_schema_version(),
@@ -465,6 +476,7 @@ pub struct GitConfig {
 }
 
 impl Default for GitConfig {
+    /// 创建 Git 跟踪配置默认值。
     fn default() -> Self {
         Self {
             schema_version: current_schema_version(),
@@ -491,6 +503,7 @@ pub struct AutoModeConfig {
 }
 
 impl Default for AutoModeConfig {
+    /// 创建 Auto Mode 配置默认值。
     fn default() -> Self {
         Self {
             schema_version: current_schema_version(),
@@ -512,6 +525,7 @@ pub struct ApprovalPromptConfig {
 }
 
 impl Default for ApprovalPromptConfig {
+    /// 创建默认审批提示词配置。
     fn default() -> Self {
         Self {
             prompt_id: "default-review".to_owned(),

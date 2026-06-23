@@ -115,6 +115,7 @@ impl SystemKeychainSecretStore {
 
 #[cfg(feature = "system-keychain")]
 impl Default for SystemKeychainSecretStore {
+    /// 使用项目默认 service 名称创建系统 keychain 存储。
     fn default() -> Self {
         Self::new("literature-agent")
     }

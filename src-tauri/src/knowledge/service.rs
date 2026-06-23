@@ -14,6 +14,7 @@ pub struct KnowledgeApprovalPolicy {
 }
 
 impl Default for KnowledgeApprovalPolicy {
+    /// 默认普通模式需要人工确认，并沿用节点审批策略。
     fn default() -> Self {
         Self {
             require_human_confirmation: true,

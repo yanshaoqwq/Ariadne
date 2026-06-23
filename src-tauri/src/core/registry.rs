@@ -90,6 +90,7 @@ pub struct NodeRegistry {
 }
 
 impl Default for NodeRegistry {
+    /// 创建空的节点注册表。
     fn default() -> Self {
         Self {
             inner: TypedRegistry::new("node"),
@@ -158,6 +159,7 @@ pub struct SkillRegistry {
 }
 
 impl Default for SkillRegistry {
+    /// 创建空的 Skill 注册表。
     fn default() -> Self {
         Self {
             inner: TypedRegistry::new("skill"),
@@ -236,6 +238,7 @@ pub struct ProviderRegistry {
 }
 
 impl Default for ProviderRegistry {
+    /// 创建空的 Provider 注册表。
     fn default() -> Self {
         Self {
             inner: TypedRegistry::new("provider"),
