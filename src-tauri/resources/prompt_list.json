@@ -1,0 +1,66 @@
+{
+  "tool.planner_register": {
+    "prompt": "注册大纲中计划写入的创作变化。请提供功能、操作和结构化内容，避免把正文直接写入注册项。",
+    "describe": "Planner 注册人物性格、人物关系或伏笔等计划写作变化。"
+  },
+  "tool.planner_find": {
+    "prompt": "查询本地创作知识库。默认返回编号、摘要、来源和评分；只有显式要求时才返回正文文本。",
+    "describe": "Planner 查询人物、关系、事件、故事段、伏笔和总结。"
+  },
+  "tool.planner_search": {
+    "prompt": "调用外部 SearchProvider 进行考据。搜索结果只返回给 agent，不自动写入知识库。",
+    "describe": "Planner 联网或外部资料考据。"
+  },
+  "tool.detail_find": {
+    "prompt": "查询本地创作知识库，为环境、心理或设定细节生成提供上下文。",
+    "describe": "Detail 查询本地创作知识。"
+  },
+  "tool.detail_search": {
+    "prompt": "调用外部 SearchProvider，为环境、心理或设定细节生成补充考据资料。",
+    "describe": "Detail 外部考据搜索。"
+  },
+  "tool.writer_find": {
+    "prompt": "查询本地创作知识库，为当前正文写作补充已有设定、前文正文片段、章节总结或伏笔状态。Writer 只能查询，不能注册新设定。",
+    "describe": "Writer 查询本地创作知识，用于保持正文连续性和设定一致性。"
+  },
+  "tool.writer_search": {
+    "prompt": "当你需要知道这一处现实中的情况时调用外部 SearchProvider 考据。结果只用于当前写作判断，不允许自动注册到知识库。",
+    "describe": "Writer 现实细节考据搜索，用于需要确认现实情况的写作位置。"
+  },
+  "tool.writer_insert_lines": {
+    "prompt": "按 1-based 行号在正文指定行后插入文本，系统会转换为 UTF-8 byte-range patch。",
+    "describe": "Writer 按行号插入正文。"
+  },
+  "tool.writer_replace_lines": {
+    "prompt": "按 1-based 闭区间行号替换正文文本，系统会转换为 UTF-8 byte-range patch。",
+    "describe": "Writer 按行号替换正文。"
+  },
+  "auto_audit.register": {
+    "prompt": "审计 Planner 注册项是否符合当前大纲目标、人物设定和长期一致性。返回是否通过以及理由。",
+    "describe": "Auto Mode 注册项自动审计提示词。"
+  },
+  "auto_audit.summary": {
+    "prompt": "审计故事段、事件、章节或阶段总结是否忠实于正文和已知设定。返回是否通过以及理由。",
+    "describe": "Auto Mode 总结项自动审计提示词。"
+  },
+  "auto_audit.correction_patch": {
+    "prompt": "审计 Writer 自动修正文档 patch 是否只完成目标修正、没有引入无关改写。返回是否通过以及理由。",
+    "describe": "Auto Mode 自动修正 patch 审计提示词。"
+  },
+  "summarizer.segments": {
+    "prompt": "把章节正文划分为连续且属于同一事件的故事段，为每个故事段编号并概括。",
+    "describe": "故事段划分并概括提示词。"
+  },
+  "summarizer.events": {
+    "prompt": "根据故事段概括和既有事件概括，把故事段归入事件并更新事件状态。",
+    "describe": "事件概括提示词。"
+  },
+  "summarizer.chapter_summary": {
+    "prompt": "总结当前章节内容，写出事件进展、人物性格变化和人物关系变化。",
+    "describe": "章节总结提示词。"
+  },
+  "summarizer.stage_summary": {
+    "prompt": "判断章节是否仍属于当前阶段，并根据阶段内章节总结更新阶段概括。",
+    "describe": "阶段概括提示词。"
+  }
+}

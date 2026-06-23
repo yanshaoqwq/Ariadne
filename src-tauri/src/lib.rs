@@ -6,4 +6,5 @@ pub mod git;
 pub mod knowledge;
 pub mod llm;
 pub mod providers;
+pub mod rag;
 pub mod retrieval;
