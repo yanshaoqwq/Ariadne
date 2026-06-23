@@ -106,8 +106,15 @@ pub struct CostQuery {
 }
 
 /// 模型 token 使用量。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+impl TokenUsage {
+    /// 返回输入和输出 token 的总量。
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
 }
