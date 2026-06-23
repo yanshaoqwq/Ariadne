@@ -5,8 +5,8 @@ use ariadne::core::{CoreResult, ProviderCapability, ProviderDefinition, Provider
 use ariadne::costs::{CostLedger, CostQuery, SqliteCostLedger, TokenUsage};
 use ariadne::providers::{
     resolve_base_url, LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider,
-    ProviderCallContext, ProviderExecutor, ProviderProtocol, ProviderRuntimeRegistry,
-    ToolUseEnvelope,
+    ProviderCallContext, ProviderExecutor, ProviderHealth, ProviderKind, ProviderProtocol,
+    ProviderRuntimeRegistry, ToolUseEnvelope,
 };
 use serde_json::{json, Value};
 
@@ -26,6 +26,10 @@ impl Provider for MockLlmProvider {
             capabilities: vec![ProviderCapability::Llm, ProviderCapability::ToolUse],
             config_schema: Value::Null,
         }
+    }
+
+    fn health_check(&self) -> CoreResult<ProviderHealth> {
+        Ok(ProviderHealth::Healthy)
     }
 }
 
@@ -140,6 +144,31 @@ fn provider_protocol_encapsulates_tool_use_differences() {
         ProviderProtocol::Gemini.tool_use_envelope(),
         ToolUseEnvelope::GeminiFunctionDeclarations
     );
+}
+
+#[test]
+fn provider_registry_exposes_lifecycle_reports() {
+    let mut registry = ProviderRuntimeRegistry::default();
+    registry
+        .register_llm(
+            "healthy",
+            Arc::new(MockLlmProvider {
+                provider_id: "healthy".to_owned(),
+                response_text: "ok".to_owned(),
+                cost_usd: None,
+            }),
+        )
+        .unwrap();
+
+    let init_reports = registry.initialize_all();
+    let health_reports = registry.health_check_all();
+    let shutdown_reports = registry.shutdown_all();
+
+    assert_eq!(init_reports.len(), 1);
+    assert!(init_reports[0].success);
+    assert_eq!(health_reports[0].kind, ProviderKind::Llm);
+    assert_eq!(health_reports[0].health, ProviderHealth::Healthy);
+    assert!(shutdown_reports[0].success);
 }
 
 #[test]

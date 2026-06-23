@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -179,7 +179,70 @@ impl PermissionPolicy {
 }
 
 fn is_under_any_root(path: &Path, roots: &[PathBuf]) -> bool {
-    path.is_absolute() && roots.iter().any(|root| path.starts_with(root))
+    let Some(normalized_path) = normalize_absolute_path(path) else {
+        return false;
+    };
+
+    let Some(canonicalish_path) = canonicalize_existing_prefix(&normalized_path) else {
+        return false;
+    };
+
+    roots.iter().any(|root| {
+        let Some(normalized_root) = normalize_absolute_path(root) else {
+            return false;
+        };
+
+        let Some(canonicalish_root) = canonicalize_existing_prefix(&normalized_root) else {
+            return false;
+        };
+
+        canonicalish_path.starts_with(canonicalish_root)
+    })
+}
+
+fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    Some(normalized)
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+
+    let mut missing_suffix = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(canonical_parent) = current.canonicalize() {
+            let mut combined = canonical_parent;
+            for component in missing_suffix.iter().rev() {
+                combined.push(component);
+            }
+            return Some(combined);
+        }
+
+        let file_name = current.file_name()?.to_owned();
+        missing_suffix.push(file_name);
+        current = current.parent()?;
+    }
 }
 
 fn permission_action(request: &PermissionRequest) -> String {
@@ -243,5 +306,46 @@ mod tests {
         };
 
         assert!(!ApprovalPolicy::default().should_auto_approve(&auto_mode, false));
+    }
+
+    #[test]
+    fn file_permission_rejects_parent_directory_escape() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let allowed = temp_dir.path().join("documents");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let escaped = allowed.join("../secrets.txt");
+        let policy = PermissionPolicy {
+            readable_file_roots: vec![allowed],
+            ..PermissionPolicy::default()
+        };
+
+        assert!(policy
+            .ensure(&PermissionRequest::FileRead { path: escaped })
+            .is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn file_permission_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let allowed = temp_dir.path().join("documents");
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = allowed.join("link");
+        symlink(&outside, &link).unwrap();
+
+        let policy = PermissionPolicy {
+            readable_file_roots: vec![allowed],
+            ..PermissionPolicy::default()
+        };
+
+        assert!(policy
+            .ensure(&PermissionRequest::FileRead {
+                path: link.join("secret.txt")
+            })
+            .is_err());
     }
 }

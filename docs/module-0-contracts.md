@@ -19,6 +19,7 @@ The Rust source of truth lives under `src-tauri/src/core`.
 - Large text should move through `DocumentRef`, `ChunkRef`, or `ArtifactRef` instead of inline copies.
 - `Pause` and `Stop` are distinct: pause preserves resumable run state, stop terminates the run while preserving completed outputs.
 - Loops must be bounded by iteration count, timeout, and a non-null stop condition. Budget limits are optional but validated when present.
+- Loop timeout is also checked against iteration count; each iteration must have at least `MIN_LOOP_ITERATION_TIMEOUT_MS`, and Module 1 workflow limits can cap loop iterations and total timeout.
 - Auto Mode only skips ordinary human confirmation when the node approval policy allows it. It does not bypass network, file, WASM, key, or budget restrictions.
+- File permissions require absolute paths under configured roots after lexical normalization and existing-prefix canonicalization. Parent directory traversal and symlink escapes are rejected.
 - Registries are keyed by stable type/id strings so later modules can add implementations without changing the core contract.
-

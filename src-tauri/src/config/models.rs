@@ -421,6 +421,10 @@ impl WorkflowConfig {
 
         Ok(())
     }
+
+    pub fn validate_loop_policy(&self, policy: &crate::core::LoopPolicy) -> CoreResult<()> {
+        policy.validate_against_limits(self.max_loop_iterations, self.default_timeout_ms)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

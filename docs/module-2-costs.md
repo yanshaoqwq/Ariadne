@@ -14,6 +14,7 @@ of truth lives under `src-tauri/src/costs`.
 
 - All cost records include category, timestamp, amount, and optional provider/model/workflow/run/node/tool-call metadata.
 - Tool-use costs can be recorded by `tool_call_id`.
+- Token pricing supports both point estimates and range estimates. Unknown tool-use round counts return a conservative range instead of a false precise value.
 - Over-budget decisions return `RunControl::Pause`.
 - Normal mode high-cost operations return `RequireConfirmation` with `RunControl::Pause`.
 - Auto Mode allows calls inside preauthorized budget and pauses when preauthorization is exceeded.
@@ -33,4 +34,3 @@ The SQLite schema has an idempotent migration path and stores:
 - `cargo fmt`
 - `cargo test`
 - `cargo test --features system-keychain --no-run`
-

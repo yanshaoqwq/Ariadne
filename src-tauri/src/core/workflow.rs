@@ -6,6 +6,8 @@ use serde_json::Value;
 use crate::core::errors::{CoreError, CoreResult};
 use crate::core::ports::{PortDefinition, PortMap};
 
+pub const MIN_LOOP_ITERATION_TIMEOUT_MS: u64 = 1_000;
+
 macro_rules! string_id {
     ($name:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -231,6 +233,14 @@ impl LoopPolicy {
             ));
         }
 
+        let per_iteration_ms = self.timeout_ms / u64::from(self.max_iterations);
+        if per_iteration_ms < MIN_LOOP_ITERATION_TIMEOUT_MS {
+            return Err(CoreError::validation(format!(
+                "loop policy timeout_ms {} is too small for {} iterations; at least {}ms per iteration is required",
+                self.timeout_ms, self.max_iterations, MIN_LOOP_ITERATION_TIMEOUT_MS
+            )));
+        }
+
         if let Some(limit) = self.budget_limit_usd {
             if !limit.is_finite() || limit < 0.0 {
                 return Err(CoreError::validation(
@@ -243,6 +253,42 @@ impl LoopPolicy {
             return Err(CoreError::validation(
                 "loop policy requires a non-null stop_condition",
             ));
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_against_limits(
+        &self,
+        max_loop_iterations: u32,
+        max_timeout_ms: u64,
+    ) -> CoreResult<()> {
+        self.validate()?;
+
+        if max_loop_iterations == 0 {
+            return Err(CoreError::validation(
+                "workflow max_loop_iterations cannot be zero",
+            ));
+        }
+
+        if max_timeout_ms == 0 {
+            return Err(CoreError::validation(
+                "workflow max_timeout_ms cannot be zero",
+            ));
+        }
+
+        if self.max_iterations > max_loop_iterations {
+            return Err(CoreError::validation(format!(
+                "loop max_iterations {} exceeds workflow limit {}",
+                self.max_iterations, max_loop_iterations
+            )));
+        }
+
+        if self.timeout_ms > max_timeout_ms {
+            return Err(CoreError::validation(format!(
+                "loop timeout_ms {} exceeds workflow timeout limit {}",
+                self.timeout_ms, max_timeout_ms
+            )));
         }
 
         Ok(())
@@ -271,12 +317,36 @@ mod tests {
     fn loop_policy_rejects_unbounded_loop() {
         let policy = LoopPolicy {
             max_iterations: 0,
-            timeout_ms: 1_000,
+            timeout_ms: 2_000,
             budget_limit_usd: Some(1.0),
             stop_condition: json!({ "kind": "score_at_least", "value": 0.95 }),
         };
 
         assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn loop_policy_rejects_unrealistic_iteration_timeout() {
+        let policy = LoopPolicy {
+            max_iterations: 10,
+            timeout_ms: 5_000,
+            budget_limit_usd: Some(1.0),
+            stop_condition: json!({ "kind": "score_at_least", "value": 0.95 }),
+        };
+
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn loop_policy_validates_against_workflow_limits() {
+        let policy = LoopPolicy {
+            max_iterations: 6,
+            timeout_ms: 60_000,
+            budget_limit_usd: Some(1.0),
+            stop_condition: json!({ "kind": "score_at_least", "value": 0.95 }),
+        };
+
+        assert!(policy.validate_against_limits(5, 60_000).is_err());
     }
 
     #[test]
