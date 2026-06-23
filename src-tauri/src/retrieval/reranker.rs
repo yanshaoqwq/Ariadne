@@ -4,16 +4,19 @@ use crate::retrieval::memory::sort_and_limit;
 use crate::retrieval::models::{RerankInput, RetrievalResult};
 use crate::retrieval::traits::ResultReranker;
 
+/// 默认 reranker，仅按已有 score 排序。
 #[derive(Debug, Default)]
 pub struct ScoreReranker;
 
 impl ScoreReranker {
+    /// 创建默认 score reranker。
     pub fn new() -> Self {
         Self
     }
 }
 
 impl ResultReranker for ScoreReranker {
+    /// 按 score 排序并裁剪到指定 limit。
     fn rerank(&self, input: RerankInput) -> CoreResult<Vec<RetrievalResult>> {
         let mut results = input.results;
         sort_and_limit(&mut results, input.limit);
@@ -21,6 +24,7 @@ impl ResultReranker for ScoreReranker {
     }
 }
 
+/// 将 Module 3 的 RerankerProvider 适配成 Module 4 的结果重排器。
 pub struct ProviderResultReranker<'a> {
     provider: &'a dyn RerankerProvider,
     context: ProviderCallContext,
@@ -28,6 +32,7 @@ pub struct ProviderResultReranker<'a> {
 }
 
 impl<'a> ProviderResultReranker<'a> {
+    /// 创建 provider-backed reranker。
     pub fn new(
         provider: &'a dyn RerankerProvider,
         context: ProviderCallContext,
@@ -42,6 +47,7 @@ impl<'a> ProviderResultReranker<'a> {
 }
 
 impl ResultReranker for ProviderResultReranker<'_> {
+    /// 调用 provider 重排，并把返回的 index/score 映射回原始检索结果。
     fn rerank(&self, input: RerankInput) -> CoreResult<Vec<RetrievalResult>> {
         let response = self.provider.rerank(
             &self.context,
@@ -60,6 +66,7 @@ impl ResultReranker for ProviderResultReranker<'_> {
 
         let mut reranked = Vec::new();
         for item in response.results {
+            // provider 返回的是原候选数组下标，非法下标直接忽略，避免 panic。
             if let Some(mut result) = input.results.get(item.index).cloned() {
                 result.score = item.score;
                 reranked.push(result);

@@ -6,6 +6,7 @@ use crate::providers::traits::{
     EmbeddingProvider, LlmProvider, Provider, ProviderHealth, RerankerProvider, SearchProvider,
 };
 
+/// 运行时 provider 类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Llm,
@@ -14,6 +15,7 @@ pub enum ProviderKind {
     Search,
 }
 
+/// Provider 初始化或关闭报告。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderLifecycleReport {
     pub provider_id: String,
@@ -22,6 +24,7 @@ pub struct ProviderLifecycleReport {
     pub reason: Option<String>,
 }
 
+/// Provider 健康检查报告。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderHealthReport {
     pub provider_id: String,
@@ -29,6 +32,7 @@ pub struct ProviderHealthReport {
     pub health: ProviderHealth,
 }
 
+/// 运行时 provider 注册表，按能力类型分别索引 provider。
 #[derive(Default)]
 pub struct ProviderRuntimeRegistry {
     llm: BTreeMap<String, Arc<dyn LlmProvider>>,
@@ -38,6 +42,7 @@ pub struct ProviderRuntimeRegistry {
 }
 
 impl ProviderRuntimeRegistry {
+    /// 注册 LLM provider。
     pub fn register_llm(
         &mut self,
         provider_id: impl Into<String>,
@@ -46,6 +51,7 @@ impl ProviderRuntimeRegistry {
         register(&mut self.llm, "llm_provider", provider_id.into(), provider)
     }
 
+    /// 注册 embedding provider。
     pub fn register_embedding(
         &mut self,
         provider_id: impl Into<String>,
@@ -59,6 +65,7 @@ impl ProviderRuntimeRegistry {
         )
     }
 
+    /// 注册 reranker provider。
     pub fn register_reranker(
         &mut self,
         provider_id: impl Into<String>,
@@ -72,6 +79,7 @@ impl ProviderRuntimeRegistry {
         )
     }
 
+    /// 注册 search provider。
     pub fn register_search(
         &mut self,
         provider_id: impl Into<String>,
@@ -85,22 +93,27 @@ impl ProviderRuntimeRegistry {
         )
     }
 
+    /// 读取 LLM provider。
     pub fn llm(&self, provider_id: &str) -> CoreResult<Arc<dyn LlmProvider>> {
         get(&self.llm, "llm_provider", provider_id)
     }
 
+    /// 读取 embedding provider。
     pub fn embedding(&self, provider_id: &str) -> CoreResult<Arc<dyn EmbeddingProvider>> {
         get(&self.embedding, "embedding_provider", provider_id)
     }
 
+    /// 读取 reranker provider。
     pub fn reranker(&self, provider_id: &str) -> CoreResult<Arc<dyn RerankerProvider>> {
         get(&self.reranker, "reranker_provider", provider_id)
     }
 
+    /// 读取 search provider。
     pub fn search(&self, provider_id: &str) -> CoreResult<Arc<dyn SearchProvider>> {
         get(&self.search, "search_provider", provider_id)
     }
 
+    /// 初始化所有已注册 provider，并收集每个 provider 的结果。
     pub fn initialize_all(&self) -> Vec<ProviderLifecycleReport> {
         let mut reports = Vec::new();
         collect_lifecycle_reports(&mut reports, ProviderKind::Llm, &self.llm, |provider| {
@@ -127,6 +140,7 @@ impl ProviderRuntimeRegistry {
         reports
     }
 
+    /// 检查所有已注册 provider 的健康状态。
     pub fn health_check_all(&self) -> Vec<ProviderHealthReport> {
         let mut reports = Vec::new();
         collect_health_reports(&mut reports, ProviderKind::Llm, &self.llm);
@@ -136,6 +150,7 @@ impl ProviderRuntimeRegistry {
         reports
     }
 
+    /// 关闭所有已注册 provider，并收集每个 provider 的结果。
     pub fn shutdown_all(&self) -> Vec<ProviderLifecycleReport> {
         let mut reports = Vec::new();
         collect_lifecycle_reports(&mut reports, ProviderKind::Llm, &self.llm, |provider| {
@@ -163,6 +178,7 @@ impl ProviderRuntimeRegistry {
     }
 }
 
+/// 注册 provider，统一处理空 id 和重复 id。
 fn register<T>(
     registry: &mut BTreeMap<String, Arc<T>>,
     registry_name: &'static str,
@@ -187,6 +203,7 @@ where
     Ok(())
 }
 
+/// 读取 provider，统一处理缺失错误。
 fn get<T>(
     registry: &BTreeMap<String, Arc<T>>,
     registry_name: &'static str,
@@ -204,6 +221,7 @@ where
         })
 }
 
+/// 对一类 provider 执行生命周期动作并收集报告。
 fn collect_lifecycle_reports<T, F>(
     reports: &mut Vec<ProviderLifecycleReport>,
     kind: ProviderKind,
@@ -231,6 +249,7 @@ fn collect_lifecycle_reports<T, F>(
     }
 }
 
+/// 对一类 provider 执行健康检查并收集报告。
 fn collect_health_reports<T>(
     reports: &mut Vec<ProviderHealthReport>,
     kind: ProviderKind,
@@ -242,6 +261,7 @@ fn collect_health_reports<T>(
         let health = provider
             .health_check()
             .unwrap_or_else(|error| ProviderHealth::Unhealthy {
+                // 健康检查本身失败也要转成报告，避免诊断接口整体失败。
                 reason: error.to_string(),
             });
         reports.push(ProviderHealthReport {

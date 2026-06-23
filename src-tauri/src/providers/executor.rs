@@ -8,15 +8,18 @@ use crate::providers::models::{
 };
 use crate::providers::traits::{EmbeddingProvider, LlmProvider, RerankerProvider, SearchProvider};
 
+/// Provider 调用执行器，负责把 provider 返回的费用写入成本账本。
 pub struct ProviderExecutor<'a, L: CostLedger> {
     ledger: &'a L,
 }
 
 impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
+    /// 创建 provider 执行器。
     pub fn new(ledger: &'a L) -> Self {
         Self { ledger }
     }
 
+    /// 执行 LLM 调用并记录可选费用。
     pub fn complete_llm(
         &self,
         provider: &dyn LlmProvider,
@@ -34,6 +37,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
         Ok(response)
     }
 
+    /// 执行 embedding 调用并记录可选费用。
     pub fn embed(
         &self,
         provider: &dyn EmbeddingProvider,
@@ -51,6 +55,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
         Ok(response)
     }
 
+    /// 执行 reranker 调用并记录可选费用。
     pub fn rerank(
         &self,
         provider: &dyn RerankerProvider,
@@ -68,6 +73,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
         Ok(response)
     }
 
+    /// 执行 search provider 调用并记录可选费用。
     pub fn search(
         &self,
         provider: &dyn SearchProvider,
@@ -85,6 +91,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
         Ok(response)
     }
 
+    /// provider 未返回费用时不写账；返回费用时统一校验并写入成本账本。
     fn record_optional_cost(
         &self,
         category: CostCategory,
@@ -122,6 +129,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
     }
 }
 
+/// 返回当前 Unix 毫秒时间戳。
 fn unix_timestamp_ms() -> CoreResult<u64> {
     let duration = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

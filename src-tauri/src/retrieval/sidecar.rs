@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{CoreError, CoreResult};
 use crate::retrieval::models::{StoreHealth, StoreStatus};
 
+/// Qdrant sidecar 的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QdrantSidecarConfig {
     pub binary_path: PathBuf,
@@ -20,11 +21,13 @@ pub struct QdrantSidecarConfig {
 }
 
 impl QdrantSidecarConfig {
+    /// 根据 host 和实际端口生成 HTTP endpoint。
     pub fn endpoint(&self, port: u16) -> String {
         format!("http://{}:{port}", self.host)
     }
 }
 
+/// Qdrant sidecar 当前状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QdrantSidecarStatus {
     pub state: SidecarState,
@@ -40,6 +43,7 @@ pub struct QdrantSidecarStatus {
 }
 
 impl QdrantSidecarStatus {
+    /// 构造停止状态。
     fn stopped(host: impl Into<String>) -> Self {
         Self {
             state: SidecarState::Stopped,
@@ -52,6 +56,7 @@ impl QdrantSidecarStatus {
     }
 }
 
+/// sidecar 生命周期状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SidecarState {
@@ -61,20 +66,25 @@ pub enum SidecarState {
     Unavailable,
 }
 
+/// 端口选择结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortSelection {
     pub port: u16,
     pub reused_requested_port: bool,
 }
 
+/// sidecar 进程启动器，测试可替换该接口避免真的启动 Qdrant。
 pub trait SidecarProcessRunner: Send + Sync {
+    /// 启动 sidecar 进程。
     fn spawn(&self, config: &QdrantSidecarConfig, port: u16) -> CoreResult<Child>;
 }
 
+/// 基于 std::process::Command 的默认进程启动器。
 #[derive(Debug, Default)]
 pub struct CommandSidecarProcessRunner;
 
 impl SidecarProcessRunner for CommandSidecarProcessRunner {
+    /// 创建数据/日志目录，并通过环境变量传递 Qdrant 基础配置。
     fn spawn(&self, config: &QdrantSidecarConfig, port: u16) -> CoreResult<Child> {
         std::fs::create_dir_all(&config.data_dir)?;
         std::fs::create_dir_all(&config.log_dir)?;
@@ -91,6 +101,7 @@ impl SidecarProcessRunner for CommandSidecarProcessRunner {
     }
 }
 
+/// 管理 Qdrant sidecar 的生命周期和健康状态。
 pub struct QdrantSidecarSupervisor<R = CommandSidecarProcessRunner> {
     config: QdrantSidecarConfig,
     runner: R,
@@ -99,6 +110,7 @@ pub struct QdrantSidecarSupervisor<R = CommandSidecarProcessRunner> {
 }
 
 impl QdrantSidecarSupervisor {
+    /// 创建使用默认命令启动器的 supervisor。
     pub fn new(config: QdrantSidecarConfig) -> Self {
         Self::with_runner(config, CommandSidecarProcessRunner)
     }
@@ -108,6 +120,7 @@ impl<R> QdrantSidecarSupervisor<R>
 where
     R: SidecarProcessRunner,
 {
+    /// 创建可注入进程启动器的 supervisor。
     pub fn with_runner(config: QdrantSidecarConfig, runner: R) -> Self {
         let status = QdrantSidecarStatus::stopped(config.host.clone());
         Self {
@@ -118,6 +131,7 @@ where
         }
     }
 
+    /// 启动 sidecar，并在端口冲突或健康检查失败时标记 degraded/unavailable。
     pub fn start(&self) -> CoreResult<QdrantSidecarStatus> {
         if let Some(existing) = self.status_if_running()? {
             return Ok(existing);
@@ -127,6 +141,7 @@ where
         let child = match self.runner.spawn(&self.config, selection.port) {
             Ok(child) => child,
             Err(error) => {
+                // 进程完全无法启动时记录不可用状态，便于前端诊断。
                 let status = QdrantSidecarStatus {
                     state: SidecarState::Unavailable,
                     host: self.config.host.clone(),
@@ -142,6 +157,7 @@ where
         let process_id = child.id();
         *self.child.lock().map_err(lock_error)? = Some(child);
 
+        // 端口冲突时仍可继续运行，但需要向诊断层暴露 degraded 原因。
         let mut state = if selection.reused_requested_port {
             SidecarState::Running
         } else {
@@ -161,6 +177,7 @@ where
             selection.port,
             self.config.startup_timeout_ms,
         ) {
+            // 进程已启动但 TCP 不可达，保留进程信息并报告 degraded。
             state = SidecarState::Degraded;
             reason = Some(error.to_string());
         }
@@ -177,6 +194,7 @@ where
         Ok(status)
     }
 
+    /// 停止当前 sidecar 进程。
     pub fn stop(&self) -> CoreResult<QdrantSidecarStatus> {
         if let Some(mut child) = self.child.lock().map_err(lock_error)?.take() {
             child.kill()?;
@@ -188,6 +206,7 @@ where
         Ok(status)
     }
 
+    /// 标记进程崩溃或被外部终止。
     pub fn mark_crashed(&self, reason: impl Into<String>) -> CoreResult<QdrantSidecarStatus> {
         let mut status = self.status.lock().map_err(lock_error)?;
         status.state = SidecarState::Unavailable;
@@ -195,15 +214,18 @@ where
         Ok(status.clone())
     }
 
+    /// 重启 sidecar。
     pub fn restart(&self) -> CoreResult<QdrantSidecarStatus> {
         self.stop()?;
         self.start()
     }
 
+    /// 返回当前 sidecar 状态快照。
     pub fn status(&self) -> CoreResult<QdrantSidecarStatus> {
         Ok(self.status.lock().map_err(lock_error)?.clone())
     }
 
+    /// 将 sidecar 状态转换成通用 StoreHealth。
     pub fn health_check(&self) -> CoreResult<StoreHealth> {
         let status = self.status()?;
         let reason = status
@@ -221,6 +243,7 @@ where
         }
     }
 
+    /// running/degraded 都表示已有进程状态，不重复启动。
     fn status_if_running(&self) -> CoreResult<Option<QdrantSidecarStatus>> {
         let status = self.status()?;
         Ok(
@@ -230,6 +253,7 @@ where
     }
 }
 
+/// 选择可用端口；请求端口不可用时回退到系统分配端口。
 pub fn select_available_port(host: &str, requested_port: u16) -> CoreResult<PortSelection> {
     if requested_port == 0 {
         return reserve_ephemeral_port(host).map(|port| PortSelection {
@@ -251,10 +275,12 @@ pub fn select_available_port(host: &str, requested_port: u16) -> CoreResult<Port
     })
 }
 
+/// 检查 host:port 当前是否可绑定。
 pub fn is_port_available(host: &str, port: u16) -> bool {
     TcpListener::bind((host, port)).is_ok()
 }
 
+/// 等待 TCP 端口可连接，用于启动后的轻量健康检查。
 pub fn wait_for_tcp_health(host: &str, port: u16, timeout_ms: u64) -> CoreResult<()> {
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -273,11 +299,13 @@ pub fn wait_for_tcp_health(host: &str, port: u16, timeout_ms: u64) -> CoreResult
     }
 }
 
+/// 向系统申请一个临时可用端口。
 fn reserve_ephemeral_port(host: &str) -> CoreResult<u16> {
     let listener = TcpListener::bind((host, 0))?;
     Ok(listener.local_addr()?.port())
 }
 
+/// 将锁中毒转换成统一错误。
 fn lock_error<T>(error: std::sync::PoisonError<T>) -> CoreError {
     CoreError::validation(format!("sidecar supervisor lock poisoned: {error}"))
 }

@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::core::SourceSpan;
 
+/// 可同时进入向量索引和全文索引的文本块。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkDocument {
     pub chunk_id: String,
@@ -17,6 +18,7 @@ pub struct ChunkDocument {
 }
 
 impl ChunkDocument {
+    /// 创建没有来源片段和 metadata 的文本块。
     pub fn new(
         chunk_id: impl Into<String>,
         document_id: impl Into<String>,
@@ -32,17 +34,20 @@ impl ChunkDocument {
     }
 }
 
+/// 向量索引记录，包含 chunk 和对应 embedding。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorRecord {
     pub chunk: ChunkDocument,
     pub embedding: Vec<f32>,
 }
 
+/// 全文索引记录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FullTextRecord {
     pub chunk: ChunkDocument,
 }
 
+/// 检索结果来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrievalSource {
@@ -51,6 +56,7 @@ pub enum RetrievalSource {
     Hybrid,
 }
 
+/// 标准化检索结果，供 RAG、SearchNode 和 UI 使用。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalResult {
     pub chunk_id: String,
@@ -65,6 +71,7 @@ pub struct RetrievalResult {
 }
 
 impl RetrievalResult {
+    /// 从 chunk 构造检索结果，并保留来源引用。
     pub fn from_chunk(chunk: &ChunkDocument, score: f32, source: RetrievalSource) -> Self {
         Self {
             chunk_id: chunk.chunk_id.clone(),
@@ -78,6 +85,7 @@ impl RetrievalResult {
     }
 }
 
+/// 向量检索请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorSearchRequest {
     pub query_embedding: Vec<f32>,
@@ -87,6 +95,7 @@ pub struct VectorSearchRequest {
 }
 
 impl VectorSearchRequest {
+    /// 创建不带 metadata filter 的向量检索请求。
     pub fn new(query_embedding: Vec<f32>, limit: usize) -> Self {
         Self {
             query_embedding,
@@ -96,6 +105,7 @@ impl VectorSearchRequest {
     }
 }
 
+/// 全文检索请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FullTextSearchRequest {
     pub query: String,
@@ -105,6 +115,7 @@ pub struct FullTextSearchRequest {
 }
 
 impl FullTextSearchRequest {
+    /// 创建不带 metadata filter 的全文检索请求。
     pub fn new(query: impl Into<String>, limit: usize) -> Self {
         Self {
             query: query.into(),
@@ -114,6 +125,7 @@ impl FullTextSearchRequest {
     }
 }
 
+/// 混合检索请求，可同时带文本查询和向量查询。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HybridSearchRequest {
     pub query: String,
@@ -129,6 +141,7 @@ pub struct HybridSearchRequest {
 }
 
 impl HybridSearchRequest {
+    /// 创建使用默认权重的混合检索请求。
     pub fn new(query: impl Into<String>, query_embedding: Option<Vec<f32>>, limit: usize) -> Self {
         Self {
             query: query.into(),
@@ -141,6 +154,7 @@ impl HybridSearchRequest {
     }
 }
 
+/// 传给 reranker 的候选结果集合。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RerankInput {
     pub query: String,
@@ -148,6 +162,7 @@ pub struct RerankInput {
     pub limit: usize,
 }
 
+/// 可重建检索组件的健康状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoreStatus {
@@ -157,6 +172,7 @@ pub enum StoreStatus {
     RebuildRequired,
 }
 
+/// 单个检索组件的健康报告。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreHealth {
     pub component: String,
@@ -166,6 +182,7 @@ pub struct StoreHealth {
 }
 
 impl StoreHealth {
+    /// 构造健康状态。
     pub fn healthy(component: impl Into<String>) -> Self {
         Self {
             component: component.into(),
@@ -174,6 +191,7 @@ impl StoreHealth {
         }
     }
 
+    /// 构造降级状态。
     pub fn degraded(component: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             component: component.into(),
@@ -182,6 +200,7 @@ impl StoreHealth {
         }
     }
 
+    /// 构造不可用状态。
     pub fn unavailable(component: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             component: component.into(),
@@ -190,6 +209,7 @@ impl StoreHealth {
         }
     }
 
+    /// 构造需要重建状态。
     pub fn rebuild_required(component: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             component: component.into(),
@@ -199,6 +219,7 @@ impl StoreHealth {
     }
 }
 
+/// 索引重建生命周期状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebuildStatus {
@@ -209,6 +230,7 @@ pub enum RebuildStatus {
     Failed,
 }
 
+/// 重建索引后的报告。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebuildReport {
     pub component: String,
@@ -218,10 +240,12 @@ pub struct RebuildReport {
     pub error: Option<String>,
 }
 
+/// 默认向量检索权重。
 fn default_vector_weight() -> f32 {
     0.55
 }
 
+/// 默认全文检索权重。
 fn default_full_text_weight() -> f32 {
     0.45
 }

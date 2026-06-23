@@ -4,6 +4,7 @@ use crate::core::{CoreError, CoreResult};
 
 pub const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// 单个配置文件迁移结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationReport {
     pub file_name: String,
@@ -12,10 +13,12 @@ pub struct MigrationReport {
     pub changed: bool,
 }
 
+/// 返回当前支持的配置 schema version。
 pub fn current_schema_version() -> u32 {
     CURRENT_CONFIG_SCHEMA_VERSION
 }
 
+/// 从 YAML Value 中读取 schema_version，缺失时视为 0。
 pub fn schema_version(value: &Value) -> u32 {
     value
         .as_mapping()
@@ -25,6 +28,7 @@ pub fn schema_version(value: &Value) -> u32 {
         .unwrap_or(0)
 }
 
+/// 迁移单个 YAML 配置文件到当前 schema version。
 pub fn migrate_yaml_value(file_name: &str, value: Value) -> CoreResult<(Value, MigrationReport)> {
     let from_version = schema_version(&value);
     if from_version > CURRENT_CONFIG_SCHEMA_VERSION {
@@ -37,6 +41,7 @@ pub fn migrate_yaml_value(file_name: &str, value: Value) -> CoreResult<(Value, M
     let changed = if from_version == CURRENT_CONFIG_SCHEMA_VERSION {
         false
     } else {
+        // 当前版本只补 schema_version；后续破坏性迁移在这里追加步骤。
         mapping.insert(
             Value::String("schema_version".to_owned()),
             Value::Number(CURRENT_CONFIG_SCHEMA_VERSION.into()),
@@ -55,6 +60,7 @@ pub fn migrate_yaml_value(file_name: &str, value: Value) -> CoreResult<(Value, M
     ))
 }
 
+/// 配置文件必须是 YAML mapping；空文件按空 mapping 处理。
 fn as_mapping(file_name: &str, value: Value) -> CoreResult<Mapping> {
     match value {
         Value::Mapping(mapping) => Ok(mapping),

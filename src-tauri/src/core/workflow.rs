@@ -6,8 +6,10 @@ use serde_json::Value;
 use crate::core::errors::{CoreError, CoreResult};
 use crate::core::ports::{PortDefinition, PortMap};
 
+/// 单次循环迭代的最小时长，防止配置出实际不可运行的高速循环。
 pub const MIN_LOOP_ITERATION_TIMEOUT_MS: u64 = 1_000;
 
+/// 定义简单字符串 ID 类型，保证序列化形态稳定且避免混用裸 String。
 macro_rules! string_id {
     ($name:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -57,6 +59,7 @@ pub struct NodeDefinition {
 }
 
 impl NodeDefinition {
+    /// 创建节点类型定义。
     pub fn new(type_name: impl Into<String>) -> Self {
         Self {
             type_name: type_name.into(),
@@ -68,6 +71,7 @@ impl NodeDefinition {
         }
     }
 
+    /// 校验节点类型名和输入/输出端口定义。
     pub fn validate(&self) -> CoreResult<()> {
         if self.type_name.trim().is_empty() {
             return Err(CoreError::validation("node type_name cannot be empty"));
@@ -79,6 +83,7 @@ impl NodeDefinition {
     }
 }
 
+/// 校验同一方向的端口名不为空且不重复。
 fn validate_unique_ports(kind: &str, ports: &[PortDefinition]) -> CoreResult<()> {
     let mut names = BTreeSet::new();
     for port in ports {
@@ -143,6 +148,7 @@ pub struct WorkflowDefinition {
 }
 
 impl WorkflowDefinition {
+    /// 校验节点和边的拓扑引用关系。
     pub fn validate_topology(&self) -> CoreResult<()> {
         let mut node_ids = BTreeSet::new();
         for node in &self.nodes {
@@ -187,8 +193,11 @@ impl WorkflowDefinition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunControl {
+    /// 继续执行。
     Continue,
+    /// 暂停并保留可恢复状态。
     Pause,
+    /// 停止当前运行，但保留已完成产物。
     Stop,
 }
 
@@ -205,11 +214,13 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
+    /// 判断运行状态是否已经不可继续迁移。
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Stopped | Self::Succeeded | Self::Failed)
     }
 }
 
+/// Loop 节点的硬限制策略。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoopPolicy {
     pub max_iterations: u32,
@@ -220,6 +231,7 @@ pub struct LoopPolicy {
 }
 
 impl LoopPolicy {
+    /// 校验循环自身是否具备边界条件、超时和可选预算限制。
     pub fn validate(&self) -> CoreResult<()> {
         if self.max_iterations == 0 {
             return Err(CoreError::validation(
@@ -233,6 +245,7 @@ impl LoopPolicy {
             ));
         }
 
+        // 这里用总超时除以最大轮次做保守估算，避免配置出每轮不足 1 秒的循环。
         let per_iteration_ms = self.timeout_ms / u64::from(self.max_iterations);
         if per_iteration_ms < MIN_LOOP_ITERATION_TIMEOUT_MS {
             return Err(CoreError::validation(format!(
@@ -258,6 +271,7 @@ impl LoopPolicy {
         Ok(())
     }
 
+    /// 在全局 workflow 限制下校验单个 loop policy。
     pub fn validate_against_limits(
         &self,
         max_loop_iterations: u32,

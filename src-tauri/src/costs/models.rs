@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use crate::core::{CoreError, CoreResult, NodeId, RunId, WorkflowId};
 
+/// 成本记录类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CostCategory {
@@ -16,6 +17,7 @@ pub enum CostCategory {
 }
 
 impl CostCategory {
+    /// 返回数据库中使用的稳定字符串。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Llm => "llm",
@@ -28,6 +30,7 @@ impl CostCategory {
         }
     }
 
+    /// 从数据库字符串解析成本类别。
     pub fn parse(value: &str) -> CoreResult<Self> {
         match value {
             "llm" => Ok(Self::Llm),
@@ -44,6 +47,7 @@ impl CostCategory {
     }
 }
 
+/// 即将写入账本的新成本记录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewCostRecord {
     pub occurred_at_ms: u64,
@@ -70,6 +74,7 @@ pub struct NewCostRecord {
 }
 
 impl NewCostRecord {
+    /// 校验成本金额合法。
     pub fn validate(&self) -> CoreResult<()> {
         if !self.amount_usd.is_finite() || self.amount_usd < 0.0 {
             return Err(CoreError::validation(
@@ -81,6 +86,7 @@ impl NewCostRecord {
     }
 }
 
+/// 已写入账本并带有数据库 id 的成本记录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CostRecord {
     pub cost_id: i64,
@@ -88,6 +94,7 @@ pub struct CostRecord {
     pub record: NewCostRecord,
 }
 
+/// 成本查询条件。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CostQuery {
     pub start_ms: Option<u64>,
@@ -98,6 +105,7 @@ pub struct CostQuery {
     pub category: Option<CostCategory>,
 }
 
+/// 模型 token 使用量。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,

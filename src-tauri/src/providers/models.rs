@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::core::{NodeId, RunId, WorkflowId};
 use crate::costs::TokenUsage;
 
+/// Provider 调用上下文，携带运行、节点、超时和重试信息。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderCallContext {
     pub provider_id: String,
@@ -22,6 +23,7 @@ pub struct ProviderCallContext {
 }
 
 impl ProviderCallContext {
+    /// 创建默认调用上下文。
     pub fn new(provider_id: impl Into<String>) -> Self {
         Self {
             provider_id: provider_id.into(),
@@ -36,6 +38,7 @@ impl ProviderCallContext {
     }
 }
 
+/// LLM 消息角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmRole {
@@ -45,6 +48,7 @@ pub enum LlmRole {
     Tool,
 }
 
+/// LLM 消息内容片段。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContentPart {
@@ -54,11 +58,13 @@ pub enum ContentPart {
 }
 
 impl ContentPart {
+    /// 创建纯文本内容片段。
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
 }
 
+/// 标准化 LLM 消息。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmMessage {
     pub role: LlmRole,
@@ -71,6 +77,7 @@ pub struct LlmMessage {
 }
 
 impl LlmMessage {
+    /// 创建 user 消息。
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: LlmRole::User,
@@ -80,6 +87,7 @@ impl LlmMessage {
         }
     }
 
+    /// 创建 assistant 消息。
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: LlmRole::Assistant,
@@ -90,6 +98,7 @@ impl LlmMessage {
     }
 }
 
+/// Tool 定义。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -97,6 +106,7 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
+/// LLM 返回的工具调用。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub tool_call_id: String,
@@ -104,6 +114,7 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
+/// 标准化 LLM 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmRequest {
     pub model_id: String,
@@ -121,6 +132,7 @@ pub struct LlmRequest {
     pub metadata: Value,
 }
 
+/// 标准化 LLM 响应。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmResponse {
     pub message: LlmMessage,
@@ -136,6 +148,7 @@ pub struct LlmResponse {
     pub raw: Value,
 }
 
+/// Embedding 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbeddingRequest {
     pub model_id: String,
@@ -144,6 +157,7 @@ pub struct EmbeddingRequest {
     pub metadata: Value,
 }
 
+/// Embedding 响应。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbeddingResponse {
     pub embeddings: Vec<Vec<f32>>,
@@ -155,6 +169,7 @@ pub struct EmbeddingResponse {
     pub raw: Value,
 }
 
+/// Reranker 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RerankRequest {
     pub model_id: String,
@@ -166,12 +181,14 @@ pub struct RerankRequest {
     pub metadata: Value,
 }
 
+/// Reranker 单条结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RerankResult {
     pub index: usize,
     pub score: f32,
 }
 
+/// Reranker 响应。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RerankResponse {
     pub results: Vec<RerankResult>,
@@ -181,6 +198,7 @@ pub struct RerankResponse {
     pub raw: Value,
 }
 
+/// SearchProvider 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchProviderRequest {
     pub query: String,
@@ -190,6 +208,7 @@ pub struct SearchProviderRequest {
     pub metadata: Value,
 }
 
+/// SearchProvider 单条结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchProviderResult {
     pub title: String,
@@ -200,6 +219,7 @@ pub struct SearchProviderResult {
     pub metadata: Value,
 }
 
+/// SearchProvider 响应。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchProviderResponse {
     pub results: Vec<SearchProviderResult>,

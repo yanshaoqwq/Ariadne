@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::ProviderConfig;
 use crate::core::{CoreError, CoreResult, ProviderType};
 
+/// Provider 使用的标准协议族。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderProtocol {
@@ -11,6 +12,7 @@ pub enum ProviderProtocol {
     Gemini,
 }
 
+/// 不同协议对 tool-use 的请求包装格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolUseEnvelope {
@@ -20,6 +22,7 @@ pub enum ToolUseEnvelope {
 }
 
 impl ProviderProtocol {
+    /// 根据 provider 类型推断协议族。
     pub fn from_provider_type(provider_type: &ProviderType) -> CoreResult<Self> {
         match provider_type {
             ProviderType::OpenAi | ProviderType::OpenAiCompatible | ProviderType::Local => {
@@ -33,6 +36,7 @@ impl ProviderProtocol {
         }
     }
 
+    /// 返回该协议使用的 tool-use envelope。
     pub fn tool_use_envelope(self) -> ToolUseEnvelope {
         match self {
             Self::OpenAi => ToolUseEnvelope::OpenAiTools,
@@ -41,6 +45,7 @@ impl ProviderProtocol {
         }
     }
 
+    /// 返回该协议的默认 base URL。
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::OpenAi => "https://api.openai.com/v1",
@@ -50,6 +55,7 @@ impl ProviderProtocol {
     }
 }
 
+/// 解析 provider base URL；OpenAI-compatible 必须显式配置。
 pub fn resolve_base_url(config: &ProviderConfig) -> CoreResult<String> {
     let protocol = ProviderProtocol::from_provider_type(&config.provider_type)?;
     if matches!(config.provider_type, ProviderType::OpenAiCompatible) {

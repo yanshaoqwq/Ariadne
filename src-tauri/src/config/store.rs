@@ -14,26 +14,31 @@ use crate::config::models::{
 };
 use crate::core::{CoreError, CoreResult};
 
+/// 项目配置文件存储，负责分文件读写和迁移。
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     project_root: PathBuf,
 }
 
 impl ConfigStore {
+    /// 创建配置存储。
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         Self {
             project_root: project_root.into(),
         }
     }
 
+    /// 返回项目根目录。
     pub fn project_root(&self) -> &Path {
         &self.project_root
     }
 
+    /// 返回 `.config` 目录路径。
     pub fn config_dir(&self) -> PathBuf {
         self.project_root.join(CONFIG_DIR_NAME)
     }
 
+    /// 加载配置；缺失时先创建默认文件，再执行迁移。
     pub fn load_or_create(&self) -> CoreResult<ProjectConfig> {
         self.ensure_config_dir()?;
         self.create_missing_defaults()?;
@@ -41,6 +46,7 @@ impl ConfigStore {
         self.load()
     }
 
+    /// 加载所有配置文件并执行整体验证。
     pub fn load(&self) -> CoreResult<ProjectConfig> {
         let config = ProjectConfig {
             app: self.read_config(APP_CONFIG_FILE)?,
@@ -56,6 +62,7 @@ impl ConfigStore {
         Ok(config)
     }
 
+    /// 保存完整项目配置。
     pub fn save(&self, config: &ProjectConfig) -> CoreResult<()> {
         config.validate()?;
         self.ensure_config_dir()?;
@@ -69,6 +76,7 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// 对所有已存在配置文件执行幂等迁移。
     pub fn migrate_all(&self) -> CoreResult<Vec<MigrationReport>> {
         let mut reports = Vec::new();
         for file_name in config_file_names() {
@@ -85,6 +93,7 @@ impl ConfigStore {
             };
             let (migrated, report) = migrate_yaml_value(file_name, value)?;
             if report.changed {
+                // 只有确实变更时才回写，避免无意义修改用户配置文件。
                 self.write_yaml_value(file_name, &migrated)?;
             }
             reports.push(report);
@@ -93,11 +102,13 @@ impl ConfigStore {
         Ok(reports)
     }
 
+    /// 确保配置目录存在。
     fn ensure_config_dir(&self) -> CoreResult<()> {
         fs::create_dir_all(self.config_dir())?;
         Ok(())
     }
 
+    /// 为缺失的配置文件写入默认内容。
     fn create_missing_defaults(&self) -> CoreResult<()> {
         self.write_default_if_missing(APP_CONFIG_FILE, &AppConfig::default())?;
         self.write_default_if_missing(PROVIDERS_CONFIG_FILE, &ProvidersConfig::default())?;
@@ -109,6 +120,7 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// 文件不存在时写入默认配置。
     fn write_default_if_missing<T: Serialize>(&self, file_name: &str, value: &T) -> CoreResult<()> {
         let path = self.config_dir().join(file_name);
         if !path.exists() {
@@ -117,6 +129,7 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// 读取并反序列化单个配置文件。
     fn read_config<T: DeserializeOwned>(&self, file_name: &str) -> CoreResult<T> {
         let path = self.config_dir().join(file_name);
         if !path.exists() {
@@ -130,11 +143,13 @@ impl ConfigStore {
         Ok(yaml_serde::from_str(&raw)?)
     }
 
+    /// 序列化并写入单个配置文件。
     fn write_config<T: Serialize>(&self, file_name: &str, value: &T) -> CoreResult<()> {
         let value = yaml_serde::to_value(value)?;
         self.write_yaml_value(file_name, &value)
     }
 
+    /// 直接写入 YAML Value，用于迁移后的回写。
     fn write_yaml_value(&self, file_name: &str, value: &Value) -> CoreResult<()> {
         let path = self.config_dir().join(file_name);
         let raw = yaml_serde::to_string(value)?;
@@ -143,6 +158,7 @@ impl ConfigStore {
     }
 }
 
+/// 返回当前分文件配置清单。
 fn config_file_names() -> [&'static str; 7] {
     [
         APP_CONFIG_FILE,

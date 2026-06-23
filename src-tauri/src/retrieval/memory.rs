@@ -8,6 +8,7 @@ use crate::retrieval::models::{
 };
 use crate::retrieval::traits::{FullTextStore, VectorStore};
 
+/// 内存向量索引，主要用于测试和早期模块集成。
 #[derive(Debug, Default)]
 pub struct MemoryVectorStore {
     records: RwLock<BTreeMap<String, VectorRecord>>,
@@ -15,12 +16,14 @@ pub struct MemoryVectorStore {
 }
 
 impl MemoryVectorStore {
+    /// 创建空的内存向量索引。
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl VectorStore for MemoryVectorStore {
+    /// 写入向量记录，并在成功后清除重建标记。
     fn upsert(&self, records: Vec<VectorRecord>) -> CoreResult<()> {
         let mut stored = self.records.write().map_err(lock_error)?;
         for record in records {
@@ -31,6 +34,7 @@ impl VectorStore for MemoryVectorStore {
         Ok(())
     }
 
+    /// 删除指定文档的所有向量记录。
     fn delete_document(&self, document_id: &str) -> CoreResult<usize> {
         let mut stored = self.records.write().map_err(lock_error)?;
         let before = stored.len();
@@ -38,6 +42,7 @@ impl VectorStore for MemoryVectorStore {
         Ok(before.saturating_sub(stored.len()))
     }
 
+    /// 使用余弦相似度执行向量检索。
     fn search(&self, request: VectorSearchRequest) -> CoreResult<Vec<RetrievalResult>> {
         if request.limit == 0 {
             return Ok(Vec::new());
@@ -66,6 +71,7 @@ impl VectorStore for MemoryVectorStore {
         Ok(results)
     }
 
+    /// 返回内存向量索引的健康状态。
     fn health_check(&self) -> CoreResult<StoreHealth> {
         if let Some(reason) = self.rebuild_reason.read().map_err(lock_error)?.clone() {
             return Ok(StoreHealth::rebuild_required("memory_vector_store", reason));
@@ -74,11 +80,13 @@ impl VectorStore for MemoryVectorStore {
         Ok(StoreHealth::healthy("memory_vector_store"))
     }
 
+    /// 标记内存向量索引需要重建。
     fn mark_rebuild_required(&self, reason: &str) -> CoreResult<()> {
         *self.rebuild_reason.write().map_err(lock_error)? = Some(reason.to_owned());
         Ok(())
     }
 
+    /// 用给定源记录替换整个向量索引。
     fn rebuild_from_records(&self, records: Vec<VectorRecord>) -> CoreResult<RebuildReport> {
         let processed_items = records.len() as u64;
         let mut next = BTreeMap::new();
@@ -99,6 +107,7 @@ impl VectorStore for MemoryVectorStore {
     }
 }
 
+/// 内存全文索引，主要用于测试和早期模块集成。
 #[derive(Debug, Default)]
 pub struct MemoryFullTextStore {
     records: RwLock<BTreeMap<String, FullTextRecord>>,
@@ -106,12 +115,14 @@ pub struct MemoryFullTextStore {
 }
 
 impl MemoryFullTextStore {
+    /// 创建空的内存全文索引。
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl FullTextStore for MemoryFullTextStore {
+    /// 写入全文记录，并在成功后清除重建标记。
     fn upsert(&self, records: Vec<FullTextRecord>) -> CoreResult<()> {
         let mut stored = self.records.write().map_err(lock_error)?;
         for record in records {
@@ -122,6 +133,7 @@ impl FullTextStore for MemoryFullTextStore {
         Ok(())
     }
 
+    /// 删除指定文档的所有全文记录。
     fn delete_document(&self, document_id: &str) -> CoreResult<usize> {
         let mut stored = self.records.write().map_err(lock_error)?;
         let before = stored.len();
@@ -129,6 +141,7 @@ impl FullTextStore for MemoryFullTextStore {
         Ok(before.saturating_sub(stored.len()))
     }
 
+    /// 使用简单关键词匹配执行全文检索。
     fn search(&self, request: FullTextSearchRequest) -> CoreResult<Vec<RetrievalResult>> {
         if request.limit == 0 {
             return Ok(Vec::new());
@@ -162,6 +175,7 @@ impl FullTextStore for MemoryFullTextStore {
         Ok(results)
     }
 
+    /// 返回内存全文索引的健康状态。
     fn health_check(&self) -> CoreResult<StoreHealth> {
         if let Some(reason) = self.rebuild_reason.read().map_err(lock_error)?.clone() {
             return Ok(StoreHealth::rebuild_required(
@@ -173,11 +187,13 @@ impl FullTextStore for MemoryFullTextStore {
         Ok(StoreHealth::healthy("memory_full_text_store"))
     }
 
+    /// 标记内存全文索引需要重建。
     fn mark_rebuild_required(&self, reason: &str) -> CoreResult<()> {
         *self.rebuild_reason.write().map_err(lock_error)? = Some(reason.to_owned());
         Ok(())
     }
 
+    /// 用给定源记录替换整个全文索引。
     fn rebuild_from_records(&self, records: Vec<FullTextRecord>) -> CoreResult<RebuildReport> {
         let processed_items = records.len() as u64;
         let mut next = BTreeMap::new();
@@ -198,6 +214,7 @@ impl FullTextStore for MemoryFullTextStore {
     }
 }
 
+/// 校验向量记录的基础完整性。
 fn validate_vector_record(record: &VectorRecord) -> CoreResult<()> {
     validate_chunk(
         &record.chunk.chunk_id,
@@ -217,6 +234,7 @@ fn validate_vector_record(record: &VectorRecord) -> CoreResult<()> {
     Ok(())
 }
 
+/// 校验全文记录的基础完整性。
 fn validate_full_text_record(record: &FullTextRecord) -> CoreResult<()> {
     validate_chunk(
         &record.chunk.chunk_id,
@@ -225,6 +243,7 @@ fn validate_full_text_record(record: &FullTextRecord) -> CoreResult<()> {
     )
 }
 
+/// 校验 chunk 的关键字段。
 fn validate_chunk(chunk_id: &str, document_id: &str, text: &str) -> CoreResult<()> {
     if chunk_id.trim().is_empty() {
         return Err(CoreError::validation("chunk_id cannot be empty"));
@@ -241,6 +260,7 @@ fn validate_chunk(chunk_id: &str, document_id: &str, text: &str) -> CoreResult<(
     Ok(())
 }
 
+/// 计算两个同维向量的余弦相似度。
 fn cosine_similarity(query: &[f32], embedding: &[f32]) -> CoreResult<f32> {
     if query.len() != embedding.len() {
         return Err(CoreError::validation(format!(
@@ -266,6 +286,7 @@ fn cosine_similarity(query: &[f32], embedding: &[f32]) -> CoreResult<f32> {
     Ok(dot / (query_norm.sqrt() * embedding_norm.sqrt()))
 }
 
+/// 计算非常轻量的关键词命中分数，真实 Tantivy 后端会替换该实现。
 fn full_text_score(text: &str, terms: &[String]) -> f32 {
     let normalized_text = text.to_lowercase();
     let mut score = 0.0_f32;
@@ -276,6 +297,7 @@ fn full_text_score(text: &str, terms: &[String]) -> f32 {
     score / terms.len() as f32
 }
 
+/// 将查询拆成小写关键词。
 fn tokenize(query: &str) -> Vec<String> {
     query
         .split(|character: char| character.is_whitespace() || character.is_ascii_punctuation())
@@ -286,6 +308,7 @@ fn tokenize(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// 使用 metadata 中的字符串字段执行精确匹配。
 fn metadata_matches(metadata: &serde_json::Value, filters: &BTreeMap<String, String>) -> bool {
     filters.iter().all(|(key, expected)| {
         metadata
@@ -295,6 +318,7 @@ fn metadata_matches(metadata: &serde_json::Value, filters: &BTreeMap<String, Str
     })
 }
 
+/// 按 score 降序、chunk_id 升序排序并裁剪数量。
 pub(crate) fn sort_and_limit(results: &mut Vec<RetrievalResult>, limit: usize) {
     results.sort_by(|left, right| {
         right
@@ -305,6 +329,7 @@ pub(crate) fn sort_and_limit(results: &mut Vec<RetrievalResult>, limit: usize) {
     results.truncate(limit);
 }
 
+/// 将锁中毒转换成统一错误。
 fn lock_error<T>(error: std::sync::PoisonError<T>) -> CoreError {
     CoreError::validation(format!("retrieval store lock poisoned: {error}"))
 }

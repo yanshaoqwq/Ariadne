@@ -17,6 +17,7 @@ pub const WORKFLOW_CONFIG_FILE: &str = "workflow.yaml";
 pub const GIT_CONFIG_FILE: &str = "git.yaml";
 pub const AUTO_MODE_CONFIG_FILE: &str = "auto_mode.yaml";
 
+/// 聚合后的项目配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub app: AppConfig,
@@ -43,6 +44,7 @@ impl Default for ProjectConfig {
 }
 
 impl ProjectConfig {
+    /// 校验所有子配置。
     pub fn validate(&self) -> CoreResult<()> {
         self.providers.validate()?;
         self.workflow.validate()?;
@@ -51,6 +53,7 @@ impl ProjectConfig {
     }
 }
 
+/// 应用基础配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default = "current_schema_version")]
@@ -83,6 +86,7 @@ impl Default for AppConfig {
     }
 }
 
+/// Provider 配置集合。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProvidersConfig {
     #[serde(default = "current_schema_version")]
@@ -113,6 +117,7 @@ impl Default for ProvidersConfig {
 }
 
 impl ProvidersConfig {
+    /// 校验 provider 唯一性和默认 provider 引用。
     pub fn validate(&self) -> CoreResult<()> {
         let mut provider_ids = BTreeSet::new();
         for provider in &self.providers {
@@ -145,6 +150,7 @@ impl ProvidersConfig {
     }
 }
 
+/// 单个 provider 配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub provider_id: String,
@@ -161,6 +167,7 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
+    /// 校验 provider 基本字段、base_url 和 model 唯一性。
     pub fn validate(&self) -> CoreResult<()> {
         if self.provider_id.trim().is_empty() {
             return Err(CoreError::validation("provider_id cannot be empty"));
@@ -194,6 +201,7 @@ impl ProviderConfig {
     }
 }
 
+/// 单个模型配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub model_id: String,
@@ -207,6 +215,7 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    /// 校验模型 id 和价格字段。
     pub fn validate(&self) -> CoreResult<()> {
         if self.model_id.trim().is_empty() {
             return Err(CoreError::validation("model_id cannot be empty"));
@@ -235,6 +244,7 @@ impl ModelConfig {
     }
 }
 
+/// 权限配置文件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionsConfig {
     #[serde(default = "current_schema_version")]
@@ -252,6 +262,7 @@ impl Default for PermissionsConfig {
     }
 }
 
+/// RAG 配置文件。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RagConfig {
     #[serde(default = "current_schema_version")]
@@ -282,6 +293,7 @@ impl Default for RagConfig {
 }
 
 impl RagConfig {
+    /// 校验 chunk 大小和 overlap。
     pub fn validate(&self) -> CoreResult<()> {
         if self.chunk_size_chars == 0 {
             return Err(CoreError::validation("chunk_size_chars cannot be zero"));
@@ -297,6 +309,7 @@ impl RagConfig {
     }
 }
 
+/// 向量存储配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VectorStoreConfig {
     #[serde(default)]
@@ -314,6 +327,7 @@ impl Default for VectorStoreConfig {
     }
 }
 
+/// 向量存储后端类型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VectorStoreBackend {
@@ -327,6 +341,7 @@ impl Default for VectorStoreBackend {
     }
 }
 
+/// sidecar 基础配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidecarConfig {
     #[serde(default = "default_qdrant_host")]
@@ -347,6 +362,7 @@ impl Default for SidecarConfig {
     }
 }
 
+/// 全文存储配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FullTextStoreConfig {
     #[serde(default)]
@@ -364,6 +380,7 @@ impl Default for FullTextStoreConfig {
     }
 }
 
+/// 全文存储后端类型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FullTextStoreBackend {
@@ -376,6 +393,7 @@ impl Default for FullTextStoreBackend {
     }
 }
 
+/// 工作流运行配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowConfig {
     #[serde(default = "current_schema_version")]
@@ -406,6 +424,7 @@ impl Default for WorkflowConfig {
 }
 
 impl WorkflowConfig {
+    /// 校验 workflow 全局限制。
     pub fn validate(&self) -> CoreResult<()> {
         if self.default_timeout_ms == 0 {
             return Err(CoreError::validation("default_timeout_ms cannot be zero"));
@@ -422,11 +441,13 @@ impl WorkflowConfig {
         Ok(())
     }
 
+    /// 用 workflow 全局限制校验单个 loop policy。
     pub fn validate_loop_policy(&self, policy: &crate::core::LoopPolicy) -> CoreResult<()> {
         policy.validate_against_limits(self.max_loop_iterations, self.default_timeout_ms)
     }
 }
 
+/// Git 跟踪策略配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitConfig {
     #[serde(default = "current_schema_version")]
@@ -456,6 +477,7 @@ impl Default for GitConfig {
     }
 }
 
+/// Auto Mode 配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoModeConfig {
     #[serde(default = "current_schema_version")]
@@ -479,6 +501,7 @@ impl Default for AutoModeConfig {
     }
 }
 
+/// 可选审批提示词配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalPromptConfig {
     pub prompt_id: String,
@@ -500,74 +523,92 @@ impl Default for ApprovalPromptConfig {
     }
 }
 
+/// 默认项目名称。
 fn default_project_name() -> String {
     "Untitled Literature Project".to_owned()
 }
 
+/// 默认语言地区。
 fn default_locale() -> String {
     "en-US".to_owned()
 }
 
+/// 默认文档目录。
 fn default_documents_dir() -> String {
     "documents".to_owned()
 }
 
+/// 默认工作流目录。
 fn default_workflows_dir() -> String {
     "workflows".to_owned()
 }
 
+/// 默认 Skill 目录。
 fn default_skills_dir() -> String {
     "skills".to_owned()
 }
 
+/// 默认导出目录。
 fn default_exports_dir() -> String {
     "exports".to_owned()
 }
 
+/// serde 默认 true helper。
 fn default_true() -> bool {
     true
 }
 
+/// 默认 chunk 字符数。
 fn default_chunk_size() -> u32 {
     2_000
 }
 
+/// 默认 chunk 重叠字符数。
 fn default_chunk_overlap() -> u32 {
     200
 }
 
+/// 默认 Qdrant host。
 fn default_qdrant_host() -> String {
     "127.0.0.1".to_owned()
 }
 
+/// 默认 Qdrant HTTP port。
 fn default_qdrant_port() -> u16 {
     6333
 }
 
+/// 默认 Qdrant 数据目录。
 fn default_qdrant_data_dir() -> String {
     ".indexes/qdrant".to_owned()
 }
 
+/// 默认 Tantivy 索引目录。
 fn default_tantivy_index_dir() -> String {
     ".indexes/tantivy".to_owned()
 }
 
+/// 默认 workflow 超时。
 fn default_workflow_timeout_ms() -> u64 {
     300_000
 }
 
+/// 默认最大 loop 轮次。
 fn default_max_loop_iterations() -> u32 {
     5
 }
 
+/// 默认最大 tool-use 轮次。
 fn default_max_tool_rounds() -> u32 {
     8
 }
 
+/// 默认 runtime 自动保存间隔。
 fn default_runtime_autosave_ms() -> u64 {
     5_000
 }
 
+/// 默认 Git 忽略路径。
 fn default_ignored_paths() -> Vec<String> {
     vec![
         ".cache/".to_owned(),

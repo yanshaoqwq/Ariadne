@@ -9,6 +9,7 @@ use crate::retrieval::models::{
 };
 use crate::retrieval::traits::{FullTextStore, HybridSearch, ResultReranker, VectorStore};
 
+/// 混合检索引擎，组合向量检索、全文检索和可选 reranker。
 pub struct HybridSearchEngine {
     vector_store: Arc<dyn VectorStore>,
     full_text_store: Arc<dyn FullTextStore>,
@@ -16,6 +17,7 @@ pub struct HybridSearchEngine {
 }
 
 impl HybridSearchEngine {
+    /// 创建不带 reranker 的混合检索引擎。
     pub fn new(
         vector_store: Arc<dyn VectorStore>,
         full_text_store: Arc<dyn FullTextStore>,
@@ -27,6 +29,7 @@ impl HybridSearchEngine {
         }
     }
 
+    /// 为混合检索引擎挂载 reranker。
     pub fn with_reranker(mut self, reranker: Arc<dyn ResultReranker>) -> Self {
         self.reranker = Some(reranker);
         self
@@ -34,6 +37,7 @@ impl HybridSearchEngine {
 }
 
 impl HybridSearch for HybridSearchEngine {
+    /// 执行混合检索，并按 chunk_id 合并重复结果。
     fn search(&self, request: HybridSearchRequest) -> CoreResult<Vec<RetrievalResult>> {
         if request.limit == 0 {
             return Ok(Vec::new());
@@ -41,6 +45,7 @@ impl HybridSearch for HybridSearchEngine {
 
         validate_weights(request.vector_weight, request.full_text_weight)?;
 
+        // 先多召回一批候选，再交给 reranker 或最终裁剪，避免过早丢掉可重排结果。
         let candidate_limit = request.limit.saturating_mul(3).max(request.limit);
         let mut combined: BTreeMap<String, RetrievalResult> = BTreeMap::new();
 
@@ -64,6 +69,7 @@ impl HybridSearch for HybridSearchEngine {
         sort_and_limit(&mut results, candidate_limit);
 
         if let Some(reranker) = &self.reranker {
+            // reranker 接收合并后的候选集，负责最终排序和裁剪。
             return reranker.rerank(RerankInput {
                 query: request.query,
                 results,
@@ -75,6 +81,7 @@ impl HybridSearch for HybridSearchEngine {
         Ok(results)
     }
 
+    /// 返回向量和全文两个底层组件的健康状态。
     fn health_check(&self) -> CoreResult<Vec<StoreHealth>> {
         Ok(vec![
             self.vector_store.health_check()?,
@@ -83,6 +90,7 @@ impl HybridSearch for HybridSearchEngine {
     }
 }
 
+/// 校验混合检索权重，避免 NaN 或全零权重污染排序。
 fn validate_weights(vector_weight: f32, full_text_weight: f32) -> CoreResult<()> {
     if !vector_weight.is_finite() || vector_weight < 0.0 {
         return Err(CoreError::validation(
@@ -105,6 +113,7 @@ fn validate_weights(vector_weight: f32, full_text_weight: f32) -> CoreResult<()>
     Ok(())
 }
 
+/// 将一组检索结果合并进 combined，同一 chunk 的分数按权重累加。
 fn merge_results(
     combined: &mut BTreeMap<String, RetrievalResult>,
     results: Vec<RetrievalResult>,
@@ -114,6 +123,7 @@ fn merge_results(
         result.score *= weight;
         match combined.get_mut(&result.chunk_id) {
             Some(existing) => {
+                // 同一 chunk 同时被向量和全文命中时，保留一个结果并累加信号。
                 existing.score += result.score;
                 existing.source = RetrievalSource::Hybrid;
                 if existing.spans.is_empty() {

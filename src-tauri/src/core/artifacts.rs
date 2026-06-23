@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::core::ports::{SourceSpan, TextRange};
 use crate::core::workflow::{NodeId, RunId};
 
+/// Artifact 类型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -19,6 +20,7 @@ pub enum ArtifactKind {
     Other,
 }
 
+/// Artifact 描述信息，记录存储位置和来源。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactDescriptor {
     pub artifact_id: String,
@@ -39,12 +41,14 @@ pub struct ArtifactDescriptor {
     pub metadata: Value,
 }
 
+/// 文档 patch 的单个替换片段。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchHunk {
     pub range: TextRange,
     pub replacement: String,
 }
 
+/// 针对单个文档的一组 patch。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentPatch {
     pub document_id: String,
@@ -55,6 +59,7 @@ pub struct DocumentPatch {
 }
 
 impl DocumentPatch {
+    /// 判断 patch 是否没有任何 hunk。
     pub fn is_empty(&self) -> bool {
         self.hunks.is_empty()
     }

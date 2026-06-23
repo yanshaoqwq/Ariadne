@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::ports::PortValue;
 use crate::core::workflow::{NodeId, RunControl, RunId, RunStatus, WorkflowId};
 
+/// 运行事件严重级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventSeverity {
@@ -12,6 +13,7 @@ pub enum EventSeverity {
     Error,
 }
 
+/// 带上下文的运行事件封装。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub event_id: String,
@@ -25,6 +27,7 @@ pub struct EventEnvelope {
 }
 
 impl EventEnvelope {
+    /// 创建不带 workflow/run 上下文的事件。
     pub fn new(
         event_id: impl Into<String>,
         timestamp_ms: u64,
@@ -41,6 +44,7 @@ impl EventEnvelope {
         }
     }
 
+    /// 为事件补充 workflow/run 上下文。
     pub fn with_run(mut self, workflow_id: WorkflowId, run_id: RunId) -> Self {
         self.workflow_id = Some(workflow_id);
         self.run_id = Some(run_id);
@@ -48,6 +52,7 @@ impl EventEnvelope {
     }
 }
 
+/// 核心运行事件类型。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoreEvent {

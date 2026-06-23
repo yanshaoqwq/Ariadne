@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::errors::{CoreError, CoreResult};
 
+/// Auto Mode 的运行态配置，只影响普通人工确认，不影响硬权限。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoModeState {
     pub enabled: bool,
@@ -20,6 +21,7 @@ impl Default for AutoModeState {
     }
 }
 
+/// 单个节点的审批策略。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalPolicy {
     pub allow_auto_approval: bool,
@@ -39,6 +41,7 @@ impl Default for ApprovalPolicy {
 }
 
 impl ApprovalPolicy {
+    /// 判断在当前 Auto Mode 状态下是否允许跳过人工审批。
     pub fn should_auto_approve(&self, auto_mode: &AutoModeState, has_conflict: bool) -> bool {
         auto_mode.enabled
             && self.allow_auto_approval
@@ -46,6 +49,7 @@ impl ApprovalPolicy {
     }
 }
 
+/// 执行时的硬权限策略。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionPolicy {
     pub allow_network: bool,
@@ -76,15 +80,23 @@ impl Default for PermissionPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PermissionRequest {
+    /// 普通网络访问。
     Network { host: String },
+    /// Web 搜索能力。
     WebSearch,
+    /// HTTP Skill 网络访问。
     HttpSkill { host: String },
+    /// WASM 内部网络访问。
     WasmNetwork { host: String },
+    /// 文件读取。
     FileRead { path: PathBuf },
+    /// 文件写入。
     FileWrite { path: PathBuf },
+    /// 直接读取 secret。
     SecretRead { key_id: String },
 }
 
+/// 权限判断结果，保留拒绝原因用于 UI 和日志。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionDecision {
     pub allowed: bool,
@@ -93,6 +105,7 @@ pub struct PermissionDecision {
 }
 
 impl PermissionDecision {
+    /// 返回允许结果。
     pub fn allow() -> Self {
         Self {
             allowed: true,
@@ -100,6 +113,7 @@ impl PermissionDecision {
         }
     }
 
+    /// 返回拒绝结果并记录原因。
     pub fn deny(reason: impl Into<String>) -> Self {
         Self {
             allowed: false,
@@ -109,6 +123,7 @@ impl PermissionDecision {
 }
 
 impl PermissionPolicy {
+    /// 根据权限请求计算允许或拒绝结果。
     pub fn evaluate(&self, request: &PermissionRequest) -> PermissionDecision {
         match request {
             PermissionRequest::Network { .. } => {
@@ -165,6 +180,7 @@ impl PermissionPolicy {
         }
     }
 
+    /// 权限拒绝时转成统一 CoreError。
     pub fn ensure(&self, request: &PermissionRequest) -> CoreResult<()> {
         let decision = self.evaluate(request);
         if decision.allowed {
@@ -178,6 +194,7 @@ impl PermissionPolicy {
     }
 }
 
+/// 判断 path 是否在任一允许根目录下，包含父目录和符号链接逃逸防护。
 fn is_under_any_root(path: &Path, roots: &[PathBuf]) -> bool {
     let Some(normalized_path) = normalize_absolute_path(path) else {
         return false;
@@ -212,6 +229,7 @@ fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
             Component::RootDir => normalized.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
+                // 词法层面先处理 `..`，阻止 `/allowed/../secret` 这类逃逸。
                 if !normalized.pop() {
                     return None;
                 }
@@ -233,6 +251,7 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     loop {
         if let Ok(canonical_parent) = current.canonicalize() {
             let mut combined = canonical_parent;
+            // 目标文件可以尚未存在，所以只 canonicalize 已存在前缀，再拼回缺失后缀。
             for component in missing_suffix.iter().rev() {
                 combined.push(component);
             }
@@ -245,6 +264,7 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// 为权限错误生成稳定的动作描述。
 fn permission_action(request: &PermissionRequest) -> String {
     match request {
         PermissionRequest::Network { host } => format!("network:{host}"),
@@ -264,6 +284,7 @@ pub struct ExecutionPolicy {
 }
 
 impl ExecutionPolicy {
+    /// 判断当前执行策略是否跳过普通人工确认。
     pub fn should_skip_human_confirmation(
         &self,
         approval_policy: &ApprovalPolicy,
@@ -272,6 +293,7 @@ impl ExecutionPolicy {
         approval_policy.should_auto_approve(&self.auto_mode, has_conflict)
     }
 
+    /// 执行硬权限检查。
     pub fn ensure_permission(&self, request: &PermissionRequest) -> CoreResult<()> {
         self.permissions.ensure(request)
     }

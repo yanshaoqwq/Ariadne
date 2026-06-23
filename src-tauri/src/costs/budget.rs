@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::AutoModeConfig;
 use crate::core::RunControl;
 
+/// 预算上限配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BudgetLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,6 +27,7 @@ impl Default for BudgetLimits {
     }
 }
 
+/// 预算评估后的动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetAction {
@@ -34,6 +36,7 @@ pub enum BudgetAction {
     Pause,
 }
 
+/// 预算评估结果，同时包含工作流控制语义。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BudgetDecision {
     pub action: BudgetAction,
@@ -43,6 +46,7 @@ pub struct BudgetDecision {
 }
 
 impl BudgetDecision {
+    /// 允许继续执行。
     fn allow() -> Self {
         Self {
             action: BudgetAction::Allow,
@@ -51,6 +55,7 @@ impl BudgetDecision {
         }
     }
 
+    /// 需要人工确认，工作流进入 Pause。
     fn require_confirmation(reason: impl Into<String>) -> Self {
         Self {
             action: BudgetAction::RequireConfirmation,
@@ -59,6 +64,7 @@ impl BudgetDecision {
         }
     }
 
+    /// 超限或非法费用，工作流进入 Pause。
     fn pause(reason: impl Into<String>) -> Self {
         Self {
             action: BudgetAction::Pause,
@@ -68,6 +74,7 @@ impl BudgetDecision {
     }
 }
 
+/// 当前调用和周期累计成本。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BudgetUsage {
     pub requested_usd: f64,
@@ -75,6 +82,7 @@ pub struct BudgetUsage {
     pub spent_this_month_usd: f64,
 }
 
+/// 根据预算、Auto Mode 和当前用量决定是否继续、确认或暂停。
 pub fn evaluate_budget(
     limits: &BudgetLimits,
     auto_mode: &AutoModeConfig,
@@ -106,6 +114,7 @@ pub fn evaluate_budget(
         if exceeds(auto_mode.preauthorized_budget_usd, usage.requested_usd) {
             return BudgetDecision::pause("auto mode preauthorized budget exceeded");
         }
+        // Auto Mode 只跳过普通确认，前面的硬预算限制仍然已经执行。
         return BudgetDecision::allow();
     }
 
@@ -116,6 +125,7 @@ pub fn evaluate_budget(
     BudgetDecision::allow()
 }
 
+/// 判断 value 是否超过可选上限。
 fn exceeds(limit: Option<f64>, value: f64) -> bool {
     limit.is_some_and(|limit| value > limit)
 }
