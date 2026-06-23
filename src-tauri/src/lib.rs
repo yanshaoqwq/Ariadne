@@ -8,3 +8,4 @@ pub mod llm;
 pub mod providers;
 pub mod rag;
 pub mod retrieval;
+pub mod skills;
