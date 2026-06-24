@@ -183,7 +183,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
     /// 按 Module 2 预算策略决定是否暂停或继续。
     fn check_budget(&self, request: &LlmRunRequest, requested_usd: f64) -> CoreResult<()> {
         let spent_after_record = self.spent_for_run(request)?;
-        let spent_before_current = (spent_after_record - requested_usd).max(0.0);
+        let spent_before_current = spent_before_current(spent_after_record, requested_usd)?;
         let decision = evaluate_budget(
             &request.config.budget_limits,
             &self.auto_mode,
@@ -266,6 +266,29 @@ fn check_timeout(started_at: Instant, timeout_ms: u64) -> CoreResult<()> {
     }
 
     Ok(())
+}
+
+/// ProviderExecutor 已经记录本次费用；这里反推出本次前累计，不能吞掉负数会计错误。
+fn spent_before_current(spent_after_record: f64, requested_usd: f64) -> CoreResult<f64> {
+    if !spent_after_record.is_finite() {
+        return Err(CoreError::validation(
+            "cost accounting error: spent total must be finite",
+        ));
+    }
+    if !requested_usd.is_finite() || requested_usd < 0.0 {
+        return Err(CoreError::validation(
+            "requested cost must be finite and non-negative",
+        ));
+    }
+
+    let spent_before_current = spent_after_record - requested_usd;
+    if spent_before_current < -f64::EPSILON {
+        return Err(CoreError::validation(
+            "cost accounting error: current request exceeds recorded total",
+        ));
+    }
+
+    Ok(spent_before_current.max(0.0))
 }
 
 /// 累加 token 用量。
@@ -399,5 +422,12 @@ mod tests {
         );
 
         assert_eq!(total.total_tokens(), 5);
+    }
+
+    #[test]
+    fn spent_before_current_rejects_negative_accounting() {
+        let error = spent_before_current(0.10, 0.25).unwrap_err();
+
+        assert!(error.to_string().contains("cost accounting error"));
     }
 }

@@ -5,6 +5,7 @@ use ariadne::retrieval::{
     select_available_port, ChunkDocument, FullTextRecord, FullTextSearchRequest,
     HybridSearchEngine, HybridSearchRequest, MemoryFullTextStore, MemoryVectorStore, RebuildStatus,
     RetrievalSource, SidecarState, StoreStatus, VectorRecord, VectorSearchRequest,
+    MAX_HYBRID_SEARCH_LIMIT,
 };
 use ariadne::retrieval::{FullTextStore, HybridSearch, QdrantSidecarSupervisor, VectorStore};
 
@@ -60,6 +61,22 @@ fn hybrid_search_merges_vector_and_full_text_results() {
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].source, RetrievalSource::Hybrid);
+}
+
+#[test]
+fn hybrid_search_rejects_unbounded_candidate_limits() {
+    let vector = Arc::new(MemoryVectorStore::new());
+    let full_text = Arc::new(MemoryFullTextStore::new());
+    let engine = HybridSearchEngine::new(vector, full_text);
+    let error = engine
+        .search(HybridSearchRequest::new(
+            "thread",
+            Some(vec![1.0, 0.0]),
+            MAX_HYBRID_SEARCH_LIMIT + 1,
+        ))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("hybrid search limit"));
 }
 
 #[test]

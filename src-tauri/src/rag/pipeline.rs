@@ -143,7 +143,12 @@ pub fn has_pending_confirmations(knowledge: &MemoryWritingKnowledgeBase) -> Core
 /// 生成稳定确认项 id。
 fn confirmation_id(kind: ConfirmationKind, chapter_id: &str) -> String {
     let name = match kind {
+        ConfirmationKind::OutlinerOutput => "outliner-output",
+        ConfirmationKind::DesignerOutput => "designer-output",
+        ConfirmationKind::PlannerOutput => "planner-output",
         ConfirmationKind::PlannerRegister => "planner-register",
+        ConfirmationKind::CriticReview => "critic-review",
+        ConfirmationKind::PrudentReview => "prudent-review",
         ConfirmationKind::SegmentSummary => "segment-summary",
         ConfirmationKind::EventSummary => "event-summary",
         ConfirmationKind::ChapterSummary => "chapter-summary",

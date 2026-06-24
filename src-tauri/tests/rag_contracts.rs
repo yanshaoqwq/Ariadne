@@ -8,16 +8,21 @@ use ariadne::providers::{
 };
 use ariadne::rag::{
     insert_lines_to_patch, load_display_name_resources, load_prompt_resources,
-    midpoint_segment_number, replace_lines_to_patch, search_response_to_writing_response,
-    tool_definitions_for_agent, ForeshadowingContent, ForeshadowingRecord, ForeshadowingStatus,
-    MemoryWritingKnowledgeBase, RealizedChangeLink, RegisterContent, RegisterFunction,
+    midpoint_segment_number, render_node_prompt, render_prompt_template, replace_lines_to_patch,
+    search_response_to_writing_response, tool_definitions_for_agent, ForeshadowingContent,
+    ForeshadowingRecord, ForeshadowingStatus, MemoryWritingKnowledgeBase, NodePromptConfig,
+    PatchSession, PromptTemplateContext, RealizedChangeLink, RegisterContent, RegisterFunction,
     RegisterOperation, RegisteredChange, RegisteredChangeStatus, StoryEvent, StoryEventStatus,
     StorySegment, SummaryPipelineDraft, SummaryPipelineExecutor, WriterDocumentContext,
     WriterInsertLines, WriterReplaceLines, WritingAgentKind, WritingConfirmationPolicy,
     WritingContextAssembler, WritingContextRequest, WritingNodeDefinition, WritingToolExecutor,
-    TOOL_DETAIL_FIND, TOOL_DETAIL_SEARCH, TOOL_PLANNER_FIND, TOOL_PLANNER_REGISTER,
-    TOOL_PLANNER_SEARCH, TOOL_WRITER_FIND, TOOL_WRITER_INSERT_LINES, TOOL_WRITER_REPLACE_LINES,
-    TOOL_WRITER_SEARCH,
+    TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH, TOOL_DESIGNER_FIND, TOOL_DESIGNER_INSERT_LINES,
+    TOOL_DESIGNER_REGISTER, TOOL_DESIGNER_REPLACE_LINES, TOOL_DESIGNER_SEARCH, TOOL_DETAIL_FIND,
+    TOOL_DETAIL_SEARCH, TOOL_OUTLINER_FIND, TOOL_OUTLINER_INSERT_LINES, TOOL_OUTLINER_REGISTER,
+    TOOL_OUTLINER_REPLACE_LINES, TOOL_OUTLINER_SEARCH, TOOL_PLANNER_FIND,
+    TOOL_PLANNER_INSERT_LINES, TOOL_PLANNER_REGISTER, TOOL_PLANNER_REPLACE_LINES,
+    TOOL_PLANNER_SEARCH, TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH, TOOL_WRITER_FIND,
+    TOOL_WRITER_INSERT_LINES, TOOL_WRITER_REPLACE_LINES, TOOL_WRITER_SEARCH,
 };
 use serde_json::{json, Value};
 
@@ -83,10 +88,13 @@ fn rag_resources_validate_required_prompt_and_display_keys() {
     let prompts = load_prompt_resources().unwrap();
     let display_names = load_display_name_resources().unwrap();
 
+    assert!(prompts.contains_key("agent_prompt.outliner"));
+    assert!(prompts.contains_key("node_template.writer.default"));
     assert!(prompts.contains_key("tool.planner_register"));
     assert!(prompts["tool.writer_search"]
         .prompt
         .contains("现实中的情况"));
+    assert_eq!(display_names["agent.designer"], "阶段设计");
     assert_eq!(display_names["tool.writer-replace-lines"], "按行替换正文");
 }
 
@@ -94,10 +102,40 @@ fn rag_resources_validate_required_prompt_and_display_keys() {
 #[test]
 fn writing_agents_expose_expected_tools_from_prompt_resources() {
     let prompts = load_prompt_resources().unwrap();
+    let outliner = tool_definitions_for_agent(WritingAgentKind::Outliner, &prompts).unwrap();
+    let designer = tool_definitions_for_agent(WritingAgentKind::Designer, &prompts).unwrap();
     let planner = tool_definitions_for_agent(WritingAgentKind::Planner, &prompts).unwrap();
     let detail = tool_definitions_for_agent(WritingAgentKind::Detail, &prompts).unwrap();
     let writer = tool_definitions_for_agent(WritingAgentKind::Writer, &prompts).unwrap();
+    let critic = tool_definitions_for_agent(WritingAgentKind::Critic, &prompts).unwrap();
+    let prudent = tool_definitions_for_agent(WritingAgentKind::Prudent, &prompts).unwrap();
 
+    assert_eq!(
+        outliner
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            TOOL_OUTLINER_REGISTER,
+            TOOL_OUTLINER_FIND,
+            TOOL_OUTLINER_SEARCH,
+            TOOL_OUTLINER_INSERT_LINES,
+            TOOL_OUTLINER_REPLACE_LINES
+        ]
+    );
+    assert_eq!(
+        designer
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            TOOL_DESIGNER_REGISTER,
+            TOOL_DESIGNER_FIND,
+            TOOL_DESIGNER_SEARCH,
+            TOOL_DESIGNER_INSERT_LINES,
+            TOOL_DESIGNER_REPLACE_LINES
+        ]
+    );
     assert_eq!(
         planner
             .iter()
@@ -106,7 +144,9 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
         vec![
             TOOL_PLANNER_REGISTER,
             TOOL_PLANNER_FIND,
-            TOOL_PLANNER_SEARCH
+            TOOL_PLANNER_SEARCH,
+            TOOL_PLANNER_INSERT_LINES,
+            TOOL_PLANNER_REPLACE_LINES
         ]
     );
     assert_eq!(
@@ -130,28 +170,58 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
     );
     assert!(!writer.iter().any(|tool| tool.name == TOOL_PLANNER_REGISTER));
     assert_eq!(
+        critic
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH]
+    );
+    assert_eq!(
+        prudent
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH]
+    );
+    assert!(!critic.iter().any(|tool| tool.name == TOOL_PLANNER_REGISTER));
+    assert!(!prudent
+        .iter()
+        .any(|tool| tool.name == TOOL_PLANNER_REGISTER));
+    assert_eq!(
         planner[0].description,
         prompts["tool.planner_register"].describe
     );
 }
 
-/// 验证一个写作节点就是一个 agent，且四个内置节点边界固定。
+/// 验证一个写作节点就是一个 agent，且内置节点边界固定。
 #[test]
 fn writing_nodes_are_one_to_one_with_agents() {
     let prompts = load_prompt_resources().unwrap();
     let display_names = load_display_name_resources().unwrap();
     let nodes = WritingNodeDefinition::built_in_nodes();
 
-    assert_eq!(nodes.len(), 4);
-    assert_eq!(nodes[0].agent, WritingAgentKind::Planner);
-    assert_eq!(nodes[1].agent, WritingAgentKind::Detail);
-    assert_eq!(nodes[2].agent, WritingAgentKind::Writer);
-    assert_eq!(nodes[3].agent, WritingAgentKind::Summarizer);
+    assert_eq!(nodes.len(), 8);
+    assert_eq!(nodes[0].agent, WritingAgentKind::Outliner);
+    assert_eq!(nodes[1].agent, WritingAgentKind::Designer);
+    assert_eq!(nodes[2].agent, WritingAgentKind::Planner);
+    assert_eq!(nodes[3].agent, WritingAgentKind::Detail);
+    assert_eq!(nodes[4].agent, WritingAgentKind::Writer);
+    assert_eq!(nodes[5].agent, WritingAgentKind::Critic);
+    assert_eq!(nodes[6].agent, WritingAgentKind::Prudent);
+    assert_eq!(nodes[7].agent, WritingAgentKind::Summarizer);
     for node in &nodes {
         node.validate(&prompts, &display_names).unwrap();
+        assert!(node
+            .prompt_keys
+            .iter()
+            .any(|key| key == node.agent.prompt_key()));
+        assert!(node
+            .prompt_keys
+            .iter()
+            .any(|key| key == node.agent.default_template_key()));
     }
     assert_eq!(
-        nodes[2].tool_names,
+        nodes[4].tool_names,
         vec![
             TOOL_WRITER_FIND,
             TOOL_WRITER_SEARCH,
@@ -159,7 +229,69 @@ fn writing_nodes_are_one_to_one_with_agents() {
             TOOL_WRITER_REPLACE_LINES
         ]
     );
-    assert!(nodes[3].tool_names.is_empty());
+    assert!(nodes[7].tool_names.is_empty());
+}
+
+/// 验证节点提示词模板可内联节点提示词、上下文区块和上游数据边 alias。
+#[test]
+fn node_prompt_template_renders_inline_context_and_alias_inputs() {
+    let prompts = load_prompt_resources().unwrap();
+    let kb = MemoryWritingKnowledgeBase::new();
+    let assembler = WritingContextAssembler::new(&kb);
+    let mut template_inputs = std::collections::BTreeMap::new();
+    template_inputs.insert("上游补充".to_owned(), "来自上游节点的内容".to_owned());
+
+    let bundle = assembler
+        .assemble(WritingContextRequest {
+            agent: WritingAgentKind::Writer,
+            chapter_id: "chapter-1".to_owned(),
+            stage_id: None,
+            user_intent: None,
+            global_outline: None,
+            stage_outline: None,
+            previous_stage_outline: None,
+            chapter_summaries: None,
+            outline: Some("本章大纲".to_owned()),
+            details: Some("本章细节".to_owned()),
+            previous_chapter_text: Some("上一章原文".to_owned()),
+            current_draft_text: None,
+            target_text: None,
+            critic_outputs: None,
+            revision_context: Some("返修上下文".to_owned()),
+            template_inputs,
+            metadata: Value::Null,
+        })
+        .unwrap();
+    let mut config =
+        NodePromptConfig::default_for_agent(WritingAgentKind::Writer, &prompts).unwrap();
+    let context =
+        PromptTemplateContext::from_bundle(WritingAgentKind::Writer, &prompts, &bundle).unwrap();
+    let rendered = render_node_prompt(&config, &context).unwrap();
+
+    assert!(rendered.contains("正式写作"));
+    assert!(rendered.contains("上一章原文"));
+    assert!(rendered.contains("本章大纲"));
+    assert!(rendered.contains("返修上下文"));
+
+    config
+        .replace_template(
+            "{{prompt.节点提示词}}\n{{input.上游补充}}\n{{system.当前章节号}}",
+            Some("用户编辑".to_owned()),
+        )
+        .unwrap();
+    let rendered = render_node_prompt(&config, &context).unwrap();
+    assert!(rendered.contains("来自上游节点的内容"));
+    assert!(rendered.contains("chapter-1"));
+    assert_eq!(config.backups.len(), 1);
+}
+
+/// 验证缺失变量会返回可诊断错误，不会静默替换为空字符串。
+#[test]
+fn prompt_template_rejects_unresolved_variables() {
+    let error =
+        render_prompt_template("{{input.不存在}}", &PromptTemplateContext::default()).unwrap_err();
+
+    assert!(error.to_string().contains("unresolved"));
 }
 
 /// 验证十进制故事段编号不用浮点数也能生成中点。
@@ -247,6 +379,115 @@ fn planner_register_enforces_typed_content_and_lifecycle_rules() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("update is only allowed"));
+}
+
+/// 验证自动生成的 register id 会避开显式指定过的 id。
+#[test]
+fn planner_register_generated_ids_skip_existing_explicit_ids() {
+    let kb = MemoryWritingKnowledgeBase::new();
+    kb.apply_register_operation(
+        RegisterFunction::CharacterTrait,
+        RegisterOperation::New,
+        Some(RegisterContent::CharacterTrait(
+            ariadne::rag::CharacterTraitContent {
+                character: "阿宁".to_owned(),
+                trait_name: "戒备心".to_owned(),
+                from_value: None,
+                to_value: "警觉".to_owned(),
+                reason: "初始状态".to_owned(),
+            },
+        )),
+        Some("register-character-trait-1".to_owned()),
+    )
+    .unwrap();
+
+    let generated = kb
+        .apply_register_operation(
+            RegisterFunction::CharacterTrait,
+            RegisterOperation::New,
+            Some(RegisterContent::CharacterTrait(
+                ariadne::rag::CharacterTraitContent {
+                    character: "阿宁".to_owned(),
+                    trait_name: "信任".to_owned(),
+                    from_value: None,
+                    to_value: "开始松动".to_owned(),
+                    reason: "队友救援".to_owned(),
+                },
+            )),
+            None,
+        )
+        .unwrap();
+
+    assert_ne!(generated[0].change_id, "register-character-trait-1");
+}
+
+/// 验证删除故事段时不会留下事件、注册项和伏笔的反向索引孤儿。
+#[test]
+fn deleting_segment_cleans_all_reverse_indexes() {
+    let kb = MemoryWritingKnowledgeBase::new();
+    kb.upsert_segment(StorySegment {
+        segment_id: "seg-1".to_owned(),
+        number: "1".to_owned(),
+        chapter_id: "chapter-1".to_owned(),
+        summary: "阿宁发现旧钥匙".to_owned(),
+        source: source_span(),
+        metadata: Value::Null,
+    })
+    .unwrap();
+    kb.upsert_event(StoryEvent {
+        event_id: "event-1".to_owned(),
+        summary: "发现钥匙".to_owned(),
+        status: StoryEventStatus::Ongoing,
+        segment_ids: vec!["seg-1".to_owned()],
+        chapter_ids: vec!["chapter-1".to_owned()],
+        metadata: Value::Null,
+    })
+    .unwrap();
+    kb.upsert_registered_change(RegisteredChange {
+        change_id: "change-1".to_owned(),
+        function: RegisterFunction::CharacterTrait,
+        status: RegisteredChangeStatus::Realized,
+        content: RegisterContent::CharacterTrait(ariadne::rag::CharacterTraitContent {
+            character: "阿宁".to_owned(),
+            trait_name: "好奇心".to_owned(),
+            from_value: None,
+            to_value: "主动探索".to_owned(),
+            reason: "发现旧钥匙".to_owned(),
+        }),
+        linked_segment_ids: vec!["seg-1".to_owned()],
+        metadata: Value::Null,
+    })
+    .unwrap();
+    kb.upsert_foreshadowing(ForeshadowingRecord {
+        foreshadowing_id: "f-1".to_owned(),
+        title: "旧钥匙".to_owned(),
+        description: "门缝里的钥匙".to_owned(),
+        status: ForeshadowingStatus::Planted,
+        planted_segment_ids: vec!["seg-1".to_owned()],
+        recovered_segment_ids: Vec::new(),
+        metadata: Value::Null,
+    })
+    .unwrap();
+
+    assert!(kb.delete_segment("seg-1").unwrap().is_some());
+    let index = kb.index_snapshot().unwrap();
+
+    assert!(!index.segment_chapter.contains_key("seg-1"));
+    assert!(!index.segment_events.contains_key("seg-1"));
+    assert!(!index.segment_changes.contains_key("seg-1"));
+    assert!(!index.segment_foreshadowing.contains_key("seg-1"));
+    assert!(!index
+        .event_segments
+        .get("event-1")
+        .is_some_and(|values| values.contains(&"seg-1".to_owned())));
+    assert!(!index
+        .change_segments
+        .get("change-1")
+        .is_some_and(|values| values.contains(&"seg-1".to_owned())));
+    assert!(!index
+        .foreshadowing_segments
+        .get("f-1")
+        .is_some_and(|values| values.contains(&"seg-1".to_owned())));
 }
 
 /// 验证 find 默认不返回正文，显式 include_text 且有文档上下文才回填正文。
@@ -368,6 +609,21 @@ fn writer_line_tools_convert_one_based_lines_to_document_patches() {
     assert_eq!(replace.hunks[0].range, TextRange { start: 4, end: 8 });
 }
 
+/// 验证行号 patch 会话内的多次操作基于模拟文本连续应用，并最终提交一个 patch。
+#[test]
+fn patch_session_commits_multiple_line_ops_as_one_patch() {
+    let mut session = PatchSession::new("doc-1", Some("v1".to_owned()), "甲\n乙\n丙").unwrap();
+
+    session.insert_lines(1, "新行\n").unwrap();
+    session.replace_lines(2, 2, "替换\n").unwrap();
+    let commit = session.commit().unwrap();
+
+    assert_eq!(session.simulated, "甲\n替换\n乙\n丙");
+    assert_eq!(commit.operations.len(), 2);
+    assert_eq!(commit.patch.hunks.len(), 1);
+    assert_eq!(commit.patch.base_version.as_deref(), Some("v1"));
+}
+
 /// 验证未回收伏笔会进入 Planner 默认可查询集合。
 #[test]
 fn unresolved_foreshadowing_excludes_recovered_items() {
@@ -436,10 +692,19 @@ fn writing_contexts_are_specialized_by_node_agent() {
             agent: WritingAgentKind::Planner,
             chapter_id: "chapter-1".to_owned(),
             stage_id: None,
+            user_intent: None,
+            global_outline: None,
+            stage_outline: None,
+            previous_stage_outline: None,
+            chapter_summaries: None,
             outline: None,
             details: None,
             previous_chapter_text: Some("上一章全文".to_owned()),
             current_draft_text: None,
+            target_text: None,
+            critic_outputs: None,
+            revision_context: None,
+            template_inputs: Default::default(),
             metadata: Value::Null,
         })
         .unwrap();
@@ -453,10 +718,19 @@ fn writing_contexts_are_specialized_by_node_agent() {
             agent: WritingAgentKind::Writer,
             chapter_id: "chapter-1".to_owned(),
             stage_id: None,
+            user_intent: None,
+            global_outline: None,
+            stage_outline: None,
+            previous_stage_outline: None,
+            chapter_summaries: None,
             outline: Some("本章大纲".to_owned()),
             details: Some("细节材料".to_owned()),
             previous_chapter_text: None,
             current_draft_text: Some("甲\n乙".to_owned()),
+            target_text: None,
+            critic_outputs: None,
+            revision_context: None,
+            template_inputs: Default::default(),
             metadata: Value::Null,
         })
         .unwrap();

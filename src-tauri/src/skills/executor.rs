@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use serde_json::{json, Value};
 
 use crate::config::AutoModeConfig;
@@ -73,6 +75,7 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
         crate::core::validate_required_ports(&manifest.schema.input_ports()?, &request.inputs)?;
         self.check_budget(manifest.estimated_cost_usd)?;
 
+        let started_at = Instant::now();
         let output =
             match &manifest.executor {
                 SkillExecutorConfig::Llm(config) => {
@@ -141,9 +144,11 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
                     )?
                 }
             };
+        let actual_elapsed_ms = elapsed_millis(started_at);
 
         validate_backend_output(
             &output,
+            actual_elapsed_ms,
             manifest.limits.timeout_ms,
             manifest.limits.max_output_bytes,
         )?;
@@ -185,9 +190,16 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
 /// 检查后端输出是否超过限制。
 fn validate_backend_output(
     output: &SkillBackendOutput,
+    actual_elapsed_ms: u64,
     timeout_ms: u64,
     max_output_bytes: u64,
 ) -> CoreResult<()> {
+    if actual_elapsed_ms > timeout_ms {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "skill_time".to_owned(),
+            reason: format!("elapsed {actual_elapsed_ms}ms exceeds {timeout_ms}ms"),
+        });
+    }
     if output.elapsed_ms > timeout_ms {
         return Err(CoreError::ResourceLimitExceeded {
             resource: "skill_time".to_owned(),
@@ -202,6 +214,11 @@ fn validate_backend_output(
         });
     }
     Ok(())
+}
+
+/// 将墙钟耗时转换为 u64 毫秒，溢出时保守按最大值处理。
+fn elapsed_millis(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// 简单 prompt 渲染，把输入端口 JSON 放入模板末尾，避免隐式字符串替换误伤。

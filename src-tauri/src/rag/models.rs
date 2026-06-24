@@ -9,9 +9,13 @@ use crate::core::{CoreError, DocumentPatch, SourceSpan};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WritingAgentKind {
+    Outliner,
+    Designer,
     Planner,
     Detail,
     Writer,
+    Critic,
+    Prudent,
     Summarizer,
 }
 
@@ -19,15 +23,47 @@ impl WritingAgentKind {
     /// 返回该节点/agent 的显示名资源 key。
     pub fn display_name_key(self) -> &'static str {
         match self {
+            Self::Outliner => "agent.outliner",
+            Self::Designer => "agent.designer",
             Self::Planner => "agent.planner",
             Self::Detail => "agent.detail",
             Self::Writer => "agent.writer",
+            Self::Critic => "agent.critic",
+            Self::Prudent => "agent.prudent",
             Self::Summarizer => "agent.summarizer",
+        }
+    }
+
+    /// 返回节点提示词正文资源 key；模板中的 `{{节点提示词}}` 会读取这一项。
+    pub fn prompt_key(self) -> &'static str {
+        match self {
+            Self::Outliner => "agent_prompt.outliner",
+            Self::Designer => "agent_prompt.designer",
+            Self::Planner => "agent_prompt.planner",
+            Self::Detail => "agent_prompt.detail",
+            Self::Writer => "agent_prompt.writer",
+            Self::Critic => "agent_prompt.critic",
+            Self::Prudent => "agent_prompt.prudent",
+            Self::Summarizer => "agent_prompt.summarizer",
+        }
+    }
+
+    /// 返回节点默认提示词模板资源 key；GUI 初始化“提示词”字段时使用。
+    pub fn default_template_key(self) -> &'static str {
+        match self {
+            Self::Outliner => "node_template.outliner.default",
+            Self::Designer => "node_template.designer.default",
+            Self::Planner => "node_template.planner.default",
+            Self::Detail => "node_template.detail.default",
+            Self::Writer => "node_template.writer.default",
+            Self::Critic => "node_template.critic.default",
+            Self::Prudent => "node_template.prudent.default",
+            Self::Summarizer => "node_template.summarizer.default",
         }
     }
 }
 
-/// 写作节点定义；Planner、Detail、Writer、Summarizer 都是独立节点。
+/// 写作节点定义；每个节点就是一个独立 agent。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WritingNodeDefinition {
     pub agent: WritingAgentKind,
@@ -41,14 +77,52 @@ pub struct WritingNodeDefinition {
 }
 
 impl WritingNodeDefinition {
-    /// 返回四个内置写作节点定义。
+    /// 返回内置写作节点定义。
     pub fn built_in_nodes() -> Vec<Self> {
         vec![
+            Self::outliner(),
+            Self::designer(),
             Self::planner(),
             Self::detail(),
             Self::writer(),
+            Self::critic(),
+            Self::prudent(),
             Self::summarizer(),
         ]
+    }
+
+    /// 返回 Outliner 总览者节点定义。
+    pub fn outliner() -> Self {
+        Self {
+            agent: WritingAgentKind::Outliner,
+            display_name_key: WritingAgentKind::Outliner.display_name_key().to_owned(),
+            tool_names: expected_tool_names(WritingAgentKind::Outliner)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            prompt_keys: expected_prompt_keys(WritingAgentKind::Outliner)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            confirmation_kinds: vec![ConfirmationKind::OutlinerOutput],
+        }
+    }
+
+    /// 返回 Designer 阶段设计师节点定义。
+    pub fn designer() -> Self {
+        Self {
+            agent: WritingAgentKind::Designer,
+            display_name_key: WritingAgentKind::Designer.display_name_key().to_owned(),
+            tool_names: expected_tool_names(WritingAgentKind::Designer)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            prompt_keys: expected_prompt_keys(WritingAgentKind::Designer)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            confirmation_kinds: vec![ConfirmationKind::DesignerOutput],
+        }
     }
 
     /// 返回 Planner 节点定义。
@@ -56,13 +130,18 @@ impl WritingNodeDefinition {
         Self {
             agent: WritingAgentKind::Planner,
             display_name_key: WritingAgentKind::Planner.display_name_key().to_owned(),
-            tool_names: vec![
-                "planner-register".to_owned(),
-                "planner-find".to_owned(),
-                "planner-search".to_owned(),
+            tool_names: expected_tool_names(WritingAgentKind::Planner)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            prompt_keys: expected_prompt_keys(WritingAgentKind::Planner)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            confirmation_kinds: vec![
+                ConfirmationKind::PlannerOutput,
+                ConfirmationKind::PlannerRegister,
             ],
-            prompt_keys: Vec::new(),
-            confirmation_kinds: vec![ConfirmationKind::PlannerRegister],
         }
     }
 
@@ -71,8 +150,14 @@ impl WritingNodeDefinition {
         Self {
             agent: WritingAgentKind::Detail,
             display_name_key: WritingAgentKind::Detail.display_name_key().to_owned(),
-            tool_names: vec!["detail-find".to_owned(), "detail-search".to_owned()],
-            prompt_keys: Vec::new(),
+            tool_names: expected_tool_names(WritingAgentKind::Detail)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            prompt_keys: expected_prompt_keys(WritingAgentKind::Detail)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
             confirmation_kinds: Vec::new(),
         }
     }
@@ -82,14 +167,49 @@ impl WritingNodeDefinition {
         Self {
             agent: WritingAgentKind::Writer,
             display_name_key: WritingAgentKind::Writer.display_name_key().to_owned(),
-            tool_names: vec![
-                "writer-find".to_owned(),
-                "writer-search".to_owned(),
-                "writer-insert-lines".to_owned(),
-                "writer-replace-lines".to_owned(),
-            ],
-            prompt_keys: Vec::new(),
+            tool_names: expected_tool_names(WritingAgentKind::Writer)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            prompt_keys: expected_prompt_keys(WritingAgentKind::Writer)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
             confirmation_kinds: vec![ConfirmationKind::WriterCorrectionPatch],
+        }
+    }
+
+    /// 返回 Critic 意见者节点定义。
+    pub fn critic() -> Self {
+        Self {
+            agent: WritingAgentKind::Critic,
+            display_name_key: WritingAgentKind::Critic.display_name_key().to_owned(),
+            tool_names: expected_tool_names(WritingAgentKind::Critic)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            prompt_keys: expected_prompt_keys(WritingAgentKind::Critic)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            confirmation_kinds: vec![ConfirmationKind::CriticReview],
+        }
+    }
+
+    /// 返回 Prudent 审慎者节点定义。
+    pub fn prudent() -> Self {
+        Self {
+            agent: WritingAgentKind::Prudent,
+            display_name_key: WritingAgentKind::Prudent.display_name_key().to_owned(),
+            tool_names: expected_tool_names(WritingAgentKind::Prudent)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            prompt_keys: expected_prompt_keys(WritingAgentKind::Prudent)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            confirmation_kinds: vec![ConfirmationKind::PrudentReview],
         }
     }
 
@@ -99,12 +219,10 @@ impl WritingNodeDefinition {
             agent: WritingAgentKind::Summarizer,
             display_name_key: WritingAgentKind::Summarizer.display_name_key().to_owned(),
             tool_names: Vec::new(),
-            prompt_keys: vec![
-                "summarizer.segments".to_owned(),
-                "summarizer.events".to_owned(),
-                "summarizer.chapter_summary".to_owned(),
-                "summarizer.stage_summary".to_owned(),
-            ],
+            prompt_keys: expected_prompt_keys(WritingAgentKind::Summarizer)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
             confirmation_kinds: vec![
                 ConfirmationKind::SegmentSummary,
                 ConfirmationKind::EventSummary,
@@ -157,28 +275,15 @@ impl WritingNodeDefinition {
             validate_resource_key(prompts, "prompt_key", prompt_key)?;
         }
 
-        if self.agent == WritingAgentKind::Summarizer {
-            let expected_prompt_keys = [
-                "summarizer.segments",
-                "summarizer.events",
-                "summarizer.chapter_summary",
-                "summarizer.stage_summary",
-            ];
-            if !self.tool_names.is_empty()
-                || self
-                    .prompt_keys
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    != expected_prompt_keys
-            {
-                return Err(CoreError::validation(
-                    "summarizer node must use segment/event/chapter/stage pipeline definition",
-                ));
-            }
-        } else if !self.prompt_keys.is_empty() {
+        if self
+            .prompt_keys
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            != expected_prompt_keys(self.agent)
+        {
             return Err(CoreError::validation(
-                "planner/detail/writer nodes should not carry summarizer prompt keys",
+                "writing node prompt_keys do not match agent contract",
             ));
         }
 
@@ -189,7 +294,27 @@ impl WritingNodeDefinition {
 /// 返回指定写作节点允许暴露的工具名。
 fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
     match agent {
-        WritingAgentKind::Planner => &["planner-register", "planner-find", "planner-search"],
+        WritingAgentKind::Outliner => &[
+            "outliner-register",
+            "outliner-find",
+            "outliner-search",
+            "outliner-insert-lines",
+            "outliner-replace-lines",
+        ],
+        WritingAgentKind::Designer => &[
+            "designer-register",
+            "designer-find",
+            "designer-search",
+            "designer-insert-lines",
+            "designer-replace-lines",
+        ],
+        WritingAgentKind::Planner => &[
+            "planner-register",
+            "planner-find",
+            "planner-search",
+            "planner-insert-lines",
+            "planner-replace-lines",
+        ],
         WritingAgentKind::Detail => &["detail-find", "detail-search"],
         WritingAgentKind::Writer => &[
             "writer-find",
@@ -197,16 +322,46 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
             "writer-insert-lines",
             "writer-replace-lines",
         ],
+        WritingAgentKind::Critic => &["critic-find", "critic-search"],
+        WritingAgentKind::Prudent => &["prudent-find", "prudent-search"],
         WritingAgentKind::Summarizer => &[],
+    }
+}
+
+/// 返回指定写作节点引用的提示词资源 key。
+fn expected_prompt_keys(agent: WritingAgentKind) -> &'static [&'static str] {
+    match agent {
+        WritingAgentKind::Outliner => &["agent_prompt.outliner", "node_template.outliner.default"],
+        WritingAgentKind::Designer => &["agent_prompt.designer", "node_template.designer.default"],
+        WritingAgentKind::Planner => &["agent_prompt.planner", "node_template.planner.default"],
+        WritingAgentKind::Detail => &["agent_prompt.detail", "node_template.detail.default"],
+        WritingAgentKind::Writer => &["agent_prompt.writer", "node_template.writer.default"],
+        WritingAgentKind::Critic => &["agent_prompt.critic", "node_template.critic.default"],
+        WritingAgentKind::Prudent => &["agent_prompt.prudent", "node_template.prudent.default"],
+        WritingAgentKind::Summarizer => &[
+            "agent_prompt.summarizer",
+            "node_template.summarizer.default",
+            "summarizer.segments",
+            "summarizer.events",
+            "summarizer.chapter_summary",
+            "summarizer.stage_summary",
+        ],
     }
 }
 
 /// 返回指定写作节点对应的确认项顺序。
 fn expected_confirmation_kinds(agent: WritingAgentKind) -> &'static [ConfirmationKind] {
     match agent {
-        WritingAgentKind::Planner => &[ConfirmationKind::PlannerRegister],
+        WritingAgentKind::Outliner => &[ConfirmationKind::OutlinerOutput],
+        WritingAgentKind::Designer => &[ConfirmationKind::DesignerOutput],
+        WritingAgentKind::Planner => &[
+            ConfirmationKind::PlannerOutput,
+            ConfirmationKind::PlannerRegister,
+        ],
         WritingAgentKind::Detail => &[],
         WritingAgentKind::Writer => &[ConfirmationKind::WriterCorrectionPatch],
+        WritingAgentKind::Critic => &[ConfirmationKind::CriticReview],
+        WritingAgentKind::Prudent => &[ConfirmationKind::PrudentReview],
         WritingAgentKind::Summarizer => &[
             ConfirmationKind::SegmentSummary,
             ConfirmationKind::EventSummary,
@@ -518,7 +673,12 @@ pub struct PlannerIssue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfirmationKind {
+    OutlinerOutput,
+    DesignerOutput,
+    PlannerOutput,
     PlannerRegister,
+    CriticReview,
+    PrudentReview,
     SegmentSummary,
     EventSummary,
     ChapterSummary,
@@ -578,7 +738,12 @@ pub enum ConfirmationMode {
 /// 总结机制确认策略；普通模式默认人工确认，Auto Mode 默认自动审计。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WritingConfirmationPolicy {
+    pub outliner_output: ConfirmationMode,
+    pub designer_output: ConfirmationMode,
+    pub planner_output: ConfirmationMode,
     pub planner_register: ConfirmationMode,
+    pub critic_review: ConfirmationMode,
+    pub prudent_review: ConfirmationMode,
     pub segment_summary: ConfirmationMode,
     pub event_summary: ConfirmationMode,
     pub chapter_summary: ConfirmationMode,
@@ -590,7 +755,12 @@ impl WritingConfirmationPolicy {
     /// 普通模式默认全部进入待确认。
     pub fn normal_default() -> Self {
         Self {
+            outliner_output: ConfirmationMode::RequireHuman,
+            designer_output: ConfirmationMode::RequireHuman,
+            planner_output: ConfirmationMode::RequireHuman,
             planner_register: ConfirmationMode::RequireHuman,
+            critic_review: ConfirmationMode::RequireHuman,
+            prudent_review: ConfirmationMode::RequireHuman,
             segment_summary: ConfirmationMode::RequireHuman,
             event_summary: ConfirmationMode::RequireHuman,
             chapter_summary: ConfirmationMode::RequireHuman,
@@ -602,7 +772,12 @@ impl WritingConfirmationPolicy {
     /// Auto Mode 默认全部执行自动审计。
     pub fn auto_audit_default() -> Self {
         Self {
+            outliner_output: ConfirmationMode::AutoAudit,
+            designer_output: ConfirmationMode::AutoAudit,
+            planner_output: ConfirmationMode::AutoAudit,
             planner_register: ConfirmationMode::AutoAudit,
+            critic_review: ConfirmationMode::AutoAudit,
+            prudent_review: ConfirmationMode::AutoAudit,
             segment_summary: ConfirmationMode::AutoAudit,
             event_summary: ConfirmationMode::AutoAudit,
             chapter_summary: ConfirmationMode::AutoAudit,
@@ -614,7 +789,12 @@ impl WritingConfirmationPolicy {
     /// 返回指定确认项的处理模式。
     pub fn mode_for(&self, kind: ConfirmationKind) -> ConfirmationMode {
         match kind {
+            ConfirmationKind::OutlinerOutput => self.outliner_output,
+            ConfirmationKind::DesignerOutput => self.designer_output,
+            ConfirmationKind::PlannerOutput => self.planner_output,
             ConfirmationKind::PlannerRegister => self.planner_register,
+            ConfirmationKind::CriticReview => self.critic_review,
+            ConfirmationKind::PrudentReview => self.prudent_review,
             ConfirmationKind::SegmentSummary => self.segment_summary,
             ConfirmationKind::EventSummary => self.event_summary,
             ConfirmationKind::ChapterSummary => self.chapter_summary,
@@ -641,7 +821,11 @@ impl WritingConfirmationPolicy {
 /// 返回确认项对应的自动审计 prompt key。
 pub fn confirmation_prompt_key(kind: ConfirmationKind) -> &'static str {
     match kind {
+        ConfirmationKind::OutlinerOutput
+        | ConfirmationKind::DesignerOutput
+        | ConfirmationKind::PlannerOutput => "auto_audit.planning_output",
         ConfirmationKind::PlannerRegister => "auto_audit.register",
+        ConfirmationKind::CriticReview | ConfirmationKind::PrudentReview => "auto_audit.review",
         ConfirmationKind::SegmentSummary
         | ConfirmationKind::EventSummary
         | ConfirmationKind::ChapterSummary
@@ -681,6 +865,16 @@ pub struct WritingContextRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_outline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_outline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_stage_outline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_summaries: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
@@ -688,6 +882,14 @@ pub struct WritingContextRequest {
     pub previous_chapter_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_draft_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub critic_outputs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_context: Option<String>,
+    #[serde(default)]
+    pub template_inputs: BTreeMap<String, String>,
     #[serde(default)]
     pub metadata: Value,
 }

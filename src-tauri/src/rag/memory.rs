@@ -28,6 +28,7 @@ struct WritingKnowledgeState {
     confirmations: BTreeMap<String, ConfirmationItem>,
     chapter_summaries: BTreeMap<String, String>,
     stage_summaries: BTreeMap<String, String>,
+    next_change_sequence: u64,
     index: BidirectionalIndex,
 }
 
@@ -41,7 +42,7 @@ impl MemoryWritingKnowledgeBase {
     pub fn upsert_segment(&self, segment: StorySegment) -> CoreResult<()> {
         segment.validate()?;
         let mut state = self.lock_state()?;
-        state.remove_segment_links(&segment.segment_id);
+        state.remove_segment_chapter_link(&segment.segment_id);
         link_unique(
             &mut state.index.chapter_segments,
             &segment.chapter_id,
@@ -53,6 +54,17 @@ impl MemoryWritingKnowledgeBase {
             .insert(segment.segment_id.clone(), segment.chapter_id.clone());
         state.segments.insert(segment.segment_id.clone(), segment);
         Ok(())
+    }
+
+    /// 删除故事段源记录，并清理章节、事件、注册项和伏笔的双向索引引用。
+    pub fn delete_segment(&self, segment_id: &str) -> CoreResult<Option<StorySegment>> {
+        validate_non_empty_local("segment_id", segment_id)?;
+        let mut state = self.lock_state()?;
+        let removed = state.segments.remove(segment_id);
+        if removed.is_some() {
+            state.remove_segment_links(segment_id);
+        }
+        Ok(removed)
     }
 
     /// 写入或更新事件，并同步事件与故事段、章节的双向索引。
@@ -445,7 +457,7 @@ impl MemoryWritingKnowledgeBase {
 
         let change_id = match change_id {
             Some(value) => value,
-            None => next_change_id(&state, function),
+            None => next_change_id(&mut state, function),
         };
         validate_non_empty_local("change_id", &change_id)?;
         if state.changes.contains_key(&change_id) {
@@ -487,10 +499,34 @@ impl MemoryWritingKnowledgeBase {
 }
 
 impl WritingKnowledgeState {
-    /// 移除故事段相关索引，随后由 upsert 重新建立。
-    fn remove_segment_links(&mut self, segment_id: &str) {
+    /// 仅移除故事段与章节的索引；普通 upsert 不应破坏事件/注册项等长期链接。
+    fn remove_segment_chapter_link(&mut self, segment_id: &str) {
         if let Some(chapter_id) = self.index.segment_chapter.remove(segment_id) {
             unlink_value(&mut self.index.chapter_segments, &chapter_id, segment_id);
+        }
+    }
+
+    /// 完整移除故事段相关索引，供删除故事段时避免留下孤儿引用。
+    fn remove_segment_links(&mut self, segment_id: &str) {
+        self.remove_segment_chapter_link(segment_id);
+        if let Some(event_ids) = self.index.segment_events.remove(segment_id) {
+            for event_id in event_ids {
+                unlink_value(&mut self.index.event_segments, &event_id, segment_id);
+            }
+        }
+        if let Some(change_ids) = self.index.segment_changes.remove(segment_id) {
+            for change_id in change_ids {
+                unlink_value(&mut self.index.change_segments, &change_id, segment_id);
+            }
+        }
+        if let Some(foreshadowing_ids) = self.index.segment_foreshadowing.remove(segment_id) {
+            for foreshadowing_id in foreshadowing_ids {
+                unlink_value(
+                    &mut self.index.foreshadowing_segments,
+                    &foreshadowing_id,
+                    segment_id,
+                );
+            }
         }
     }
 
@@ -548,14 +584,20 @@ fn matches_register_content(function: RegisterFunction, content: &RegisterConten
     )
 }
 
-/// 生成稳定的注册项 id，便于测试和后续审计。
-fn next_change_id(state: &WritingKnowledgeState, function: RegisterFunction) -> String {
+/// 生成稳定且单调递增的注册项 id，避免显式 id 或失败重试造成 `len()+1` 撞号。
+fn next_change_id(state: &mut WritingKnowledgeState, function: RegisterFunction) -> String {
     let prefix = match function {
         RegisterFunction::CharacterTrait => "character-trait",
         RegisterFunction::Relationship => "relationship",
         RegisterFunction::Foreshadowing => "foreshadowing",
     };
-    format!("register-{prefix}-{}", state.changes.len() + 1)
+    loop {
+        state.next_change_sequence = state.next_change_sequence.saturating_add(1);
+        let candidate = format!("register-{prefix}-{}", state.next_change_sequence);
+        if !state.changes.contains_key(&candidate) {
+            return candidate;
+        }
+    }
 }
 
 /// 人物性格路径查询。

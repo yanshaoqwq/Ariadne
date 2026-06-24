@@ -73,6 +73,12 @@ pub struct PortSelection {
     pub reused_requested_port: bool,
 }
 
+/// 内部端口预留结果；listener 保持到 spawn 前一刻，缩小端口被抢占窗口。
+struct ReservedPortSelection {
+    selection: PortSelection,
+    listener: TcpListener,
+}
+
 /// sidecar 进程启动器，测试可替换该接口避免真的启动 Qdrant。
 pub trait SidecarProcessRunner: Send + Sync {
     /// 启动 sidecar 进程。
@@ -137,7 +143,10 @@ where
             return Ok(existing);
         }
 
-        let selection = select_available_port(&self.config.host, self.config.requested_port)?;
+        let reservation = reserve_available_port(&self.config.host, self.config.requested_port)?;
+        let selection = reservation.selection.clone();
+        // 外部 sidecar 需要自己 bind 端口；这里只能在 spawn 前释放预留 listener。
+        drop(reservation.listener);
         let child = match self.runner.spawn(&self.config, selection.port) {
             Ok(child) => child,
             Err(error) => {
@@ -255,23 +264,37 @@ where
 
 /// 选择可用端口；请求端口不可用时回退到系统分配端口。
 pub fn select_available_port(host: &str, requested_port: u16) -> CoreResult<PortSelection> {
+    reserve_available_port(host, requested_port).map(|reservation| reservation.selection)
+}
+
+/// 选择并暂时持有可用端口，供启动流程在 spawn 前一刻释放。
+fn reserve_available_port(host: &str, requested_port: u16) -> CoreResult<ReservedPortSelection> {
     if requested_port == 0 {
-        return reserve_ephemeral_port(host).map(|port| PortSelection {
+        return reserve_ephemeral_port(host).map(|(port, listener)| ReservedPortSelection {
+            selection: PortSelection {
+                port,
+                reused_requested_port: false,
+            },
+            listener,
+        });
+    }
+
+    if let Ok(listener) = TcpListener::bind((host, requested_port)) {
+        return Ok(ReservedPortSelection {
+            selection: PortSelection {
+                port: requested_port,
+                reused_requested_port: true,
+            },
+            listener,
+        });
+    }
+
+    reserve_ephemeral_port(host).map(|(port, listener)| ReservedPortSelection {
+        selection: PortSelection {
             port,
             reused_requested_port: false,
-        });
-    }
-
-    if is_port_available(host, requested_port) {
-        return Ok(PortSelection {
-            port: requested_port,
-            reused_requested_port: true,
-        });
-    }
-
-    reserve_ephemeral_port(host).map(|port| PortSelection {
-        port,
-        reused_requested_port: false,
+        },
+        listener,
     })
 }
 
@@ -300,9 +323,10 @@ pub fn wait_for_tcp_health(host: &str, port: u16, timeout_ms: u64) -> CoreResult
 }
 
 /// 向系统申请一个临时可用端口。
-fn reserve_ephemeral_port(host: &str) -> CoreResult<u16> {
+fn reserve_ephemeral_port(host: &str) -> CoreResult<(u16, TcpListener)> {
     let listener = TcpListener::bind((host, 0))?;
-    Ok(listener.local_addr()?.port())
+    let port = listener.local_addr()?.port();
+    Ok((port, listener))
 }
 
 /// 将锁中毒转换成统一错误。

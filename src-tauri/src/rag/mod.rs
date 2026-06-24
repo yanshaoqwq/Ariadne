@@ -4,6 +4,7 @@ pub mod memory;
 pub mod models;
 pub mod numbering;
 pub mod pipeline;
+pub mod prompt_template;
 pub mod resources;
 pub mod tools;
 
@@ -13,5 +14,6 @@ pub use memory::*;
 pub use models::*;
 pub use numbering::*;
 pub use pipeline::*;
+pub use prompt_template::*;
 pub use resources::*;
 pub use tools::*;

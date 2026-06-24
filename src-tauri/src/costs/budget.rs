@@ -83,6 +83,18 @@ pub struct BudgetUsage {
     pub spent_this_month_usd: f64,
 }
 
+impl BudgetUsage {
+    /// 返回本次调用后当天累计成本，供硬预算和 Auto Mode 预授权共用。
+    fn spent_today_after_request(self) -> f64 {
+        self.spent_today_usd + self.requested_usd
+    }
+
+    /// 返回本次调用后当月累计成本。
+    fn spent_this_month_after_request(self) -> f64 {
+        self.spent_this_month_usd + self.requested_usd
+    }
+}
+
 /// 根据预算、Auto Mode 和当前用量决定是否继续、确认或暂停。
 pub fn evaluate_budget(
     limits: &BudgetLimits,
@@ -97,22 +109,20 @@ pub fn evaluate_budget(
         return BudgetDecision::pause("single-call budget limit exceeded");
     }
 
-    if exceeds(
-        limits.daily_usd,
-        usage.spent_today_usd + usage.requested_usd,
-    ) {
+    if exceeds(limits.daily_usd, usage.spent_today_after_request()) {
         return BudgetDecision::pause("daily budget limit exceeded");
     }
 
-    if exceeds(
-        limits.monthly_usd,
-        usage.spent_this_month_usd + usage.requested_usd,
-    ) {
+    if exceeds(limits.monthly_usd, usage.spent_this_month_after_request()) {
         return BudgetDecision::pause("monthly budget limit exceeded");
     }
 
     if auto_mode.enabled_by_default {
-        if exceeds(auto_mode.preauthorized_budget_usd, usage.requested_usd) {
+        // Auto Mode 预授权是累计放行额度，不是单次调用额度；否则多次小额调用会绕过上限。
+        if exceeds(
+            auto_mode.preauthorized_budget_usd,
+            usage.spent_today_after_request(),
+        ) {
             return BudgetDecision::pause("auto mode preauthorized budget exceeded");
         }
         // Auto Mode 只跳过普通确认，前面的硬预算限制仍然已经执行。
@@ -155,6 +165,29 @@ mod tests {
 
         assert_eq!(decision.action, BudgetAction::Pause);
         assert_eq!(decision.run_control, RunControl::Pause);
+    }
+
+    #[test]
+    fn auto_mode_uses_cumulative_preauthorized_budget() {
+        let decision = evaluate_budget(
+            &BudgetLimits::default(),
+            &AutoModeConfig {
+                enabled_by_default: true,
+                preauthorized_budget_usd: Some(1.0),
+                ..AutoModeConfig::default()
+            },
+            BudgetUsage {
+                requested_usd: 0.25,
+                spent_today_usd: 0.90,
+                spent_this_month_usd: 0.90,
+            },
+        );
+
+        assert_eq!(decision.action, BudgetAction::Pause);
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some("auto mode preauthorized budget exceeded")
+        );
     }
 
     #[test]

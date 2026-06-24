@@ -9,6 +9,11 @@ use crate::retrieval::models::{
 };
 use crate::retrieval::traits::{FullTextStore, HybridSearch, ResultReranker, VectorStore};
 
+/// 单次混合检索允许的最大最终返回数量。
+pub const MAX_HYBRID_SEARCH_LIMIT: usize = 10_000;
+/// 单次混合检索允许进入 reranker 的最大候选数量。
+pub const MAX_HYBRID_CANDIDATE_LIMIT: usize = MAX_HYBRID_SEARCH_LIMIT * 3;
+
 /// 混合检索引擎，组合向量检索、全文检索和可选 reranker。
 pub struct HybridSearchEngine {
     vector_store: Arc<dyn VectorStore>,
@@ -43,10 +48,16 @@ impl HybridSearch for HybridSearchEngine {
             return Ok(Vec::new());
         }
 
+        validate_limit(request.limit)?;
         validate_weights(request.vector_weight, request.full_text_weight)?;
 
         // 先多召回一批候选，再交给 reranker 或最终裁剪，避免过早丢掉可重排结果。
-        let candidate_limit = request.limit.saturating_mul(3).max(request.limit);
+        let candidate_limit = request
+            .limit
+            .checked_mul(3)
+            .unwrap_or(MAX_HYBRID_CANDIDATE_LIMIT)
+            .min(MAX_HYBRID_CANDIDATE_LIMIT)
+            .max(request.limit);
         let mut combined: BTreeMap<String, RetrievalResult> = BTreeMap::new();
 
         if let Some(query_embedding) = request.query_embedding.clone() {
@@ -88,6 +99,16 @@ impl HybridSearch for HybridSearchEngine {
             self.full_text_store.health_check()?,
         ])
     }
+}
+
+/// 校验请求数量上限，避免极端 limit 透传到底层索引。
+fn validate_limit(limit: usize) -> CoreResult<()> {
+    if limit > MAX_HYBRID_SEARCH_LIMIT {
+        return Err(CoreError::validation(format!(
+            "hybrid search limit {limit} exceeds maximum {MAX_HYBRID_SEARCH_LIMIT}"
+        )));
+    }
+    Ok(())
 }
 
 /// 校验混合检索权重，避免 NaN 或全零权重污染排序。

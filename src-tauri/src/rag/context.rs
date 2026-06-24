@@ -23,9 +23,13 @@ impl<'a> WritingContextAssembler<'a> {
     pub fn assemble(&self, request: WritingContextRequest) -> CoreResult<WritingContextBundle> {
         validate_chapter_id(&request.chapter_id)?;
         let sections = match request.agent {
+            WritingAgentKind::Outliner => self.outliner_sections(&request)?,
+            WritingAgentKind::Designer => self.designer_sections(&request)?,
             WritingAgentKind::Planner => self.planner_sections(&request)?,
             WritingAgentKind::Detail => self.detail_sections(&request)?,
             WritingAgentKind::Writer => self.writer_sections(&request)?,
+            WritingAgentKind::Critic => self.critic_sections(&request)?,
+            WritingAgentKind::Prudent => self.prudent_sections(&request)?,
             WritingAgentKind::Summarizer => self.summarizer_sections(&request)?,
         };
 
@@ -37,12 +41,114 @@ impl<'a> WritingContextAssembler<'a> {
         })
     }
 
+    /// Outliner 上下文用于全局开局规划，重点接收用户初始意图和已有长期知识。
+    fn outliner_sections(
+        &self,
+        request: &WritingContextRequest,
+    ) -> CoreResult<Vec<WritingContextSection>> {
+        let mut sections = Vec::new();
+        if let Some(intent) = non_empty_optional(&request.user_intent) {
+            sections.push(section(
+                "user_intent",
+                "用户初始意图",
+                intent.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(outline) = non_empty_optional(&request.global_outline) {
+            sections.push(section(
+                "global_outline",
+                "已有全局总纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        let character_state =
+            current_character_and_relationship_state(&self.knowledge.registered_changes()?);
+        if !character_state.is_empty() {
+            sections.push(section(
+                "character_state",
+                "人物与关系当前状态",
+                character_state,
+                Value::Null,
+            ));
+        }
+        append_template_inputs(&mut sections, &request.template_inputs)?;
+        Ok(sections)
+    }
+
+    /// Designer 上下文用于阶段粒度规划，包含全局总纲、既有阶段总纲和章节概括。
+    fn designer_sections(
+        &self,
+        request: &WritingContextRequest,
+    ) -> CoreResult<Vec<WritingContextSection>> {
+        let mut sections = Vec::new();
+        if let Some(outline) = non_empty_optional(&request.global_outline) {
+            sections.push(section(
+                "global_outline",
+                "全局总纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(outline) = non_empty_optional(&request.previous_stage_outline) {
+            sections.push(section(
+                "previous_stage_outline",
+                "之前阶段总纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(outline) = non_empty_optional(&request.stage_outline) {
+            sections.push(section(
+                "stage_outline",
+                "既有阶段总纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(summaries) = non_empty_optional(&request.chapter_summaries) {
+            sections.push(section(
+                "chapter_summaries",
+                "章节概括",
+                summaries.to_owned(),
+                Value::Null,
+            ));
+        }
+        append_template_inputs(&mut sections, &request.template_inputs)?;
+        Ok(sections)
+    }
+
     /// Planner 上下文包含前文总结、人物当前状态、未回收伏笔和上一章正文。
     fn planner_sections(
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
         let mut sections = Vec::new();
+        if let Some(outline) = non_empty_optional(&request.global_outline) {
+            sections.push(section(
+                "global_outline",
+                "全局总纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(outline) = non_empty_optional(&request.stage_outline) {
+            sections.push(section(
+                "stage_outline",
+                "当前阶段总纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(summaries) = non_empty_optional(&request.chapter_summaries) {
+            sections.push(section(
+                "chapter_summaries",
+                "当前阶段章节概括",
+                summaries.to_owned(),
+                Value::Null,
+            ));
+        }
         let chapter_summaries = self.knowledge.chapter_summaries()?;
         if !chapter_summaries.is_empty() {
             sections.push(section(
@@ -87,6 +193,7 @@ impl<'a> WritingContextAssembler<'a> {
                 Value::Null,
             ));
         }
+        append_template_inputs(&mut sections, &request.template_inputs)?;
         Ok(sections)
     }
 
@@ -107,6 +214,7 @@ impl<'a> WritingContextAssembler<'a> {
                 Value::Null,
             ));
         }
+        append_template_inputs(&mut sections, &request.template_inputs)?;
         Ok(sections)
     }
 
@@ -148,6 +256,94 @@ impl<'a> WritingContextAssembler<'a> {
                 json!({ "line_numbered": true }),
             ));
         }
+        if let Some(revision) = non_empty_optional(&request.revision_context) {
+            sections.push(section(
+                "revision_context",
+                "审慎者返修上下文",
+                revision.to_owned(),
+                Value::Null,
+            ));
+        }
+        append_template_inputs(&mut sections, &request.template_inputs)?;
+        Ok(sections)
+    }
+
+    /// Critic 上下文用于评价正文，可接入待评价文本、章节/阶段规划和上游 alias。
+    fn critic_sections(
+        &self,
+        request: &WritingContextRequest,
+    ) -> CoreResult<Vec<WritingContextSection>> {
+        let mut sections = Vec::new();
+        if let Some(text) = non_empty_optional(&request.target_text) {
+            sections.push(section(
+                "target_text",
+                "待评价文本",
+                text.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(outline) = non_empty_optional(&request.outline) {
+            sections.push(section(
+                "outline",
+                "本章大纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(outline) = non_empty_optional(&request.stage_outline) {
+            sections.push(section(
+                "stage_outline",
+                "阶段总纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        append_template_inputs(&mut sections, &request.template_inputs)?;
+        if sections.is_empty() {
+            return Err(CoreError::validation("critic context requires target_text"));
+        }
+        Ok(sections)
+    }
+
+    /// Prudent 上下文接收一个或多个 Critic 输出，并形成返修判断依据。
+    fn prudent_sections(
+        &self,
+        request: &WritingContextRequest,
+    ) -> CoreResult<Vec<WritingContextSection>> {
+        let mut sections = Vec::new();
+        if let Some(outputs) = non_empty_optional(&request.critic_outputs) {
+            sections.push(section(
+                "critic_outputs",
+                "意见者输出",
+                outputs.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(text) = non_empty_optional(&request.target_text) {
+            sections.push(section(
+                "target_text",
+                "待评价文本",
+                text.to_owned(),
+                Value::Null,
+            ));
+        }
+        if let Some(outline) = non_empty_optional(&request.outline) {
+            sections.push(section(
+                "outline",
+                "本章大纲",
+                outline.to_owned(),
+                Value::Null,
+            ));
+        }
+        append_template_inputs(&mut sections, &request.template_inputs)?;
+        if !sections
+            .iter()
+            .any(|section| section.section_id == "critic_outputs" || section.title == "意见者输出")
+        {
+            return Err(CoreError::validation(
+                "prudent context requires critic_outputs",
+            ));
+        }
         Ok(sections)
     }
 
@@ -170,6 +366,7 @@ impl<'a> WritingContextAssembler<'a> {
                 "summarizer context requires current_draft_text",
             ));
         }
+        append_template_inputs(&mut sections, &request.template_inputs)?;
         Ok(sections)
     }
 }
@@ -188,6 +385,30 @@ fn section(
         sources: Vec::new(),
         metadata,
     }
+}
+
+/// 将上游数据边 alias 展开为模板可引用的上下文区块。
+fn append_template_inputs(
+    sections: &mut Vec<WritingContextSection>,
+    inputs: &std::collections::BTreeMap<String, String>,
+) -> CoreResult<()> {
+    for (alias, content) in inputs {
+        if alias.trim().is_empty() {
+            return Err(CoreError::validation(
+                "template input alias cannot be empty",
+            ));
+        }
+        if content.trim().is_empty() {
+            continue;
+        }
+        sections.push(section(
+            format!("input.{alias}"),
+            alias.clone(),
+            content.clone(),
+            json!({ "from_template_input": true }),
+        ));
+    }
+    Ok(())
 }
 
 /// 格式化有序摘要表。
