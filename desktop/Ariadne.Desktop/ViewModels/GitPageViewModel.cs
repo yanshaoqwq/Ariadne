@@ -1,3 +1,4 @@
+using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
@@ -7,12 +8,18 @@ namespace Ariadne.Desktop.ViewModels;
 public sealed class GitPageViewModel : ViewModelBase
 {
     private readonly DisplayNameService _displayNames;
+    private readonly IAriadneBackendClient _backend;
     private bool _isRightPanelOpen = true;
+    private string _checkpointMessage = string.Empty;
+    private string _statusText = string.Empty;
 
-    public GitPageViewModel(DisplayNameService displayNames)
+    public GitPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
         _displayNames = displayNames;
+        _backend = backend;
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
+        RefreshCommand = new RelayCommand(() => _ = RefreshAsync());
+        CreateCheckpointCommand = new RelayCommand(() => _ = CreateCheckpointAsync());
     }
 
     public string ToggleRightPanelText => _displayNames.Text("ui.action.toggle_right_panel");
@@ -25,6 +32,22 @@ public sealed class GitPageViewModel : ViewModelBase
     }
 
     public RelayCommand ToggleRightPanelCommand { get; }
+
+    public RelayCommand RefreshCommand { get; }
+
+    public RelayCommand CreateCheckpointCommand { get; }
+
+    public string CheckpointMessage
+    {
+        get => _checkpointMessage;
+        set => SetProperty(ref _checkpointMessage, value);
+    }
+
+    public string StatusText
+    {
+        get => _statusText;
+        set => SetProperty(ref _statusText, value);
+    }
 
     public string Title => _displayNames.Text("ui.git.title");
 
@@ -53,4 +76,37 @@ public sealed class GitPageViewModel : ViewModelBase
     public string AuthorLabel => _displayNames.Text("ui.git.author");
 
     public string TimeLabel => _displayNames.Text("ui.git.time");
+
+    // 分支图节点右键菜单文案
+    public string CtxCreateCheckpointText => _displayNames.Text("ui.git.context.create_checkpoint");
+    public string CtxViewDetailsText => _displayNames.Text("ui.git.context.view_details");
+    public string CtxRestoreText => _displayNames.Text("ui.git.context.restore");
+    public string CtxCopyIdText => _displayNames.Text("ui.git.context.copy_id");
+
+    private async Task RefreshAsync()
+    {
+        try
+        {
+            await _backend.InvokeAsync<object>("get_git_history").ConfigureAwait(true);
+            StatusText = BranchGraphText;
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task CreateCheckpointAsync()
+    {
+        try
+        {
+            var checkpoint = await _backend.CreateCheckpointAsync(CheckpointMessage).ConfigureAwait(true);
+            StatusText = checkpoint.Message;
+            CheckpointMessage = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
 }

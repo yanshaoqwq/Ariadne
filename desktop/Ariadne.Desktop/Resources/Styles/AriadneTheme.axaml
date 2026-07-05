@@ -20,6 +20,8 @@
           <Color x:Key="Ariadne.Color.BackgroundMain">#F3F1EA</Color>
           <Color x:Key="Ariadne.Color.BackgroundSurface">#FBFAF6</Color>
           <Color x:Key="Ariadne.Color.BackgroundElevated">#FFFFFF</Color>
+          <!-- 右键菜单背景：略带透明度模拟毛玻璃（93% 暖白 + teal 微量） -->
+          <Color x:Key="Ariadne.Color.MenuBackground">#EEF9F7F3</Color>
           <Color x:Key="Ariadne.Color.BackgroundSubtle">#EFEDE4</Color>
           <Color x:Key="Ariadne.Color.BackgroundHover">#1A160D0D</Color>
           <Color x:Key="Ariadne.Color.BackgroundPressed">#1A160D1A</Color>
@@ -80,6 +82,7 @@
           <SolidColorBrush x:Key="Ariadne.BackgroundMain" Color="{StaticResource Ariadne.Color.BackgroundMain}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundSurface" Color="{StaticResource Ariadne.Color.BackgroundSurface}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundElevated" Color="{StaticResource Ariadne.Color.BackgroundElevated}" />
+          <SolidColorBrush x:Key="Ariadne.MenuBackground" Color="{StaticResource Ariadne.Color.MenuBackground}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundSubtle" Color="{StaticResource Ariadne.Color.BackgroundSubtle}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundHover" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
@@ -134,6 +137,8 @@
           <Color x:Key="Ariadne.Color.BackgroundMain">#17191C</Color>
           <Color x:Key="Ariadne.Color.BackgroundSurface">#212427</Color>
           <Color x:Key="Ariadne.Color.BackgroundElevated">#2A2E31</Color>
+          <!-- 右键菜单背景：91% 深色 + teal 微量，模拟毛玻璃 -->
+          <Color x:Key="Ariadne.Color.MenuBackground">#E81B2025</Color>
           <Color x:Key="Ariadne.Color.BackgroundSubtle">#1D2023</Color>
           <Color x:Key="Ariadne.Color.BackgroundHover">#14FFFFFF</Color>
           <Color x:Key="Ariadne.Color.BackgroundPressed">#22FFFFFF</Color>
@@ -185,6 +190,7 @@
           <SolidColorBrush x:Key="Ariadne.BackgroundMain" Color="{StaticResource Ariadne.Color.BackgroundMain}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundSurface" Color="{StaticResource Ariadne.Color.BackgroundSurface}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundElevated" Color="{StaticResource Ariadne.Color.BackgroundElevated}" />
+          <SolidColorBrush x:Key="Ariadne.MenuBackground" Color="{StaticResource Ariadne.Color.MenuBackground}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundSubtle" Color="{StaticResource Ariadne.Color.BackgroundSubtle}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundHover" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
@@ -524,18 +530,20 @@
 
   <!-- 悬浮开合按钮：右栏收起后贴右缘的圆形浮钮（左向箭头） -->
   <Style Selector="Button.panel-float">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="CornerRadius" Value="8,0,0,8" />
-    <Setter Property="Width" Value="24" />
-    <Setter Property="Height" Value="52" />
+    <Setter Property="Width" Value="20" />
+    <Setter Property="Height" Value="44" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="VerticalAlignment" Value="Center" />
     <Setter Property="HorizontalAlignment" Value="Right" />
+    <Setter Property="Opacity" Value="0.82" />
   </Style>
   <Style Selector="Button.panel-float:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Opacity" Value="1" />
   </Style>
   <!-- 右栏内的收起小钮 -->
   <Style Selector="Button.panel-collapse">
@@ -658,5 +666,57 @@
         <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.08" />
       </Transitions>
     </Setter>
+  </Style>
+
+  <!-- ============ 右键菜单：Win11 风格（圆角、轻描边、悬浮高亮圆角项）============ -->
+  <!-- ============ 右键菜单（仅限 Classes="ariadne"，不污染 TextBox 内置菜单） ============ -->
+  <!-- 背景用半透明 MenuBackground token 模拟毛玻璃；阴影三层叠加增加悬浮感 -->
+  <Style Selector="ContextMenu.ariadne">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Padding" Value="5" />
+    <Setter Property="MinWidth" Value="200" />
+  </Style>
+  <Style Selector="ContextMenu.ariadne /template/ Border#PART_LayoutRoot">
+    <Setter Property="BoxShadow" Value="0 2 6 0 #10000000, 0 8 24 0 #18000000, 0 20 56 0 #12000000" />
+    <Setter Property="CornerRadius" Value="10" />
+  </Style>
+  <!-- 菜单项：比例舒适、圆角高亮、0.10s 过渡 -->
+  <Style Selector="ContextMenu.ariadne MenuItem">
+    <Setter Property="Padding" Value="12,7" />
+    <Setter Property="MinHeight" Value="32" />
+    <Setter Property="Margin" Value="2,1" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="CornerRadius" Value="6" />
+  </Style>
+  <Style Selector="ContextMenu.ariadne MenuItem /template/ Border#PART_LayoutRoot">
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.10" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ContextMenu.ariadne MenuItem:selected /template/ Border#PART_LayoutRoot">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <Style Selector="ContextMenu.ariadne MenuItem:selected">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <!-- 分隔线：只在 ariadne 菜单内生效 -->
+  <Style Selector="ContextMenu.ariadne Separator">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="Height" Value="1" />
+    <Setter Property="Margin" Value="8,3" />
+  </Style>
+  <!-- 危险项（删除等） -->
+  <Style Selector="ContextMenu.ariadne MenuItem.danger">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+  </Style>
+  <Style Selector="ContextMenu.ariadne MenuItem.danger:selected">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
   </Style>
 </Styles>

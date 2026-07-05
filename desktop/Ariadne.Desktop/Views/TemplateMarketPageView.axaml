@@ -2,7 +2,9 @@
     x:Class="Ariadne.Desktop.Views.TemplateMarketPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:backend="clr-namespace:Ariadne.Desktop.Backend"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
+    x:Name="Root"
     x:DataType="vm:TemplateMarketPageViewModel">
   <Grid RowDefinitions="52,*" Background="{DynamicResource Ariadne.BackgroundMain}">
 
@@ -19,12 +21,14 @@
       <StackPanel MaxWidth="1040" Margin="32,28">
 
         <!-- 搜索栏：600px 固定宽度居中，右侧搜索键 -->
-        <Grid ColumnDefinitions="*,Auto" MaxWidth="648" HorizontalAlignment="Center" ColumnSpacing="8">
+        <Grid ColumnDefinitions="*,Auto" HorizontalAlignment="Stretch" ColumnSpacing="8">
           <TextBox Grid.Column="0"
+              Text="{Binding SearchQuery, Mode=TwoWay}"
               PlaceholderText="{Binding SearchPlaceholder}"
               MinHeight="48"
               FontSize="16" />
           <Button Grid.Column="1" Classes="primary" Width="52" Height="48" Padding="0"
+                  Command="{Binding SearchCommand}"
                   ToolTip.Tip="{Binding SearchText}">
             <Path Classes="icon" Width="20" Height="20"
                   Stroke="{DynamicResource Ariadne.TextOnAccent}"
@@ -41,35 +45,40 @@
           <Border Classes="chip" Margin="4"><TextBlock Text="总结" Classes="caption" /></Border>
         </WrapPanel>
 
-        <!-- 卡片网格：空态骨架（占位卡片，方角矩形） -->
-        <UniformGrid Columns="3">
-          <Border Classes="card" Margin="8" Padding="18" MinHeight="168">
-            <DockPanel>
-              <StackPanel DockPanel.Dock="Top" Spacing="10">
-                <Grid ColumnDefinitions="*,Auto">
-                  <TextBlock Grid.Column="0" Text="—" Classes="subtitle" />
-                  <Border Grid.Column="1" Classes="chip" Background="{DynamicResource Ariadne.AccentLight}">
-                    <TextBlock Text="{Binding PermissionText}" Classes="caption" Foreground="{DynamicResource Ariadne.AccentPrimary}" />
-                  </Border>
-                </Grid>
-                <WrapPanel>
-                  <Border Classes="chip" Margin="0,0,6,0"><TextBlock Text="—" Classes="subtle" /></Border>
-                </WrapPanel>
-              </StackPanel>
-              <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" VerticalAlignment="Bottom">
-                <TextBlock Grid.Column="0" Text="—" Classes="mono" VerticalAlignment="Center" />
-                <Button Grid.Column="1" Classes="primary" Content="{Binding ImportText}" />
-              </Grid>
-            </DockPanel>
-          </Border>
-        </UniformGrid>
+        <ItemsControl ItemsSource="{Binding Templates}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <UniformGrid Columns="3" />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="{x:Type backend:TemplateSummary}">
+              <Border Classes="card" Margin="8" Padding="18" MinHeight="168">
+                <DockPanel>
+                  <StackPanel DockPanel.Dock="Top" Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBlock Grid.Column="0" Text="{Binding Name}" Classes="subtitle" />
+                      <Border Grid.Column="1" Classes="chip" Background="{DynamicResource Ariadne.AccentLight}" IsVisible="{Binding RequiresPermissions}">
+                        <TextBlock Text="{Binding #Root.DataContext.PermissionText}" Classes="caption" Foreground="{DynamicResource Ariadne.AccentPrimary}" />
+                      </Border>
+                    </Grid>
+                    <TextBlock Text="{Binding Id}" Classes="mono" />
+                  </StackPanel>
+                </DockPanel>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
 
         <!-- 空态说明 -->
         <Border Classes="layer" Padding="32" Margin="8,16" HorizontalAlignment="Stretch">
-          <TextBlock Text="{Binding EmptyText}" Classes="secondary" HorizontalAlignment="Center" />
+          <TextBlock Text="{Binding StatusText}" Classes="secondary" HorizontalAlignment="Center" />
         </Border>
 
-        <Button Classes="secondary" Content="{Binding LoadMoreText}" HorizontalAlignment="Center" Margin="0,8" />
+        <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center" Margin="0,8">
+          <Button Classes="primary" Content="{Binding ImportText}" Command="{Binding InstallFirstCommand}" />
+          <Button Classes="secondary" Content="{Binding LoadMoreText}" Command="{Binding LoadMoreCommand}" />
+        </StackPanel>
       </StackPanel>
     </ScrollViewer>
   </Grid>

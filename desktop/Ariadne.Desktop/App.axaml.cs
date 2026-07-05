@@ -18,6 +18,7 @@ public partial class App : Application
     public override void OnFrameworkInitializationCompleted()
     {
         DisplayNameService.Initialize(DisplayNameService.LoadDefault());
+        DialogService.Initialize(DisplayNameService.Current);
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {

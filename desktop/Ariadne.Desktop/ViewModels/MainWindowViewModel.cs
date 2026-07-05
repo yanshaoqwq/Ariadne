@@ -47,6 +47,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public WelcomeViewModel Welcome { get; }
 
+    /// 全局弹窗服务（未保存离开、通用确认等）；MainWindow 内叠层渲染。
+    public DialogService Dialog => DialogService.Current;
+
     public ObservableCollection<NavigationItemViewModel> PrimaryNavigationItems { get; }
 
     public ObservableCollection<NavigationItemViewModel> SecondaryNavigationItems { get; }
@@ -132,7 +135,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             _displayNames.Text(key),
             icon,
             () => CreatePage(id, key),
-            SelectNavigationItem);
+            item => _ = SelectNavigationItemAsync(item));
     }
 
     // 根据导航 id 构造对应页面 VM；未接页面回退占位页。
@@ -140,18 +143,28 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         return id switch
         {
-            "workspace" => new WorkspacePageViewModel(_displayNames),
-            "works" => new WorksPageViewModel(_displayNames),
-            "git" => new GitPageViewModel(_displayNames),
-            "run_logs" => new RunLogPageViewModel(_displayNames),
-            "templates" => new TemplateMarketPageViewModel(_displayNames),
-            "settings" => new SettingsPageViewModel(_displayNames),
+            "workspace" => new WorkspacePageViewModel(_displayNames, _backend),
+            "works" => new WorksPageViewModel(_displayNames, _backend),
+            "git" => new GitPageViewModel(_displayNames, _backend),
+            "run_logs" => new RunLogPageViewModel(_displayNames, _backend),
+            "templates" => new TemplateMarketPageViewModel(_displayNames, _backend),
+            "settings" => new SettingsPageViewModel(_displayNames, _backend),
             _ => new PlaceholderPageViewModel(_displayNames.Text(key), _displayNames.Text("ui.common.wired"), string.Empty),
         };
     }
 
-    private void SelectNavigationItem(NavigationItemViewModel item)
+    private async Task SelectNavigationItemAsync(NavigationItemViewModel item)
     {
+        if (item.IsSelected)
+        {
+            return;
+        }
+
+        if (CurrentPage is IUnsavedChangesGuard guard && !await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+        {
+            return;
+        }
+
         foreach (var nav in AllNavigationItems())
         {
             nav.IsSelected = nav == item;

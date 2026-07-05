@@ -3,16 +3,23 @@ use std::net::TcpListener;
 use std::thread;
 
 use ariadne::commands::{
-    create_checkpoint_impl, get_automation_settings_impl, get_budget_status_impl,
-    get_document_content_impl, get_document_tree_impl, get_git_history_impl,
-    get_permissions_settings_impl, get_provider_config_impl, load_workflow_graph_impl,
-    pack_workflow_selection_impl, project_ai_chat_impl, resolve_confirmation_impl,
-    resolve_project_references, run_workflow_impl, save_automation_settings_impl,
-    save_document_content_impl, save_permissions_settings_impl, save_provider_key_impl,
-    save_provider_settings_impl, save_workflow_graph_impl, update_budget_config_impl,
-    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationDecision, ConfirmationPolicySetting,
-    PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest,
-    ProviderSettingsUpdate, ResolveConfirmationRequest, WorkflowGraphData,
+    create_checkpoint_impl, get_app_settings_impl, get_automation_settings_impl,
+    fetch_provider_models_impl, get_budget_status_impl, get_document_content_impl,
+    get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
+    get_permissions_settings_impl, get_node_preset_settings_impl, get_provider_config_impl,
+    get_rag_settings_impl,
+    get_template_repository_settings_impl, get_workflow_settings_impl, load_workflow_graph_impl,
+    pack_workflow_selection_impl,
+    project_ai_chat_impl, resolve_confirmation_impl, resolve_project_references, run_workflow_impl,
+    save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
+    save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
+    save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
+    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
+    update_budget_config_impl, AppSettings, AutomationSettings, CanvasEdge, CanvasNode,
+    ConfirmationAutoModePolicy, ConfirmationDecision, ConfirmationNormalPolicy,
+    ConfirmationPolicySetting, GitSettings, NodePresetSettings, PermissionsSettings,
+    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate, RagSettings,
+    ResolveConfirmationRequest, TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{MemorySecretStore, ModelConfig, SecretStore};
 use ariadne::contracts::{
@@ -461,6 +468,8 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
                 output_cost_per_million_tokens: None,
             }],
             make_default_llm: true,
+            make_default_embedding: true,
+            make_default_reranker: false,
         },
     )
     .unwrap();
@@ -479,6 +488,10 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
     assert_eq!(budget.preauthorized_usd, 3.5);
     assert!(provider.has_openai_key);
     assert_eq!(provider.default_llm_provider_id.as_deref(), Some("openai"));
+    assert_eq!(
+        provider.default_embedding_provider_id.as_deref(),
+        Some("openai")
+    );
     assert_eq!(provider.providers[0].provider, "openai");
     assert_eq!(provider.providers[0].models[0].model_id, "gpt-test");
     assert_eq!(
@@ -489,6 +502,77 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
             .expose_secret(),
         "sk-secret"
     );
+}
+
+#[test]
+fn provider_model_fetch_returns_configured_and_embedding_models() {
+    let temp = tempfile::tempdir().unwrap();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "openai".to_owned(),
+            provider_type: ProviderType::OpenAi,
+            display_name: "OpenAI".to_owned(),
+            enabled: true,
+            base_url: None,
+            models: vec![ModelConfig {
+                model_id: "gpt-test".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(4096),
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: true,
+            make_default_reranker: false,
+        },
+    )
+    .unwrap();
+
+    let models = fetch_provider_models_impl(temp.path(), Some("openai".to_owned())).unwrap();
+
+    assert_eq!(models.provider_id, "openai");
+    assert!(models
+        .models
+        .iter()
+        .any(|model| model.model_id == "gpt-test"
+            && model.capability == ProviderCapability::Llm));
+    assert!(models
+        .models
+        .iter()
+        .any(|model| model.model_id == "text-embedding-3-small"
+            && model.capability == ProviderCapability::Embedding));
+}
+
+#[test]
+fn node_preset_settings_are_per_node_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = NodePresetSettings::default();
+    assert!(settings
+        .presets
+        .iter()
+        .any(|preset| preset.node_type == "writer"));
+
+    let writer = settings
+        .presets
+        .iter_mut()
+        .find(|preset| preset.node_type == "writer")
+        .unwrap();
+    writer.model_id = "gpt-writer".to_owned();
+    writer.timeout_ms = 600_000;
+    writer.budget_usd = 0.25;
+
+    save_node_preset_settings_impl(temp.path(), settings).unwrap();
+    let loaded = get_node_preset_settings_impl(temp.path()).unwrap();
+    let writer = loaded
+        .presets
+        .iter()
+        .find(|preset| preset.node_type == "writer")
+        .unwrap();
+
+    assert_eq!(writer.model_id, "gpt-writer");
+    assert_eq!(writer.timeout_ms, 600_000);
+    assert_eq!(writer.budget_usd, 0.25);
 }
 
 #[test]
@@ -508,11 +592,15 @@ fn automation_and_permission_settings_round_trip_config_files() {
             confirmation_policies: vec![
                 ConfirmationPolicySetting {
                     confirmation_kind: "chapter_write".to_owned(),
-                    policy: "auto_audit".to_owned(),
+                    normal_policy: ConfirmationNormalPolicy::ManualReview,
+                    auto_mode_policy: ConfirmationAutoModePolicy::AutoApproval,
+                    policy: String::new(),
                 },
                 ConfirmationPolicySetting {
                     confirmation_kind: "summary_write".to_owned(),
-                    policy: "auto_skip".to_owned(),
+                    normal_policy: ConfirmationNormalPolicy::AllowByDefault,
+                    auto_mode_policy: ConfirmationAutoModePolicy::AllowByDefault,
+                    policy: String::new(),
                 },
             ],
         },
@@ -526,11 +614,15 @@ fn automation_and_permission_settings_round_trip_config_files() {
     assert!(automation
         .confirmation_policies
         .iter()
-        .any(|item| item.confirmation_kind == "chapter_write" && item.policy == "auto_audit"));
+        .any(|item| item.confirmation_kind == "chapter_write"
+            && item.normal_policy == ConfirmationNormalPolicy::ManualReview
+            && item.auto_mode_policy == ConfirmationAutoModePolicy::AutoApproval));
     assert!(automation
         .confirmation_policies
         .iter()
-        .any(|item| item.confirmation_kind == "summary_write" && item.policy == "auto_skip"));
+        .any(|item| item.confirmation_kind == "summary_write"
+            && item.normal_policy == ConfirmationNormalPolicy::AllowByDefault
+            && item.auto_mode_policy == ConfirmationAutoModePolicy::AllowByDefault));
 
     let mut policy = PermissionPolicy::default();
     policy.allow_network = true;
@@ -548,6 +640,65 @@ fn automation_and_permission_settings_round_trip_config_files() {
     let permissions = get_permissions_settings_impl(temp.path()).unwrap();
 
     assert_eq!(permissions.policy, policy);
+}
+
+#[test]
+fn module_settings_round_trip_config_files() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let mut app = get_app_settings_impl(temp.path()).unwrap().app;
+    app.project_name = "模块设置项目".to_owned();
+    app.locale = "zh-CN".to_owned();
+    save_app_settings_impl(temp.path(), AppSettings { app }).unwrap();
+    assert_eq!(
+        get_app_settings_impl(temp.path()).unwrap().app.project_name,
+        "模块设置项目"
+    );
+
+    let mut rag = get_rag_settings_impl(temp.path()).unwrap().rag;
+    rag.chunk_size_chars = 4096;
+    rag.chunk_overlap_chars = 256;
+    save_rag_settings_impl(temp.path(), RagSettings { rag }).unwrap();
+    assert_eq!(
+        get_rag_settings_impl(temp.path())
+            .unwrap()
+            .rag
+            .chunk_size_chars,
+        4096
+    );
+
+    let mut workflow = get_workflow_settings_impl(temp.path()).unwrap().workflow;
+    workflow.max_tool_rounds = 12;
+    workflow.runtime_autosave_ms = 2500;
+    save_workflow_settings_impl(temp.path(), WorkflowSettings { workflow }).unwrap();
+    assert_eq!(
+        get_workflow_settings_impl(temp.path())
+            .unwrap()
+            .workflow
+            .max_tool_rounds,
+        12
+    );
+
+    let mut git = get_git_settings_impl(temp.path()).unwrap().git;
+    git.track_skills = false;
+    git.ignored_paths.push("scratch/".to_owned());
+    save_git_settings_impl(temp.path(), GitSettings { git }).unwrap();
+    assert!(!get_git_settings_impl(temp.path()).unwrap().git.track_skills);
+
+    save_template_repository_settings_impl(
+        temp.path(),
+        &TemplateRepositorySettings {
+            base_url: "http://127.0.0.1:8080/templates".to_owned(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        get_template_repository_settings_impl(temp.path())
+            .unwrap()
+            .base_url,
+        "http://127.0.0.1:8080/templates"
+    );
 }
 
 #[test]
@@ -654,6 +805,8 @@ fn project_ai_chat_sends_chat_history_through_llm_provider() {
                 output_cost_per_million_tokens: None,
             }],
             make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
         },
     )
     .unwrap();
@@ -770,6 +923,8 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
                 output_cost_per_million_tokens: None,
             }],
             make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
         },
     )
     .unwrap();

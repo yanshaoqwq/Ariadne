@@ -60,7 +60,10 @@ pub fn run_json_line_stdio() -> io::Result<()> {
             Ok(request) => handle_request(&state, request),
             Err(error) => IpcResponse::error(error.to_string()),
         };
-        println!("{}", serde_json::to_string(&response).expect("ipc response should serialize"));
+        println!(
+            "{}",
+            serde_json::to_string(&response).expect("ipc response should serialize")
+        );
     }
     Ok(())
 }
@@ -78,7 +81,11 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "open_project" => {
             let params: ProjectSelectionParams = params(request.params)?;
-            ok(commands::open_project(state, params.project_root, params.name)?)
+            ok(commands::open_project(
+                state,
+                params.project_root,
+                params.name,
+            )?)
         }
         "get_current_project" => ok(commands::get_current_project(state)?),
         "get_app_status" => ok(commands::get_app_status(state)?),
@@ -220,6 +227,37 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             )?)
         }
         "get_budget_status" => ok(commands::get_budget_status(state)?),
+        "get_app_settings" => ok(commands::get_app_settings(state)?),
+        "save_app_settings" => {
+            let params: SettingsParam<commands::AppSettings> = params(request.params)?;
+            ok(commands::save_app_settings(state, params.settings)?)
+        }
+        "get_rag_settings" => ok(commands::get_rag_settings(state)?),
+        "save_rag_settings" => {
+            let params: SettingsParam<commands::RagSettings> = params(request.params)?;
+            ok(commands::save_rag_settings(state, params.settings)?)
+        }
+        "get_workflow_settings" => ok(commands::get_workflow_settings(state)?),
+        "save_workflow_settings" => {
+            let params: SettingsParam<commands::WorkflowSettings> = params(request.params)?;
+            ok(commands::save_workflow_settings(state, params.settings)?)
+        }
+        "get_git_settings" => ok(commands::get_git_settings(state)?),
+        "save_git_settings" => {
+            let params: SettingsParam<commands::GitSettings> = params(request.params)?;
+            ok(commands::save_git_settings(state, params.settings)?)
+        }
+        "get_template_repository_settings" => {
+            ok(commands::get_template_repository_settings(state)?)
+        }
+        "save_template_repository_settings" => {
+            let params: SettingsParam<commands::TemplateRepositorySettings> =
+                params(request.params)?;
+            ok(commands::save_template_repository_settings(
+                state,
+                params.settings,
+            )?)
+        }
         "update_budget_config" => {
             let params: UpdateBudgetParams = params(request.params)?;
             ok(commands::update_budget_config(
@@ -247,6 +285,10 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             let params: SettingsParam<commands::NodePresetSettings> = params(request.params)?;
             ok(commands::save_node_preset_settings(state, params.settings)?)
         }
+        "fetch_provider_models" => {
+            let params: ProviderModelsParams = params(request.params)?;
+            ok(commands::fetch_provider_models(state, params.provider_id)?)
+        }
         "list_confirmations" => ok(commands::list_confirmations(state)?),
         "get_confirmation" => {
             let params: ConfirmationIdParams = params(request.params)?;
@@ -261,12 +303,14 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         "override_confirmation_output" => {
             let params: RequestParam<commands::OverrideConfirmationOutputRequest> =
                 params(request.params)?;
-            ok(commands::override_confirmation_output(state, params.request)?)
+            ok(commands::override_confirmation_output(
+                state,
+                params.request,
+            )?)
         }
         // 路径 A：注入外部正文并从指定节点下游重跑。
         "resume_from_node" => {
-            let params: RequestParam<commands::ResumeFromNodeRequest> =
-                params(request.params)?;
+            let params: RequestParam<commands::ResumeFromNodeRequest> = params(request.params)?;
             ok(commands::resume_from_node(state, params.request)?)
         }
         "get_git_history" => ok(commands::get_git_history(state)?),
@@ -334,7 +378,10 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "resolve_project_reference" => {
             let params: ReferenceParams = params(request.params)?;
-            ok(commands::resolve_project_reference(state, params.reference)?)
+            ok(commands::resolve_project_reference(
+                state,
+                params.reference,
+            )?)
         }
         "get_ui_preferences" => ok(commands::get_ui_preferences(state)?),
         "save_ui_preferences" => {
@@ -356,7 +403,11 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "install_template" => {
             let params: TemplateDetailParams = params(request.params)?;
-            ok(commands::install_template(state, params.request, params.id)?)
+            ok(commands::install_template(
+                state,
+                params.request,
+                params.id,
+            )?)
         }
         "get_backend_diagnostics" => ok(commands::get_backend_diagnostics(state)?),
         "backend_info" => Ok(json!({
@@ -436,6 +487,12 @@ struct ExportChaptersParams {
 struct WorkflowIdParams {
     #[serde(default)]
     workflow_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ProviderModelsParams {
+    #[serde(default)]
+    provider_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

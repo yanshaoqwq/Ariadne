@@ -34,3 +34,218 @@ public sealed record BackendResult<T>(
     [property: JsonPropertyName("ok")] bool Ok,
     [property: JsonPropertyName("data")] T? Data,
     [property: JsonPropertyName("error")] string? Error);
+
+public sealed record ProjectInitReport(
+    [property: JsonPropertyName("project_root")] string ProjectRoot,
+    [property: JsonPropertyName("created_dirs")] IReadOnlyList<string> CreatedDirs,
+    [property: JsonPropertyName("git_initialized")] bool GitInitialized);
+
+public sealed record AppSettings(
+    [property: JsonPropertyName("app")] AppConfig App);
+
+public sealed record AppConfig(
+    [property: JsonPropertyName("schema_version")] int SchemaVersion,
+    [property: JsonPropertyName("project_name")] string ProjectName,
+    [property: JsonPropertyName("locale")] string Locale,
+    [property: JsonPropertyName("documents_dir")] string DocumentsDir,
+    [property: JsonPropertyName("workflows_dir")] string WorkflowsDir,
+    [property: JsonPropertyName("skills_dir")] string SkillsDir,
+    [property: JsonPropertyName("exports_dir")] string ExportsDir);
+
+public sealed record ProviderConfigStatus(
+    [property: JsonPropertyName("has_openai_key")] bool HasOpenAiKey,
+    [property: JsonPropertyName("has_anthropic_key")] bool HasAnthropicKey,
+    [property: JsonPropertyName("has_gemini_key")] bool HasGeminiKey,
+    [property: JsonPropertyName("default_llm_provider_id")] string? DefaultLlmProviderId,
+    [property: JsonPropertyName("default_embedding_provider_id")] string? DefaultEmbeddingProviderId,
+    [property: JsonPropertyName("default_reranker_provider_id")] string? DefaultRerankerProviderId,
+    [property: JsonPropertyName("providers")] IReadOnlyList<ProviderKeyStatus> Providers);
+
+public sealed record ProviderKeyStatus(
+    [property: JsonPropertyName("provider")] string Provider,
+    [property: JsonPropertyName("display_name")] string DisplayName,
+    [property: JsonPropertyName("provider_type")] string ProviderType,
+    [property: JsonPropertyName("enabled")] bool Enabled,
+    [property: JsonPropertyName("base_url")] string? BaseUrl,
+    [property: JsonPropertyName("models")] IReadOnlyList<ModelConfig> Models,
+    [property: JsonPropertyName("has_key")] bool HasKey);
+
+public sealed record ProviderSettingsUpdate(
+    [property: JsonPropertyName("provider_id")] string ProviderId,
+    [property: JsonPropertyName("provider_type")] string ProviderType,
+    [property: JsonPropertyName("display_name")] string DisplayName,
+    [property: JsonPropertyName("enabled")] bool Enabled,
+    [property: JsonPropertyName("base_url")] string? BaseUrl,
+    [property: JsonPropertyName("models")] IReadOnlyList<ModelConfig> Models,
+    [property: JsonPropertyName("make_default_llm")] bool MakeDefaultLlm,
+    [property: JsonPropertyName("make_default_embedding")] bool MakeDefaultEmbedding,
+    [property: JsonPropertyName("make_default_reranker")] bool MakeDefaultReranker);
+
+public sealed record ModelConfig(
+    [property: JsonPropertyName("model_id")] string ModelId,
+    [property: JsonPropertyName("capability")] string Capability,
+    [property: JsonPropertyName("max_context_tokens")] int? MaxContextTokens,
+    [property: JsonPropertyName("input_cost_per_million_tokens")] double? InputCostPerMillionTokens,
+    [property: JsonPropertyName("output_cost_per_million_tokens")] double? OutputCostPerMillionTokens);
+
+public sealed record ProviderModelsResult(
+    [property: JsonPropertyName("provider_id")] string ProviderId,
+    [property: JsonPropertyName("models")] IReadOnlyList<ModelConfig> Models);
+
+public sealed record BudgetStatus(
+    [property: JsonPropertyName("budget_usd")] double BudgetUsd,
+    [property: JsonPropertyName("spent_usd")] double SpentUsd,
+    [property: JsonPropertyName("preauthorized_usd")] double PreauthorizedUsd,
+    [property: JsonPropertyName("auto_mode_enabled")] bool AutoModeEnabled);
+
+public sealed record AutomationSettings(
+    [property: JsonPropertyName("budget")] BudgetStatus Budget,
+    [property: JsonPropertyName("confirmation_policies")] IReadOnlyList<ConfirmationPolicySetting> ConfirmationPolicies);
+
+public sealed record ConfirmationPolicySetting(
+    [property: JsonPropertyName("confirmation_kind")] string ConfirmationKind,
+    [property: JsonPropertyName("normal_policy")] string NormalPolicy,
+    [property: JsonPropertyName("auto_mode_policy")] string AutoModePolicy,
+    [property: JsonPropertyName("policy")] string Policy);
+
+public sealed record PermissionsSettings(
+    [property: JsonPropertyName("policy")] PermissionPolicy Policy);
+
+public sealed record PermissionPolicy(
+    [property: JsonPropertyName("allow_network")] bool AllowNetwork,
+    [property: JsonPropertyName("allow_web_search")] bool AllowWebSearch,
+    [property: JsonPropertyName("allow_http_skill")] bool AllowHttpSkill,
+    [property: JsonPropertyName("allow_wasm_network")] bool AllowWasmNetwork,
+    [property: JsonPropertyName("allow_secret_read")] bool AllowSecretRead,
+    [property: JsonPropertyName("writable_file_roots")] IReadOnlyList<string> WritableFileRoots,
+    [property: JsonPropertyName("readable_file_roots")] IReadOnlyList<string> ReadableFileRoots);
+
+public sealed record NodePresetSettings(
+    [property: JsonPropertyName("presets")] IReadOnlyList<NodeTypePreset> Presets,
+    [property: JsonPropertyName("default_model_id")] string DefaultModelId,
+    [property: JsonPropertyName("default_timeout_ms")] long DefaultTimeoutMs,
+    [property: JsonPropertyName("default_budget_usd")] double DefaultBudgetUsd);
+
+public sealed record NodeTypePreset(
+    [property: JsonPropertyName("node_type")] string NodeType,
+    [property: JsonPropertyName("display_name_key")] string DisplayNameKey,
+    [property: JsonPropertyName("model_id")] string ModelId,
+    [property: JsonPropertyName("timeout_ms")] long TimeoutMs,
+    [property: JsonPropertyName("budget_usd")] double BudgetUsd);
+
+public sealed record TemplateRepositorySettings(
+    [property: JsonPropertyName("base_url")] string BaseUrl);
+
+public sealed record WorkflowSettings(
+    [property: JsonPropertyName("workflow")] WorkflowConfig Workflow);
+
+public sealed record WorkflowConfig(
+    [property: JsonPropertyName("schema_version")] int SchemaVersion,
+    [property: JsonPropertyName("default_timeout_ms")] long DefaultTimeoutMs,
+    [property: JsonPropertyName("max_loop_iterations")] int MaxLoopIterations,
+    [property: JsonPropertyName("max_tool_rounds")] int MaxToolRounds,
+    [property: JsonPropertyName("checkpoint_enabled")] bool CheckpointEnabled,
+    [property: JsonPropertyName("runtime_autosave_ms")] long RuntimeAutosaveMs);
+
+public sealed record GitSettings(
+    [property: JsonPropertyName("git")] GitConfig Git);
+
+public sealed record GitConfig(
+    [property: JsonPropertyName("schema_version")] int SchemaVersion,
+    [property: JsonPropertyName("track_documents")] bool TrackDocuments,
+    [property: JsonPropertyName("track_workflows")] bool TrackWorkflows,
+    [property: JsonPropertyName("track_skills")] bool TrackSkills,
+    [property: JsonPropertyName("track_non_sensitive_config")] bool TrackNonSensitiveConfig,
+    [property: JsonPropertyName("ignored_paths")] IReadOnlyList<string> IgnoredPaths);
+
+public sealed record RagSettings(
+    [property: JsonPropertyName("rag")] RagConfig Rag);
+
+public sealed record RagConfig(
+    [property: JsonPropertyName("schema_version")] int SchemaVersion,
+    [property: JsonPropertyName("vector_store")] VectorStoreConfig VectorStore,
+    [property: JsonPropertyName("full_text_store")] FullTextStoreConfig FullTextStore,
+    [property: JsonPropertyName("reranker_enabled")] bool RerankerEnabled,
+    [property: JsonPropertyName("chunk_size_chars")] int ChunkSizeChars,
+    [property: JsonPropertyName("chunk_overlap_chars")] int ChunkOverlapChars);
+
+public sealed record VectorStoreConfig(
+    [property: JsonPropertyName("backend")] string Backend,
+    [property: JsonPropertyName("sidecar")] SidecarConfig Sidecar);
+
+public sealed record SidecarConfig(
+    [property: JsonPropertyName("host")] string Host,
+    [property: JsonPropertyName("port")] int Port,
+    [property: JsonPropertyName("data_dir")] string DataDir);
+
+public sealed record FullTextStoreConfig(
+    [property: JsonPropertyName("backend")] string Backend,
+    [property: JsonPropertyName("index_dir")] string IndexDir);
+
+public sealed record TemplateSummary(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("tags")] IReadOnlyList<string> Tags,
+    [property: JsonPropertyName("requires_permissions")] bool RequiresPermissions);
+
+public sealed record TemplateInstallReport(
+    [property: JsonPropertyName("workflow_id")] string WorkflowId,
+    [property: JsonPropertyName("version")] string Version,
+    [property: JsonPropertyName("manifest_path")] string ManifestPath,
+    [property: JsonPropertyName("requires_permissions")] bool RequiresPermissions,
+    [property: JsonPropertyName("required_permissions")] IReadOnlyList<string> RequiredPermissions);
+
+public sealed record WorkflowRunStarted(
+    [property: JsonPropertyName("run_id")] string RunId,
+    [property: JsonPropertyName("status")] string Status);
+
+public sealed record ProjectAiResponse(
+    [property: JsonPropertyName("answer")] string Answer,
+    [property: JsonPropertyName("chat_history")] IReadOnlyList<ProjectAiChatMessage> ChatHistory,
+    [property: JsonPropertyName("workflow_run")] WorkflowRunStarted? WorkflowRun,
+    [property: JsonPropertyName("project_memory")] string ProjectMemory);
+
+public sealed record ProjectAiChatMessage(
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("content")] string Content);
+
+public sealed record WorkflowGraphData(
+    [property: JsonPropertyName("workflow_id")] string WorkflowId,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("nodes")] IReadOnlyList<CanvasNode> Nodes,
+    [property: JsonPropertyName("edges")] IReadOnlyList<CanvasEdge> Edges,
+    [property: JsonPropertyName("metadata")] Dictionary<string, object?> Metadata);
+
+public sealed record CanvasNode(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("type")] string Type,
+    [property: JsonPropertyName("label")] string? Label,
+    [property: JsonPropertyName("data")] Dictionary<string, object?> Data,
+    [property: JsonPropertyName("position")] CanvasPosition? Position);
+
+public sealed record CanvasPosition(
+    [property: JsonPropertyName("x")] double X,
+    [property: JsonPropertyName("y")] double Y);
+
+public sealed record CanvasEdge(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("source")] string Source,
+    [property: JsonPropertyName("target")] string Target,
+    [property: JsonPropertyName("source_handle")] string SourceHandle,
+    [property: JsonPropertyName("target_handle")] string TargetHandle,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("label")] string? Label,
+    [property: JsonPropertyName("data")] Dictionary<string, object?> Data);
+
+public sealed record ArchivePoint(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("commit_id")] string CommitId,
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("checkpoint_kind")] string CheckpointKind);
+
+public sealed record UiRunLogEntry(
+    [property: JsonPropertyName("log_id")] string LogId,
+    [property: JsonPropertyName("timestamp_ms")] long TimestampMs,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("level")] string Level,
+    [property: JsonPropertyName("message")] string Message);

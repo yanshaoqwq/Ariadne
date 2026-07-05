@@ -2,6 +2,7 @@
     x:Class="Ariadne.Desktop.Views.RunLogPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:backend="clr-namespace:Ariadne.Desktop.Backend"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:RunLogPageViewModel">
   <Grid RowDefinitions="52,*" Background="{DynamicResource Ariadne.BackgroundMain}">
@@ -15,28 +16,35 @@
         VerticalAlignment="Stretch">
       <Border Grid.ColumnSpan="5" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" />
       <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="subtitle" VerticalAlignment="Center" Margin="18,0,0,0" />
-      <TextBox Grid.Column="1" PlaceholderText="{Binding SearchPlaceholder}" MaxWidth="320" HorizontalAlignment="Left" Margin="18,0" VerticalAlignment="Center" />
+      <TextBox Grid.Column="1" Text="{Binding SearchQuery, Mode=TwoWay}" PlaceholderText="{Binding SearchPlaceholder}" MaxWidth="320" HorizontalAlignment="Left" Margin="18,0" VerticalAlignment="Center" />
       <ComboBox Grid.Column="2" SelectedIndex="0" MinWidth="110" VerticalAlignment="Center" Margin="0,0,8,0">
         <ComboBoxItem Content="{Binding AllLevelsText}" />
         <ComboBoxItem Content="{Binding LevelInfoText}" />
         <ComboBoxItem Content="{Binding LevelWarningText}" />
         <ComboBoxItem Content="{Binding LevelErrorText}" />
       </ComboBox>
-      <Button Grid.Column="3" Classes="secondary" Content="{Binding RefreshText}" VerticalAlignment="Center" Margin="0,0,18,0" />
+      <Button Grid.Column="3" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshCommand}" VerticalAlignment="Center" Margin="0,0,18,0" />
     </Grid>
 
     <!-- 日志流：空态骨架 -->
     <ScrollViewer Grid.Row="1">
       <StackPanel Margin="18" Spacing="8">
-        <Border Classes="layer" Padding="14,10">
-          <Grid ColumnDefinitions="Auto,Auto,Auto,*">
-            <TextBlock Grid.Column="0" Text="—:—:—" Classes="mono" Width="80" VerticalAlignment="Center" />
-            <Border Grid.Column="1" Classes="chip" Margin="0,0,8,0">
-              <TextBlock Text="{Binding LevelInfoText}" Classes="caption" />
-            </Border>
-            <TextBlock Grid.Column="3" Text="{Binding EmptyText}" Classes="secondary" VerticalAlignment="Center" />
-          </Grid>
-        </Border>
+        <TextBlock Text="{Binding StatusText}" Classes="caption" />
+        <ItemsControl ItemsSource="{Binding Logs}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="{x:Type backend:UiRunLogEntry}">
+              <Border Classes="layer" Padding="14,10" Margin="0,0,0,8">
+                <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10">
+                  <TextBlock Grid.Column="0" Text="{Binding TimestampMs}" Classes="mono" Width="112" VerticalAlignment="Center" />
+                  <Border Grid.Column="1" Classes="chip">
+                    <TextBlock Text="{Binding Level}" Classes="caption" />
+                  </Border>
+                  <TextBlock Grid.Column="2" Text="{Binding Message}" Classes="secondary" VerticalAlignment="Center" TextWrapping="Wrap" />
+                </Grid>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
       </StackPanel>
     </ScrollViewer>
   </Grid>

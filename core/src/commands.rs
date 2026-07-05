@@ -9,8 +9,8 @@ use crate::config::MemorySecretStore;
 #[cfg(feature = "system-keychain")]
 use crate::config::SystemKeychainSecretStore;
 use crate::config::{
-    ApprovalPromptConfig, ConfigStore, ModelConfig, ProviderConfig, SecretRef, SecretStore,
-    SecretValue,
+    AppConfig, ApprovalPromptConfig, ConfigStore, GitConfig, ModelConfig, ProviderConfig,
+    RagConfig, SecretRef, SecretStore, SecretValue, WorkflowConfig,
 };
 use crate::contracts::{
     ensure_path_under_root, ApprovalPolicy, CoreResult, Edge, EdgeId, NodeId, NodeInstance,
@@ -62,6 +62,8 @@ const RECENT_PROJECTS_FILE: &str = "recent_projects.json";
 const BUDGET_CONFIG_FILE: &str = "budget.json";
 const CHAPTER_INDEX_FILE: &str = "chapter_index.json";
 const UI_NODE_PRESETS_FILE: &str = "ui_node_presets.json";
+const TEMPLATE_REPOSITORY_SETTINGS_FILE: &str = "template_repository_settings.json";
+const CONFIRMATION_POLICY_SETTINGS_FILE: &str = "confirmation_policy_settings.json";
 const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = "https://templates.ariadne.local";
 
 /// 桌面前端共享状态。project_root 可由 Avalonia IPC 显式设置，也可用环境变量/当前目录兜底。
@@ -208,7 +210,38 @@ pub struct AutomationSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfirmationPolicySetting {
     pub confirmation_kind: String,
+    #[serde(default)]
+    pub normal_policy: ConfirmationNormalPolicy,
+    #[serde(default)]
+    pub auto_mode_policy: ConfirmationAutoModePolicy,
+    #[serde(default)]
     pub policy: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationNormalPolicy {
+    ManualReview,
+    AllowByDefault,
+}
+
+impl Default for ConfirmationNormalPolicy {
+    fn default() -> Self {
+        Self::ManualReview
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationAutoModePolicy {
+    AllowByDefault,
+    AutoApproval,
+}
+
+impl Default for ConfirmationAutoModePolicy {
+    fn default() -> Self {
+        Self::AutoApproval
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,19 +251,34 @@ pub struct PermissionsSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodePresetSettings {
+    #[serde(default)]
+    pub presets: Vec<NodeTypePreset>,
+    #[serde(default = "default_node_preset_model_id")]
     pub default_model_id: String,
+    #[serde(default = "default_node_preset_timeout_ms")]
     pub default_timeout_ms: u64,
+    #[serde(default)]
     pub default_budget_usd: f64,
 }
 
 impl Default for NodePresetSettings {
     fn default() -> Self {
         Self {
-            default_model_id: "gpt-4.1-mini".to_owned(),
-            default_timeout_ms: 300_000,
+            presets: default_node_type_presets(),
+            default_model_id: default_node_preset_model_id(),
+            default_timeout_ms: default_node_preset_timeout_ms(),
             default_budget_usd: 0.0,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeTypePreset {
+    pub node_type: String,
+    pub display_name_key: String,
+    pub model_id: String,
+    pub timeout_ms: u64,
+    pub budget_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,12 +293,49 @@ impl Default for BudgetConfigFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub app: AppConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagSettings {
+    pub rag: RagConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowSettings {
+    pub workflow: WorkflowConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSettings {
+    pub git: GitConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateRepositorySettings {
+    pub base_url: String,
+}
+
+impl Default for TemplateRepositorySettings {
+    fn default() -> Self {
+        Self {
+            base_url: DEFAULT_TEMPLATE_REPOSITORY_URL.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfigStatus {
     pub has_openai_key: bool,
     pub has_anthropic_key: bool,
     pub has_gemini_key: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_llm_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_embedding_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reranker_provider_id: Option<String>,
     #[serde(default)]
     pub providers: Vec<ProviderKeyStatus>,
 }
@@ -280,6 +365,17 @@ pub struct ProviderSettingsUpdate {
     pub models: Vec<ModelConfig>,
     #[serde(default)]
     pub make_default_llm: bool,
+    #[serde(default)]
+    pub make_default_embedding: bool,
+    #[serde(default)]
+    pub make_default_reranker: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderModelsResult {
+    pub provider_id: String,
+    #[serde(default)]
+    pub models: Vec<ModelConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -729,7 +825,9 @@ pub fn override_confirmation_output(
         &project_root_from_state(&state, None)?,
         request.workflow_id,
         request.run_id,
-        |runtime| runtime.override_confirmation_output(&request.confirmation_id, request.new_outputs),
+        |runtime| {
+            runtime.override_confirmation_output(&request.confirmation_id, request.new_outputs)
+        },
     )
 }
 
@@ -741,13 +839,18 @@ pub fn resume_from_node(
     let project_root = project_root_from_state(&state, None)?;
     let workflow = load_workflow_definition(&project_root, Some(request.workflow_id.clone()))
         .map_err(error_to_string)?;
-    update_workflow_run_control(&project_root, request.workflow_id, request.run_id, |runtime| {
-        runtime.resume_from_node(
-            &workflow,
-            &NodeId::from(request.node_id.clone()),
-            request.injected_outputs,
-        )
-    })
+    update_workflow_run_control(
+        &project_root,
+        request.workflow_id,
+        request.run_id,
+        |runtime| {
+            runtime.resume_from_node(
+                &workflow,
+                &NodeId::from(request.node_id.clone()),
+                request.injected_outputs,
+            )
+        },
+    )
 }
 
 pub fn get_workflow_run_state(
@@ -768,6 +871,78 @@ pub fn get_workflow_run_state(
 pub fn get_budget_status(state: &AriadneAppState) -> CommandResult<BudgetStatus> {
     let project_root = project_root_from_state(&state, None)?;
     get_budget_status_impl(&project_root)
+}
+
+pub fn get_app_settings(state: &AriadneAppState) -> CommandResult<AppSettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    get_app_settings_impl(&project_root)
+}
+
+pub fn save_app_settings(
+    state: &AriadneAppState,
+    settings: AppSettings,
+) -> CommandResult<AppSettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    save_app_settings_impl(&project_root, settings)?;
+    get_app_settings_impl(&project_root)
+}
+
+pub fn get_rag_settings(state: &AriadneAppState) -> CommandResult<RagSettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    get_rag_settings_impl(&project_root)
+}
+
+pub fn save_rag_settings(
+    state: &AriadneAppState,
+    settings: RagSettings,
+) -> CommandResult<RagSettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    save_rag_settings_impl(&project_root, settings)?;
+    get_rag_settings_impl(&project_root)
+}
+
+pub fn get_workflow_settings(state: &AriadneAppState) -> CommandResult<WorkflowSettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    get_workflow_settings_impl(&project_root)
+}
+
+pub fn save_workflow_settings(
+    state: &AriadneAppState,
+    settings: WorkflowSettings,
+) -> CommandResult<WorkflowSettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    save_workflow_settings_impl(&project_root, settings)?;
+    get_workflow_settings_impl(&project_root)
+}
+
+pub fn get_git_settings(state: &AriadneAppState) -> CommandResult<GitSettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    get_git_settings_impl(&project_root)
+}
+
+pub fn save_git_settings(
+    state: &AriadneAppState,
+    settings: GitSettings,
+) -> CommandResult<GitSettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    save_git_settings_impl(&project_root, settings)?;
+    get_git_settings_impl(&project_root)
+}
+
+pub fn get_template_repository_settings(
+    state: &AriadneAppState,
+) -> CommandResult<TemplateRepositorySettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    get_template_repository_settings_impl(&project_root)
+}
+
+pub fn save_template_repository_settings(
+    state: &AriadneAppState,
+    settings: TemplateRepositorySettings,
+) -> CommandResult<TemplateRepositorySettings> {
+    let project_root = project_root_from_state(&state, None)?;
+    save_template_repository_settings_impl(&project_root, &settings)?;
+    get_template_repository_settings_impl(&project_root)
 }
 
 pub fn update_budget_config(
@@ -814,7 +989,7 @@ pub fn save_permissions_settings(
 
 pub fn get_node_preset_settings(state: &AriadneAppState) -> CommandResult<NodePresetSettings> {
     let project_root = project_root_from_state(&state, None)?;
-    read_node_preset_settings(&project_root)
+    get_node_preset_settings_impl(&project_root)
 }
 
 pub fn save_node_preset_settings(
@@ -822,8 +997,84 @@ pub fn save_node_preset_settings(
     settings: NodePresetSettings,
 ) -> CommandResult<NodePresetSettings> {
     let project_root = project_root_from_state(&state, None)?;
-    write_node_preset_settings(&project_root, &settings)?;
-    Ok(settings)
+    save_node_preset_settings_impl(&project_root, settings)
+}
+
+pub fn get_node_preset_settings_impl(project_root: &Path) -> CommandResult<NodePresetSettings> {
+    read_node_preset_settings(project_root)
+}
+
+pub fn save_node_preset_settings_impl(
+    project_root: &Path,
+    settings: NodePresetSettings,
+) -> CommandResult<NodePresetSettings> {
+    write_node_preset_settings(project_root, &settings)?;
+    read_node_preset_settings(project_root)
+}
+
+pub fn fetch_provider_models(
+    state: &AriadneAppState,
+    provider_id: Option<String>,
+) -> CommandResult<ProviderModelsResult> {
+    let project_root = project_root_from_state(&state, None)?;
+    fetch_provider_models_impl(&project_root, provider_id)
+}
+
+pub fn fetch_provider_models_impl(
+    project_root: &Path,
+    provider_id: Option<String>,
+) -> CommandResult<ProviderModelsResult> {
+    validate_project_root(project_root)?;
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let requested = provider_id
+        .as_deref()
+        .map(normalize_provider)
+        .transpose()?;
+    let selected = requested
+        .as_ref()
+        .and_then(|id| {
+            config
+                .providers
+                .providers
+                .iter()
+                .find(|provider| provider.provider_id == *id)
+        })
+        .or_else(|| {
+            config
+                .providers
+                .default_llm_provider_id
+                .as_ref()
+                .and_then(|id| {
+                    config
+                        .providers
+                        .providers
+                        .iter()
+                        .find(|provider| provider.provider_id == *id)
+                })
+        })
+        .or_else(|| config.providers.providers.iter().find(|provider| provider.enabled))
+        .or_else(|| config.providers.providers.first())
+        .ok_or_else(|| "no provider configured".to_owned())?;
+
+    let mut models = selected.models.clone();
+    if models.is_empty() {
+        models.push(default_llm_model_for_provider(&selected.provider_id));
+    }
+    if !models
+        .iter()
+        .any(|model| model.capability == ProviderCapability::Embedding)
+    {
+        if let Some(model) = default_embedding_model_for_provider(&selected.provider_id) {
+            models.push(model);
+        }
+    }
+
+    Ok(ProviderModelsResult {
+        provider_id: selected.provider_id.clone(),
+        models,
+    })
 }
 
 pub fn list_confirmations(state: &AriadneAppState) -> CommandResult<Vec<ConfirmationLogEntry>> {
@@ -1296,6 +1547,115 @@ pub fn get_budget_status_impl(project_root: &Path) -> CommandResult<BudgetStatus
     })
 }
 
+pub fn get_app_settings_impl(project_root: &Path) -> CommandResult<AppSettings> {
+    validate_project_root(project_root)?;
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    Ok(AppSettings { app: config.app })
+}
+
+pub fn save_app_settings_impl(project_root: &Path, settings: AppSettings) -> CommandResult<()> {
+    validate_project_root(project_root)?;
+    let config_store = ConfigStore::new(project_root);
+    let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    config.app = settings.app;
+    config.app.project_name = non_empty_or("project_name", config.app.project_name)?;
+    config.app.documents_dir = non_empty_or("documents_dir", config.app.documents_dir)?;
+    config.app.workflows_dir = non_empty_or("workflows_dir", config.app.workflows_dir)?;
+    config.app.skills_dir = non_empty_or("skills_dir", config.app.skills_dir)?;
+    config.app.exports_dir = non_empty_or("exports_dir", config.app.exports_dir)?;
+    config_store.save(&config).map_err(error_to_string)
+}
+
+pub fn get_rag_settings_impl(project_root: &Path) -> CommandResult<RagSettings> {
+    validate_project_root(project_root)?;
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    Ok(RagSettings { rag: config.rag })
+}
+
+pub fn save_rag_settings_impl(project_root: &Path, settings: RagSettings) -> CommandResult<()> {
+    validate_project_root(project_root)?;
+    settings.rag.validate().map_err(error_to_string)?;
+    let config_store = ConfigStore::new(project_root);
+    let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    config.rag = settings.rag;
+    config_store.save(&config).map_err(error_to_string)
+}
+
+pub fn get_workflow_settings_impl(project_root: &Path) -> CommandResult<WorkflowSettings> {
+    validate_project_root(project_root)?;
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    Ok(WorkflowSettings {
+        workflow: config.workflow,
+    })
+}
+
+pub fn save_workflow_settings_impl(
+    project_root: &Path,
+    settings: WorkflowSettings,
+) -> CommandResult<()> {
+    validate_project_root(project_root)?;
+    settings.workflow.validate().map_err(error_to_string)?;
+    let config_store = ConfigStore::new(project_root);
+    let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    config.workflow = settings.workflow;
+    config_store.save(&config).map_err(error_to_string)
+}
+
+pub fn get_git_settings_impl(project_root: &Path) -> CommandResult<GitSettings> {
+    validate_project_root(project_root)?;
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    Ok(GitSettings { git: config.git })
+}
+
+pub fn save_git_settings_impl(project_root: &Path, settings: GitSettings) -> CommandResult<()> {
+    validate_project_root(project_root)?;
+    let config_store = ConfigStore::new(project_root);
+    let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    config.git = settings.git;
+    config_store.save(&config).map_err(error_to_string)
+}
+
+pub fn get_template_repository_settings_impl(
+    project_root: &Path,
+) -> CommandResult<TemplateRepositorySettings> {
+    validate_project_root(project_root)?;
+    let path = template_repository_settings_path(project_root);
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).map_err(error_to_string),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(TemplateRepositorySettings::default())
+        }
+        Err(error) => Err(error_to_string(error)),
+    }
+}
+
+pub fn save_template_repository_settings_impl(
+    project_root: &Path,
+    settings: &TemplateRepositorySettings,
+) -> CommandResult<()> {
+    validate_project_root(project_root)?;
+    if settings.base_url.trim().is_empty() {
+        return Err("template repository base_url cannot be empty".to_owned());
+    }
+    let path = template_repository_settings_path(project_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(error_to_string)?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(settings).map_err(error_to_string)?,
+    )
+    .map_err(error_to_string)
+}
+
 pub fn update_budget_config_impl(
     project_root: &Path,
     budget_usd: f64,
@@ -1324,13 +1684,9 @@ pub fn get_automation_settings_impl(project_root: &Path) -> CommandResult<Automa
         .load_or_create()
         .map_err(error_to_string)?;
     let budget = get_budget_status_impl(project_root)?;
-    let policies = confirmation_policy_keys()
-        .into_iter()
-        .map(|kind| ConfirmationPolicySetting {
-            confirmation_kind: kind.to_owned(),
-            policy: policy_for_kind(&config.auto_mode.available_approval_prompts, kind),
-        })
-        .collect();
+    let policies = read_confirmation_policy_settings(project_root)?.unwrap_or_else(|| {
+        confirmation_policy_settings_from_prompts(&config.auto_mode.available_approval_prompts)
+    });
     Ok(AutomationSettings {
         budget,
         confirmation_policies: policies,
@@ -1349,6 +1705,7 @@ pub fn save_automation_settings_impl(
     set_auto_mode_impl(project_root, settings.budget.auto_mode_enabled)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    let mut normalized_settings = Vec::new();
     for setting in settings.confirmation_policies {
         if !confirmation_policy_keys().contains(&setting.confirmation_kind.as_str()) {
             return Err(format!(
@@ -1356,14 +1713,17 @@ pub fn save_automation_settings_impl(
                 setting.confirmation_kind
             ));
         }
-        let policy = approval_policy_from_ui(&setting.policy)?;
+        let normalized = normalize_confirmation_policy_setting(setting);
+        let policy = approval_policy_from_ui(&normalized.policy)?;
         let prompt = ensure_approval_prompt(
             &mut config.auto_mode.available_approval_prompts,
-            &setting.confirmation_kind,
+            &normalized.confirmation_kind,
         );
         prompt.default_policy = policy;
+        normalized_settings.push(normalized);
     }
-    config_store.save(&config).map_err(error_to_string)
+    config_store.save(&config).map_err(error_to_string)?;
+    write_confirmation_policy_settings(project_root, &normalized_settings)
 }
 
 pub fn get_permissions_settings_impl(project_root: &Path) -> CommandResult<PermissionsSettings> {
@@ -1528,6 +1888,8 @@ pub fn get_provider_config_impl(
             .iter()
             .any(|provider| provider.provider == "gemini" && provider.has_key),
         default_llm_provider_id: config.providers.default_llm_provider_id,
+        default_embedding_provider_id: config.providers.default_embedding_provider_id,
+        default_reranker_provider_id: config.providers.default_reranker_provider_id,
         providers,
     })
 }
@@ -1599,7 +1961,13 @@ pub fn save_provider_settings_impl(
         config.providers.providers.push(provider_config);
     }
     if update.make_default_llm {
-        config.providers.default_llm_provider_id = Some(provider_id);
+        config.providers.default_llm_provider_id = Some(provider_id.clone());
+    }
+    if update.make_default_embedding {
+        config.providers.default_embedding_provider_id = Some(provider_id.clone());
+    }
+    if update.make_default_reranker {
+        config.providers.default_reranker_provider_id = Some(provider_id);
     }
     config_store.save(&config).map_err(error_to_string)
 }
@@ -2112,6 +2480,18 @@ fn budget_config_path(project_root: &Path) -> PathBuf {
     project_root.join(".config").join(BUDGET_CONFIG_FILE)
 }
 
+fn template_repository_settings_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(".runtime")
+        .join(TEMPLATE_REPOSITORY_SETTINGS_FILE)
+}
+
+fn confirmation_policy_settings_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(".config")
+        .join(CONFIRMATION_POLICY_SETTINGS_FILE)
+}
+
 fn node_preset_settings_path(project_root: &Path) -> PathBuf {
     project_root.join(".runtime").join(UI_NODE_PRESETS_FILE)
 }
@@ -2133,6 +2513,18 @@ fn write_node_preset_settings(
     settings: &NodePresetSettings,
 ) -> CommandResult<()> {
     validate_project_root(project_root)?;
+    for preset in &settings.presets {
+        if preset.node_type.trim().is_empty() {
+            return Err("node_type cannot be empty".to_owned());
+        }
+        if preset.model_id.trim().is_empty() {
+            return Err(format!("model_id cannot be empty for node_type {}", preset.node_type));
+        }
+        if preset.timeout_ms == 0 {
+            return Err(format!("timeout_ms cannot be zero for node_type {}", preset.node_type));
+        }
+        validate_money("budget_usd", preset.budget_usd)?;
+    }
     if settings.default_model_id.trim().is_empty() {
         return Err("default_model_id cannot be empty".to_owned());
     }
@@ -2151,6 +2543,45 @@ fn write_node_preset_settings(
     .map_err(error_to_string)
 }
 
+fn default_node_preset_model_id() -> String {
+    "gpt-4.1-mini".to_owned()
+}
+
+fn default_node_preset_timeout_ms() -> u64 {
+    300_000
+}
+
+fn default_node_type_presets() -> Vec<NodeTypePreset> {
+    [
+        ("start", "ui.workspace.start_node.title"),
+        ("llm", "ui.node.llm"),
+        ("document", "ui.node.document"),
+        ("search", "ui.node.search"),
+        ("condition", "ui.node.condition"),
+        ("loop", "ui.node.loop"),
+        ("approval", "ui.node.approval"),
+        ("export", "ui.node.export"),
+        ("outliner", "agent.outliner"),
+        ("designer", "agent.designer"),
+        ("planner", "agent.planner"),
+        ("detail", "agent.detail"),
+        ("writer", "agent.writer"),
+        ("critic", "agent.critic"),
+        ("prudent", "agent.prudent"),
+        ("polisher", "agent.polisher"),
+        ("summarizer", "agent.summarizer"),
+    ]
+    .into_iter()
+    .map(|(node_type, display_name_key)| NodeTypePreset {
+        node_type: node_type.to_owned(),
+        display_name_key: display_name_key.to_owned(),
+        model_id: default_node_preset_model_id(),
+        timeout_ms: default_node_preset_timeout_ms(),
+        budget_usd: 0.0,
+    })
+    .collect()
+}
+
 fn confirmation_policy_keys() -> [&'static str; 4] {
     [
         "chapter_write",
@@ -2158,6 +2589,105 @@ fn confirmation_policy_keys() -> [&'static str; 4] {
         "high_risk_permission",
         "budget_exceeded",
     ]
+}
+
+fn confirmation_policy_settings_from_prompts(
+    prompts: &[ApprovalPromptConfig],
+) -> Vec<ConfirmationPolicySetting> {
+    confirmation_policy_keys()
+        .into_iter()
+        .map(|kind| {
+            let policy = policy_for_kind(prompts, kind);
+            let (normal_policy, auto_mode_policy) = policies_from_legacy_policy(&policy);
+            ConfirmationPolicySetting {
+                confirmation_kind: kind.to_owned(),
+                normal_policy,
+                auto_mode_policy,
+                policy,
+            }
+        })
+        .collect()
+}
+
+fn normalize_confirmation_policy_setting(
+    mut setting: ConfirmationPolicySetting,
+) -> ConfirmationPolicySetting {
+    if !setting.policy.trim().is_empty() {
+        let (normal_policy, auto_mode_policy) = policies_from_legacy_policy(&setting.policy);
+        setting.normal_policy = normal_policy;
+        setting.auto_mode_policy = auto_mode_policy;
+    } else {
+        setting.policy =
+            legacy_policy_from_dual_policy(setting.normal_policy, setting.auto_mode_policy);
+    }
+    setting
+}
+
+fn policies_from_legacy_policy(
+    policy: &str,
+) -> (ConfirmationNormalPolicy, ConfirmationAutoModePolicy) {
+    match policy {
+        "auto_skip" => (
+            ConfirmationNormalPolicy::AllowByDefault,
+            ConfirmationAutoModePolicy::AllowByDefault,
+        ),
+        "auto_audit" => (
+            ConfirmationNormalPolicy::ManualReview,
+            ConfirmationAutoModePolicy::AutoApproval,
+        ),
+        _ => (
+            ConfirmationNormalPolicy::ManualReview,
+            ConfirmationAutoModePolicy::AutoApproval,
+        ),
+    }
+}
+
+fn legacy_policy_from_dual_policy(
+    normal_policy: ConfirmationNormalPolicy,
+    auto_mode_policy: ConfirmationAutoModePolicy,
+) -> String {
+    match (normal_policy, auto_mode_policy) {
+        (ConfirmationNormalPolicy::AllowByDefault, ConfirmationAutoModePolicy::AllowByDefault) => {
+            "auto_skip".to_owned()
+        }
+        (_, ConfirmationAutoModePolicy::AllowByDefault) => "auto_skip".to_owned(),
+        (_, ConfirmationAutoModePolicy::AutoApproval) => "auto_audit".to_owned(),
+    }
+}
+
+fn read_confirmation_policy_settings(
+    project_root: &Path,
+) -> CommandResult<Option<Vec<ConfirmationPolicySetting>>> {
+    let path = confirmation_policy_settings_path(project_root);
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let settings = serde_json::from_str::<Vec<ConfirmationPolicySetting>>(&content)
+                .map_err(error_to_string)?;
+            Ok(Some(
+                settings
+                    .into_iter()
+                    .map(normalize_confirmation_policy_setting)
+                    .collect(),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error_to_string(error)),
+    }
+}
+
+fn write_confirmation_policy_settings(
+    project_root: &Path,
+    settings: &[ConfirmationPolicySetting],
+) -> CommandResult<()> {
+    let path = confirmation_policy_settings_path(project_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(error_to_string)?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(settings).map_err(error_to_string)?,
+    )
+    .map_err(error_to_string)
 }
 
 fn policy_for_kind(prompts: &[ApprovalPromptConfig], kind: &str) -> String {
@@ -2692,6 +3222,21 @@ fn default_llm_model_for_provider(provider: &str) -> ModelConfig {
         input_cost_per_million_tokens: None,
         output_cost_per_million_tokens: None,
     }
+}
+
+fn default_embedding_model_for_provider(provider: &str) -> Option<ModelConfig> {
+    let model_id = match provider {
+        "openai" => "text-embedding-3-small",
+        "gemini" => "text-embedding-004",
+        _ => return None,
+    };
+    Some(ModelConfig {
+        model_id: model_id.to_owned(),
+        capability: ProviderCapability::Embedding,
+        max_context_tokens: None,
+        input_cost_per_million_tokens: None,
+        output_cost_per_million_tokens: None,
+    })
 }
 
 fn normalize_provider(provider: &str) -> CommandResult<String> {

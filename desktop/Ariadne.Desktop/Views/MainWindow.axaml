@@ -28,6 +28,7 @@
       BorderThickness="1"
       CornerRadius="10"
       ClipToBounds="True">
+    <Panel>
     <Grid RowDefinitions="40,*">
 
       <!-- ================= 顶栏（自定义标题栏 + 项目 + 预算 + Auto Mode） ================= -->
@@ -243,5 +244,18 @@
             Content="{Binding CurrentPage}" />
       </Grid>
     </Grid>
+
+    <!-- ================= 全局弹窗遮罩层 ================= -->
+    <!-- 半透明 scrim 覆盖整个客户区（含标题栏）；点击遮罩=取消。 -->
+    <Border x:Name="DialogScrim"
+            Background="#66000000"
+            IsVisible="{Binding Dialog.IsOpen}"
+            PointerPressed="OnDialogScrimPressed">
+      <ContentControl Content="{Binding Dialog.ActiveDialog}"
+                      HorizontalAlignment="Center"
+                      VerticalAlignment="Center"
+                      Margin="40" />
+    </Border>
+    </Panel>
   </Border>
 </Window>
