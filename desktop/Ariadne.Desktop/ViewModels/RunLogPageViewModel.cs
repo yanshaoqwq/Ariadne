@@ -4,8 +4,6 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-/// 运行日志页 ViewModel：可检索事件流。
-/// 本轮只承载视觉骨架文案，后端接线（query_run_logs / mark_run_logs_read）留待交互阶段。
 public sealed class RunLogPageViewModel : ViewModelBase
 {
     private readonly DisplayNameService _displayNames;
@@ -19,6 +17,13 @@ public sealed class RunLogPageViewModel : ViewModelBase
         _displayNames = displayNames;
         _backend = backend;
         Logs = new ObservableCollection<UiRunLogEntry>();
+        LevelOptions = new ObservableCollection<RunLogLevelOption>
+        {
+            new(string.Empty, displayNames.Text("ui.run_log.all_levels")),
+            new("info", displayNames.Text("ui.level.info")),
+            new("warning", displayNames.Text("ui.level.warning")),
+            new("error", displayNames.Text("ui.level.error")),
+        };
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync());
         _ = RefreshAsync();
     }
@@ -41,6 +46,8 @@ public sealed class RunLogPageViewModel : ViewModelBase
 
     public ObservableCollection<UiRunLogEntry> Logs { get; }
 
+    public ObservableCollection<RunLogLevelOption> LevelOptions { get; }
+
     public RelayCommand RefreshCommand { get; }
 
     public string SearchQuery
@@ -52,7 +59,13 @@ public sealed class RunLogPageViewModel : ViewModelBase
     public string SelectedLevel
     {
         get => _selectedLevel;
-        set => SetProperty(ref _selectedLevel, value);
+        set
+        {
+            if (SetProperty(ref _selectedLevel, value))
+            {
+                _ = RefreshAsync();
+            }
+        }
     }
 
     public string StatusText
@@ -65,13 +78,7 @@ public sealed class RunLogPageViewModel : ViewModelBase
     {
         try
         {
-            var level = SelectedLevel switch
-            {
-                "info" => "info",
-                "warning" => "warning",
-                "error" => "error",
-                _ => null,
-            };
+            var level = string.IsNullOrWhiteSpace(SelectedLevel) ? null : SelectedLevel;
             var logs = await _backend.QueryRunLogsAsync(level, SearchQuery).ConfigureAwait(true);
             Logs.Clear();
             foreach (var log in logs)
@@ -86,3 +93,5 @@ public sealed class RunLogPageViewModel : ViewModelBase
         }
     }
 }
+
+public sealed record RunLogLevelOption(string Value, string Label);

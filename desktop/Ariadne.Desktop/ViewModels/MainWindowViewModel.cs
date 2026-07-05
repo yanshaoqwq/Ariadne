@@ -41,7 +41,6 @@ public sealed class MainWindowViewModel : ViewModelBase
         };
 
         PrimaryNavigationItems[0].IsSelected = true;
-        // 启动即进主界面并落在工作空间页（欢迎页路由在交互阶段按当前项目状态接入）。
         _currentPage = PrimaryNavigationItems[0].PageFactory();
     }
 
@@ -103,10 +102,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public RelayCommand ToggleSidebarCommand => new(() => SidebarExpanded = !SidebarExpanded);
 
-    // 版本/反馈入口；具体行为（弹版本页 / 打开 issue 链接）在交互阶段接，先占位不报错。
-    public RelayCommand OpenVersionCommand => new(() => { });
+    public RelayCommand OpenVersionCommand => new(() => BackendStatus = VersionText);
 
-    public RelayCommand OpenFeedbackCommand => new(() => { });
+    public RelayCommand OpenFeedbackCommand => new(() => BackendStatus = FeedbackText);
 
     public async Task InitializeAsync()
     {
@@ -122,7 +120,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             ["name"] = status.CurrentProject.ProjectName,
         });
-        BackendStatus = _displayNames.Text("ui.layout.backend_linked");
+        BackendStatus = ProjectTitle;
         SetBadge("workspace", status.Badges.Confirmations);
         SetBadge("run_logs", status.Badges.RunLogs);
         SetBadge("settings", status.Badges.Diagnostics);
@@ -138,7 +136,6 @@ public sealed class MainWindowViewModel : ViewModelBase
             item => _ = SelectNavigationItemAsync(item));
     }
 
-    // 根据导航 id 构造对应页面 VM；未接页面回退占位页。
     private object CreatePage(string id, string key)
     {
         return id switch

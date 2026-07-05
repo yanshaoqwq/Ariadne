@@ -179,6 +179,21 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         return InvokeRequiredAsync<WorkflowRunStarted>("run_workflow", new { workflow_id = workflowId, start_node_id = startNodeId }, cancellationToken);
     }
 
+    public Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProjectAiResponse>("project_ai_chat", new
+        {
+            request = new
+            {
+                message,
+                chat_history = Array.Empty<object>(),
+                references = Array.Empty<string>(),
+                workflow_id_to_run = workflowIdToRun,
+                append_memory = (string?)null,
+            },
+        }, cancellationToken);
+    }
+
     public Task<WorkflowGraphData> LoadWorkflowGraphAsync(string? workflowId = null, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<WorkflowGraphData>("load_workflow_graph", new { workflow_id = workflowId }, cancellationToken);
@@ -203,6 +218,16 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         }, cancellationToken);
     }
 
+    public Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string artifactId, string format = "markdown", CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<CombinedExportReport>("export_chapters", new
+        {
+            selected_chapter_ids = selectedChapterIds,
+            artifact_id = artifactId,
+            format,
+        }, cancellationToken);
+    }
+
     public Task SaveDocumentContentAsync(string documentId, string content, CancellationToken cancellationToken = default)
     {
         return InvokeCommandAsync("save_document_content", new { document_id = documentId, content }, cancellationToken);
@@ -216,6 +241,25 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
     public Task<ArchivePoint> CreateCheckpointAsync(string message, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<ArchivePoint>("create_checkpoint", new { message }, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<GitCommitSummary>> GetGitHistoryAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredListAsync<GitCommitSummary>("get_git_history", null, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<BranchGraphNode>> GetGitBranchGraphAsync(int limit = 200, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredListAsync<BranchGraphNode>("get_git_branch_graph", new { limit }, cancellationToken);
+    }
+
+    public Task<RestoreReport> RestoreToNewBranchAsync(string commitId, string newBranch, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<RestoreReport>("restore_to_new_branch", new
+        {
+            commit_id = commitId,
+            new_branch = newBranch,
+        }, cancellationToken);
     }
 
     public Task<IReadOnlyList<UiRunLogEntry>> QueryRunLogsAsync(string? level = null, string? query = null, CancellationToken cancellationToken = default)

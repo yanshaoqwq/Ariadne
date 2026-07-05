@@ -292,19 +292,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 await _backend.SaveWorkflowGraphAsync(BuildGraph()).ConfigureAwait(true);
                 CaptureSnapshot();
             }
-            var result = await _backend.InvokeAsync<ProjectAiResponse>("project_ai_chat", new
-            {
-                request = new
-                {
-                    message = ProjectAiMessage,
-                    chat_history = Array.Empty<object>(),
-                    references = Array.Empty<string>(),
-                    workflow_id_to_run = ProjectAiMessage.Contains("/run", StringComparison.OrdinalIgnoreCase) ? DefaultWorkflowId : null,
-                    append_memory = (string?)null,
-                },
-            }).ConfigureAwait(true);
-            ProjectAiAnswer = result?.Answer ?? _displayNames.Text("ui.common.empty");
-            StatusText = result?.WorkflowRun?.Status ?? _displayNames.Text("ui.common.configured");
+            var result = await _backend.ProjectAiChatAsync(
+                ProjectAiMessage,
+                ProjectAiMessage.Contains("/run", StringComparison.OrdinalIgnoreCase) ? DefaultWorkflowId : null).ConfigureAwait(true);
+            ProjectAiAnswer = result.Answer;
+            StatusText = result.WorkflowRun?.Status ?? _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
         {

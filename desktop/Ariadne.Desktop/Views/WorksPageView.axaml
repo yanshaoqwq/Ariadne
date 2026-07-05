@@ -14,8 +14,8 @@
         <Grid ColumnDefinitions="*,Auto">
           <TextBlock Grid.Column="0" Text="{Binding NoDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
-            <Button Classes="subtle" Padding="10,5" Content="{Binding ReadModeText}" />
-            <Button Classes="subtle" Padding="10,5" Content="{Binding EditModeText}" />
+            <Button Classes="subtle" Padding="10,5" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
+            <Button Classes="subtle" Padding="10,5" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
             <Border Width="1" Margin="6,4" Background="{DynamicResource Ariadne.BorderMuted}" />
             <!-- 图标按钮：导入稿件 / 导出合并 / 保存 -->
             <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" Command="{Binding ImportCommand}">
@@ -35,13 +35,13 @@
       <ScrollViewer Background="{DynamicResource Ariadne.BackgroundMain}">
         <ScrollViewer.ContextMenu>
           <ContextMenu Classes="ariadne">
-            <MenuItem Header="{Binding CtxCopyText}" />
-            <MenuItem Header="{Binding CtxSelectAllText}" />
+            <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopyCommand}" />
+            <MenuItem Header="{Binding CtxSelectAllText}" Command="{Binding SelectAllCommand}" />
             <Separator />
-            <MenuItem Header="{Binding CtxQuickAiText}" />
-            <MenuItem Header="{Binding CtxInsertOutlineText}" />
+            <MenuItem Header="{Binding CtxQuickAiText}" Command="{Binding QuickAiCommand}" />
+            <MenuItem Header="{Binding CtxInsertOutlineText}" Command="{Binding InsertOutlineCommand}" />
             <Separator />
-            <MenuItem Header="{Binding CtxToggleEditText}" />
+            <MenuItem Header="{Binding CtxToggleEditText}" Command="{Binding ToggleEditCommand}" />
           </ContextMenu>
         </ScrollViewer.ContextMenu>
         <Border MaxWidth="760" Margin="0,40" HorizontalAlignment="Center" Classes="card" Padding="56,48">
@@ -91,7 +91,7 @@
           <!-- 标签内容 1：导航树（章节树 + 大纲入口）-->
           <DockPanel IsVisible="{Binding IsNavTreeTab}">
             <Border DockPanel.Dock="Top" Padding="10,10,10,4">
-              <Button Classes="subtle" Padding="10,6" HorizontalAlignment="Left" ToolTip.Tip="{Binding OutlineText}">
+              <Button Classes="subtle" Padding="10,6" HorizontalAlignment="Left" ToolTip.Tip="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
                 <StackPanel Orientation="Horizontal" Spacing="7">
                   <Path Classes="icon" Width="15" Height="15"
                         Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
@@ -101,7 +101,7 @@
             </Border>
             <ScrollViewer Margin="8,4">
               <StackPanel Spacing="1">
-                <Button Classes="nav">
+                <Button Classes="nav" Command="{Binding SelectAllCommand}">
                   <StackPanel Orientation="Horizontal" Spacing="8">
                     <Path Classes="icon" Width="14" Height="14"
                           Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
@@ -120,6 +120,7 @@
               <DockPanel>
                 <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" Margin="0,6,0,0">
                   <Button Grid.Column="1" Classes="primary" Width="34" Height="34" Padding="0"
+                          Command="{Binding SendProjectAiCommand}"
                           ToolTip.Tip="{Binding ProjectAiText}">
                     <Path Classes="icon" Width="17" Height="17"
                           Stroke="{DynamicResource Ariadne.TextOnAccent}"
@@ -127,13 +128,14 @@
                   </Button>
                 </Grid>
                 <TextBox MinHeight="60" MaxHeight="120" FontSize="13"
+                         Text="{Binding ProjectAiMessage, Mode=TwoWay}"
                          AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0"
                          Background="Transparent" VerticalContentAlignment="Top"
                          PlaceholderText="{Binding ProjectAiPlaceholder}" />
               </DockPanel>
             </Border>
             <ScrollViewer Margin="12,8">
-              <TextBlock Text="{Binding QuickAiHint}" Classes="subtle" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding ProjectAiAnswer}" Classes="subtle" TextWrapping="Wrap" />
             </ScrollViewer>
           </DockPanel>
         </Grid>

@@ -4,8 +4,6 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-/// 模板市场页 ViewModel：搜索 + 标签 + 卡片网格 + 权限确认。
-/// 本轮只承载视觉骨架文案，后端接线（search_templates / install_template 等）留待交互阶段。
 public sealed class TemplateMarketPageViewModel : ViewModelBase
 {
     private readonly DisplayNameService _displayNames;
@@ -19,6 +17,14 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         _displayNames = displayNames;
         _backend = backend;
         Templates = new ObservableCollection<TemplateSummary>();
+        Tags = new ObservableCollection<TemplateTagViewModel>
+        {
+            CreateTag("ui.template.tag.novel"),
+            CreateTag("ui.template.tag.worldbuilding"),
+            CreateTag("ui.template.tag.outline"),
+            CreateTag("ui.template.tag.review"),
+            CreateTag("ui.template.tag.summary"),
+        };
         SearchCommand = new RelayCommand(() => _ = SearchAsync());
         InstallFirstCommand = new RelayCommand(() => _ = InstallFirstAsync());
         LoadMoreCommand = new RelayCommand(() => _ = SearchAsync());
@@ -57,11 +63,23 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
 
     public ObservableCollection<TemplateSummary> Templates { get; }
 
+    public ObservableCollection<TemplateTagViewModel> Tags { get; }
+
     public RelayCommand SearchCommand { get; }
 
     public RelayCommand InstallFirstCommand { get; }
 
     public RelayCommand LoadMoreCommand { get; }
+
+    private TemplateTagViewModel CreateTag(string key)
+    {
+        var title = _displayNames.Text(key);
+        return new TemplateTagViewModel(title, () =>
+        {
+            SearchQuery = title;
+            _ = SearchAsync();
+        });
+    }
 
     private async Task LoadRepositoryAsync()
     {
@@ -119,4 +137,16 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             StatusText = ex.Message;
         }
     }
+}
+
+public sealed class TemplateTagViewModel
+{
+    public TemplateTagViewModel(string title, Action select)
+    {
+        Title = title;
+        SelectCommand = new RelayCommand(select);
+    }
+
+    public string Title { get; }
+    public RelayCommand SelectCommand { get; }
 }

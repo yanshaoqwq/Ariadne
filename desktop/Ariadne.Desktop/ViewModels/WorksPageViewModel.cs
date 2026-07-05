@@ -3,8 +3,6 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-/// 作品页 ViewModel：章节树 + 阅读/修改器 + 右栏（导航/项目 AI）。
-/// 本轮只承载视觉骨架文案，后端接线（get_works_tree / get_document_content 等）留待交互阶段。
 public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 {
     private readonly DisplayNameService _displayNames;
@@ -13,19 +11,33 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _isNavTreeTab = true;
     private string _documentContent = string.Empty;
     private string _statusText = string.Empty;
+    private string _projectAiMessage = string.Empty;
+    private string _projectAiAnswer;
+    private string _savedSnapshot = string.Empty;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
+    private bool _isEditMode;
 
     public WorksPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
         _displayNames = displayNames;
         _backend = backend;
+        _projectAiAnswer = displayNames.Text("ui.works.project_ai.empty");
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
         ImportCommand = new RelayCommand(() => _ = ImportAsync());
         ExportCommand = new RelayCommand(() => _ = ExportAsync());
         SaveCommand = new RelayCommand(() => _ = SaveAsync());
+        ReadModeCommand = new RelayCommand(() => IsEditMode = false);
+        EditModeCommand = new RelayCommand(() => IsEditMode = true);
+        CopyCommand = new RelayCommand(() => StatusText = CtxCopyText);
+        SelectAllCommand = new RelayCommand(() => StatusText = CtxSelectAllText);
+        QuickAiCommand = new RelayCommand(() => StatusText = QuickAiHint);
+        InsertOutlineCommand = new RelayCommand(() => StatusText = OutlineText);
+        ToggleEditCommand = new RelayCommand(() => IsEditMode = !IsEditMode);
+        SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync());
+        CaptureSnapshot();
     }
 
     public string ToggleRightPanelText => _displayNames.Text("ui.action.toggle_right_panel");
@@ -64,6 +76,28 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public RelayCommand SaveCommand { get; }
 
+    public RelayCommand ReadModeCommand { get; }
+
+    public RelayCommand EditModeCommand { get; }
+
+    public RelayCommand CopyCommand { get; }
+
+    public RelayCommand SelectAllCommand { get; }
+
+    public RelayCommand QuickAiCommand { get; }
+
+    public RelayCommand InsertOutlineCommand { get; }
+
+    public RelayCommand ToggleEditCommand { get; }
+
+    public RelayCommand SendProjectAiCommand { get; }
+
+    public bool IsEditMode
+    {
+        get => _isEditMode;
+        set => SetProperty(ref _isEditMode, value);
+    }
+
     public string DocumentContent
     {
         get => _documentContent;
@@ -80,6 +114,18 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         get => _statusText;
         set => SetProperty(ref _statusText, value);
+    }
+
+    public string ProjectAiMessage
+    {
+        get => _projectAiMessage;
+        set => SetProperty(ref _projectAiMessage, value);
+    }
+
+    public string ProjectAiAnswer
+    {
+        get => _projectAiAnswer;
+        set => SetProperty(ref _projectAiAnswer, value);
     }
 
     public string SidebarTitle => _displayNames.Text("ui.works.sidebar.title");
@@ -128,7 +174,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 _suppressDirtyTracking = false;
             }
-            HasUnsavedChanges = false;
+            CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.open");
         }
         catch (Exception ex)
@@ -142,7 +188,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             await _backend.SaveDocumentContentAsync("documents/sample.md", DocumentContent).ConfigureAwait(true);
-            HasUnsavedChanges = false;
+            CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.save");
         }
         catch (Exception ex)
@@ -155,13 +201,26 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
-            await _backend.InvokeAsync<object>("export_chapters", new
+            var report = await _backend.ExportChaptersAsync(Array.Empty<string>(), "combined-markdown", "markdown").ConfigureAwait(true);
+            StatusText = _displayNames.Format("ui.works.export_done", new Dictionary<string, string>
             {
-                selected_chapter_ids = Array.Empty<string>(),
-                artifact_id = "combined-markdown",
-                format = "markdown",
-            }).ConfigureAwait(true);
-            StatusText = _displayNames.Text("ui.common.export");
+                ["format"] = report.Format,
+                ["path"] = report.StorageUri,
+            });
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task SendProjectAiAsync()
+    {
+        try
+        {
+            var result = await _backend.ProjectAiChatAsync(ProjectAiMessage).ConfigureAwait(true);
+            ProjectAiAnswer = result.Answer;
+            StatusText = _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
         {
@@ -183,11 +242,36 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 await SaveAsync().ConfigureAwait(true);
                 return !HasUnsavedChanges;
             case UnsavedLeaveChoice.Discard:
-                HasUnsavedChanges = false;
+                RestoreSnapshot();
                 return true;
             default:
                 return false;
         }
+    }
+
+    private void CaptureSnapshot()
+    {
+        _savedSnapshot = DocumentContent;
+        RefreshDirtyState();
+    }
+
+    private void RestoreSnapshot()
+    {
+        _suppressDirtyTracking = true;
+        try
+        {
+            DocumentContent = _savedSnapshot;
+            HasUnsavedChanges = false;
+        }
+        finally
+        {
+            _suppressDirtyTracking = false;
+        }
+    }
+
+    private void RefreshDirtyState()
+    {
+        HasUnsavedChanges = DocumentContent != _savedSnapshot;
     }
 
     protected override void OnPropertyChanged(string? propertyName = null)
@@ -195,7 +279,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         base.OnPropertyChanged(propertyName);
         if (!_suppressDirtyTracking && propertyName == nameof(DocumentContent))
         {
-            HasUnsavedChanges = true;
+            RefreshDirtyState();
         }
     }
 }

@@ -67,6 +67,8 @@ public interface IAriadneBackendClient
 
     Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default);
 
+    Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default);
+
     Task<WorkflowGraphData> LoadWorkflowGraphAsync(string? workflowId = null, CancellationToken cancellationToken = default);
 
     Task SaveWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default);
@@ -75,11 +77,19 @@ public interface IAriadneBackendClient
 
     Task<WorkflowGraphData> ExportWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, CancellationToken cancellationToken = default);
 
+    Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string artifactId, string format = "markdown", CancellationToken cancellationToken = default);
+
     Task SaveDocumentContentAsync(string documentId, string content, CancellationToken cancellationToken = default);
 
     Task<string> GetDocumentContentAsync(string documentId, CancellationToken cancellationToken = default);
 
     Task<ArchivePoint> CreateCheckpointAsync(string message, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<GitCommitSummary>> GetGitHistoryAsync(CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<BranchGraphNode>> GetGitBranchGraphAsync(int limit = 200, CancellationToken cancellationToken = default);
+
+    Task<RestoreReport> RestoreToNewBranchAsync(string commitId, string newBranch, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<UiRunLogEntry>> QueryRunLogsAsync(string? level = null, string? query = null, CancellationToken cancellationToken = default);
 }

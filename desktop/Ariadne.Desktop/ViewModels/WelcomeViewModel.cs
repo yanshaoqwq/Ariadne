@@ -16,6 +16,10 @@ public sealed class WelcomeViewModel : ViewModelBase
         _displayNames = displayNames;
         _backend = backend;
         _statusText = displayNames.Text("ui.common.loading");
+        CreateProjectCommand = new RelayCommand(() => _ = CreateProjectAsync());
+        OpenProjectCommand = new RelayCommand(() => _ = OpenProjectAsync());
+        TutorialCommand = new RelayCommand(() => StatusText = TutorialText);
+        FeedbackCommand = new RelayCommand(() => StatusText = FeedbackText);
     }
 
     public string BrandName => _displayNames.Text("ui.brand.name");
@@ -31,6 +35,14 @@ public sealed class WelcomeViewModel : ViewModelBase
     public string TutorialText => _displayNames.Text("ui.settings.index.tutorial");
 
     public string FeedbackText => _displayNames.Text("ui.layout.feedback");
+
+    public RelayCommand CreateProjectCommand { get; }
+
+    public RelayCommand OpenProjectCommand { get; }
+
+    public RelayCommand TutorialCommand { get; }
+
+    public RelayCommand FeedbackCommand { get; }
 
     public string StatusText
     {
@@ -62,6 +74,45 @@ public sealed class WelcomeViewModel : ViewModelBase
                 {
                     ["count"] = RecentProjects.Count.ToString(),
                 });
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task CreateProjectAsync()
+    {
+        IsLoading = true;
+        try
+        {
+            var root = Environment.CurrentDirectory;
+            var report = await _backend.CreateProjectAsync(root).ConfigureAwait(true);
+            StatusText = report.ProjectRoot;
+            RecentProjects = await _backend.ListRecentProjectsAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task OpenProjectAsync()
+    {
+        IsLoading = true;
+        try
+        {
+            var root = RecentProjects.FirstOrDefault()?.ProjectRoot ?? Environment.CurrentDirectory;
+            RecentProjects = await _backend.OpenProjectAsync(root).ConfigureAwait(true);
+            StatusText = root;
         }
         catch (Exception ex)
         {

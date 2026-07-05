@@ -7,8 +7,7 @@ namespace Ariadne.Desktop.Localization;
 /// - 中文 display_name.json 为基底（永远加载）。
 /// - display_name.{lang}.json 为覆盖层：匹配 key 覆盖中文，缺失 key 回退中文。
 /// - 首次加载自动按 CultureInfo.CurrentUICulture 选语言；可在运行时调用 SwitchLanguage 切换。
-/// - 当前版本预留接口：zh（中文基底）、en（英语覆盖）、ja（日语覆盖）；
-///   翻译文件（display_name.en.json / display_name.ja.json）为空白占位，后期填入翻译。
+/// - 当前版本提供 zh（中文基底）、en（英语覆盖）、ja（日语覆盖）三种语言入口。
 public sealed class DisplayNameService
 {
     // 已知支持的语言代码（和文件名后缀对应）

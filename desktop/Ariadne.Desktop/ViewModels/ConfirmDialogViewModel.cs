@@ -19,7 +19,7 @@ public enum UnsavedLeaveChoice
 /// 通用确认弹窗 ViewModel：标题 + 正文 + 一组按钮。
 /// - 做成通用组件以便复用（未保存离开、删除确认、覆盖确认等共用同一套视图/样式）。
 /// - 结果通过 <see cref="Completion"/> 以 int（按钮索引）异步返回；便捷工厂再把索引映射为语义枚举。
-/// - 骨架阶段按钮回调只负责置结果；实际业务（保存等）由调用方在 await 之后处理。
+/// - 按钮回调只负责置结果；实际业务（保存等）由调用方在 await 之后处理。
 public sealed class ConfirmDialogViewModel : ViewModelBase
 {
     private readonly TaskCompletionSource<int> _completion =

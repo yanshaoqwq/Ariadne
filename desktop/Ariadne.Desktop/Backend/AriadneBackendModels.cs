@@ -237,11 +237,36 @@ public sealed record CanvasEdge(
     [property: JsonPropertyName("label")] string? Label,
     [property: JsonPropertyName("data")] Dictionary<string, object?> Data);
 
+public sealed record CombinedExportReport(
+    [property: JsonPropertyName("artifact_id")] string ArtifactId,
+    [property: JsonPropertyName("format")] string Format,
+    [property: JsonPropertyName("exported_chapter_ids")] IReadOnlyList<string> ExportedChapterIds,
+    [property: JsonPropertyName("document_ids")] IReadOnlyList<string> DocumentIds,
+    [property: JsonPropertyName("storage_uri")] string StorageUri,
+    [property: JsonPropertyName("size_bytes")] long? SizeBytes);
+
 public sealed record ArchivePoint(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("commit_id")] string CommitId,
     [property: JsonPropertyName("message")] string Message,
     [property: JsonPropertyName("checkpoint_kind")] string CheckpointKind);
+
+public sealed record GitCommitSummary(
+    [property: JsonPropertyName("commit_id")] string CommitId,
+    [property: JsonPropertyName("summary")] string Summary,
+    [property: JsonPropertyName("checkpoint_kind")] string? CheckpointKind);
+
+public sealed record BranchGraphNode(
+    [property: JsonPropertyName("commit_id")] string CommitId,
+    [property: JsonPropertyName("parents")] IReadOnlyList<string> Parents,
+    [property: JsonPropertyName("refs")] IReadOnlyList<string> Refs,
+    [property: JsonPropertyName("summary")] string Summary);
+
+public sealed record RestoreReport(
+    [property: JsonPropertyName("new_branch")] string NewBranch,
+    [property: JsonPropertyName("base_commit")] string BaseCommit,
+    [property: JsonPropertyName("index_rebuild_required")] bool IndexRebuildRequired,
+    [property: JsonPropertyName("runtime_rebind_required")] bool RuntimeRebindRequired);
 
 public sealed record UiRunLogEntry(
     [property: JsonPropertyName("log_id")] string LogId,

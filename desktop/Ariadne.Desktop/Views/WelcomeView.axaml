@@ -39,12 +39,12 @@
         </StackPanel>
 
         <StackPanel DockPanel.Dock="Bottom" Spacing="10" Margin="0,28,0,0">
-          <Button Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Height="44" Content="{Binding CreateProjectText}" />
-          <Button Classes="secondary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Height="44" Content="{Binding OpenProjectText}" />
+          <Button Classes="primary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Height="44" Content="{Binding CreateProjectText}" Command="{Binding CreateProjectCommand}" />
+          <Button Classes="secondary" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Height="44" Content="{Binding OpenProjectText}" Command="{Binding OpenProjectCommand}" />
           <Separator Margin="0,10" />
           <StackPanel Orientation="Horizontal" Spacing="10">
-            <Button Classes="subtle" Content="{Binding TutorialText}" />
-            <Button Classes="subtle" Content="{Binding FeedbackText}" />
+            <Button Classes="subtle" Content="{Binding TutorialText}" Command="{Binding TutorialCommand}" />
+            <Button Classes="subtle" Content="{Binding FeedbackText}" Command="{Binding FeedbackCommand}" />
           </StackPanel>
         </StackPanel>
 

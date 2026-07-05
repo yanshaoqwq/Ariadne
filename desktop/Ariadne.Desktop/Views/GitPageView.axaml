@@ -6,12 +6,9 @@
     x:DataType="vm:GitPageViewModel">
   <Grid ColumnDefinitions="*,Auto" Background="{DynamicResource Ariadne.BackgroundMain}">
 
-    <!-- 中间：无限画布，标题/图例/树图全部悬浮在其上 -->
     <Canvas x:Name="GitCanvas" Grid.Column="0"
             Background="{DynamicResource Ariadne.CanvasBackground}"
             ClipToBounds="True">
-
-      <!-- 悬浮标题 + 刷新按钮 -->
       <StackPanel Canvas.Left="24" Canvas.Top="18" Spacing="2">
         <TextBlock Text="{Binding Title}" Classes="title" />
         <TextBlock Text="{Binding Description}" Classes="caption" TextWrapping="Wrap" />
@@ -19,78 +16,47 @@
       <Button Canvas.Right="20" Canvas.Top="18" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshCommand}" />
       <TextBlock Canvas.Left="24" Canvas.Top="62" Text="{Binding StatusText}" Classes="caption" />
 
-      <!-- 悬浮图例（左下角） -->
-      <StackPanel Canvas.Left="24" Canvas.Bottom="16" Orientation="Horizontal" Spacing="18">
-        <StackPanel Orientation="Horizontal" Spacing="5">
-          <Ellipse Width="10" Height="10" Fill="{DynamicResource Ariadne.GitManual}" VerticalAlignment="Center" />
-          <TextBlock Text="主动 / 章节完成" Classes="subtle" VerticalAlignment="Center" />
-        </StackPanel>
-        <StackPanel Orientation="Horizontal" Spacing="5">
-          <Ellipse Width="10" Height="10" Fill="{DynamicResource Ariadne.GitAuto}" VerticalAlignment="Center" />
-          <TextBlock Text="节点自动存档" Classes="subtle" VerticalAlignment="Center" />
-        </StackPanel>
-        <StackPanel Orientation="Horizontal" Spacing="5">
-          <Ellipse Width="10" Height="10" Fill="{DynamicResource Ariadne.GitCurrent}" VerticalAlignment="Center" />
-          <TextBlock Text="当前位置" Classes="subtle" VerticalAlignment="Center" />
-        </StackPanel>
-        <StackPanel Orientation="Horizontal" Spacing="5">
-          <Ellipse Width="10" Height="10" Fill="{DynamicResource Ariadne.GitBranch}" VerticalAlignment="Center" />
-          <TextBlock Text="分支" Classes="subtle" VerticalAlignment="Center" />
-        </StackPanel>
-      </StackPanel>
-
-      <!-- 树图：直接画在 Canvas 上，可横向双向滚动 -->
-      <ScrollViewer Canvas.Left="0" Canvas.Top="80"
+      <ScrollViewer Canvas.Left="0" Canvas.Top="82"
                     HorizontalScrollBarVisibility="Auto"
                     VerticalScrollBarVisibility="Auto">
-        <Canvas Width="800" Height="340" Margin="24,12">
-          <!-- 存档点右键菜单：Win11 风格。骨架阶段命令占位，交互阶段接后端 -->
-          <Canvas.ContextMenu>
-            <ContextMenu Classes="ariadne">
-              <MenuItem Header="{Binding CtxViewDetailsText}" />
-              <MenuItem Header="{Binding CtxCreateCheckpointText}" />
-              <Separator />
-              <MenuItem Header="{Binding CtxRestoreText}" />
-              <MenuItem Header="{Binding CtxCopyIdText}" />
-            </ContextMenu>
-          </Canvas.ContextMenu>
-          <!-- 主线 -->
-          <Line StartPoint="24,80" EndPoint="660,80" Stroke="{DynamicResource Ariadne.BorderStrong}" StrokeThickness="2" />
-          <!-- 分支线 -->
-          <Polyline Points="300,80 348,168 572,168"
-                    Stroke="{DynamicResource Ariadne.GitBranch}" StrokeThickness="2"
-                    StrokeLineCap="Round" StrokeJoin="Round" />
-          <!-- 首个自动存档 -->
-          <Ellipse Canvas.Left="18" Canvas.Top="74" Width="12" Height="12" Fill="{DynamicResource Ariadne.GitAuto}" />
-          <TextBlock Canvas.Left="6" Canvas.Top="92" Text="f02ab17" Classes="mono" />
-          <!-- 折叠自动存档 ×5 -->
-          <Border Canvas.Left="96" Canvas.Top="68" Classes="chip" Background="{DynamicResource Ariadne.BackgroundSubtle}">
-            <StackPanel Orientation="Horizontal" Spacing="5">
-              <Ellipse Width="8" Height="8" Fill="{DynamicResource Ariadne.GitFolded}" VerticalAlignment="Center" />
-              <TextBlock Text="×5" Classes="caption" VerticalAlignment="Center" />
-            </StackPanel>
+        <StackPanel Width="780" Margin="24,12" Spacing="10">
+          <ItemsControl ItemsSource="{Binding Commits}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="{x:Type vm:GitHistoryItemViewModel}">
+                <Border Classes="layer" Padding="14,10" Margin="0,0,0,8"
+                        PointerPressed="OnCommitPointerPressed">
+                  <Border.ContextMenu>
+                    <ContextMenu Classes="ariadne">
+                      <MenuItem Header="{Binding ViewDetailsText}" Command="{Binding ViewDetailsCommand}" />
+                      <MenuItem Header="{Binding CreateCheckpointText}" Command="{Binding CreateCheckpointCommand}" />
+                      <Separator />
+                      <MenuItem Header="{Binding RestoreText}" Command="{Binding RestoreCommand}" />
+                      <MenuItem Header="{Binding CopyIdText}" Command="{Binding CopyIdCommand}" />
+                    </ContextMenu>
+                  </Border.ContextMenu>
+                  <Grid ColumnDefinitions="Auto,120,*,120" ColumnSpacing="12">
+                    <Button Grid.Column="0" Classes="subtle" Padding="0" Command="{Binding SelectCommand}">
+                      <Ellipse Width="14" Height="14" Fill="{DynamicResource Ariadne.GitManual}" />
+                    </Button>
+                    <TextBlock Grid.Column="1" Text="{Binding ShortCommitId}" Classes="mono" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="2" Spacing="2">
+                      <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding RefsText}" Classes="caption" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Border Grid.Column="3" Classes="chip" HorizontalAlignment="Left" VerticalAlignment="Center">
+                      <TextBlock Text="{Binding KindText}" Classes="caption" />
+                    </Border>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <Border Classes="layer" Padding="24" IsVisible="{Binding !HasSelection}">
+            <TextBlock Text="{Binding EmptyText}" Classes="secondary" HorizontalAlignment="Center" />
           </Border>
-          <!-- 主动存档 -->
-          <Ellipse Canvas.Left="216" Canvas.Top="73" Width="14" Height="14" Fill="{DynamicResource Ariadne.GitManual}" />
-          <TextBlock Canvas.Left="188" Canvas.Top="50" Text="调整伏笔" Classes="caption" />
-          <TextBlock Canvas.Left="196" Canvas.Top="94" Text="7b1d004" Classes="mono" />
-          <!-- 分支起点 -->
-          <Ellipse Canvas.Left="294" Canvas.Top="74" Width="12" Height="12" Fill="{DynamicResource Ariadne.GitAuto}" />
-          <!-- 当前 HEAD 光环 -->
-          <Ellipse Canvas.Left="640" Canvas.Top="69" Width="22" Height="22"
-                   Stroke="{DynamicResource Ariadne.GitCurrent}" StrokeThickness="2" Fill="Transparent" />
-          <Ellipse Canvas.Left="645" Canvas.Top="74" Width="12" Height="12" Fill="{DynamicResource Ariadne.GitCurrent}" />
-          <TextBlock Canvas.Left="614" Canvas.Top="46" Text="当前 · 第 12 章完成" Classes="caption"
-                     Foreground="{DynamicResource Ariadne.GitCurrent}" FontWeight="SemiBold" />
-          <TextBlock Canvas.Left="630" Canvas.Top="98" Text="a3f9c2e" Classes="mono" />
-          <!-- 分支存档点 -->
-          <Ellipse Canvas.Left="426" Canvas.Top="162" Width="12" Height="12" Fill="{DynamicResource Ariadne.GitAuto}" />
-          <Ellipse Canvas.Left="560" Canvas.Top="161" Width="14" Height="14" Fill="{DynamicResource Ariadne.GitManual}" />
-          <TextBlock Canvas.Left="532" Canvas.Top="182" Text="备选结局" Classes="caption" />
-        </Canvas>
+        </StackPanel>
       </ScrollViewer>
 
-      <!-- 浮动收起/展开小块（可上下拖，点击切换右栏；toggle 逻辑在 PointerReleased） -->
       <Border x:Name="GitTogglePill"
               Canvas.Right="0"
               Width="22"
@@ -110,7 +76,6 @@
       </Border>
     </Canvas>
 
-    <!-- 右栏：新建存档 + 存档详情 + 回档（可收起） -->
     <Panel Grid.Column="1">
       <Border
           Width="300"
@@ -119,12 +84,9 @@
           BorderThickness="1,0,0,0"
           IsVisible="{Binding IsRightPanelOpen}">
         <DockPanel>
-          <!-- 右栏标题（无栏内收起键，收起/展开由画布上的 GitTogglePill 浮动小块统一控制） -->
           <TextBlock DockPanel.Dock="Top" Text="{Binding DetailsText}" Classes="subtitle" Margin="20,16,20,8" />
           <ScrollViewer>
             <StackPanel Margin="20,0,20,20" Spacing="16">
-
-              <!-- 新建存档 -->
               <StackPanel Spacing="8">
                 <TextBlock Text="{Binding CreateCheckpointText}" Classes="subtitle" />
                 <TextBox Text="{Binding CheckpointMessage, Mode=TwoWay}" PlaceholderText="{Binding CheckpointPlaceholder}" />
@@ -133,34 +95,35 @@
 
               <Separator />
 
-              <!-- 存档详情 -->
               <StackPanel Spacing="3">
                 <TextBlock Text="{Binding SummaryLabel}" Classes="subtle" />
-                <TextBlock Text="第 12 章完成" Classes="body" />
+                <TextBlock Text="{Binding SelectedSummary}" Classes="body" TextWrapping="Wrap" />
               </StackPanel>
               <StackPanel Spacing="3">
-                <TextBlock Text="{Binding AuthorLabel}" Classes="subtle" />
-                <TextBlock Text="yanshao" Classes="body" />
+                <TextBlock Text="{Binding CommitLabel}" Classes="subtle" />
+                <TextBlock Text="{Binding SelectedCommitId}" Classes="mono" TextWrapping="Wrap" />
               </StackPanel>
               <StackPanel Spacing="3">
-                <TextBlock Text="{Binding TimeLabel}" Classes="subtle" />
-                <TextBlock Text="2026-06-30 16:08" Classes="body" />
+                <TextBlock Text="{Binding KindLabel}" Classes="subtle" />
+                <TextBlock Text="{Binding SelectedKind}" Classes="body" />
+              </StackPanel>
+              <StackPanel Spacing="3">
+                <TextBlock Text="{Binding ParentsLabel}" Classes="subtle" />
+                <TextBlock Text="{Binding SelectedParents}" Classes="mono" TextWrapping="Wrap" />
               </StackPanel>
 
               <Separator />
 
-              <!-- 回档新分支 -->
               <StackPanel Spacing="6">
                 <TextBlock Text="{Binding RestoreBranchNameText}" Classes="subtle" />
-                <TextBox />
-                <Button Classes="secondary" HorizontalAlignment="Stretch" Content="{Binding RestoreNewBranchText}" />
+                <TextBox Text="{Binding RestoreBranchName, Mode=TwoWay}" />
+                <Button Classes="secondary" HorizontalAlignment="Stretch" Content="{Binding RestoreNewBranchText}" Command="{Binding RestoreCommand}" />
               </StackPanel>
             </StackPanel>
           </ScrollViewer>
         </DockPanel>
       </Border>
 
-      <!-- 收起态：右缘悬浮左向箭头 -->
       <Button Classes="panel-float" Command="{Binding ToggleRightPanelCommand}"
               ToolTip.Tip="{Binding ToggleRightPanelText}"
               IsVisible="{Binding !IsRightPanelOpen}">

@@ -36,14 +36,22 @@
           </Button>
         </Grid>
 
-        <!-- 标签行 -->
-        <WrapPanel HorizontalAlignment="Center" Margin="0,16,0,24">
-          <Border Classes="chip" Margin="4"><TextBlock Text="写小说" Classes="caption" /></Border>
-          <Border Classes="chip" Margin="4"><TextBlock Text="世界观构建" Classes="caption" /></Border>
-          <Border Classes="chip" Margin="4"><TextBlock Text="大纲生成" Classes="caption" /></Border>
-          <Border Classes="chip" Margin="4"><TextBlock Text="审查" Classes="caption" /></Border>
-          <Border Classes="chip" Margin="4"><TextBlock Text="总结" Classes="caption" /></Border>
-        </WrapPanel>
+        <ItemsControl ItemsSource="{Binding Tags}" HorizontalAlignment="Center" Margin="0,16,0,24">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <WrapPanel />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="{x:Type vm:TemplateTagViewModel}">
+              <Button Classes="subtle" Margin="4" Padding="0" Command="{Binding SelectCommand}">
+                <Border Classes="chip">
+                  <TextBlock Text="{Binding Title}" Classes="caption" />
+                </Border>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
 
         <ItemsControl ItemsSource="{Binding Templates}">
           <ItemsControl.ItemsPanel>

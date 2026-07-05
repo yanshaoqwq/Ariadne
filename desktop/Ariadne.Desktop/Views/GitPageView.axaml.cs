@@ -22,6 +22,14 @@ public partial class GitPageView : UserControl
         LayoutUpdated += OnFirstLayout;
     }
 
+    public void OnCommitPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (sender is Control { DataContext: ViewModels.GitHistoryItemViewModel item })
+        {
+            item.SelectCommand.Execute(null);
+        }
+    }
+
     private void OnFirstLayout(object? sender, EventArgs e)
     {
         if (_layoutInitialized || GitTogglePill is null || GitCanvas is null)
