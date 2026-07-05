@@ -10,6 +10,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private readonly IAriadneBackendClient _backend;
     private SettingsTabViewModel _selectedTab;
     private SettingsSectionIndexItemViewModel? _selectedSection;
+    private string _selectedSectionId = string.Empty;
     private string _selectedLanguage;
     private string _statusText;
     private bool _isLoading;
@@ -35,6 +36,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _makeDefaultReranker;
     private string _apiKey = string.Empty;
     private string _modelsText = "gpt-4.1-mini,llm,,,,";
+    private string _embeddingModelId = string.Empty;
     private bool _manualModelsVisible;
     private string _providerStatus = string.Empty;
     private ProviderConfigStatus? _providerConfig;
@@ -166,6 +168,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 OnPropertyChanged(nameof(IsPermissionsSelected));
                 OnPropertyChanged(nameof(IsPersonalizationSelected));
                 OnPropertyChanged(nameof(IsMiscSelected));
+                OnSelectedSectionChanged();
             }
         }
     }
@@ -177,6 +180,27 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool IsPermissionsSelected => SelectedTab.Id == "permissions";
     public bool IsPersonalizationSelected => SelectedTab.Id == "personalization";
     public bool IsMiscSelected => SelectedTab.Id == "misc";
+    public bool IsSectionProjectSelected => IsSectionSelected("project");
+    public bool IsSectionDirectoriesSelected => IsSectionSelected("directories");
+    public bool IsSectionProviderSelected => IsSectionSelected("provider");
+    public bool IsSectionAvailableModelsSelected => IsSectionSelected("available");
+    public bool IsSectionEmbeddingSelected => IsSectionSelected("embedding");
+    public bool IsSectionManualModelsSelected => IsSectionSelected("manual");
+    public bool IsSectionSecretSelected => IsSectionSelected("secret");
+    public bool IsSectionNodePresetsSelected => IsSectionSelected("node_presets");
+    public bool IsSectionDefaultsSelected => IsSectionSelected("defaults");
+    public bool IsSectionTemplatesSelected => IsSectionSelected("templates");
+    public bool IsSectionBudgetSelected => IsSectionSelected("budget");
+    public bool IsSectionConfirmationsSelected => IsSectionSelected("confirmations");
+    public bool IsSectionRuntimeSelected => IsSectionSelected("runtime");
+    public bool IsSectionCapabilitiesSelected => IsSectionSelected("capabilities");
+    public bool IsSectionPathsSelected => IsSectionSelected("paths");
+    public bool IsSectionThemeSelected => IsSectionSelected("theme");
+    public bool IsSectionWorkspaceSelected => IsSectionSelected("workspace");
+    public bool IsSectionRetrievalSelected => IsSectionSelected("retrieval");
+    public bool IsSectionGitSelected => IsSectionSelected("git");
+    public bool IsSectionLanguageSelected => IsSectionSelected("language");
+    public bool IsSectionDiagnosticsSelected => IsSectionSelected("diagnostics");
     public ObservableCollection<LanguageOption> LanguageOptions { get; }
     public ObservableCollection<string> ProviderTypeOptions { get; }
     public ObservableCollection<string> ThemeOptions { get; }
@@ -226,6 +250,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ManualModelsText => _displayNames.Text("ui.settings.models.manual_models");
     public string ModelsTextLabel => _displayNames.Text("ui.settings.models.models");
     public string ModelsPlaceholder => _displayNames.Text("ui.settings.models.models.placeholder");
+    public string EmbeddingModelLabel => _displayNames.Text("ui.settings.models.embedding_model");
+    public string EmbeddingModelPlaceholder => _displayNames.Text("ui.settings.models.embedding_model.placeholder");
     public string ApiKeyLabel => _displayNames.Text("ui.settings.models.api_key");
     public string ApiKeyPlaceholder => _displayNames.Text("ui.settings.models.api_key.placeholder");
     public string SaveModelText => _displayNames.Text("ui.settings.models.save");
@@ -313,6 +339,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool MakeDefaultReranker { get => _makeDefaultReranker; set => SetProperty(ref _makeDefaultReranker, value); }
     public string ApiKey { get => _apiKey; set => SetProperty(ref _apiKey, value); }
     public string ModelsText { get => _modelsText; set => SetProperty(ref _modelsText, value); }
+    public string EmbeddingModelId { get => _embeddingModelId; set => SetProperty(ref _embeddingModelId, value); }
     public bool ManualModelsVisible { get => _manualModelsVisible; set => SetProperty(ref _manualModelsVisible, value); }
     public string ProviderStatus { get => _providerStatus; set => SetProperty(ref _providerStatus, value); }
 
@@ -406,6 +433,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 ("provider", "ui.settings.section.provider"),
                 ("available", "ui.settings.section.available_models"),
+                ("embedding", "ui.settings.section.embedding"),
                 ("manual", "ui.settings.section.manual_fallback"),
                 ("secret", "ui.settings.section.secret"),
             },
@@ -436,6 +464,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 ("retrieval", "ui.settings.section.retrieval"),
                 ("git", "ui.settings.section.git"),
                 ("language", "ui.settings.section.language"),
+                ("diagnostics", "ui.settings.section.diagnostics"),
             },
         };
 
@@ -447,7 +476,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         if (_selectedSection is not null)
         {
             _selectedSection.IsSelected = true;
+            _selectedSectionId = _selectedSection.Id;
         }
+        OnSelectedSectionChanged();
     }
 
     private void SelectSection(SettingsSectionIndexItemViewModel section)
@@ -457,6 +488,35 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             item.IsSelected = item == section;
         }
         _selectedSection = section;
+        _selectedSectionId = section.Id;
+        OnSelectedSectionChanged();
+    }
+
+    private bool IsSectionSelected(string id) => _selectedSectionId == id;
+
+    private void OnSelectedSectionChanged()
+    {
+        OnPropertyChanged(nameof(IsSectionProjectSelected));
+        OnPropertyChanged(nameof(IsSectionDirectoriesSelected));
+        OnPropertyChanged(nameof(IsSectionProviderSelected));
+        OnPropertyChanged(nameof(IsSectionAvailableModelsSelected));
+        OnPropertyChanged(nameof(IsSectionEmbeddingSelected));
+        OnPropertyChanged(nameof(IsSectionManualModelsSelected));
+        OnPropertyChanged(nameof(IsSectionSecretSelected));
+        OnPropertyChanged(nameof(IsSectionNodePresetsSelected));
+        OnPropertyChanged(nameof(IsSectionDefaultsSelected));
+        OnPropertyChanged(nameof(IsSectionTemplatesSelected));
+        OnPropertyChanged(nameof(IsSectionBudgetSelected));
+        OnPropertyChanged(nameof(IsSectionConfirmationsSelected));
+        OnPropertyChanged(nameof(IsSectionRuntimeSelected));
+        OnPropertyChanged(nameof(IsSectionCapabilitiesSelected));
+        OnPropertyChanged(nameof(IsSectionPathsSelected));
+        OnPropertyChanged(nameof(IsSectionThemeSelected));
+        OnPropertyChanged(nameof(IsSectionWorkspaceSelected));
+        OnPropertyChanged(nameof(IsSectionRetrievalSelected));
+        OnPropertyChanged(nameof(IsSectionGitSelected));
+        OnPropertyChanged(nameof(IsSectionLanguageSelected));
+        OnPropertyChanged(nameof(IsSectionDiagnosticsSelected));
     }
 
     private async Task LoadAsync()
@@ -562,6 +622,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 MakeDefaultEmbedding = _providerConfig.DefaultEmbeddingProviderId == selected.Provider;
                 MakeDefaultReranker = _providerConfig.DefaultRerankerProviderId == selected.Provider;
                 ModelsText = string.Join(Environment.NewLine, selected.Models.Select(ModelLine));
+                EmbeddingModelId = selected.Models.FirstOrDefault(IsEmbeddingModel)?.ModelId ?? string.Empty;
                 AvailableModels.Clear();
                 foreach (var model in selected.Models)
                 {
@@ -586,6 +647,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             var result = await _backend.FetchProviderModelsAsync(ProviderId).ConfigureAwait(true);
             ProviderId = result.ProviderId;
             ModelsText = string.Join(Environment.NewLine, result.Models.Select(ModelLine));
+            EmbeddingModelId = result.Models.FirstOrDefault(IsEmbeddingModel)?.ModelId ?? string.Empty;
             ManualModelsVisible = false;
             AvailableModels.Clear();
             foreach (var model in result.Models)
@@ -623,7 +685,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 ProviderDisplayName,
                 ProviderEnabled,
                 string.IsNullOrWhiteSpace(ProviderBaseUrl) ? null : ProviderBaseUrl,
-                ParseModels(ModelsText),
+                MergeEmbeddingModel(ParseModels(ModelsText), EmbeddingModelId),
                 MakeDefaultLlm,
                 MakeDefaultEmbedding,
                 MakeDefaultReranker);
@@ -848,6 +910,36 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             .ToArray();
     }
 
+    private static IReadOnlyList<ModelConfig> MergeEmbeddingModel(IReadOnlyList<ModelConfig> models, string embeddingModelId)
+    {
+        var merged = models
+            .Where(model => !string.IsNullOrWhiteSpace(model.ModelId))
+            .ToList();
+        var trimmed = embeddingModelId.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return merged;
+        }
+
+        var existing = merged.FindIndex(model => string.Equals(model.ModelId, trimmed, StringComparison.Ordinal));
+        if (existing >= 0)
+        {
+            var model = merged[existing];
+            merged[existing] = model with { Capability = "embedding" };
+        }
+        else
+        {
+            merged.Add(new ModelConfig(trimmed, "embedding", null, null, null));
+        }
+
+        return merged;
+    }
+
+    private static bool IsEmbeddingModel(ModelConfig model)
+    {
+        return string.Equals(model.Capability, "embedding", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static IReadOnlyList<string> Lines(string text)
     {
         return text
@@ -948,6 +1040,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             MakeDefaultReranker.ToString(),
             ApiKey,
             ModelsText,
+            EmbeddingModelId,
             ManualModelsVisible.ToString(),
             DefaultModelId,
             DefaultTimeoutMs,
@@ -993,7 +1086,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             or nameof(SkillsDir) or nameof(ExportsDir) or nameof(ProviderId) or nameof(ProviderType)
             or nameof(ProviderDisplayName) or nameof(ProviderBaseUrl) or nameof(ProviderEnabled)
             or nameof(MakeDefaultLlm) or nameof(MakeDefaultEmbedding) or nameof(MakeDefaultReranker)
-            or nameof(ModelsText) or nameof(ManualModelsVisible) or nameof(ApiKey) or nameof(DefaultModelId)
+            or nameof(ModelsText) or nameof(EmbeddingModelId) or nameof(ManualModelsVisible) or nameof(ApiKey) or nameof(DefaultModelId)
             or nameof(DefaultTimeoutMs) or nameof(DefaultBudgetUsd) or nameof(TemplateRepositoryBaseUrl)
             or nameof(BudgetUsd) or nameof(PreauthorizedUsd) or nameof(AutoModeEnabled)
             or nameof(WorkflowDefaultTimeoutMs) or nameof(MaxLoopIterations) or nameof(MaxToolRounds)
