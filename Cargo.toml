@@ -1,4 +1,4 @@
 [workspace]
-members = ["src-tauri"]
+members = ["core"]
 resolver = "2"
 

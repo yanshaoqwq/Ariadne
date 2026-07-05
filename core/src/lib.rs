@@ -1,0 +1,16 @@
+pub mod commands;
+pub mod config;
+pub mod contracts;
+pub mod costs;
+pub mod diagnostics;
+pub mod documents;
+pub mod frontend;
+pub mod git;
+pub mod ipc;
+pub mod knowledge;
+pub mod llm;
+pub mod providers;
+pub mod rag;
+pub mod retrieval;
+pub mod skills;
+pub mod workflow;

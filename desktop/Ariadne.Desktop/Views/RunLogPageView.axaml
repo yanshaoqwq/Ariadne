@@ -1,0 +1,43 @@
+<UserControl
+    x:Class="Ariadne.Desktop.Views.RunLogPageView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
+    x:DataType="vm:RunLogPageViewModel">
+  <Grid RowDefinitions="52,*" Background="{DynamicResource Ariadne.BackgroundMain}">
+
+    <!-- 顶栏：标题 + 搜索 + 级别筛选 + 刷新 -->
+    <Grid
+        Grid.Row="0"
+        ColumnDefinitions="Auto,*,Auto,Auto,Auto"
+        Background="{DynamicResource Ariadne.BackgroundSurface}"
+        Margin="0"
+        VerticalAlignment="Stretch">
+      <Border Grid.ColumnSpan="5" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" />
+      <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="subtitle" VerticalAlignment="Center" Margin="18,0,0,0" />
+      <TextBox Grid.Column="1" PlaceholderText="{Binding SearchPlaceholder}" MaxWidth="320" HorizontalAlignment="Left" Margin="18,0" VerticalAlignment="Center" />
+      <ComboBox Grid.Column="2" SelectedIndex="0" MinWidth="110" VerticalAlignment="Center" Margin="0,0,8,0">
+        <ComboBoxItem Content="{Binding AllLevelsText}" />
+        <ComboBoxItem Content="{Binding LevelInfoText}" />
+        <ComboBoxItem Content="{Binding LevelWarningText}" />
+        <ComboBoxItem Content="{Binding LevelErrorText}" />
+      </ComboBox>
+      <Button Grid.Column="3" Classes="secondary" Content="{Binding RefreshText}" VerticalAlignment="Center" Margin="0,0,18,0" />
+    </Grid>
+
+    <!-- 日志流：空态骨架 -->
+    <ScrollViewer Grid.Row="1">
+      <StackPanel Margin="18" Spacing="8">
+        <Border Classes="layer" Padding="14,10">
+          <Grid ColumnDefinitions="Auto,Auto,Auto,*">
+            <TextBlock Grid.Column="0" Text="—:—:—" Classes="mono" Width="80" VerticalAlignment="Center" />
+            <Border Grid.Column="1" Classes="chip" Margin="0,0,8,0">
+              <TextBlock Text="{Binding LevelInfoText}" Classes="caption" />
+            </Border>
+            <TextBlock Grid.Column="3" Text="{Binding EmptyText}" Classes="secondary" VerticalAlignment="Center" />
+          </Grid>
+        </Border>
+      </StackPanel>
+    </ScrollViewer>
+  </Grid>
+</UserControl>

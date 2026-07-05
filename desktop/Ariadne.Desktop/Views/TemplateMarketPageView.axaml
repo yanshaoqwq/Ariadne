@@ -1,0 +1,76 @@
+<UserControl
+    x:Class="Ariadne.Desktop.Views.TemplateMarketPageView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
+    x:DataType="vm:TemplateMarketPageViewModel">
+  <Grid RowDefinitions="52,*" Background="{DynamicResource Ariadne.BackgroundMain}">
+
+    <!-- 顶栏 -->
+    <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Background="{DynamicResource Ariadne.BackgroundSurface}">
+      <Border Grid.ColumnSpan="3" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" />
+      <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="subtitle" VerticalAlignment="Center" Margin="18,0,0,0" />
+      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="0,0,18,0">
+        <TextBlock Text="{Binding OnlineSearchText}" Classes="subtle" VerticalAlignment="Center" />
+      </StackPanel>
+    </Grid>
+
+    <ScrollViewer Grid.Row="1">
+      <StackPanel MaxWidth="1040" Margin="32,28">
+
+        <!-- 居中搜索栏：加宽 + 右侧搜索键 -->
+        <Grid ColumnDefinitions="*,Auto" MaxWidth="820" HorizontalAlignment="Center" ColumnSpacing="8">
+          <TextBox Grid.Column="0"
+              PlaceholderText="{Binding SearchPlaceholder}"
+              MinHeight="44"
+              FontSize="15" />
+          <Button Grid.Column="1" Classes="primary" Width="48" Height="44" Padding="0"
+                  ToolTip.Tip="{Binding SearchText}">
+            <Path Classes="icon" Width="18" Height="18"
+                  Stroke="{DynamicResource Ariadne.TextOnAccent}"
+                  Data="{StaticResource Ariadne.Icon.Search}" />
+          </Button>
+        </Grid>
+
+        <!-- 标签行 -->
+        <WrapPanel HorizontalAlignment="Center" Margin="0,16,0,24">
+          <Border Classes="chip" Margin="4"><TextBlock Text="写小说" Classes="caption" /></Border>
+          <Border Classes="chip" Margin="4"><TextBlock Text="世界观构建" Classes="caption" /></Border>
+          <Border Classes="chip" Margin="4"><TextBlock Text="大纲生成" Classes="caption" /></Border>
+          <Border Classes="chip" Margin="4"><TextBlock Text="审查" Classes="caption" /></Border>
+          <Border Classes="chip" Margin="4"><TextBlock Text="总结" Classes="caption" /></Border>
+        </WrapPanel>
+
+        <!-- 卡片网格：空态骨架（占位卡片，方角矩形） -->
+        <UniformGrid Columns="3">
+          <Border Classes="card" Margin="8" Padding="18" MinHeight="168">
+            <DockPanel>
+              <StackPanel DockPanel.Dock="Top" Spacing="10">
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBlock Grid.Column="0" Text="—" Classes="subtitle" />
+                  <Border Grid.Column="1" Classes="chip" Background="{DynamicResource Ariadne.AccentLight}">
+                    <TextBlock Text="{Binding PermissionText}" Classes="caption" Foreground="{DynamicResource Ariadne.AccentPrimary}" />
+                  </Border>
+                </Grid>
+                <WrapPanel>
+                  <Border Classes="chip" Margin="0,0,6,0"><TextBlock Text="—" Classes="subtle" /></Border>
+                </WrapPanel>
+              </StackPanel>
+              <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" VerticalAlignment="Bottom">
+                <TextBlock Grid.Column="0" Text="—" Classes="mono" VerticalAlignment="Center" />
+                <Button Grid.Column="1" Classes="primary" Content="{Binding ImportText}" />
+              </Grid>
+            </DockPanel>
+          </Border>
+        </UniformGrid>
+
+        <!-- 空态说明 -->
+        <Border Classes="layer" Padding="32" Margin="8,16" HorizontalAlignment="Stretch">
+          <TextBlock Text="{Binding EmptyText}" Classes="secondary" HorizontalAlignment="Center" />
+        </Border>
+
+        <Button Classes="secondary" Content="{Binding LoadMoreText}" HorizontalAlignment="Center" Margin="0,8" />
+      </StackPanel>
+    </ScrollViewer>
+  </Grid>
+</UserControl>

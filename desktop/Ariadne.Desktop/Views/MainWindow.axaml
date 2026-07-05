@@ -1,0 +1,247 @@
+<Window
+    x:Class="Ariadne.Desktop.Views.MainWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
+    x:DataType="vm:MainWindowViewModel"
+    Width="1280"
+    Height="800"
+    MinWidth="1120"
+    MinHeight="700"
+    CanResize="True"
+    UseLayoutRounding="True"
+    TextElement.FontSize="14"
+    TextOptions.TextRenderingMode="SubpixelAntialias"
+    RenderOptions.BitmapInterpolationMode="HighQuality"
+    ExtendClientAreaToDecorationsHint="True"
+    ExtendClientAreaTitleBarHeightHint="-1"
+    WindowDecorations="None"
+    TransparencyLevelHint="Mica, AcrylicBlur"
+    Background="Transparent"
+    WindowStartupLocation="CenterScreen"
+    Title="{Binding AppName}">
+
+  <!-- 外层圆角窗体：Mica 透出壁纸微光，内容浮在其上 -->
+  <Border
+      Background="{DynamicResource Ariadne.WindowBase}"
+      BorderBrush="{DynamicResource Ariadne.BorderStrong}"
+      BorderThickness="1"
+      CornerRadius="10"
+      ClipToBounds="True">
+    <Grid RowDefinitions="40,*">
+
+      <!-- ================= 顶栏（自定义标题栏 + 项目 + 预算 + Auto Mode） ================= -->
+      <Grid
+          Grid.Row="0"
+          ColumnDefinitions="Auto,*,Auto,Auto"
+          Background="Transparent"
+          PointerPressed="OnTitleBarPointerPressed">
+
+        <!-- 品牌 + 项目 chip -->
+        <StackPanel
+            Grid.Column="0"
+            Orientation="Horizontal"
+            Spacing="10"
+            Margin="14,0"
+            VerticalAlignment="Center">
+          <Border
+              Width="22"
+              Height="22"
+              CornerRadius="6"
+              Background="{DynamicResource Ariadne.AccentPrimary}"
+              VerticalAlignment="Center">
+            <TextBlock
+                Text="{Binding AppLogoLetter}"
+                Foreground="{DynamicResource Ariadne.TextOnAccent}"
+                FontWeight="Bold"
+                FontSize="13"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center" />
+          </Border>
+          <TextBlock
+              Text="{Binding AppName}"
+              Foreground="{DynamicResource Ariadne.TextPrimary}"
+              FontWeight="SemiBold"
+              VerticalAlignment="Center" />
+          <Border Classes="chip" VerticalAlignment="Center">
+            <TextBlock
+                Text="{Binding ProjectTitle}"
+                Classes="caption"
+                VerticalAlignment="Center" />
+          </Border>
+        </StackPanel>
+
+        <!-- 中段：后端连接状态 -->
+        <TextBlock
+            Grid.Column="1"
+            Text="{Binding BackendStatus}"
+            Classes="subtle"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Center"
+            Margin="0,0,18,0" />
+
+        <!-- 预算条 + Auto Mode -->
+        <StackPanel
+            Grid.Column="2"
+            Orientation="Horizontal"
+            Spacing="16"
+            VerticalAlignment="Center"
+            Margin="0,0,12,0">
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <TextBlock Text="{Binding BudgetLabel}" Classes="caption" VerticalAlignment="Center" />
+            <Border
+                Width="92"
+                Height="6"
+                CornerRadius="3"
+                Background="{DynamicResource Ariadne.BackgroundHover}"
+                VerticalAlignment="Center">
+              <Border
+                  Width="38"
+                  Height="6"
+                  CornerRadius="3"
+                  HorizontalAlignment="Left"
+                  Background="{DynamicResource Ariadne.AccentPrimary}" />
+            </Border>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <TextBlock Text="{Binding AutoModeLabel}" Classes="caption" VerticalAlignment="Center" />
+            <ToggleSwitch OnContent="" OffContent="" VerticalAlignment="Center" />
+          </StackPanel>
+        </StackPanel>
+
+        <!-- 窗口控制（矢量 Path，不依赖字体） -->
+        <StackPanel Grid.Column="3" Orientation="Horizontal">
+          <Button
+              Classes="window-control"
+              ToolTip.Tip="{Binding MinimizeWindowText}"
+              Click="OnMinimizeClicked">
+            <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Minimize}" />
+          </Button>
+          <Button
+              Classes="window-control"
+              ToolTip.Tip="{Binding MaximizeWindowText}"
+              Click="OnMaximizeClicked">
+            <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Maximize}" />
+          </Button>
+          <Button
+              Classes="window-control close"
+              ToolTip.Tip="{Binding CloseWindowText}"
+              Click="OnCloseClicked">
+            <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Close}" />
+          </Button>
+        </StackPanel>
+      </Grid>
+
+      <!-- ================= 主体：侧栏 + 内容 ================= -->
+      <Grid Grid.Row="1" ColumnDefinitions="Auto,*">
+
+        <!-- 左侧栏 -->
+        <Border
+            Grid.Column="0"
+            Width="204"
+            Background="{DynamicResource Ariadne.BackgroundSurface}"
+            BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+            BorderThickness="0,0,1,0">
+          <DockPanel Margin="0,4,0,0">
+
+            <!-- 折叠按钮 -->
+            <Button
+                DockPanel.Dock="Top"
+                Classes="subtle"
+                Margin="10,2,10,6"
+                HorizontalAlignment="Left"
+                Width="36"
+                Height="32"
+                Command="{Binding ToggleSidebarCommand}"
+                ToolTip.Tip="{Binding ToggleSidebarText}">
+              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Menu}" />
+            </Button>
+
+            <!-- 底部：版本 + 反馈 -->
+            <StackPanel DockPanel.Dock="Bottom" Margin="10,8,10,14" Spacing="2">
+              <Separator Margin="2,6" />
+              <Button Classes="nav" Command="{Binding OpenVersionCommand}">
+                <Grid ColumnDefinitions="30,*">
+                  <Path Grid.Column="0" Classes="icon" Data="{StaticResource Ariadne.Icon.Info}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="1" Text="{Binding VersionText}" Classes="caption" VerticalAlignment="Center" />
+                </Grid>
+              </Button>
+              <Button Classes="nav" Command="{Binding OpenFeedbackCommand}">
+                <Grid ColumnDefinitions="30,*">
+                  <Path Grid.Column="0" Classes="icon" Data="{StaticResource Ariadne.Icon.Feedback}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="1" Text="{Binding FeedbackText}" Classes="caption" VerticalAlignment="Center" />
+                </Grid>
+              </Button>
+            </StackPanel>
+
+            <!-- 导航：上组 →(大间距分隔)→ 下组，顺排靠上，不置底 -->
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <StackPanel Margin="10,4,10,0" Spacing="0">
+                <ItemsControl ItemsSource="{Binding PrimaryNavigationItems}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
+                      <Button Classes="nav" Classes.selected="{Binding IsSelected}" Margin="0,2" Padding="8,7" Command="{Binding SelectCommand}">
+                        <Grid ColumnDefinitions="Auto,26,*,Auto">
+                          <!-- 选中竖条 pill -->
+                          <Border
+                              Grid.Column="0"
+                              Width="3"
+                              Height="16"
+                              CornerRadius="2"
+                              VerticalAlignment="Center"
+                              Margin="0,0,7,0"
+                              IsVisible="{Binding IsSelected}"
+                              Background="{DynamicResource Ariadne.AccentPrimary}" />
+                          <Path Grid.Column="1" Classes="icon" Width="17" Height="17" Data="{Binding Icon}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                          <TextBlock Grid.Column="2" Text="{Binding Title}" FontSize="13" VerticalAlignment="Center" Margin="4,0,0,0" />
+                          <Border Grid.Column="3" Classes="badge" IsVisible="{Binding HasBadge}" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                          </Border>
+                        </Grid>
+                      </Button>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- 上下组之间的大间距分隔（固定，不是弹性置底） -->
+                <Grid Height="52" VerticalAlignment="Center">
+                  <Border Height="1" Margin="8,0" VerticalAlignment="Center" Background="{DynamicResource Ariadne.BorderMuted}" />
+                </Grid>
+
+                <ItemsControl ItemsSource="{Binding SecondaryNavigationItems}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
+                      <Button Classes="nav" Classes.selected="{Binding IsSelected}" Margin="0,2" Padding="8,7" Command="{Binding SelectCommand}">
+                        <Grid ColumnDefinitions="Auto,26,*,Auto">
+                          <Border
+                              Grid.Column="0"
+                              Width="3"
+                              Height="16"
+                              CornerRadius="2"
+                              VerticalAlignment="Center"
+                              Margin="0,0,7,0"
+                              IsVisible="{Binding IsSelected}"
+                              Background="{DynamicResource Ariadne.AccentPrimary}" />
+                          <Path Grid.Column="1" Classes="icon" Width="17" Height="17" Data="{Binding Icon}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                          <TextBlock Grid.Column="2" Text="{Binding Title}" FontSize="13" VerticalAlignment="Center" Margin="4,0,0,0" />
+                          <Border Grid.Column="3" Classes="badge" IsVisible="{Binding HasBadge}" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                          </Border>
+                        </Grid>
+                      </Button>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </ScrollViewer>
+          </DockPanel>
+        </Border>
+
+        <!-- 内容区 -->
+        <ContentControl
+            Grid.Column="1"
+            Content="{Binding CurrentPage}" />
+      </Grid>
+    </Grid>
+  </Border>
+</Window>

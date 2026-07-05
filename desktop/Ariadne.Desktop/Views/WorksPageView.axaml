@@ -1,0 +1,134 @@
+<UserControl
+    x:Class="Ariadne.Desktop.Views.WorksPageView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
+    x:DataType="vm:WorksPageViewModel">
+  <!-- 作品页：中阅读/修改器 + 右栏（顶部标签切换 导航树/项目 AI，可收起）。无左栏。 -->
+  <Grid ColumnDefinitions="*,Auto" Background="{DynamicResource Ariadne.BackgroundMain}">
+
+    <!-- ============ 中：阅读/修改器 ============ -->
+    <DockPanel Grid.Column="0">
+      <!-- 顶部工具条 -->
+      <Border DockPanel.Dock="Top" Background="{DynamicResource Ariadne.BackgroundSurface}" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" Padding="16,8">
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBlock Grid.Column="0" Text="{Binding NoDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
+            <Button Classes="subtle" Padding="10,5" Content="{Binding ReadModeText}" />
+            <Button Classes="subtle" Padding="10,5" Content="{Binding EditModeText}" />
+            <Border Width="1" Margin="6,4" Background="{DynamicResource Ariadne.BorderMuted}" />
+            <!-- 图标按钮：导入稿件 / 导出合并 / 保存 -->
+            <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}">
+              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
+            </Button>
+            <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}">
+              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Export}" />
+            </Button>
+            <Button Classes="icon-btn accent" ToolTip.Tip="{Binding SaveText}">
+              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
+            </Button>
+          </StackPanel>
+        </Grid>
+      </Border>
+
+      <!-- 正文阅读区：居中、限宽、衬线、松行高 -->
+      <ScrollViewer Background="{DynamicResource Ariadne.BackgroundMain}">
+        <Border MaxWidth="760" Margin="0,40" HorizontalAlignment="Center" Classes="card" Padding="56,48">
+          <StackPanel Spacing="20">
+            <TextBlock Text="{Binding QuickAiHint}" Classes="caption" />
+            <TextBlock Classes="reading" Foreground="{DynamicResource Ariadne.TextSubtle}"
+                       Text="正文阅读区。选择左侧章节后在此沉浸式阅读，切到修改模式可编辑、预览 diff，Ctrl/Cmd+K 调用快捷 AI 改写。" />
+          </StackPanel>
+        </Border>
+      </ScrollViewer>
+    </DockPanel>
+
+    <!-- ============ 右：导航树 / 项目 AI（右上标签切换，可收起） ============ -->
+    <Panel Grid.Column="1">
+      <Border
+          Width="264"
+          Background="{DynamicResource Ariadne.BackgroundSurface}"
+          BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+          BorderThickness="1,0,0,0"
+          IsVisible="{Binding IsRightPanelOpen}">
+      <DockPanel>
+        <!-- 右上标签切换 + 收起键 -->
+        <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto"
+              Background="{DynamicResource Ariadne.BackgroundSurface}"
+              Margin="12,8,8,0">
+          <StackPanel Grid.Column="0" Orientation="Horizontal">
+            <Button Classes="tab" Classes.selected="{Binding IsNavTreeTab}"
+                    Content="{Binding NavTreeText}" Command="{Binding ShowNavTreeCommand}" />
+            <Button Classes="tab" Classes.selected="{Binding IsProjectAiTab}"
+                    Content="{Binding ProjectAiText}" Command="{Binding ShowProjectAiCommand}" />
+          </StackPanel>
+          <Button Grid.Column="1" Classes="panel-collapse" VerticalAlignment="Center"
+                  Command="{Binding ToggleRightPanelCommand}" ToolTip.Tip="{Binding ToggleRightPanelText}">
+            <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronRight}" />
+          </Button>
+        </Grid>
+        <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
+
+        <!-- ===== 标签内容 1：导航树（章节树 + 大纲入口 + 导入/导出）===== -->
+        <DockPanel IsVisible="{Binding IsNavTreeTab}">
+          <!-- 大纲按钮：进入章节正文时跳转/分栏到该章大纲 -->
+          <Border DockPanel.Dock="Top" Padding="10,10,10,4">
+            <Button Classes="subtle" Padding="10,6" HorizontalAlignment="Left" ToolTip.Tip="{Binding OutlineText}">
+              <StackPanel Orientation="Horizontal" Spacing="7">
+                <Path Classes="icon" Width="15" Height="15"
+                      Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
+                <TextBlock Text="{Binding OutlineText}" Classes="caption" VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
+          </Border>
+          <!-- 章节树（骨架；导入/导出已移到顶部工具条图标按钮） -->
+          <ScrollViewer Margin="8,4">
+            <StackPanel Spacing="1">
+              <Button Classes="nav">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Path Classes="icon" Width="14" Height="14"
+                        Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
+                  <TextBlock Text="{Binding NoDocumentText}" Classes="caption" VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+              <TextBlock Text="{Binding EmptyIndexText}" Classes="subtle" Margin="12,12,0,0" />
+            </StackPanel>
+          </ScrollViewer>
+        </DockPanel>
+
+        <!-- ===== 标签内容 2：项目 AI ===== -->
+        <DockPanel IsVisible="{Binding IsProjectAiTab}">
+          <!-- 输入区：不套卡片，直接贴栏底，仅顶部一条分隔线 -->
+          <Border DockPanel.Dock="Bottom" Padding="12,8"
+                  BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,1,0,0">
+            <DockPanel>
+              <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" Margin="0,6,0,0">
+                <Button Grid.Column="1" Classes="primary" Width="34" Height="34" Padding="0"
+                        ToolTip.Tip="{Binding ProjectAiText}">
+                  <Path Classes="icon" Width="17" Height="17"
+                        Stroke="{DynamicResource Ariadne.TextOnAccent}"
+                        Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
+                </Button>
+              </Grid>
+              <TextBox MinHeight="60" MaxHeight="120" FontSize="13"
+                       AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0"
+                       Background="Transparent" VerticalContentAlignment="Top"
+                       PlaceholderText="{Binding ProjectAiPlaceholder}" />
+            </DockPanel>
+          </Border>
+          <ScrollViewer Margin="12,8">
+            <TextBlock Text="{Binding QuickAiHint}" Classes="subtle" TextWrapping="Wrap" />
+          </ScrollViewer>
+        </DockPanel>
+      </DockPanel>
+      </Border>
+
+      <!-- 收起态：右缘悬浮左向箭头 -->
+      <Button Classes="panel-float" Command="{Binding ToggleRightPanelCommand}"
+              ToolTip.Tip="{Binding ToggleRightPanelText}"
+              IsVisible="{Binding !IsRightPanelOpen}">
+        <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
+      </Button>
+    </Panel>
+  </Grid>
+</UserControl>

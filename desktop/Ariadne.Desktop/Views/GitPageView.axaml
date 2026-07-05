@@ -1,0 +1,159 @@
+<UserControl
+    x:Class="Ariadne.Desktop.Views.GitPageView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
+    x:DataType="vm:GitPageViewModel">
+  <Grid ColumnDefinitions="*,Auto" Background="{DynamicResource Ariadne.BackgroundMain}">
+
+    <!-- 中间：整个区域是横向树图；标题在上，图例钉在底部居中 -->
+    <DockPanel Grid.Column="0" Margin="28,24,20,0">
+
+      <!-- 标题行 -->
+      <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,16">
+        <StackPanel Grid.Column="0" Spacing="2">
+          <TextBlock Text="{Binding Title}" Classes="title" />
+          <TextBlock Text="{Binding Description}" Classes="caption" TextWrapping="Wrap" />
+        </StackPanel>
+        <Button Grid.Column="1" Classes="secondary" VerticalAlignment="Top" Content="{Binding RefreshText}" />
+      </Grid>
+
+      <!-- 底部居中图例 -->
+      <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="20"
+                  HorizontalAlignment="Center" Margin="0,14,0,18">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Ellipse Width="11" Height="11" Fill="{DynamicResource Ariadne.GitManual}" VerticalAlignment="Center" />
+          <TextBlock Text="主动 / 章节完成" Classes="subtle" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Ellipse Width="11" Height="11" Fill="{DynamicResource Ariadne.GitAuto}" VerticalAlignment="Center" />
+          <TextBlock Text="节点自动存档" Classes="subtle" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Ellipse Width="11" Height="11" Fill="{DynamicResource Ariadne.GitCurrent}" VerticalAlignment="Center" />
+          <TextBlock Text="当前位置" Classes="subtle" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Ellipse Width="11" Height="11" Fill="{DynamicResource Ariadne.GitBranch}" VerticalAlignment="Center" />
+          <TextBlock Text="分支" Classes="subtle" VerticalAlignment="Center" />
+        </StackPanel>
+      </StackPanel>
+
+      <!-- 树图主体：全域流程图（无卡片外壳），填满中间空间，双向滚动 -->
+      <Border Background="{DynamicResource Ariadne.CanvasBackground}"
+              CornerRadius="{DynamicResource Ariadne.Radius.Large}"
+              ClipToBounds="True">
+        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+          <Canvas Width="760" Height="360" Margin="24,28">
+
+            <!-- 主线 -->
+            <Line StartPoint="24,80" EndPoint="620,80" Stroke="{DynamicResource Ariadne.BorderStrong}" StrokeThickness="2" />
+            <!-- 分支线：自 x=300 主线点向右下斜出，再转平 -->
+            <Polyline Points="300,80 348,168 572,168"
+                      Stroke="{DynamicResource Ariadne.GitBranch}" StrokeThickness="2"
+                      StrokeLineCap="Round" StrokeJoin="Round" />
+
+            <!-- ===== 主线存档点（左→右）===== -->
+            <Ellipse Canvas.Left="18" Canvas.Top="74" Width="12" Height="12" Fill="{DynamicResource Ariadne.GitAuto}" />
+            <TextBlock Canvas.Left="6" Canvas.Top="92" Text="f02ab17" Classes="mono" />
+
+            <!-- 折叠的自动存档组（×5）-->
+            <Border Canvas.Left="96" Canvas.Top="68" Classes="chip"
+                    Background="{DynamicResource Ariadne.BackgroundSubtle}">
+              <StackPanel Orientation="Horizontal" Spacing="5">
+                <Ellipse Width="9" Height="9" Fill="{DynamicResource Ariadne.GitFolded}" VerticalAlignment="Center" />
+                <TextBlock Text="×5" Classes="caption" VerticalAlignment="Center" />
+              </StackPanel>
+            </Border>
+
+            <!-- 主动存档（橙，可配置色）-->
+            <Ellipse Canvas.Left="216" Canvas.Top="73" Width="14" Height="14" Fill="{DynamicResource Ariadne.GitManual}" />
+            <TextBlock Canvas.Left="188" Canvas.Top="50" Text="调整伏笔" Classes="caption" />
+            <TextBlock Canvas.Left="196" Canvas.Top="94" Text="7b1d004" Classes="mono" />
+
+            <!-- 分支起点（主线上的分叉点）-->
+            <Ellipse Canvas.Left="294" Canvas.Top="74" Width="12" Height="12" Fill="{DynamicResource Ariadne.GitAuto}" />
+
+            <!-- 当前 HEAD（青，带光环）-->
+            <Ellipse Canvas.Left="608" Canvas.Top="69" Width="22" Height="22"
+                     Stroke="{DynamicResource Ariadne.GitCurrent}" StrokeThickness="2" Fill="Transparent" />
+            <Ellipse Canvas.Left="613" Canvas.Top="74" Width="12" Height="12" Fill="{DynamicResource Ariadne.GitCurrent}" />
+            <TextBlock Canvas.Left="580" Canvas.Top="46" Text="当前 · 第 12 章完成" Classes="caption"
+                       Foreground="{DynamicResource Ariadne.GitCurrent}" FontWeight="SemiBold" />
+            <TextBlock Canvas.Left="596" Canvas.Top="98" Text="a3f9c2e" Classes="mono" />
+
+            <!-- ===== 分支上的存档点 ===== -->
+            <Ellipse Canvas.Left="426" Canvas.Top="162" Width="12" Height="12" Fill="{DynamicResource Ariadne.GitAuto}" />
+            <Ellipse Canvas.Left="560" Canvas.Top="161" Width="14" Height="14" Fill="{DynamicResource Ariadne.GitManual}" />
+            <TextBlock Canvas.Left="532" Canvas.Top="182" Text="备选结局" Classes="caption" />
+
+          </Canvas>
+        </ScrollViewer>
+      </Border>
+    </DockPanel>
+
+    <!-- 右栏：新建存档 + 存档详情 + 回档（可收起） -->
+    <Panel Grid.Column="1">
+      <Border
+          Width="300"
+          Background="{DynamicResource Ariadne.BackgroundSurface}"
+          BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+          BorderThickness="1,0,0,0"
+          IsVisible="{Binding IsRightPanelOpen}">
+        <DockPanel>
+          <!-- 右栏标题 + 收起键 -->
+          <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="20,16,16,8">
+            <TextBlock Grid.Column="0" Text="{Binding DetailsText}" Classes="subtitle" VerticalAlignment="Center" />
+            <Button Grid.Column="1" Classes="panel-collapse"
+                    Command="{Binding ToggleRightPanelCommand}" ToolTip.Tip="{Binding ToggleRightPanelText}">
+              <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronRight}" />
+            </Button>
+          </Grid>
+          <ScrollViewer>
+            <StackPanel Margin="20,0,20,20" Spacing="16">
+
+              <!-- 新建存档 -->
+              <StackPanel Spacing="8">
+                <TextBlock Text="{Binding CreateCheckpointText}" Classes="subtitle" />
+                <TextBox PlaceholderText="{Binding CheckpointPlaceholder}" />
+                <Button Classes="primary" HorizontalAlignment="Stretch" Content="{Binding CreateCheckpointText}" />
+              </StackPanel>
+
+              <Separator />
+
+              <!-- 存档详情 -->
+              <StackPanel Spacing="3">
+                <TextBlock Text="{Binding SummaryLabel}" Classes="subtle" />
+                <TextBlock Text="第 12 章完成" Classes="body" />
+              </StackPanel>
+              <StackPanel Spacing="3">
+                <TextBlock Text="{Binding AuthorLabel}" Classes="subtle" />
+                <TextBlock Text="yanshao" Classes="body" />
+              </StackPanel>
+              <StackPanel Spacing="3">
+                <TextBlock Text="{Binding TimeLabel}" Classes="subtle" />
+                <TextBlock Text="2026-06-30 16:08" Classes="body" />
+              </StackPanel>
+
+              <Separator />
+
+              <!-- 回档新分支 -->
+              <StackPanel Spacing="6">
+                <TextBlock Text="{Binding RestoreBranchNameText}" Classes="subtle" />
+                <TextBox />
+                <Button Classes="secondary" HorizontalAlignment="Stretch" Content="{Binding RestoreNewBranchText}" />
+              </StackPanel>
+            </StackPanel>
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+
+      <!-- 收起态：右缘悬浮左向箭头 -->
+      <Button Classes="panel-float" Command="{Binding ToggleRightPanelCommand}"
+              ToolTip.Tip="{Binding ToggleRightPanelText}"
+              IsVisible="{Binding !IsRightPanelOpen}">
+        <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
+      </Button>
+    </Panel>
+  </Grid>
+</UserControl>

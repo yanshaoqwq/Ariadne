@@ -1,0 +1,29 @@
+[package]
+name = "ariadne"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+publish = false
+
+[lib]
+name = "ariadne"
+path = "src/lib.rs"
+
+[dependencies]
+keyring = { version = "4.1.2", optional = true, default-features = false, features = ["v1"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tantivy = "0.22"
+thiserror = "1"
+wasmi = "0.40"
+yaml_serde = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+wat = "1"
+
+[features]
+default = []
+system-keychain = ["dep:keyring"]

@@ -1,0 +1,58 @@
+<UserControl
+    x:Class="Ariadne.Desktop.Views.SettingsPageView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
+    x:DataType="vm:SettingsPageViewModel">
+  <!-- 配置页：顶部横向标签栏 + 下方内容区 -->
+  <DockPanel Background="{DynamicResource Ariadne.BackgroundMain}">
+
+    <!-- 顶部：标题 + 横向标签 -->
+    <StackPanel DockPanel.Dock="Top" Background="{DynamicResource Ariadne.BackgroundSurface}">
+      <TextBlock Text="{Binding Title}" Classes="title" Margin="32,20,32,4" />
+      <Border BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1">
+        <ItemsControl ItemsSource="{Binding Tabs}" Margin="32,0,32,0">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <StackPanel Orientation="Horizontal" />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="{x:Type vm:SettingsTabViewModel}">
+              <Button
+                  Classes="tab"
+                  Classes.selected="{Binding IsSelected}"
+                  Content="{Binding Title}"
+                  Command="{Binding SelectCommand}" />
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Border>
+    </StackPanel>
+
+    <!-- 内容区（骨架：以当前选中标签标题占位） -->
+    <ScrollViewer Padding="32,24">
+      <Border Classes="card" Padding="28" MaxWidth="820" HorizontalAlignment="Stretch">
+        <StackPanel Spacing="14">
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <Border
+                Width="4"
+                Height="22"
+                CornerRadius="2"
+                Background="{DynamicResource Ariadne.AccentPrimary}"
+                VerticalAlignment="Center" />
+            <TextBlock Text="{Binding SelectedTab.Title}" Classes="title" VerticalAlignment="Center" />
+          </StackPanel>
+          <Separator />
+          <Border Classes="layer" Padding="18" MinHeight="160">
+            <TextBlock
+                Text="{Binding SelectedTab.Title}"
+                Classes="secondary"
+                VerticalAlignment="Center"
+                HorizontalAlignment="Center" />
+          </Border>
+        </StackPanel>
+      </Border>
+    </ScrollViewer>
+  </DockPanel>
+</UserControl>

@@ -1,0 +1,611 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!--
+    Ariadne 风格地基（Win11 / Fluent 方向）
+    - 设计目标：轻盈、精致、桌面感、阅读舒适，扔掉网页感。
+    - 分层而非描边：窗口底为 Mica，内容浮在「层」上，靠极淡背景差 + 发丝边框 + 柔和投影区分。
+    - 强调色克制：青绿 teal 仅用于主操作 / 选中指示 / 焦点。
+    - 主题：system/light/dark 由 ThemeDictionaries(Light/Dark) 驱动，跟随系统；
+      其余命名主题见 Palettes.axaml（运行时切换在交互阶段接）。
+    - 命名约定：颜色 = Ariadne.Color.* ；笔刷 = Ariadne.* （沿用既有 key，旧视图无需改动）。
+  -->
+  <Styles.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+
+        <!-- ========================= 浅色（清昼，默认强调=青绿） ========================= -->
+        <ResourceDictionary x:Key="Light">
+          <!-- 背景层（默认纸色：米白，克制暖白，非米黄；米黄见 Paper 可选主题） -->
+          <Color x:Key="Ariadne.Color.WindowBase">#E9E7DF</Color>
+          <Color x:Key="Ariadne.Color.BackgroundMain">#F3F1EA</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSurface">#FBFAF6</Color>
+          <Color x:Key="Ariadne.Color.BackgroundElevated">#FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSubtle">#EFEDE4</Color>
+          <Color x:Key="Ariadne.Color.BackgroundHover">#1A160D0D</Color>
+          <Color x:Key="Ariadne.Color.BackgroundPressed">#1A160D1A</Color>
+          <Color x:Key="Ariadne.Color.BackgroundCode">#EEECE2</Color>
+          <!-- 文字 -->
+          <Color x:Key="Ariadne.Color.TextHeading">#15181B</Color>
+          <Color x:Key="Ariadne.Color.TextPrimary">#1B1F22</Color>
+          <Color x:Key="Ariadne.Color.TextSecondary">#5B6469</Color>
+          <Color x:Key="Ariadne.Color.TextSubtle">#8A9398</Color>
+          <Color x:Key="Ariadne.Color.TextOnAccent">#FFFFFF</Color>
+          <!-- 边界（暖调，配合纸色） -->
+          <Color x:Key="Ariadne.Color.BorderDefault">#E0D8C8</Color>
+          <Color x:Key="Ariadne.Color.BorderMuted">#EAE3D5</Color>
+          <Color x:Key="Ariadne.Color.BorderStrong">#C9BFA9</Color>
+          <Color x:Key="Ariadne.Color.BorderCard">#14140A00</Color>
+          <Color x:Key="Ariadne.Color.FocusRing">#2E726B</Color>
+          <!-- 强调（青绿） -->
+          <Color x:Key="Ariadne.Color.AccentPrimary">#2E726B</Color>
+          <Color x:Key="Ariadne.Color.AccentHover">#25605A</Color>
+          <Color x:Key="Ariadne.Color.AccentPressed">#1F524D</Color>
+          <Color x:Key="Ariadne.Color.AccentLight">#1F2E726B</Color>
+          <Color x:Key="Ariadne.Color.AccentBorder">#662E726B</Color>
+          <!-- 状态 -->
+          <Color x:Key="Ariadne.Color.StatusInfo">#2563EB</Color>
+          <Color x:Key="Ariadne.Color.StatusSuccess">#0F9D63</Color>
+          <Color x:Key="Ariadne.Color.StatusWarning">#D97706</Color>
+          <Color x:Key="Ariadne.Color.StatusError">#DC2626</Color>
+          <!-- 运行态 -->
+          <Color x:Key="Ariadne.Color.RuntimeIdle">#9AA0A8</Color>
+          <Color x:Key="Ariadne.Color.RuntimeRunning">#2E726B</Color>
+          <Color x:Key="Ariadne.Color.RuntimePaused">#D97706</Color>
+          <Color x:Key="Ariadne.Color.RuntimePending">#2563EB</Color>
+          <Color x:Key="Ariadne.Color.RuntimeApproved">#0F9D63</Color>
+          <Color x:Key="Ariadne.Color.RuntimeRejected">#DC2626</Color>
+          <!-- Git -->
+          <Color x:Key="Ariadne.Color.GitAuto">#8A8F98</Color>
+          <Color x:Key="Ariadne.Color.GitManual">#F59E0B</Color>
+          <Color x:Key="Ariadne.Color.GitCurrent">#2E726B</Color>
+          <Color x:Key="Ariadne.Color.GitBranch">#6366F1</Color>
+          <Color x:Key="Ariadne.Color.GitFolded">#B9C0BB</Color>
+          <!-- 画布（暖纸调） -->
+          <Color x:Key="Ariadne.Color.CanvasBackground">#F1EBDD</Color>
+          <Color x:Key="Ariadne.Color.CanvasGrid">#DED5C3</Color>
+          <Color x:Key="Ariadne.Color.NodeBackground">#FDFCF7</Color>
+          <Color x:Key="Ariadne.Color.NodeBorder">#D8CFBB</Color>
+          <Color x:Key="Ariadne.Color.NodeSelected">#2E726B</Color>
+          <Color x:Key="Ariadne.Color.EdgeData">#2E726B</Color>
+          <Color x:Key="Ariadne.Color.EdgeControl">#8C8366</Color>
+          <Color x:Key="Ariadne.Color.EdgeCommunication">#7C3AED</Color>
+          <!-- 编辑 / diff -->
+          <Color x:Key="Ariadne.Color.EditorBackground">#FBF7EE</Color>
+          <Color x:Key="Ariadne.Color.EditorSelection">#2E2E726B</Color>
+          <Color x:Key="Ariadne.Color.DiffAddBackground">#24059669</Color>
+          <Color x:Key="Ariadne.Color.DiffRemoveBackground">#1FDC2626</Color>
+
+          <!-- 笔刷（引用同字典颜色，随变体切换） -->
+          <SolidColorBrush x:Key="Ariadne.WindowBase" Color="{StaticResource Ariadne.Color.WindowBase}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundMain" Color="{StaticResource Ariadne.Color.BackgroundMain}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundSurface" Color="{StaticResource Ariadne.Color.BackgroundSurface}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundElevated" Color="{StaticResource Ariadne.Color.BackgroundElevated}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundSubtle" Color="{StaticResource Ariadne.Color.BackgroundSubtle}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundHover" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundCode" Color="{StaticResource Ariadne.Color.BackgroundCode}" />
+          <SolidColorBrush x:Key="Ariadne.TextHeading" Color="{StaticResource Ariadne.Color.TextHeading}" />
+          <SolidColorBrush x:Key="Ariadne.TextPrimary" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="Ariadne.TextSecondary" Color="{StaticResource Ariadne.Color.TextSecondary}" />
+          <SolidColorBrush x:Key="Ariadne.TextSubtle" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="Ariadne.TextOnAccent" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="Ariadne.BorderDefault" Color="{StaticResource Ariadne.Color.BorderDefault}" />
+          <SolidColorBrush x:Key="Ariadne.BorderMuted" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="Ariadne.BorderStrong" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="Ariadne.BorderCard" Color="{StaticResource Ariadne.Color.BorderCard}" />
+          <SolidColorBrush x:Key="Ariadne.FocusRing" Color="{StaticResource Ariadne.Color.FocusRing}" />
+          <SolidColorBrush x:Key="Ariadne.AccentPrimary" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="Ariadne.AccentHover" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="Ariadne.AccentPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="Ariadne.AccentLight" Color="{StaticResource Ariadne.Color.AccentLight}" />
+          <SolidColorBrush x:Key="Ariadne.AccentBorder" Color="{StaticResource Ariadne.Color.AccentBorder}" />
+          <SolidColorBrush x:Key="Ariadne.StatusInfo" Color="{StaticResource Ariadne.Color.StatusInfo}" />
+          <SolidColorBrush x:Key="Ariadne.StatusSuccess" Color="{StaticResource Ariadne.Color.StatusSuccess}" />
+          <SolidColorBrush x:Key="Ariadne.StatusWarning" Color="{StaticResource Ariadne.Color.StatusWarning}" />
+          <SolidColorBrush x:Key="Ariadne.StatusError" Color="{StaticResource Ariadne.Color.StatusError}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimeIdle" Color="{StaticResource Ariadne.Color.RuntimeIdle}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimeRunning" Color="{StaticResource Ariadne.Color.RuntimeRunning}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimePaused" Color="{StaticResource Ariadne.Color.RuntimePaused}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimePending" Color="{StaticResource Ariadne.Color.RuntimePending}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimeApproved" Color="{StaticResource Ariadne.Color.RuntimeApproved}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimeRejected" Color="{StaticResource Ariadne.Color.RuntimeRejected}" />
+          <SolidColorBrush x:Key="Ariadne.GitAuto" Color="{StaticResource Ariadne.Color.GitAuto}" />
+          <SolidColorBrush x:Key="Ariadne.GitManual" Color="{StaticResource Ariadne.Color.GitManual}" />
+          <SolidColorBrush x:Key="Ariadne.GitCurrent" Color="{StaticResource Ariadne.Color.GitCurrent}" />
+          <SolidColorBrush x:Key="Ariadne.GitBranch" Color="{StaticResource Ariadne.Color.GitBranch}" />
+          <SolidColorBrush x:Key="Ariadne.GitFolded" Color="{StaticResource Ariadne.Color.GitFolded}" />
+          <SolidColorBrush x:Key="Ariadne.CanvasBackground" Color="{StaticResource Ariadne.Color.CanvasBackground}" />
+          <SolidColorBrush x:Key="Ariadne.CanvasGrid" Color="{StaticResource Ariadne.Color.CanvasGrid}" />
+          <SolidColorBrush x:Key="Ariadne.NodeBackground" Color="{StaticResource Ariadne.Color.NodeBackground}" />
+          <SolidColorBrush x:Key="Ariadne.NodeBorder" Color="{StaticResource Ariadne.Color.NodeBorder}" />
+          <SolidColorBrush x:Key="Ariadne.NodeSelected" Color="{StaticResource Ariadne.Color.NodeSelected}" />
+          <SolidColorBrush x:Key="Ariadne.EdgeData" Color="{StaticResource Ariadne.Color.EdgeData}" />
+          <SolidColorBrush x:Key="Ariadne.EdgeControl" Color="{StaticResource Ariadne.Color.EdgeControl}" />
+          <SolidColorBrush x:Key="Ariadne.EdgeCommunication" Color="{StaticResource Ariadne.Color.EdgeCommunication}" />
+          <SolidColorBrush x:Key="Ariadne.EditorBackground" Color="{StaticResource Ariadne.Color.EditorBackground}" />
+          <SolidColorBrush x:Key="Ariadne.EditorSelection" Color="{StaticResource Ariadne.Color.EditorSelection}" />
+          <SolidColorBrush x:Key="Ariadne.DiffAddBackground" Color="{StaticResource Ariadne.Color.DiffAddBackground}" />
+          <SolidColorBrush x:Key="Ariadne.DiffRemoveBackground" Color="{StaticResource Ariadne.Color.DiffRemoveBackground}" />
+        </ResourceDictionary>
+
+        <!-- ========================= 深色（夜航，默认强调=青绿） ========================= -->
+        <ResourceDictionary x:Key="Dark">
+          <Color x:Key="Ariadne.Color.WindowBase">#1C1E21</Color>
+          <Color x:Key="Ariadne.Color.BackgroundMain">#17191C</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSurface">#212427</Color>
+          <Color x:Key="Ariadne.Color.BackgroundElevated">#2A2E31</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSubtle">#1D2023</Color>
+          <Color x:Key="Ariadne.Color.BackgroundHover">#14FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.BackgroundPressed">#22FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.BackgroundCode">#1F2327</Color>
+          <Color x:Key="Ariadne.Color.TextHeading">#F4F6F8</Color>
+          <Color x:Key="Ariadne.Color.TextPrimary">#ECEEF0</Color>
+          <Color x:Key="Ariadne.Color.TextSecondary">#A7AEB2</Color>
+          <Color x:Key="Ariadne.Color.TextSubtle">#717881</Color>
+          <Color x:Key="Ariadne.Color.TextOnAccent">#07110F</Color>
+          <Color x:Key="Ariadne.Color.BorderDefault">#313539</Color>
+          <Color x:Key="Ariadne.Color.BorderMuted">#26292D</Color>
+          <Color x:Key="Ariadne.Color.BorderStrong">#474C50</Color>
+          <Color x:Key="Ariadne.Color.BorderCard">#14FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.FocusRing">#6FB9AD</Color>
+          <Color x:Key="Ariadne.Color.AccentPrimary">#6FB9AD</Color>
+          <Color x:Key="Ariadne.Color.AccentHover">#82C6BB</Color>
+          <Color x:Key="Ariadne.Color.AccentPressed">#5BA89C</Color>
+          <Color x:Key="Ariadne.Color.AccentLight">#1F6FB9AD</Color>
+          <Color x:Key="Ariadne.Color.AccentBorder">#556FB9AD</Color>
+          <Color x:Key="Ariadne.Color.StatusInfo">#60A5FA</Color>
+          <Color x:Key="Ariadne.Color.StatusSuccess">#34D399</Color>
+          <Color x:Key="Ariadne.Color.StatusWarning">#FBBF24</Color>
+          <Color x:Key="Ariadne.Color.StatusError">#F87171</Color>
+          <Color x:Key="Ariadne.Color.RuntimeIdle">#6A7079</Color>
+          <Color x:Key="Ariadne.Color.RuntimeRunning">#6FB9AD</Color>
+          <Color x:Key="Ariadne.Color.RuntimePaused">#FBBF24</Color>
+          <Color x:Key="Ariadne.Color.RuntimePending">#60A5FA</Color>
+          <Color x:Key="Ariadne.Color.RuntimeApproved">#34D399</Color>
+          <Color x:Key="Ariadne.Color.RuntimeRejected">#F87171</Color>
+          <Color x:Key="Ariadne.Color.GitAuto">#6A7079</Color>
+          <Color x:Key="Ariadne.Color.GitManual">#FBBF24</Color>
+          <Color x:Key="Ariadne.Color.GitCurrent">#6FB9AD</Color>
+          <Color x:Key="Ariadne.Color.GitBranch">#818CF8</Color>
+          <Color x:Key="Ariadne.Color.GitFolded">#4A525A</Color>
+          <Color x:Key="Ariadne.Color.CanvasBackground">#17191C</Color>
+          <Color x:Key="Ariadne.Color.CanvasGrid">#2B3137</Color>
+          <Color x:Key="Ariadne.Color.NodeBackground">#212427</Color>
+          <Color x:Key="Ariadne.Color.NodeBorder">#343A40</Color>
+          <Color x:Key="Ariadne.Color.NodeSelected">#6FB9AD</Color>
+          <Color x:Key="Ariadne.Color.EdgeData">#6FB9AD</Color>
+          <Color x:Key="Ariadne.Color.EdgeControl">#8B939D</Color>
+          <Color x:Key="Ariadne.Color.EdgeCommunication">#A78BFA</Color>
+          <Color x:Key="Ariadne.Color.EditorBackground">#212427</Color>
+          <Color x:Key="Ariadne.Color.EditorSelection">#386FB9AD</Color>
+          <Color x:Key="Ariadne.Color.DiffAddBackground">#2834D399</Color>
+          <Color x:Key="Ariadne.Color.DiffRemoveBackground">#28F87171</Color>
+
+          <SolidColorBrush x:Key="Ariadne.WindowBase" Color="{StaticResource Ariadne.Color.WindowBase}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundMain" Color="{StaticResource Ariadne.Color.BackgroundMain}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundSurface" Color="{StaticResource Ariadne.Color.BackgroundSurface}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundElevated" Color="{StaticResource Ariadne.Color.BackgroundElevated}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundSubtle" Color="{StaticResource Ariadne.Color.BackgroundSubtle}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundHover" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="Ariadne.BackgroundCode" Color="{StaticResource Ariadne.Color.BackgroundCode}" />
+          <SolidColorBrush x:Key="Ariadne.TextHeading" Color="{StaticResource Ariadne.Color.TextHeading}" />
+          <SolidColorBrush x:Key="Ariadne.TextPrimary" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="Ariadne.TextSecondary" Color="{StaticResource Ariadne.Color.TextSecondary}" />
+          <SolidColorBrush x:Key="Ariadne.TextSubtle" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="Ariadne.TextOnAccent" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="Ariadne.BorderDefault" Color="{StaticResource Ariadne.Color.BorderDefault}" />
+          <SolidColorBrush x:Key="Ariadne.BorderMuted" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="Ariadne.BorderStrong" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="Ariadne.BorderCard" Color="{StaticResource Ariadne.Color.BorderCard}" />
+          <SolidColorBrush x:Key="Ariadne.FocusRing" Color="{StaticResource Ariadne.Color.FocusRing}" />
+          <SolidColorBrush x:Key="Ariadne.AccentPrimary" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="Ariadne.AccentHover" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="Ariadne.AccentPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="Ariadne.AccentLight" Color="{StaticResource Ariadne.Color.AccentLight}" />
+          <SolidColorBrush x:Key="Ariadne.AccentBorder" Color="{StaticResource Ariadne.Color.AccentBorder}" />
+          <SolidColorBrush x:Key="Ariadne.StatusInfo" Color="{StaticResource Ariadne.Color.StatusInfo}" />
+          <SolidColorBrush x:Key="Ariadne.StatusSuccess" Color="{StaticResource Ariadne.Color.StatusSuccess}" />
+          <SolidColorBrush x:Key="Ariadne.StatusWarning" Color="{StaticResource Ariadne.Color.StatusWarning}" />
+          <SolidColorBrush x:Key="Ariadne.StatusError" Color="{StaticResource Ariadne.Color.StatusError}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimeIdle" Color="{StaticResource Ariadne.Color.RuntimeIdle}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimeRunning" Color="{StaticResource Ariadne.Color.RuntimeRunning}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimePaused" Color="{StaticResource Ariadne.Color.RuntimePaused}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimePending" Color="{StaticResource Ariadne.Color.RuntimePending}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimeApproved" Color="{StaticResource Ariadne.Color.RuntimeApproved}" />
+          <SolidColorBrush x:Key="Ariadne.RuntimeRejected" Color="{StaticResource Ariadne.Color.RuntimeRejected}" />
+          <SolidColorBrush x:Key="Ariadne.GitAuto" Color="{StaticResource Ariadne.Color.GitAuto}" />
+          <SolidColorBrush x:Key="Ariadne.GitManual" Color="{StaticResource Ariadne.Color.GitManual}" />
+          <SolidColorBrush x:Key="Ariadne.GitCurrent" Color="{StaticResource Ariadne.Color.GitCurrent}" />
+          <SolidColorBrush x:Key="Ariadne.GitBranch" Color="{StaticResource Ariadne.Color.GitBranch}" />
+          <SolidColorBrush x:Key="Ariadne.GitFolded" Color="{StaticResource Ariadne.Color.GitFolded}" />
+          <SolidColorBrush x:Key="Ariadne.CanvasBackground" Color="{StaticResource Ariadne.Color.CanvasBackground}" />
+          <SolidColorBrush x:Key="Ariadne.CanvasGrid" Color="{StaticResource Ariadne.Color.CanvasGrid}" />
+          <SolidColorBrush x:Key="Ariadne.NodeBackground" Color="{StaticResource Ariadne.Color.NodeBackground}" />
+          <SolidColorBrush x:Key="Ariadne.NodeBorder" Color="{StaticResource Ariadne.Color.NodeBorder}" />
+          <SolidColorBrush x:Key="Ariadne.NodeSelected" Color="{StaticResource Ariadne.Color.NodeSelected}" />
+          <SolidColorBrush x:Key="Ariadne.EdgeData" Color="{StaticResource Ariadne.Color.EdgeData}" />
+          <SolidColorBrush x:Key="Ariadne.EdgeControl" Color="{StaticResource Ariadne.Color.EdgeControl}" />
+          <SolidColorBrush x:Key="Ariadne.EdgeCommunication" Color="{StaticResource Ariadne.Color.EdgeCommunication}" />
+          <SolidColorBrush x:Key="Ariadne.EditorBackground" Color="{StaticResource Ariadne.Color.EditorBackground}" />
+          <SolidColorBrush x:Key="Ariadne.EditorSelection" Color="{StaticResource Ariadne.Color.EditorSelection}" />
+          <SolidColorBrush x:Key="Ariadne.DiffAddBackground" Color="{StaticResource Ariadne.Color.DiffAddBackground}" />
+          <SolidColorBrush x:Key="Ariadne.DiffRemoveBackground" Color="{StaticResource Ariadne.Color.DiffRemoveBackground}" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+
+      <!-- ===== 与变体无关：圆角 / 间距 / 字体 / 字号 ===== -->
+      <CornerRadius x:Key="Ariadne.Radius.Small">4</CornerRadius>
+      <CornerRadius x:Key="Ariadne.Radius.Medium">6</CornerRadius>
+      <CornerRadius x:Key="Ariadne.Radius.Large">8</CornerRadius>
+      <CornerRadius x:Key="Ariadne.Radius.Pill">999</CornerRadius>
+
+      <x:Double x:Key="Ariadne.Size.Display">28</x:Double>
+      <x:Double x:Key="Ariadne.Size.Title">20</x:Double>
+      <x:Double x:Key="Ariadne.Size.Subtitle">16</x:Double>
+      <x:Double x:Key="Ariadne.Size.Body">14</x:Double>
+      <x:Double x:Key="Ariadne.Size.Caption">12</x:Double>
+      <x:Double x:Key="Ariadne.Size.Badge">10.5</x:Double>
+
+      <!-- 字体：Inter 不含中文，必须挂中文黑体 fallback（系统实测可用：WenQuanYi Zen Hei / AR PL UMing CN / DejaVu）。
+           Windows 上前面的 Segoe UI / Microsoft YaHei 会优先命中，Linux 上回退到文泉驿正黑。 -->
+      <FontFamily x:Key="Ariadne.Font.Ui">Inter, Segoe UI, Microsoft YaHei UI, PingFang SC, Noto Sans CJK SC, WenQuanYi Zen Hei, DejaVu Sans, sans-serif</FontFamily>
+      <FontFamily x:Key="Ariadne.Font.Reading">Source Han Serif SC, Noto Serif CJK SC, Songti SC, AR PL UMing CN, Georgia, DejaVu Serif, serif</FontFamily>
+      <FontFamily x:Key="Ariadne.Font.Mono">Cascadia Code, JetBrains Mono, Consolas, Sarasa Mono SC, DejaVu Sans Mono, WenQuanYi Zen Hei Mono, monospace</FontFamily>
+
+      <!-- Win11 柔和投影：卡片 / 浮层 -->
+      <BoxShadows x:Key="Ariadne.Shadow.Card">0 1 3 0 #14000000</BoxShadows>
+      <BoxShadows x:Key="Ariadne.Shadow.Flyout">0 8 24 -6 #2E000000</BoxShadows>
+
+      <!-- ============================================================
+           矢量图标几何（24x24 viewbox）——不依赖任何图标字体，
+           Linux/Win 一致渲染，消除 Segoe Fluent Icons 缺失的豆腐块。
+           用法：<Path Data="{StaticResource Ariadne.Icon.X}" .../>，
+           Path Stretch=Uniform + Width/Height 控制显示尺寸。
+           ============================================================ -->
+      <!-- 窗口控制 -->
+      <StreamGeometry x:Key="Ariadne.Icon.Minimize">M4,12 L20,12</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Maximize">M5,5 L19,5 L19,19 L5,19 Z</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Close">M5,5 L19,19 M19,5 L5,19</StreamGeometry>
+      <!-- 侧栏折叠（汉堡） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Menu">M3,6 L21,6 M3,12 L21,12 M3,18 L21,18</StreamGeometry>
+      <!-- 导航：工作空间（节点/编排——三连点+线） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Workspace">M6,6 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 M18,6 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 M12,18 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 M7.5,8 L11,15 M16.5,8 L13,15</StreamGeometry>
+      <!-- 导航：作品（书页） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Works">M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L16,16</StreamGeometry>
+      <!-- 导航：Git（分支） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Git">M7,5 m-2.5,0 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0 M7,19 m-2.5,0 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0 M17,8 m-2.5,0 a2.5,2.5 0 1,0 5,0 a2.5,2.5 0 1,0 -5,0 M7,7.5 L7,16.5 M7,12 C7,9 17,12 17,10.5</StreamGeometry>
+      <!-- 导航：运行日志（列表行） -->
+      <StreamGeometry x:Key="Ariadne.Icon.RunLog">M4,6 L7,6 M10,6 L20,6 M4,12 L7,12 M10,12 L20,12 M4,18 L7,18 M10,18 L20,18</StreamGeometry>
+      <!-- 导航：模板市场（方格） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Templates">M4,4 L11,4 L11,11 L4,11 Z M13,4 L20,4 L20,11 L13,11 Z M4,13 L11,13 L11,20 L4,20 Z M13,13 L20,13 L20,20 L13,20 Z</StreamGeometry>
+      <!-- 导航：配置（齿轮，简化） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Settings">M12,12 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 M12,3 L12,6 M12,18 L12,21 M3,12 L6,12 M18,12 L21,12 M5.6,5.6 L7.7,7.7 M16.3,16.3 L18.4,18.4 M18.4,5.6 L16.3,7.7 M7.7,16.3 L5.6,18.4</StreamGeometry>
+      <!-- 底部：版本（信息圈） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Info">M12,12 m-9,0 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0 M12,11 L12,16 M12,8 L12,8.5</StreamGeometry>
+      <!-- 底部：反馈（对话气泡） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Feedback">M4,5 L20,5 L20,16 L13,16 L9,20 L9,16 L4,16 Z</StreamGeometry>
+      <!-- 发送（纸飞机） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Send">M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12</StreamGeometry>
+      <!-- 刷新 -->
+      <StreamGeometry x:Key="Ariadne.Icon.Refresh">M19,12 a7,7 0 1,1 -2.1,-5 M17,3 L17,7 L13,7</StreamGeometry>
+      <!-- 折叠/展开箭头（右栏收放） -->
+      <StreamGeometry x:Key="Ariadne.Icon.ChevronLeft">M15,5 L8,12 L15,19</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.ChevronRight">M9,5 L16,12 L9,19</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.ChevronDown">M5,9 L12,16 L19,9</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.ChevronUp">M5,15 L12,8 L19,15</StreamGeometry>
+      <!-- 保存（软盘） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Save">M5,4 L15,4 L19,8 L19,20 L5,20 Z M8,4 L8,9 L15,9 L15,4 M8,13 L16,13 M8,16 L16,16</StreamGeometry>
+      <!-- 导入（向下入托盘） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Import">M12,3 L12,13 M8,9 L12,13 L16,9 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
+      <!-- 导出（向上出托盘） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Export">M12,13 L12,3 M8,7 L12,3 L16,7 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
+      <!-- 搜索（放大镜） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Search">M10.5,4 a6.5,6.5 0 1,0 0.01,0 M15.5,15.5 L20,20</StreamGeometry>
+    </ResourceDictionary>
+  </Styles.Resources>
+
+  <!-- ============================ 全局排版 ============================ -->
+  <Style Selector="Window">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.WindowBase}" />
+  </Style>
+
+  <Style Selector="TextBlock">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="TextWrapping" Value="NoWrap" />
+  </Style>
+
+  <!-- 矢量图标：描边线条，统一 stroke。geometry 见资源区 Ariadne.Icon.* -->
+  <Style Selector="Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="StrokeThickness" Value="1.6" />
+    <Setter Property="StrokeLineCap" Value="Round" />
+    <Setter Property="StrokeJoin" Value="Round" />
+    <Setter Property="Fill" Value="Transparent" />
+    <Setter Property="Stretch" Value="Uniform" />
+    <Setter Property="Width" Value="18" />
+    <Setter Property="Height" Value="18" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <!-- 实心填充图标变体（如品牌点） -->
+  <Style Selector="Path.icon-fill">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="Stretch" Value="Uniform" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
+  <!-- 文字层级（class） -->
+  <Style Selector="TextBlock.display">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Display}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
+  </Style>
+  <Style Selector="TextBlock.title">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Title}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
+  </Style>
+  <Style Selector="TextBlock.subtitle">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Subtitle}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="TextBlock.body">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
+    <Setter Property="LineHeight" Value="21" />
+  </Style>
+  <Style Selector="TextBlock.secondary">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <Style Selector="TextBlock.caption">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Caption}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <Style Selector="TextBlock.subtle">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Caption}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+  </Style>
+  <Style Selector="TextBlock.mono">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Mono}" />
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Caption}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <!-- 阅读正文：衬线、松行高 -->
+  <Style Selector="TextBlock.reading">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Reading}" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="LineHeight" Value="30" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+  </Style>
+
+  <!-- ============================ 卡片 / 层 ============================ -->
+  <!-- 浮起卡片：表面色 + 发丝边框 + 柔投影，圆角 8 -->
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderCard}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Card}" />
+  </Style>
+  <!-- 内嵌层：次级容器，无投影 -->
+  <Style Selector="Border.layer">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+  </Style>
+
+  <!-- ============================ 按钮 ============================ -->
+  <Style Selector="Button">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="MinHeight" Value="32" />
+    <Setter Property="Padding" Value="14,6" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderStrong}" />
+  </Style>
+
+  <!-- 主按钮：青绿强调 -->
+  <Style Selector="Button.primary">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextOnAccent}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentHover}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentHover}" />
+  </Style>
+  <Style Selector="Button.primary:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPressed}" />
+  </Style>
+
+  <!-- 次按钮：表面 + 边框 -->
+  <Style Selector="Button.secondary">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+  </Style>
+
+  <!-- 幽灵按钮：透明，hover 才显底 -->
+  <Style Selector="Button.subtle">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <Style Selector="Button.subtle:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+
+  <!-- 危险按钮 -->
+  <Style Selector="Button.danger">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+  </Style>
+
+  <!-- 窗口控制按钮（标题栏 − □ ×） -->
+  <Style Selector="Button.window-control">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="MinHeight" Value="36" />
+    <Setter Property="MinWidth" Value="46" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="Button.window-control:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+  </Style>
+  <Style Selector="Button.window-control.close:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <!-- 导航项：左侧选中 pill + 柔底（Win11 NavigationView 语感） -->
+  <Style Selector="Button.nav">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="Padding" Value="10,8" />
+    <Setter Property="MinHeight" Value="38" />
+  </Style>
+  <Style Selector="Button.nav:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <Style Selector="Button.nav.selected /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
+  <Style Selector="Button.nav.selected TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+
+  <!-- 横向标签（配置页顶部分段）：底部下划线指示选中，Win11 pivot 语感 -->
+  <Style Selector="Button.tab">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0,0,0,2" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="Padding" Value="4,10" />
+    <Setter Property="Margin" Value="0,0,20,0" />
+    <Setter Property="MinHeight" Value="40" />
+    <Setter Property="FontSize" Value="14" />
+  </Style>
+  <Style Selector="Button.tab:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="TextElement.Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+  </Style>
+  <Style Selector="Button.tab.selected">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <!-- 悬浮开合按钮：右栏收起后贴右缘的圆形浮钮（左向箭头） -->
+  <Style Selector="Button.panel-float">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="8,0,0,8" />
+    <Setter Property="Width" Value="24" />
+    <Setter Property="Height" Value="52" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="HorizontalAlignment" Value="Right" />
+  </Style>
+  <Style Selector="Button.panel-float:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <!-- 右栏内的收起小钮 -->
+  <Style Selector="Button.panel-collapse">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Width" Value="26" />
+    <Setter Property="Height" Value="26" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+  <Style Selector="Button.panel-collapse:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <!-- 工具条图标按钮：正方形、透明底、悬停浅灰 -->
+  <Style Selector="Button.icon-btn">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Width" Value="32" />
+    <Setter Property="Height" Value="32" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+  </Style>
+  <Style Selector="Button.icon-btn:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <!-- 主色调图标按钮变体（如保存） -->
+  <Style Selector="Button.icon-btn.accent > Path">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+
+  <!-- ============================ 输入控件 ============================ -->
+  <Style Selector="TextBox">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="MinHeight" Value="32" />
+    <Setter Property="Padding" Value="10,6" />
+  </Style>
+  <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+
+  <Style Selector="ComboBox">
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="MinHeight" Value="32" />
+  </Style>
+
+  <!-- 分隔线 -->
+  <Style Selector="Separator">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="Height" Value="1" />
+    <Setter Property="Margin" Value="0,6" />
+  </Style>
+
+  <!-- 徽标（数字角标 / 标签 pill） -->
+  <Style Selector="Border.badge">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Pill}" />
+    <Setter Property="MinWidth" Value="18" />
+    <Setter Property="Height" Value="18" />
+    <Setter Property="Padding" Value="5,0" />
+  </Style>
+  <Style Selector="Border.chip">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Pill}" />
+    <Setter Property="Padding" Value="10,3" />
+  </Style>
+</Styles>
