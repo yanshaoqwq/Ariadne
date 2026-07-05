@@ -58,6 +58,7 @@
           <StackPanel Spacing="20">
             <TextBlock Text="{Binding StatusText}" Classes="caption" />
             <TextBox Text="{Binding DocumentContent, Mode=TwoWay}"
+                     x:Name="DocumentEditor"
                      Classes="reading"
                      KeyDown="OnDocumentEditorKeyDown"
                      AcceptsReturn="True"

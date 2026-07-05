@@ -57,6 +57,7 @@ pub const DIAGNOSTICS_UPDATED_EVENT: &str = "diagnostics_updated";
 pub const TOAST_CREATED_EVENT: &str = "toast_created";
 
 const DEFAULT_PROJECT_ENV: &str = "ARIADNE_PROJECT_ROOT";
+const APP_STATE_ENV: &str = "ARIADNE_APP_STATE_ROOT";
 const APP_STATE_DIR: &str = ".ariadne-app";
 const RECENT_PROJECTS_FILE: &str = "recent_projects.json";
 const BUDGET_CONFIG_FILE: &str = "budget.json";
@@ -1028,10 +1029,7 @@ pub fn fetch_provider_models_impl(
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
-    let requested = provider_id
-        .as_deref()
-        .map(normalize_provider)
-        .transpose()?;
+    let requested = provider_id.as_deref().map(normalize_provider).transpose()?;
     let selected = requested
         .as_ref()
         .and_then(|id| {
@@ -1054,7 +1052,13 @@ pub fn fetch_provider_models_impl(
                         .find(|provider| provider.provider_id == *id)
                 })
         })
-        .or_else(|| config.providers.providers.iter().find(|provider| provider.enabled))
+        .or_else(|| {
+            config
+                .providers
+                .providers
+                .iter()
+                .find(|provider| provider.enabled)
+        })
         .or_else(|| config.providers.providers.first())
         .ok_or_else(|| "no provider configured".to_owned())?;
 
@@ -1319,6 +1323,9 @@ pub fn default_project_root() -> PathBuf {
 }
 
 pub fn default_app_state_root() -> PathBuf {
+    if let Some(path) = std::env::var_os(APP_STATE_ENV) {
+        return PathBuf::from(path);
+    }
     default_project_root().join(APP_STATE_DIR)
 }
 
@@ -2518,10 +2525,16 @@ fn write_node_preset_settings(
             return Err("node_type cannot be empty".to_owned());
         }
         if preset.model_id.trim().is_empty() {
-            return Err(format!("model_id cannot be empty for node_type {}", preset.node_type));
+            return Err(format!(
+                "model_id cannot be empty for node_type {}",
+                preset.node_type
+            ));
         }
         if preset.timeout_ms == 0 {
-            return Err(format!("timeout_ms cannot be zero for node_type {}", preset.node_type));
+            return Err(format!(
+                "timeout_ms cannot be zero for node_type {}",
+                preset.node_type
+            ));
         }
         validate_money("budget_usd", preset.budget_usd)?;
     }

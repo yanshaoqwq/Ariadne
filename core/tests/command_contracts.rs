@@ -1,16 +1,16 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use ariadne::commands::{
-    create_checkpoint_impl, get_app_settings_impl, get_automation_settings_impl,
-    fetch_provider_models_impl, get_budget_status_impl, get_document_content_impl,
+    create_checkpoint_impl, fetch_provider_models_impl, get_app_settings_impl,
+    get_automation_settings_impl, get_budget_status_impl, get_document_content_impl,
     get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
-    get_permissions_settings_impl, get_node_preset_settings_impl, get_provider_config_impl,
-    get_rag_settings_impl,
-    get_template_repository_settings_impl, get_workflow_settings_impl, load_workflow_graph_impl,
-    pack_workflow_selection_impl,
-    project_ai_chat_impl, resolve_confirmation_impl, resolve_project_references, run_workflow_impl,
+    get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
+    get_rag_settings_impl, get_template_repository_settings_impl, get_workflow_settings_impl,
+    load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat_impl,
+    resolve_confirmation_impl, resolve_project_references, run_workflow_impl,
     save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
     save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
     save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
@@ -33,6 +33,8 @@ use ariadne::workflow::{
 };
 use serde_json::{json, Value};
 
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 #[test]
 fn document_commands_read_tree_and_round_trip_content() {
     let temp = tempfile::tempdir().unwrap();
@@ -51,6 +53,24 @@ fn document_commands_read_tree_and_round_trip_content() {
 
     assert_eq!(content, "正文");
     assert!(format!("{tree:?}").contains("chapter.md"));
+}
+
+#[test]
+fn app_state_root_can_be_separated_from_project_root_env() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    std::env::set_var("ARIADNE_PROJECT_ROOT", project.path());
+    std::env::set_var("ARIADNE_APP_STATE_ROOT", app_state.path());
+
+    let resolved_app_state = ariadne::commands::default_app_state_root();
+    let resolved_project = ariadne::commands::default_project_root();
+
+    std::env::remove_var("ARIADNE_PROJECT_ROOT");
+    std::env::remove_var("ARIADNE_APP_STATE_ROOT");
+
+    assert_eq!(resolved_project, project.path());
+    assert_eq!(resolved_app_state, app_state.path());
 }
 
 #[test]
@@ -535,8 +555,7 @@ fn provider_model_fetch_returns_configured_and_embedding_models() {
     assert!(models
         .models
         .iter()
-        .any(|model| model.model_id == "gpt-test"
-            && model.capability == ProviderCapability::Llm));
+        .any(|model| model.model_id == "gpt-test" && model.capability == ProviderCapability::Llm));
     assert!(models
         .models
         .iter()

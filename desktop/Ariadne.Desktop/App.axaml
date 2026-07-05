@@ -14,9 +14,6 @@
     <DataTemplate DataType="{x:Type vm:WelcomeViewModel}">
       <views:WelcomeView />
     </DataTemplate>
-    <DataTemplate DataType="{x:Type vm:PlaceholderPageViewModel}">
-      <views:PlaceholderPageView />
-    </DataTemplate>
     <DataTemplate DataType="{x:Type vm:WorkspacePageViewModel}">
       <views:WorkspacePageView />
     </DataTemplate>

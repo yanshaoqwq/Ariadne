@@ -44,10 +44,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         SaveCommand = new RelayCommand(() => _ = SaveAsync());
         ReadModeCommand = new RelayCommand(() => IsEditMode = false);
         EditModeCommand = new RelayCommand(() => IsEditMode = true);
-        CopyCommand = new RelayCommand(() => StatusText = CtxCopyText);
-        SelectAllCommand = new RelayCommand(() => StatusText = CtxSelectAllText);
+        CopyCommand = new RelayCommand(() => RequestEditorCopy?.Invoke());
+        SelectAllCommand = new RelayCommand(() => RequestEditorSelectAll?.Invoke());
         QuickAiCommand = new RelayCommand(() => _ = QuickEditAsync());
-        InsertOutlineCommand = new RelayCommand(() => StatusText = OutlineText);
+        InsertOutlineCommand = new RelayCommand(InsertOutlineReference);
         ToggleEditCommand = new RelayCommand(() => IsEditMode = !IsEditMode);
         SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync());
         ApplyQuickEditCommand = new RelayCommand(() => _ = ApplyQuickEditAsync());
@@ -118,6 +118,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand ApplyQuickEditCommand { get; }
 
     public RelayCommand SaveProjectMemoryCommand { get; }
+    public Action? RequestEditorCopy { get; set; }
+    public Action? RequestEditorSelectAll { get; set; }
 
     public ObservableCollection<WorksTreeItemViewModel> WorksTreeNodes { get; }
 
@@ -369,6 +371,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             StatusText = ex.Message;
         }
+    }
+
+    private void InsertOutlineReference()
+    {
+        if (string.IsNullOrWhiteSpace(_currentDocumentId))
+        {
+            DocumentContent += Environment.NewLine + "@planning/outline.md";
+            return;
+        }
+        DocumentContent += Environment.NewLine + "@planning/outline.md";
+        StatusText = OutlineText;
     }
 
     private async Task QuickEditAsync()

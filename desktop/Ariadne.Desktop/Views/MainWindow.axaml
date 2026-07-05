@@ -64,12 +64,30 @@
               Foreground="{DynamicResource Ariadne.TextPrimary}"
               FontWeight="SemiBold"
               VerticalAlignment="Center" />
-          <Border Classes="chip" VerticalAlignment="Center">
-            <TextBlock
-                Text="{Binding ProjectTitle}"
-                Classes="caption"
-                VerticalAlignment="Center" />
-          </Border>
+          <Button Classes="subtle" Padding="0" VerticalAlignment="Center" ToolTip.Tip="{Binding ProjectMenuText}">
+            <Border Classes="chip">
+              <TextBlock
+                  Text="{Binding ProjectTitle}"
+                  Classes="caption"
+                  VerticalAlignment="Center" />
+            </Border>
+            <Button.Flyout>
+              <MenuFlyout>
+                <MenuItem Header="{Binding CreateProjectText}" Command="{Binding CreateProjectCommand}" />
+                <MenuItem Header="{Binding OpenProjectText}" Command="{Binding OpenProjectCommand}" />
+                <Separator />
+                <ItemsControl ItemsSource="{Binding ProjectMenuItems}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:ProjectMenuItemViewModel}">
+                      <MenuItem Header="{Binding Name}" Command="{Binding OpenCommand}" ToolTip.Tip="{Binding ProjectRoot}" />
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Separator />
+                <MenuItem Header="{Binding LeaveProjectText}" Command="{Binding LeaveProjectCommand}" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
         </StackPanel>
 
         <!-- 中段：后端连接状态 -->
@@ -97,16 +115,17 @@
                 Background="{DynamicResource Ariadne.BackgroundHover}"
                 VerticalAlignment="Center">
               <Border
-                  Width="38"
+                  Width="{Binding BudgetUsageWidth}"
                   Height="6"
                   CornerRadius="3"
                   HorizontalAlignment="Left"
                   Background="{DynamicResource Ariadne.AccentPrimary}" />
             </Border>
+            <TextBlock Text="{Binding BudgetStatusText}" Classes="caption" VerticalAlignment="Center" />
           </StackPanel>
           <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
             <TextBlock Text="{Binding AutoModeLabel}" Classes="caption" VerticalAlignment="Center" />
-            <ToggleSwitch OnContent="" OffContent="" VerticalAlignment="Center" />
+            <ToggleSwitch OnContent="" OffContent="" VerticalAlignment="Center" IsChecked="{Binding AutoModeEnabled, Mode=TwoWay}" />
           </StackPanel>
         </StackPanel>
 

@@ -7,6 +7,7 @@ public sealed class WelcomeViewModel : ViewModelBase
 {
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
+    private readonly Func<CurrentProjectStatus, Task>? _projectOpened;
     private Func<Task<string?>> _pickProjectFolder;
     private IReadOnlyList<RecentProjectItemViewModel> _recentProjects = Array.Empty<RecentProjectItemViewModel>();
     private string _statusText;
@@ -15,10 +16,12 @@ public sealed class WelcomeViewModel : ViewModelBase
     public WelcomeViewModel(
         DisplayNameService displayNames,
         IAriadneBackendClient backend,
+        Func<CurrentProjectStatus, Task>? projectOpened = null,
         Func<Task<string?>>? pickProjectFolder = null)
     {
         _displayNames = displayNames;
         _backend = backend;
+        _projectOpened = projectOpened;
         _pickProjectFolder = pickProjectFolder ?? (() => Task.FromResult<string?>(null));
         _statusText = displayNames.Text("ui.common.loading");
         CreateProjectCommand = new RelayCommand(() => _ = CreateProjectAsync());
@@ -109,6 +112,11 @@ public sealed class WelcomeViewModel : ViewModelBase
             var report = await _backend.CreateProjectAsync(root).ConfigureAwait(true);
             StatusText = report.ProjectRoot;
             RecentProjects = WrapRecentProjects(await _backend.ListRecentProjectsAsync().ConfigureAwait(true));
+            var status = await _backend.GetCurrentProjectAsync().ConfigureAwait(true);
+            if (status is not null && _projectOpened is not null)
+            {
+                await _projectOpened(status).ConfigureAwait(true);
+            }
         }
         catch (Exception ex)
         {
@@ -153,6 +161,10 @@ public sealed class WelcomeViewModel : ViewModelBase
         var status = await _backend.OpenProjectAsync(root).ConfigureAwait(true);
         RecentProjects = WrapRecentProjects(await _backend.ListRecentProjectsAsync().ConfigureAwait(true));
         StatusText = status.ProjectRoot;
+        if (_projectOpened is not null)
+        {
+            await _projectOpened(status).ConfigureAwait(true);
+        }
     }
 }
 

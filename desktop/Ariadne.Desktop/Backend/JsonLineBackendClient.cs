@@ -7,11 +7,16 @@ namespace Ariadne.Desktop.Backend;
 public sealed class JsonLineBackendClient : IAriadneBackendClient
 {
     private readonly string? _backendCommand;
+    private readonly string _appStateRoot;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private string? _projectRoot;
 
     private JsonLineBackendClient(string? backendCommand)
     {
         _backendCommand = backendCommand;
+        _appStateRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Ariadne");
     }
 
     public static JsonLineBackendClient CreateDefault()
@@ -41,17 +46,22 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
 
     public Task<ProjectInitReport> CreateProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<ProjectInitReport>("create_project", new { project_root = projectRoot, name }, cancellationToken);
+        return InvokeAndRememberProjectAsync<ProjectInitReport>("create_project", projectRoot, new { project_root = projectRoot, name }, cancellationToken);
     }
 
     public Task<CurrentProjectStatus> OpenProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<CurrentProjectStatus>("open_project", new { project_root = projectRoot, name }, cancellationToken);
+        return InvokeAndRememberProjectAsync<CurrentProjectStatus>("open_project", projectRoot, new { project_root = projectRoot, name }, cancellationToken);
     }
 
     public Task SetProjectRootAsync(string projectRoot, CancellationToken cancellationToken = default)
     {
-        return InvokeCommandAsync("set_project_root", new { project_root = projectRoot }, cancellationToken);
+        return InvokeCommandAndRememberProjectAsync("set_project_root", projectRoot, new { project_root = projectRoot }, cancellationToken);
+    }
+
+    public void ClearProjectRoot()
+    {
+        _projectRoot = null;
     }
 
     public Task<AppSettings> GetAppSettingsAsync(CancellationToken cancellationToken = default)
@@ -484,6 +494,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        ApplyProjectEnvironment(startInfo);
         foreach (var argument in ResolveCommandArguments(_backendCommand))
         {
             startInfo.ArgumentList.Add(argument);
@@ -546,6 +557,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        ApplyProjectEnvironment(startInfo);
         foreach (var argument in ResolveCommandArguments(_backendCommand))
         {
             startInfo.ArgumentList.Add(argument);
@@ -602,6 +614,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        ApplyProjectEnvironment(startInfo);
         foreach (var argument in ResolveCommandArguments(_backendCommand))
         {
             startInfo.ArgumentList.Add(argument);
@@ -631,6 +644,36 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         if (!result.Ok)
         {
             throw new InvalidOperationException(result.Error ?? "backend command failed");
+        }
+    }
+
+    private async Task<T> InvokeAndRememberProjectAsync<T>(
+        string method,
+        string projectRoot,
+        object? parameters,
+        CancellationToken cancellationToken)
+    {
+        var result = await InvokeRequiredAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
+        _projectRoot = projectRoot;
+        return result;
+    }
+
+    private async Task InvokeCommandAndRememberProjectAsync(
+        string method,
+        string projectRoot,
+        object? parameters,
+        CancellationToken cancellationToken)
+    {
+        await InvokeCommandAsync(method, parameters, cancellationToken).ConfigureAwait(false);
+        _projectRoot = projectRoot;
+    }
+
+    private void ApplyProjectEnvironment(ProcessStartInfo startInfo)
+    {
+        startInfo.Environment["ARIADNE_APP_STATE_ROOT"] = _appStateRoot;
+        if (!string.IsNullOrWhiteSpace(_projectRoot))
+        {
+            startInfo.Environment["ARIADNE_PROJECT_ROOT"] = _projectRoot;
         }
     }
 

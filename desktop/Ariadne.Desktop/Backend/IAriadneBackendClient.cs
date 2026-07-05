@@ -21,6 +21,8 @@ public interface IAriadneBackendClient
 
     Task SetProjectRootAsync(string projectRoot, CancellationToken cancellationToken = default);
 
+    void ClearProjectRoot();
+
     Task<AppSettings> GetAppSettingsAsync(CancellationToken cancellationToken = default);
 
     Task<AppSettings> SaveAppSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default);
