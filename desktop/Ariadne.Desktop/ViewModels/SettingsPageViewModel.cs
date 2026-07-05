@@ -289,6 +289,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SaveMiscText => _displayNames.Text("ui.settings.misc.save");
     public string LanguageLabel => _displayNames.Text("ui.settings.misc.language");
     public string LanguageDescText => _displayNames.Text("ui.settings.misc.language.desc");
+    public string TutorialText => _displayNames.Text("ui.settings.index.tutorial");
     public string DiagnosticsLabel => _displayNames.Text("ui.settings.misc.diagnostics");
     public string DiagnosticsStatusText => _displayNames.Format("ui.settings.misc.diagnostics.status", new Dictionary<string, string>
     {

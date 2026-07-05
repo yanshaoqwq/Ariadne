@@ -319,6 +319,10 @@
                     <Button Grid.Column="1" Classes="secondary" Content="{Binding SaveText}" Command="{Binding ToggleBreakpointCommand}" />
                   </Grid>
                   <Button Classes="primary" Content="{Binding ApplyNodeConfigText}" Command="{Binding ApplyNodeConfigCommand}" />
+                  <TextBlock Text="{Binding EdgeDetailsText}" Classes="subtitle" />
+                  <Border Classes="layer" Padding="10">
+                    <TextBlock Text="{Binding EdgeCountText}" Classes="caption" />
+                  </Border>
                   <Button Classes="secondary" Content="{Binding ExportSelectionText}" Command="{Binding ExportSelectionCommand}" />
                   <Button Classes="secondary" Content="{Binding SubworkflowText}" Command="{Binding PackSelectionCommand}" />
                   <TextBox Text="{Binding AnnotationTitle, Mode=TwoWay}" PlaceholderText="{Binding AnnotationTitlePlaceholder}" />

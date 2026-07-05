@@ -20,6 +20,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _exportFormat = "markdown";
     private string _currentDocumentId = string.Empty;
     private string _documentTitle;
+    private string _importChapterId = string.Empty;
+    private string _importChapterTitle = string.Empty;
+    private string _importOrder = "0";
+    private string _importSourcePath = string.Empty;
+    private string _importTargetPath = string.Empty;
     private string _savedSnapshot = string.Empty;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
@@ -34,7 +39,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
-        ImportCommand = new RelayCommand(() => _ = LoadWorksTreeAsync());
+        ImportCommand = new RelayCommand(() => _ = ImportChapterAsync());
         ExportCommand = new RelayCommand(() => _ = ExportAsync());
         SaveCommand = new RelayCommand(() => _ = SaveAsync());
         ReadModeCommand = new RelayCommand(() => IsEditMode = false);
@@ -190,6 +195,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
+    public string ImportChapterId { get => _importChapterId; set => SetProperty(ref _importChapterId, value); }
+    public string ImportChapterTitle { get => _importChapterTitle; set => SetProperty(ref _importChapterTitle, value); }
+    public string ImportOrder { get => _importOrder; set => SetProperty(ref _importOrder, value); }
+    public string ImportSourcePath { get => _importSourcePath; set => SetProperty(ref _importSourcePath, value); }
+    public string ImportTargetPath { get => _importTargetPath; set => SetProperty(ref _importTargetPath, value); }
+
     public string SidebarTitle => _displayNames.Text("ui.works.sidebar.title");
 
     public string ImportText => _displayNames.Text("ui.works.import_manuscript");
@@ -219,6 +230,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ProjectAiPlaceholder => _displayNames.Text("ui.works.project_ai.placeholder");
 
     public string ExportFormatText => _displayNames.Text("ui.works.export_format");
+    public string ImportTitle => _displayNames.Text("ui.works.import.title");
+    public string ImportChapterIdText => _displayNames.Text("ui.works.import.chapter_id");
+    public string ImportChapterTitleText => _displayNames.Text("ui.works.import.chapter_title");
+    public string ImportOrderText => _displayNames.Text("ui.works.import.order");
+    public string ImportSourcePathText => _displayNames.Text("ui.works.import.source_path");
+    public string ImportTargetPathText => _displayNames.Text("ui.works.import.target_path");
+    public string ImportSourcePlaceholder => _displayNames.Text("ui.works.import.source_placeholder");
+    public string ImportTargetPlaceholder => _displayNames.Text("ui.works.import.target_placeholder");
     public string ProjectMemoryText => _displayNames.Text("ui.works.project_memory");
     public string ProjectMemoryPlaceholder => _displayNames.Text("ui.works.project_memory.placeholder");
     public string SaveProjectMemoryText => _displayNames.Text("ui.works.save_project_memory");
@@ -276,6 +295,25 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.open");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task ImportChapterAsync()
+    {
+        try
+        {
+            await _backend.ImportChapterAsync(new ChapterImportRequest(
+                ImportChapterId,
+                ImportChapterTitle,
+                long.TryParse(ImportOrder, out var order) ? order : 0,
+                ImportSourcePath,
+                ImportTargetPath)).ConfigureAwait(true);
+            StatusText = _displayNames.Text("ui.common.import");
+            await LoadWorksTreeAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {

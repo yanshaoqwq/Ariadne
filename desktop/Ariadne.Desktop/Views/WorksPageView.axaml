@@ -113,13 +113,22 @@
           <!-- 标签内容 1：导航树（章节树 + 大纲入口）-->
           <DockPanel IsVisible="{Binding IsNavTreeTab}">
             <Border DockPanel.Dock="Top" Padding="10,10,10,4">
-              <Button Classes="subtle" Padding="10,6" HorizontalAlignment="Left" ToolTip.Tip="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
-                <StackPanel Orientation="Horizontal" Spacing="7">
-                  <Path Classes="icon" Width="15" Height="15"
-                        Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
-                  <TextBlock Text="{Binding OutlineText}" Classes="caption" VerticalAlignment="Center" />
-                </StackPanel>
-              </Button>
+              <StackPanel Spacing="8">
+                <Button Classes="subtle" Padding="10,6" HorizontalAlignment="Left" ToolTip.Tip="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
+                  <StackPanel Orientation="Horizontal" Spacing="7">
+                    <Path Classes="icon" Width="15" Height="15"
+                          Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
+                    <TextBlock Text="{Binding OutlineText}" Classes="caption" VerticalAlignment="Center" />
+                  </StackPanel>
+                </Button>
+                <TextBlock Text="{Binding ImportTitle}" Classes="subtitle" />
+                <TextBox Text="{Binding ImportChapterId, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterIdText}" />
+                <TextBox Text="{Binding ImportChapterTitle, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterTitleText}" />
+                <TextBox Text="{Binding ImportOrder, Mode=TwoWay}" PlaceholderText="{Binding ImportOrderText}" />
+                <TextBox Text="{Binding ImportSourcePath, Mode=TwoWay}" PlaceholderText="{Binding ImportSourcePlaceholder}" />
+                <TextBox Text="{Binding ImportTargetPath, Mode=TwoWay}" PlaceholderText="{Binding ImportTargetPlaceholder}" />
+                <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
+              </StackPanel>
             </Border>
             <ScrollViewer Margin="8,4">
               <StackPanel Spacing="1">

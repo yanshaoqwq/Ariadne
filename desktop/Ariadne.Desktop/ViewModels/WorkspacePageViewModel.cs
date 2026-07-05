@@ -24,6 +24,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _currentRunId = string.Empty;
     private string _confirmationReason = string.Empty;
     private string _annotationTitle = string.Empty;
+    private IReadOnlyList<CanvasEdge> _edges = Array.Empty<CanvasEdge>();
     private WorkflowNodeViewModel? _selectedNode;
     private ConfirmationItemViewModel? _selectedConfirmation;
 
@@ -136,6 +137,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string AnnotationTitleText => _displayNames.Text("ui.workspace.annotation_title");
     public string AnnotationTitlePlaceholder => _displayNames.Text("ui.workspace.annotation_title.placeholder");
     public string SubworkflowText => _displayNames.Text("ui.workspace.subworkflow");
+    public string EdgeDetailsText => _displayNames.Text("ui.workspace.edge_details");
+    public string EdgeCountText => $"{_edges.Count}";
 
     public bool IsRightPanelOpen { get => _isRightPanelOpen; set => SetProperty(ref _isRightPanelOpen, value); }
     public RelayCommand ToggleRightPanelCommand { get; }
@@ -584,7 +587,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 node.Label,
                 node.ToData(),
                 new CanvasPosition(node.X, node.Y))).ToArray(),
-            Array.Empty<CanvasEdge>(),
+            _edges,
             new Dictionary<string, object?>());
     }
 
@@ -595,6 +598,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             Nodes.Clear();
             SelectedNode = null;
+            _edges = graph.Edges.ToArray();
+            OnPropertyChanged(nameof(EdgeCountText));
             foreach (var graphNode in graph.Nodes)
             {
                 var node = new WorkflowNodeViewModel(
