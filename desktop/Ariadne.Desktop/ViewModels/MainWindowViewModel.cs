@@ -121,9 +121,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             ["name"] = status.CurrentProject.ProjectName,
         });
         BackendStatus = ProjectTitle;
-        SetBadge("workspace", status.Badges.Confirmations);
-        SetBadge("run_logs", status.Badges.RunLogs);
-        SetBadge("settings", status.Badges.Diagnostics);
+        await RefreshSidebarBadgesAsync(status.Badges).ConfigureAwait(true);
     }
 
     private NavigationItemViewModel CreateNav(string id, string key, Avalonia.Media.Geometry? icon)
@@ -176,6 +174,23 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             item.BadgeCount = value;
         }
+    }
+
+    private async Task RefreshSidebarBadgesAsync(SidebarBadgeCounts fallback)
+    {
+        SidebarBadgeCounts badges;
+        try
+        {
+            badges = await _backend.GetSidebarBadgesAsync().ConfigureAwait(true);
+        }
+        catch
+        {
+            badges = fallback;
+        }
+
+        SetBadge("workspace", badges.Confirmations);
+        SetBadge("run_logs", badges.RunLogs);
+        SetBadge("settings", badges.Diagnostics);
     }
 
     private IEnumerable<NavigationItemViewModel> AllNavigationItems()

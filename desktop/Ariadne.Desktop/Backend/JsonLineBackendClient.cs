@@ -29,6 +29,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         return InvokeAsync<AppStatus>("get_app_status", null, cancellationToken);
     }
 
+    public Task<SidebarBadgeCounts> GetSidebarBadgesAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<SidebarBadgeCounts>("get_sidebar_badges", null, cancellationToken);
+    }
+
     public Task<CurrentProjectStatus?> GetCurrentProjectAsync(CancellationToken cancellationToken = default)
     {
         return InvokeAsync<CurrentProjectStatus>("get_current_project", null, cancellationToken);

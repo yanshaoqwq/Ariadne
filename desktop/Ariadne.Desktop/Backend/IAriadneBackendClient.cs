@@ -11,6 +11,8 @@ public interface IAriadneBackendClient
 
     Task<AppStatus?> GetAppStatusAsync(CancellationToken cancellationToken = default);
 
+    Task<SidebarBadgeCounts> GetSidebarBadgesAsync(CancellationToken cancellationToken = default);
+
     Task<CurrentProjectStatus?> GetCurrentProjectAsync(CancellationToken cancellationToken = default);
 
     Task<ProjectInitReport> CreateProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default);
