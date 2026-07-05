@@ -39,9 +39,14 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         return InvokeRequiredAsync<ProjectInitReport>("create_project", new { project_root = projectRoot, name }, cancellationToken);
     }
 
-    public Task<IReadOnlyList<RecentProjectEntry>> OpenProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default)
+    public Task<CurrentProjectStatus> OpenProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredListAsync<RecentProjectEntry>("open_project", new { project_root = projectRoot, name }, cancellationToken);
+        return InvokeRequiredAsync<CurrentProjectStatus>("open_project", new { project_root = projectRoot, name }, cancellationToken);
+    }
+
+    public Task SetProjectRootAsync(string projectRoot, CancellationToken cancellationToken = default)
+    {
+        return InvokeCommandAsync("set_project_root", new { project_root = projectRoot }, cancellationToken);
     }
 
     public Task<AppSettings> GetAppSettingsAsync(CancellationToken cancellationToken = default)

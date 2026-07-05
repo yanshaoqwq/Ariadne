@@ -15,7 +15,9 @@ public interface IAriadneBackendClient
 
     Task<ProjectInitReport> CreateProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default);
 
-    Task<IReadOnlyList<RecentProjectEntry>> OpenProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default);
+    Task<CurrentProjectStatus> OpenProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default);
+
+    Task SetProjectRootAsync(string projectRoot, CancellationToken cancellationToken = default);
 
     Task<AppSettings> GetAppSettingsAsync(CancellationToken cancellationToken = default);
 

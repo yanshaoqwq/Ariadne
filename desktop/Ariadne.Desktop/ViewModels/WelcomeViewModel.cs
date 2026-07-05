@@ -150,8 +150,9 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     private async Task OpenProjectRootAsync(string root)
     {
-        RecentProjects = WrapRecentProjects(await _backend.OpenProjectAsync(root).ConfigureAwait(true));
-        StatusText = root;
+        var status = await _backend.OpenProjectAsync(root).ConfigureAwait(true);
+        RecentProjects = WrapRecentProjects(await _backend.ListRecentProjectsAsync().ConfigureAwait(true));
+        StatusText = status.ProjectRoot;
     }
 }
 
