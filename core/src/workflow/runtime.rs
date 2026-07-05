@@ -886,8 +886,14 @@ impl WorkflowRuntime {
             format!("confirmation {confirmation_id} output overridden and approved"),
             Value::Null,
         );
-        // 改写后置为通过，复用 update_confirmation_state 的回写 + 自动解除暂停逻辑。
+        // 改写后置为通过，复用 update_confirmation_state 的回写逻辑。
         self.update_confirmation_state(confirmation_id, RuntimeConfirmationState::Approved)?;
+        // override 操作本身就是对"被拒暂停"的解决，无论 pause_reason 是什么都直接恢复。
+        if self.state.status == RunStatus::Paused {
+            self.state.control = RunControl::Continue;
+            self.state.pause_reason = None;
+            self.state.status = RunStatus::Queued;
+        }
         Ok(())
     }
 

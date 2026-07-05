@@ -548,7 +548,7 @@
   <Style Selector="Button.panel-collapse:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
   </Style>
-  <!-- 工具条图标按钮：正方形、透明底、悬停浅灰 -->
+  <!-- 工具条图标按钮：正方形、透明底、悬停浅灰；hover 有过渡动效 -->
   <Style Selector="Button.icon-btn">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
@@ -556,13 +556,24 @@
     <Setter Property="Height" Value="32" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.10" />
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="Button.icon-btn:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
   </Style>
-  <!-- 主色调图标按钮变体（如保存） -->
-  <Style Selector="Button.icon-btn.accent > Path">
+  <!-- 三个工具条按钮（导入/导出/保存）保持统一的描边图标风格，
+       不用实色背景——避免保存按钮蓝色盖住图标。
+       保存用 accent 色描边区分，导入导出用普通 secondary 描边。 -->
+  <Style Selector="Button.icon-btn.save > Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="StrokeThickness" Value="2" />
+  </Style>
+  <Style Selector="Button.icon-btn.save:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
   </Style>
 
   <!-- ============================ 输入控件 ============================ -->
@@ -607,5 +618,45 @@
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Pill}" />
     <Setter Property="Padding" Value="10,3" />
+  </Style>
+
+  <!-- ============================ 动效 ============================ -->
+  <!-- 导航项：选中/hover 背景淡入淡出 -->
+  <Style Selector="Button.nav">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <!-- 横向 tab：下划线（BorderBrush）淡入淡出 -->
+  <Style Selector="Button.tab">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <BrushTransition Property="Foreground" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <!-- panel-float 悬浮箭头：轻透明度过渡（收起/展开感） -->
+  <Style Selector="Button.panel-float">
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.18" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <!-- 主按钮按下弹性 -->
+  <Style Selector="Button.primary:pressed /template/ ContentPresenter">
+    <Setter Property="RenderTransform">
+      <ScaleTransform ScaleX="0.96" ScaleY="0.96" />
+    </Setter>
+  </Style>
+  <Style Selector="Button.primary /template/ ContentPresenter">
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.08" />
+      </Transitions>
+    </Setter>
   </Style>
 </Styles>

@@ -1103,3 +1103,172 @@ fn line_patch_tool_allows_matching_scope_and_document() {
 
     assert!(output.value.get("hunks").is_some());
 }
+
+// ─── SqliteWritingKnowledgeStore 往返等价测试 ─────────────────────────────
+
+#[cfg(test)]
+mod store_contracts {
+    use ariadne::contracts::{SourceSpan, TextRange};
+    use ariadne::rag::memory::MemoryWritingKnowledgeBase;
+    use ariadne::contracts::AutoModeState;
+    use ariadne::rag::models::{
+        ForeshadowingContent, ForeshadowingRecord, ForeshadowingStatus,
+        RegisterContent, RegisteredChangeStatus, RegisterFunction, StoryEvent, StoryEventStatus,
+        StorySegment, WritingConfirmationPolicy,
+    };
+    use ariadne::rag::pipeline::SummaryPipelineExecutor;
+    use ariadne::rag::store::SqliteWritingKnowledgeStore;
+    use ariadne::rag::{SummaryPipelineDraft, SummaryPipelineReport};
+    use serde_json::{json, Value};
+
+    fn source_span() -> SourceSpan {
+        SourceSpan {
+            document_id: "chapters/ch-1.md".to_owned(),
+            range: TextRange { start: 0, end: 100 },
+            version: None,
+        }
+    }
+
+    fn make_draft() -> SummaryPipelineDraft {
+        SummaryPipelineDraft {
+            chapter_id: "ch-1".to_owned(),
+            segments: vec![StorySegment {
+                segment_id: "ch-1::seg-1".to_owned(),
+                number: "1".to_owned(),
+                chapter_id: "ch-1".to_owned(),
+                summary: "主角进入废城".to_owned(),
+                source: source_span(),
+                metadata: Value::Null,
+            }],
+            events: vec![StoryEvent {
+                event_id: "event-1".to_owned(),
+                summary: "进城事件".to_owned(),
+                status: StoryEventStatus::Ongoing,
+                segment_ids: vec!["ch-1::seg-1".to_owned()],
+                chapter_ids: vec!["ch-1".to_owned()],
+                metadata: Value::Null,
+            }],
+            chapter_summary: Some("第一章总结".to_owned()),
+            stage_id: Some("stage-1".to_owned()),
+            stage_summary: Some("第一阶段开篇".to_owned()),
+            realized_changes: vec![],
+            foreshadowing_updates: vec![],
+            metadata: json!({ "generated_by": "test" }),
+        }
+    }
+
+    #[test]
+    fn store_roundtrip_preserves_all_entities() {
+        let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+        let kb = MemoryWritingKnowledgeBase::new();
+
+        // 填充数据
+        let executor = SummaryPipelineExecutor::new(
+            &kb,
+            WritingConfirmationPolicy::normal_default(),
+            AutoModeState::default(),
+        );
+        executor.apply_draft(make_draft()).unwrap();
+
+        // 写入伏笔
+        kb.upsert_foreshadowing(ForeshadowingRecord {
+            foreshadowing_id: "fore-1".to_owned(),
+            title: "神秘地图".to_owned(),
+            description: "主角在废城发现残破地图".to_owned(),
+            status: ForeshadowingStatus::Planted,
+            planted_segment_ids: vec!["ch-1::seg-1".to_owned()],
+            recovered_segment_ids: vec![],
+            metadata: Value::Null,
+        })
+        .unwrap();
+
+        // 写入注册项
+        kb.apply_register_operation(
+            RegisterFunction::Foreshadowing,
+            ariadne::rag::models::RegisterOperation::New,
+            Some(RegisterContent::Foreshadowing(ForeshadowingContent {
+                title: "地图".to_owned(),
+                description: "见伏笔".to_owned(),
+                intended_payoff: "揭示地下城".to_owned(),
+            })),
+            None,
+        )
+        .unwrap();
+
+        // 落库
+        store.save_knowledge(&kb).unwrap();
+
+        // 重新加载
+        let kb2 = store.load_knowledge().unwrap();
+
+        // 源实体往返等价
+        assert_eq!(kb2.all_segments().unwrap().len(), 1, "故事段数量");
+        assert_eq!(kb2.all_events().unwrap().len(), 1, "事件数量");
+        assert_eq!(
+            kb2.chapter_summary("ch-1").unwrap(),
+            Some("第一章总结".to_owned()),
+            "章节总结"
+        );
+        assert_eq!(
+            kb2.stage_summary("stage-1").unwrap(),
+            Some("第一阶段开篇".to_owned()),
+            "阶段总结"
+        );
+        assert_eq!(
+            kb2.all_foreshadowing().unwrap().len(),
+            1,
+            "伏笔数量"
+        );
+        assert_eq!(
+            kb2.registered_changes().unwrap().len(),
+            1,
+            "注册项数量"
+        );
+
+        // 确认项 4 个（segment/event/chapter/stage）
+        assert_eq!(
+            kb2.confirmations(None).unwrap().len(),
+            4,
+            "确认项数量"
+        );
+
+        // 双向索引在重放后正确重建
+        let idx = kb2.index_snapshot().unwrap();
+        assert!(
+            idx.chapter_segments.contains_key("ch-1"),
+            "章节-故事段索引"
+        );
+        assert!(
+            idx.event_segments.contains_key("event-1"),
+            "事件-故事段索引"
+        );
+    }
+
+    #[test]
+    fn store_incremental_save_upserts_correctly() {
+        let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+        let kb = MemoryWritingKnowledgeBase::new();
+
+        // 第一次保存
+        let executor = SummaryPipelineExecutor::new(
+            &kb,
+            WritingConfirmationPolicy::normal_default(),
+            AutoModeState::default(),
+        );
+        executor.apply_draft(make_draft()).unwrap();
+        store.save_knowledge(&kb).unwrap();
+
+        // 追加阶段总结后再保存
+        kb.upsert_stage_summary("stage-2", "第二阶段").unwrap();
+        store.save_knowledge(&kb).unwrap();
+
+        let kb2 = store.load_knowledge().unwrap();
+        assert_eq!(
+            kb2.stage_summary("stage-2").unwrap(),
+            Some("第二阶段".to_owned()),
+            "增量保存后阶段总结应存在"
+        );
+        // 原有实体未丢失
+        assert_eq!(kb2.all_segments().unwrap().len(), 1);
+    }
+}

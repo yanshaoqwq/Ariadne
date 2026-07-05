@@ -18,15 +18,15 @@
     <ScrollViewer Grid.Row="1">
       <StackPanel MaxWidth="1040" Margin="32,28">
 
-        <!-- 居中搜索栏：加宽 + 右侧搜索键 -->
-        <Grid ColumnDefinitions="*,Auto" MaxWidth="820" HorizontalAlignment="Center" ColumnSpacing="8">
+        <!-- 搜索栏：600px 固定宽度居中，右侧搜索键 -->
+        <Grid ColumnDefinitions="*,Auto" MaxWidth="648" HorizontalAlignment="Center" ColumnSpacing="8">
           <TextBox Grid.Column="0"
               PlaceholderText="{Binding SearchPlaceholder}"
-              MinHeight="44"
-              FontSize="15" />
-          <Button Grid.Column="1" Classes="primary" Width="48" Height="44" Padding="0"
+              MinHeight="48"
+              FontSize="16" />
+          <Button Grid.Column="1" Classes="primary" Width="52" Height="48" Padding="0"
                   ToolTip.Tip="{Binding SearchText}">
-            <Path Classes="icon" Width="18" Height="18"
+            <Path Classes="icon" Width="20" Height="20"
                   Stroke="{DynamicResource Ariadne.TextOnAccent}"
                   Data="{StaticResource Ariadne.Icon.Search}" />
           </Button>

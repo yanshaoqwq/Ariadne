@@ -331,6 +331,28 @@ pub struct ResolveConfirmationRequest {
     pub review_reason: Option<String>,
 }
 
+/// 路径 B：把交流后同意的输出改写进被拒确认项的关联节点并通过。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverrideConfirmationOutputRequest {
+    pub workflow_id: String,
+    pub run_id: String,
+    pub confirmation_id: String,
+    /// 改写的节点输出，键为端口 alias，值为 PortValue（内联或引用）。
+    #[serde(default)]
+    pub new_outputs: crate::contracts::PortMap,
+}
+
+/// 路径 A：把外部正文注入为指定节点的输出，从该节点下游重跑。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResumeFromNodeRequest {
+    pub workflow_id: String,
+    pub run_id: String,
+    pub node_id: String,
+    /// 注入的节点输出（通常含 chapter_text 等正文端口）。
+    #[serde(default)]
+    pub injected_outputs: crate::contracts::PortMap,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolveConfirmationResult {
     pub workflow: WorkflowActionResult,
@@ -696,6 +718,36 @@ pub fn resume_workflow(
         run_id,
         |runtime| runtime.resume(),
     )
+}
+
+/// 路径 B：把交流后同意的 Prudent 输出改写进关联节点并置为通过，解除暂停继续运行。
+pub fn override_confirmation_output(
+    state: &AriadneAppState,
+    request: OverrideConfirmationOutputRequest,
+) -> CommandResult<WorkflowActionResult> {
+    update_workflow_run_control(
+        &project_root_from_state(&state, None)?,
+        request.workflow_id,
+        request.run_id,
+        |runtime| runtime.override_confirmation_output(&request.confirmation_id, request.new_outputs),
+    )
+}
+
+/// 路径 A：注入外部正文到指定节点并从其控制下游重跑，解除暂停继续运行。
+pub fn resume_from_node(
+    state: &AriadneAppState,
+    request: ResumeFromNodeRequest,
+) -> CommandResult<WorkflowActionResult> {
+    let project_root = project_root_from_state(&state, None)?;
+    let workflow = load_workflow_definition(&project_root, Some(request.workflow_id.clone()))
+        .map_err(error_to_string)?;
+    update_workflow_run_control(&project_root, request.workflow_id, request.run_id, |runtime| {
+        runtime.resume_from_node(
+            &workflow,
+            &NodeId::from(request.node_id.clone()),
+            request.injected_outputs,
+        )
+    })
 }
 
 pub fn get_workflow_run_state(

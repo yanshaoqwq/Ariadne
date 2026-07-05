@@ -1374,3 +1374,230 @@ fn routed_external_executor_dispatches_registered_handlers() {
         Some(PortValue::Inline { value }) if value == &json!("node-1")
     ));
 }
+
+// ─── Prudent 拒绝处置 A/B 测试 ───────────────────────────────────────────
+
+#[cfg(test)]
+mod prudent_rejection_contracts {
+    use ariadne::contracts::{NodeId, PortMap, PortValue, RunId, WorkflowId};
+    use ariadne::workflow::{
+        BuiltinWorkflowNodeExecutor, NoopExternalNodeExecutor, RuntimeConfirmationState,
+        WorkflowRuntime,
+    };
+    use serde_json::json;
+
+    use super::*;
+
+    fn make_runtime_with_prudent_confirmation() -> (WorkflowRuntime, WorkflowDefinition) {
+        let workflow = WorkflowDefinition {
+            id: WorkflowId::from("wf-prudent"),
+            name: "Prudent Test".to_owned(),
+            nodes: vec![
+                NodeInstance {
+                    id: NodeId::from("writer"),
+                    type_name: "writer".to_owned(),
+                    label: None,
+                    config: Value::Null,
+                    position: None,
+                },
+                NodeInstance {
+                    id: NodeId::from("prudent"),
+                    type_name: "prudent".to_owned(),
+                    label: None,
+                    config: Value::Null,
+                    position: None,
+                },
+                NodeInstance {
+                    id: NodeId::from("summarizer"),
+                    type_name: "summarizer".to_owned(),
+                    label: None,
+                    config: Value::Null,
+                    position: None,
+                },
+            ],
+            edges: vec![
+                Edge {
+                    id: EdgeId::from("e1"),
+                    kind: WorkflowEdgeKind::Control,
+                    from: PortEndpoint {
+                        node_id: NodeId::from("writer"),
+                        port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                    },
+                    to: PortEndpoint {
+                        node_id: NodeId::from("prudent"),
+                        port_name: EXECUTION_INPUT_PORT.to_owned(),
+                    },
+                    alias: None,
+                    communication: None,
+                },
+                Edge {
+                    id: EdgeId::from("e2"),
+                    kind: WorkflowEdgeKind::Control,
+                    from: PortEndpoint {
+                        node_id: NodeId::from("prudent"),
+                        port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                    },
+                    to: PortEndpoint {
+                        node_id: NodeId::from("summarizer"),
+                        port_name: EXECUTION_INPUT_PORT.to_owned(),
+                    },
+                    alias: None,
+                    communication: None,
+                },
+            ],
+            metadata: Value::Null,
+        };
+
+        let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+
+        // 模拟 prudent 节点已成功，生成一个被拒的确认项
+        use ariadne::workflow::{
+            RuntimeConfirmation, WorkflowNodeRuntimeState, WorkflowRunState,
+        };
+        use ariadne::contracts::RunStatus;
+        runtime.state.nodes.insert(
+            NodeId::from("writer"),
+            WorkflowNodeRuntimeState {
+                node_id: NodeId::from("writer"),
+                status: RunStatus::Succeeded,
+                outputs: {
+                    let mut m = PortMap::new();
+                    m.insert("text".to_owned(), PortValue::inline("原始正文".to_owned()));
+                    m
+                },
+                communication_output: None,
+                communication_control: Default::default(),
+                prompt_trace_hash: None,
+                patch_session_commit_id: None,
+                checkpoint_id: None,
+                patch_write_back_state: None,
+                metadata: Value::Null,
+                error: None,
+                error_state: None,
+                execution_attempts: 1,
+            },
+        );
+        runtime.state.nodes.insert(
+            NodeId::from("prudent"),
+            WorkflowNodeRuntimeState {
+                node_id: NodeId::from("prudent"),
+                status: RunStatus::Succeeded,
+                outputs: {
+                    let mut m = PortMap::new();
+                    m.insert(
+                        "revision_context".to_owned(),
+                        PortValue::inline("被拒原因".to_owned()),
+                    );
+                    m
+                },
+                communication_output: None,
+                communication_control: Default::default(),
+                prompt_trace_hash: None,
+                patch_session_commit_id: None,
+                checkpoint_id: None,
+                patch_write_back_state: None,
+                metadata: Value::Null,
+                error: None,
+                error_state: None,
+                execution_attempts: 1,
+            },
+        );
+        runtime.state.confirmations.insert(
+            "prudent-review".to_owned(),
+            RuntimeConfirmation {
+                confirmation_id: "prudent-review".to_owned(),
+                node_id: NodeId::from("prudent"),
+                state: RuntimeConfirmationState::Rejected,
+                artifact_id: None,
+                patch_session_commit_id: None,
+                metadata: json!({}),
+            },
+        );
+        runtime.state.status = ariadne::contracts::RunStatus::Paused;
+        runtime.state.control = ariadne::contracts::RunControl::Pause;
+        runtime.state.pause_reason = Some("prudent rejected".to_owned());
+
+        (runtime, workflow)
+    }
+
+    #[test]
+    fn path_b_override_confirmation_output_approves_and_resumes() {
+        let (mut runtime, _workflow) = make_runtime_with_prudent_confirmation();
+
+        let mut new_outputs = PortMap::new();
+        new_outputs.insert(
+            "revision_context".to_owned(),
+            PortValue::inline("交流后同意的返修目标".to_owned()),
+        );
+
+        runtime
+            .override_confirmation_output("prudent-review", new_outputs)
+            .unwrap();
+
+        // 确认项已置为通过
+        let item = runtime.state.confirmations.get("prudent-review").unwrap();
+        assert_eq!(item.state, RuntimeConfirmationState::Approved);
+
+        // 节点输出被改写
+        let node = runtime.state.nodes.get(&NodeId::from("prudent")).unwrap();
+        let ctx = node.outputs.get("revision_context").unwrap();
+        assert!(matches!(ctx, PortValue::Inline { value } if value.as_str() == Some("交流后同意的返修目标")));
+
+        // 暂停解除（无其他 pending 确认项）
+        assert_eq!(
+            runtime.state.status,
+            ariadne::contracts::RunStatus::Queued
+        );
+    }
+
+    #[test]
+    fn path_a_resume_from_node_injects_and_clears_downstream() {
+        let (mut runtime, workflow) = make_runtime_with_prudent_confirmation();
+
+        // 模拟 summarizer 节点已有旧快照
+        use ariadne::workflow::WorkflowNodeRuntimeState;
+        use ariadne::contracts::RunStatus;
+        runtime.state.nodes.insert(
+            NodeId::from("summarizer"),
+            WorkflowNodeRuntimeState {
+                node_id: NodeId::from("summarizer"),
+                status: RunStatus::Succeeded,
+                outputs: PortMap::new(),
+                communication_output: None,
+                communication_control: Default::default(),
+                prompt_trace_hash: None,
+                patch_session_commit_id: None,
+                checkpoint_id: None,
+                patch_write_back_state: None,
+                metadata: Value::Null,
+                error: None,
+                error_state: None,
+                execution_attempts: 1,
+            },
+        );
+
+        let mut injected = PortMap::new();
+        injected.insert(
+            "chapter_text".to_owned(),
+            PortValue::inline("人工修改后的正文".to_owned()),
+        );
+
+        runtime
+            .resume_from_node(&workflow, &NodeId::from("writer"), injected)
+            .unwrap();
+
+        // writer 节点输出被注入
+        let writer = runtime.state.nodes.get(&NodeId::from("writer")).unwrap();
+        assert!(matches!(
+            writer.outputs.get("chapter_text"),
+            Some(PortValue::Inline { value }) if value.as_str() == Some("人工修改后的正文")
+        ));
+
+        // prudent 和 summarizer 下游快照被清除
+        assert!(!runtime.state.nodes.contains_key(&NodeId::from("prudent")));
+        assert!(!runtime.state.nodes.contains_key(&NodeId::from("summarizer")));
+
+        // 暂停解除
+        assert_eq!(runtime.state.status, ariadne::contracts::RunStatus::Queued);
+    }
+}

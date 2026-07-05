@@ -125,7 +125,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         SetBadge("settings", status.Badges.Diagnostics);
     }
 
-    private NavigationItemViewModel CreateNav(string id, string key, Avalonia.Media.Geometry icon)
+    private NavigationItemViewModel CreateNav(string id, string key, Avalonia.Media.Geometry? icon)
     {
         return new NavigationItemViewModel(
             id,

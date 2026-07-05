@@ -24,7 +24,7 @@
             <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Export}" />
             </Button>
-            <Button Classes="icon-btn accent" ToolTip.Tip="{Binding SaveText}">
+            <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
             </Button>
           </StackPanel>
@@ -46,7 +46,7 @@
     <!-- ============ 右：导航树 / 项目 AI（右上标签切换，可收起） ============ -->
     <Panel Grid.Column="1">
       <Border
-          Width="264"
+          Width="280"
           Background="{DynamicResource Ariadne.BackgroundSurface}"
           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
           BorderThickness="1,0,0,0"

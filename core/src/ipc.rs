@@ -257,6 +257,18 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
                 params(request.params)?;
             ok(commands::resolve_confirmation(state, params.request)?)
         }
+        // 路径 B：改写被拒确认项输出并通过。
+        "override_confirmation_output" => {
+            let params: RequestParam<commands::OverrideConfirmationOutputRequest> =
+                params(request.params)?;
+            ok(commands::override_confirmation_output(state, params.request)?)
+        }
+        // 路径 A：注入外部正文并从指定节点下游重跑。
+        "resume_from_node" => {
+            let params: RequestParam<commands::ResumeFromNodeRequest> =
+                params(request.params)?;
+            ok(commands::resume_from_node(state, params.request)?)
+        }
         "get_git_history" => ok(commands::get_git_history(state)?),
         "get_git_branch_graph" => {
             let params: LimitParams = params(request.params)?;

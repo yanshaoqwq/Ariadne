@@ -15,7 +15,7 @@
               Background="{DynamicResource Ariadne.CanvasBackground}"
               ClipToBounds="True">
 
-        <!-- 顶部右上角图标工具条：导入图 / 导出图 / 保存 -->
+        <!-- 顶部右上角图标工具条：三个保持一致的描边图标风格，保存用 accent 色描边区分 -->
         <StackPanel x:Name="TopToolbar" Canvas.Top="12" Canvas.Right="16" Orientation="Horizontal" Spacing="4">
           <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
@@ -23,15 +23,15 @@
           <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Export}" />
           </Button>
-          <Button Classes="icon-btn accent" ToolTip.Tip="{Binding SaveText}">
+          <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
           </Button>
         </StackPanel>
 
-        <!-- 起始节点（节点库拖出的入口类型节点示例）：
-             左上=执行按钮，右上=三角形执行输出端口，体内含名称/工作目录/工具开关。 -->
+        <!-- 起始节点（节点库拖出的入口类型节点）：
+             外观优化：更紧凑的标题条、细腻的分隔线、圆润的整体比例。 -->
         <Border Canvas.Left="140" Canvas.Top="84"
-                Width="200"
+                Width="196"
                 DataContext="{Binding StartNode}"
                 Background="{DynamicResource Ariadne.NodeBackground}"
                 BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
@@ -43,37 +43,46 @@
             <Border DockPanel.Dock="Top"
                     Background="{DynamicResource Ariadne.AccentLight}"
                     CornerRadius="8,8,0,0"
-                    Padding="8,6">
+                    Padding="9,7">
               <Grid ColumnDefinitions="Auto,*,Auto">
-                <!-- 左上：执行按钮 -->
-                <Button Grid.Column="0" Classes="primary" Width="26" Height="26" Padding="0"
+                <!-- 左：执行按钮，圆形，小而精致 -->
+                <Button Grid.Column="0" Classes="primary" Width="24" Height="24" Padding="0"
+                        CornerRadius="12"
                         Command="{Binding RunCommand}" ToolTip.Tip="{Binding RunText}">
-                  <Path Width="12" Height="12" Stretch="Uniform"
+                  <Path Width="10" Height="10" Stretch="Uniform"
                         Fill="{DynamicResource Ariadne.TextOnAccent}"
-                        Data="M8,5 L19,12 L8,19 Z" />
+                        Data="M8,5 L18,12 L8,19 Z" />
                 </Button>
+                <!-- 中：节点标题 -->
                 <TextBlock Grid.Column="1" Text="{Binding TitleText}"
-                           FontWeight="SemiBold" FontSize="12" Margin="8,0,0,0"
-                           Foreground="{DynamicResource Ariadne.AccentPrimary}" VerticalAlignment="Center" />
-                <!-- 右上：三角形执行输出端口 -->
-                <Path Grid.Column="2" Width="13" Height="13" Stretch="Uniform"
+                           FontWeight="SemiBold" FontSize="12" Margin="8,0,4,0"
+                           Foreground="{DynamicResource Ariadne.AccentPrimary}"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <!-- 右：空心三角执行输出端口 -->
+                <Path Grid.Column="2" Width="12" Height="12" Stretch="Uniform"
                       VerticalAlignment="Center"
-                      Fill="{DynamicResource Ariadne.AccentPrimary}"
+                      Fill="Transparent"
+                      Stroke="{DynamicResource Ariadne.AccentPrimary}"
+                      StrokeThickness="1.5"
                       Data="M6,4 L18,12 L6,20 Z" ToolTip.Tip="exec-out" />
               </Grid>
             </Border>
-            <!-- 节点体：名称 + 工作目录 + 工具开关 -->
-            <StackPanel Margin="10,9" Spacing="8">
-              <StackPanel Spacing="3">
+            <!-- 细分隔线 -->
+            <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
+            <!-- 节点体：紧凑的字段区 -->
+            <StackPanel Margin="10,8" Spacing="7">
+              <StackPanel Spacing="2">
                 <TextBlock Text="{Binding NameLabel}" Classes="subtle" />
-                <TextBox Text="{Binding Name, Mode=TwoWay}" MinHeight="28" Padding="7,4" FontSize="12" />
+                <TextBox Text="{Binding Name, Mode=TwoWay}" MinHeight="26" Padding="7,3" FontSize="12"
+                         CornerRadius="{DynamicResource Ariadne.Radius.Small}" />
               </StackPanel>
-              <StackPanel Spacing="3">
+              <StackPanel Spacing="2">
                 <TextBlock Text="{Binding WorkDirLabel}" Classes="subtle" />
-                <TextBox Text="{Binding WorkDir, Mode=TwoWay}" MinHeight="28" Padding="7,4" FontSize="11"
-                         Classes="mono" PlaceholderText="{Binding WorkDirPlaceholder}" />
+                <TextBox Text="{Binding WorkDir, Mode=TwoWay}" MinHeight="26" Padding="7,3" FontSize="11"
+                         Classes="mono" PlaceholderText="{Binding WorkDirPlaceholder}"
+                         CornerRadius="{DynamicResource Ariadne.Radius.Small}" />
               </StackPanel>
-              <CheckBox IsChecked="{Binding ExposedAsTool, Mode=TwoWay}">
+              <CheckBox IsChecked="{Binding ExposedAsTool, Mode=TwoWay}" Margin="0,2,0,0">
                 <TextBlock Text="{Binding ExposeToolLabel}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center" />
               </CheckBox>
             </StackPanel>
@@ -167,7 +176,7 @@
     <!-- 右：项目 AI / 节点细节（可收起；收起后右缘悬浮左向箭头展开） -->
     <Panel Grid.Column="1">
       <Border
-          Width="264"
+          Width="280"
           Margin="0,14,14,14"
           Classes="card"
           Padding="0"
