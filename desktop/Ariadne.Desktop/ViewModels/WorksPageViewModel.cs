@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -13,6 +14,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _statusText = string.Empty;
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
+    private string _projectMemory = string.Empty;
+    private string _quickEditInstruction = string.Empty;
+    private string _quickEditDiff = string.Empty;
+    private string _exportFormat = "markdown";
+    private string _currentDocumentId = string.Empty;
+    private string _documentTitle;
     private string _savedSnapshot = string.Empty;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
@@ -23,20 +30,31 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _displayNames = displayNames;
         _backend = backend;
         _projectAiAnswer = displayNames.Text("ui.works.project_ai.empty");
+        _documentTitle = displayNames.Text("ui.works.no_document_selected");
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
-        ImportCommand = new RelayCommand(() => _ = ImportAsync());
+        ImportCommand = new RelayCommand(() => _ = LoadWorksTreeAsync());
         ExportCommand = new RelayCommand(() => _ = ExportAsync());
         SaveCommand = new RelayCommand(() => _ = SaveAsync());
         ReadModeCommand = new RelayCommand(() => IsEditMode = false);
         EditModeCommand = new RelayCommand(() => IsEditMode = true);
         CopyCommand = new RelayCommand(() => StatusText = CtxCopyText);
         SelectAllCommand = new RelayCommand(() => StatusText = CtxSelectAllText);
-        QuickAiCommand = new RelayCommand(() => StatusText = QuickAiHint);
+        QuickAiCommand = new RelayCommand(() => _ = QuickEditAsync());
         InsertOutlineCommand = new RelayCommand(() => StatusText = OutlineText);
         ToggleEditCommand = new RelayCommand(() => IsEditMode = !IsEditMode);
         SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync());
+        ApplyQuickEditCommand = new RelayCommand(() => _ = ApplyQuickEditAsync());
+        SaveProjectMemoryCommand = new RelayCommand(() => _ = SaveProjectMemoryAsync());
+        WorksTreeNodes = new ObservableCollection<WorksTreeItemViewModel>();
+        ExportFormats = new ObservableCollection<ExportFormatOption>
+        {
+            new("markdown", displayNames.Text("ui.works.export_format.markdown")),
+            new("epub", displayNames.Text("ui.works.export_format.epub")),
+            new("pdf", displayNames.Text("ui.works.export_format.pdf")),
+        };
+        _ = InitializeAsync();
         CaptureSnapshot();
     }
 
@@ -92,6 +110,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public RelayCommand SendProjectAiCommand { get; }
 
+    public RelayCommand ApplyQuickEditCommand { get; }
+
+    public RelayCommand SaveProjectMemoryCommand { get; }
+
+    public ObservableCollection<WorksTreeItemViewModel> WorksTreeNodes { get; }
+
+    public ObservableCollection<ExportFormatOption> ExportFormats { get; }
+
     public bool IsEditMode
     {
         get => _isEditMode;
@@ -128,6 +154,42 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         set => SetProperty(ref _projectAiAnswer, value);
     }
 
+    public string ProjectMemory
+    {
+        get => _projectMemory;
+        set => SetProperty(ref _projectMemory, value);
+    }
+
+    public string QuickEditInstruction
+    {
+        get => _quickEditInstruction;
+        set => SetProperty(ref _quickEditInstruction, value);
+    }
+
+    public string QuickEditDiff
+    {
+        get => _quickEditDiff;
+        set => SetProperty(ref _quickEditDiff, value);
+    }
+
+    public string ExportFormat
+    {
+        get => _exportFormat;
+        set => SetProperty(ref _exportFormat, value);
+    }
+
+    public string DocumentTitle
+    {
+        get => _documentTitle;
+        set
+        {
+            if (SetProperty(ref _documentTitle, value))
+            {
+                OnPropertyChanged(nameof(CurrentDocumentText));
+            }
+        }
+    }
+
     public string SidebarTitle => _displayNames.Text("ui.works.sidebar.title");
 
     public string ImportText => _displayNames.Text("ui.works.import_manuscript");
@@ -148,11 +210,23 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public string NoDocumentText => _displayNames.Text("ui.works.no_document_selected");
 
+    public string CurrentDocumentText => DocumentTitle;
+
     public string EmptyIndexText => _displayNames.Text("ui.works.empty_index");
 
     public string QuickAiHint => _displayNames.Text("ui.works.quick_ai_hint");
 
     public string ProjectAiPlaceholder => _displayNames.Text("ui.works.project_ai.placeholder");
+
+    public string ExportFormatText => _displayNames.Text("ui.works.export_format");
+    public string ProjectMemoryText => _displayNames.Text("ui.works.project_memory");
+    public string ProjectMemoryPlaceholder => _displayNames.Text("ui.works.project_memory.placeholder");
+    public string SaveProjectMemoryText => _displayNames.Text("ui.works.save_project_memory");
+    public string QuickEditTitle => _displayNames.Text("ui.works.quick_edit.title");
+    public string QuickEditPlaceholder => _displayNames.Text("ui.works.quick_edit.placeholder");
+    public string QuickEditGenerateText => _displayNames.Text("ui.works.quick_edit.generate");
+    public string QuickEditDiffText => _displayNames.Text("ui.works.quick_edit.diff");
+    public string QuickEditApplyText => _displayNames.Text("ui.works.quick_edit.apply");
 
     // 右键菜单文案（阅读/修改器）
     public string CtxCopyText => _displayNames.Text("ui.works.context.copy");
@@ -161,14 +235,40 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string CtxInsertOutlineText => _displayNames.Text("ui.works.context.insert_outline");
     public string CtxToggleEditText => _displayNames.Text("ui.works.context.toggle_edit");
 
-    private async Task ImportAsync()
+    private async Task InitializeAsync()
+    {
+        await LoadWorksTreeAsync().ConfigureAwait(true);
+        await LoadProjectMemoryAsync().ConfigureAwait(true);
+    }
+
+    private async Task LoadWorksTreeAsync()
+    {
+        try
+        {
+            var tree = await _backend.GetWorksTreeAsync().ConfigureAwait(true);
+            WorksTreeNodes.Clear();
+            foreach (var item in FlattenTree(tree))
+            {
+                WorksTreeNodes.Add(item);
+            }
+            StatusText = WorksTreeNodes.Count == 0 ? EmptyIndexText : $"{WorksTreeNodes.Count}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task LoadDocumentAsync(WorksTreeItemViewModel item)
     {
         try
         {
             _suppressDirtyTracking = true;
             try
             {
-                DocumentContent = await _backend.GetDocumentContentAsync("documents/sample.md").ConfigureAwait(true);
+                DocumentContent = await _backend.GetDocumentContentByPathAsync(item.Path).ConfigureAwait(true);
+                _currentDocumentId = ProjectRelativePath(item.Path);
+                DocumentTitle = item.Title;
             }
             finally
             {
@@ -187,7 +287,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
-            await _backend.SaveDocumentContentAsync("documents/sample.md", DocumentContent).ConfigureAwait(true);
+            if (string.IsNullOrWhiteSpace(_currentDocumentId))
+            {
+                StatusText = NoDocumentText;
+                return;
+            }
+            await _backend.SaveDocumentContentAsync(_currentDocumentId, DocumentContent).ConfigureAwait(true);
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.save");
         }
@@ -201,7 +306,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
-            var report = await _backend.ExportChaptersAsync(Array.Empty<string>(), "combined-markdown", "markdown").ConfigureAwait(true);
+            var report = await _backend.ExportChaptersAsync(Array.Empty<string>(), $"combined-{ExportFormat}", ExportFormat).ConfigureAwait(true);
             StatusText = _displayNames.Format("ui.works.export_done", new Dictionary<string, string>
             {
                 ["format"] = report.Format,
@@ -221,6 +326,94 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             var result = await _backend.ProjectAiChatAsync(ProjectAiMessage).ConfigureAwait(true);
             ProjectAiAnswer = result.Answer;
             StatusText = _displayNames.Text("ui.common.configured");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task QuickEditAsync()
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(DocumentContent) || string.IsNullOrWhiteSpace(QuickEditInstruction))
+            {
+                StatusText = QuickAiHint;
+                return;
+            }
+            var result = await _backend.QuickEditAsync(new QuickEditRequest(
+                DocumentContent,
+                QuickEditInstruction,
+                string.IsNullOrWhiteSpace(_currentDocumentId) ? null : _currentDocumentId)).ConfigureAwait(true);
+            _pendingQuickEdit = result;
+            QuickEditDiff = result.Diff;
+            StatusText = QuickEditDiffText;
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private QuickEditResult? _pendingQuickEdit;
+
+    private async Task ApplyQuickEditAsync()
+    {
+        if (_pendingQuickEdit is null)
+        {
+            StatusText = QuickAiHint;
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_currentDocumentId))
+        {
+            StatusText = NoDocumentText;
+            return;
+        }
+        try
+        {
+            await _backend.ApplyQuickEditAsync(
+                _currentDocumentId,
+                null,
+                DocumentContent,
+                new TextRange(0, DocumentContent.Length),
+                _pendingQuickEdit).ConfigureAwait(true);
+            _suppressDirtyTracking = true;
+            try
+            {
+                DocumentContent = await _backend.GetDocumentContentAsync(_currentDocumentId).ConfigureAwait(true);
+            }
+            finally
+            {
+                _suppressDirtyTracking = false;
+            }
+            CaptureSnapshot();
+            StatusText = _displayNames.Text("ui.common.configured");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task LoadProjectMemoryAsync()
+    {
+        try
+        {
+            ProjectMemory = await _backend.ReadProjectMemoryAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task SaveProjectMemoryAsync()
+    {
+        try
+        {
+            await _backend.WriteProjectMemoryAsync(ProjectMemory).ConfigureAwait(true);
+            StatusText = _displayNames.Text("ui.common.save");
         }
         catch (Exception ex)
         {
@@ -282,4 +475,69 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             RefreshDirtyState();
         }
     }
+
+    private IEnumerable<WorksTreeItemViewModel> FlattenTree(WorksTreeNode root)
+    {
+        foreach (var item in FlattenTree(root, 0))
+        {
+            yield return item;
+        }
+    }
+
+    private IEnumerable<WorksTreeItemViewModel> FlattenTree(WorksTreeNode node, int depth)
+    {
+        yield return new WorksTreeItemViewModel(
+            node.NodeId,
+            node.Title,
+            node.Path,
+            new string(' ', Math.Max(0, depth) * 2),
+            () => _ = LoadDocumentAsync(node.Path, node.Title));
+        foreach (var child in node.Children)
+        {
+            foreach (var item in FlattenTree(child, depth + 1))
+            {
+                yield return item;
+            }
+        }
+    }
+
+    private Task LoadDocumentAsync(string path, string title)
+    {
+        return LoadDocumentAsync(new WorksTreeItemViewModel(string.Empty, title, path, string.Empty, () => { }));
+    }
+
+    private static string ProjectRelativePath(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        foreach (var marker in new[] { "/documents/", "/planning/", "/workflows/" })
+        {
+            var index = normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index >= 0)
+            {
+                return normalized[(index + 1)..];
+            }
+        }
+        return normalized.TrimStart('/');
+    }
+}
+
+public sealed record ExportFormatOption(string Value, string Label);
+
+public sealed class WorksTreeItemViewModel
+{
+    public WorksTreeItemViewModel(string nodeId, string title, string path, string indent, Action open)
+    {
+        NodeId = nodeId;
+        Title = title;
+        Path = path;
+        Indent = indent;
+        OpenCommand = new RelayCommand(open);
+    }
+
+    public string NodeId { get; }
+    public string Title { get; }
+    public string Path { get; }
+    public string Indent { get; }
+    public string DisplayTitle => $"{Indent}{Title}";
+    public RelayCommand OpenCommand { get; }
 }

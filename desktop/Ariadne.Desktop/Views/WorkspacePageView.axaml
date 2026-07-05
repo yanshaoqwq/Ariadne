@@ -29,6 +29,9 @@
           <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}" Command="{Binding SaveCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
           </Button>
+          <Button Classes="secondary" Content="{Binding PauseText}" Command="{Binding PauseWorkflowCommand}" />
+          <Button Classes="danger" Content="{Binding StopText}" Command="{Binding StopWorkflowCommand}" />
+          <Button Classes="secondary" Content="{Binding ResumeText}" Command="{Binding ResumeWorkflowCommand}" />
         </StackPanel>
         <TextBlock Canvas.Left="18" Canvas.Bottom="18" Text="{Binding StatusText}" Classes="caption" />
 
@@ -262,7 +265,33 @@
                 </DockPanel>
               </Border>
               <ScrollViewer Margin="12,10">
-                <TextBlock Text="{Binding ProjectAiAnswer}" Classes="caption" TextWrapping="Wrap" />
+                <StackPanel Spacing="12">
+                  <TextBlock Text="{Binding ProjectAiAnswer}" Classes="caption" TextWrapping="Wrap" />
+                  <Separator />
+                  <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock Grid.Column="0" Text="{Binding ConfirmationsText}" Classes="subtitle" />
+                    <Button Grid.Column="1" Classes="secondary" Content="{Binding RefreshConfirmationsText}" Command="{Binding RefreshConfirmationsCommand}" />
+                  </Grid>
+                  <ItemsControl ItemsSource="{Binding Confirmations}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate DataType="{x:Type vm:ConfirmationItemViewModel}">
+                        <Button Classes="nav" Classes.selected="{Binding IsSelected}" Command="{Binding SelectCommand}" HorizontalContentAlignment="Left">
+                          <StackPanel Spacing="2">
+                            <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding State}" Classes="caption" />
+                          </StackPanel>
+                        </Button>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <TextBlock Text="{Binding ConfirmationDiffText}" Classes="caption" />
+                  <TextBox Text="{Binding SelectedConfirmation.Diff}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" IsReadOnly="True" />
+                  <TextBox Text="{Binding ConfirmationReason, Mode=TwoWay}" PlaceholderText="{Binding ConfirmationReasonPlaceholder}" />
+                  <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button Classes="secondary" Content="{Binding RejectConfirmationText}" Command="{Binding RejectConfirmationCommand}" />
+                    <Button Classes="primary" Content="{Binding ApproveConfirmationText}" Command="{Binding ApproveConfirmationCommand}" />
+                  </StackPanel>
+                </StackPanel>
               </ScrollViewer>
             </DockPanel>
 
@@ -271,6 +300,29 @@
                 <TextBlock Text="{Binding SelectedNodeTitle}" Classes="subtitle" TextWrapping="Wrap" />
                 <StackPanel IsVisible="{Binding HasSelectedNode}" Spacing="8">
                   <Button Classes="secondary" Content="{Binding RunText}" Command="{Binding RunSelectedNodeCommand}" />
+                  <TextBlock Text="{Binding PromptTemplateText}" Classes="caption" />
+                  <TextBox Text="{Binding SelectedNode.PromptTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="86" />
+                  <TextBlock Text="{Binding ModelIdText}" Classes="caption" />
+                  <TextBox Text="{Binding SelectedNode.ModelId, Mode=TwoWay}" />
+                  <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                    <StackPanel Grid.Column="0" Spacing="4">
+                      <TextBlock Text="{Binding NodeBudgetText}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Spacing="4">
+                      <TextBlock Text="{Binding NodeTimeoutText}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.TimeoutMs, Mode=TwoWay}" />
+                    </StackPanel>
+                  </Grid>
+                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                    <CheckBox Grid.Column="0" IsChecked="{Binding SelectedNode.BreakpointEnabled, Mode=TwoWay}" Content="{Binding BreakpointText}" />
+                    <Button Grid.Column="1" Classes="secondary" Content="{Binding SaveText}" Command="{Binding ToggleBreakpointCommand}" />
+                  </Grid>
+                  <Button Classes="primary" Content="{Binding ApplyNodeConfigText}" Command="{Binding ApplyNodeConfigCommand}" />
+                  <Button Classes="secondary" Content="{Binding ExportSelectionText}" Command="{Binding ExportSelectionCommand}" />
+                  <Button Classes="secondary" Content="{Binding SubworkflowText}" Command="{Binding PackSelectionCommand}" />
+                  <TextBox Text="{Binding AnnotationTitle, Mode=TwoWay}" PlaceholderText="{Binding AnnotationTitlePlaceholder}" />
+                  <Button Classes="secondary" Content="{Binding AddAnnotationText}" Command="{Binding AddAnnotationCommand}" />
                   <Button Classes="danger" Content="{Binding DeleteText}" Command="{Binding DeleteSelectedNodeCommand}" />
                 </StackPanel>
                 <TextBlock Text="{Binding NoNodeSelectedText}" Classes="subtle" TextWrapping="Wrap" IsVisible="{Binding !HasSelectedNode}" />

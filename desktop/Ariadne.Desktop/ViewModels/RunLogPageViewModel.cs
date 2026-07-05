@@ -25,6 +25,7 @@ public sealed class RunLogPageViewModel : ViewModelBase
             new("error", displayNames.Text("ui.level.error")),
         };
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync());
+        MarkReadCommand = new RelayCommand(() => _ = MarkReadAsync());
         _ = RefreshAsync();
     }
 
@@ -35,6 +36,8 @@ public sealed class RunLogPageViewModel : ViewModelBase
     public string AllLevelsText => _displayNames.Text("ui.run_log.all_levels");
 
     public string RefreshText => _displayNames.Text("ui.common.refresh");
+
+    public string MarkReadText => _displayNames.Text("ui.run_log.mark_read");
 
     public string EmptyText => _displayNames.Text("ui.run_log.empty");
 
@@ -49,6 +52,8 @@ public sealed class RunLogPageViewModel : ViewModelBase
     public ObservableCollection<RunLogLevelOption> LevelOptions { get; }
 
     public RelayCommand RefreshCommand { get; }
+
+    public RelayCommand MarkReadCommand { get; }
 
     public string SearchQuery
     {
@@ -86,6 +91,19 @@ public sealed class RunLogPageViewModel : ViewModelBase
                 Logs.Add(log);
             }
             StatusText = Logs.Count == 0 ? EmptyText : $"{Logs.Count}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task MarkReadAsync()
+    {
+        try
+        {
+            await _backend.MarkRunLogsReadAsync().ConfigureAwait(true);
+            await RefreshAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {

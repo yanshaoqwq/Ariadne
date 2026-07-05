@@ -12,10 +12,20 @@
       <!-- 顶部工具条 -->
       <Border DockPanel.Dock="Top" Background="{DynamicResource Ariadne.BackgroundSurface}" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" Padding="16,8">
         <Grid ColumnDefinitions="*,Auto">
-          <TextBlock Grid.Column="0" Text="{Binding NoDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
+          <TextBlock Grid.Column="0" Text="{Binding CurrentDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
             <Button Classes="subtle" Padding="10,5" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
             <Button Classes="subtle" Padding="10,5" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
+            <ComboBox ItemsSource="{Binding ExportFormats}"
+                      SelectedValue="{Binding ExportFormat, Mode=TwoWay}"
+                      SelectedValueBinding="{Binding Value}"
+                      MinWidth="112">
+              <ComboBox.ItemTemplate>
+                <DataTemplate DataType="{x:Type vm:ExportFormatOption}">
+                  <TextBlock Text="{Binding Label}" />
+                </DataTemplate>
+              </ComboBox.ItemTemplate>
+            </ComboBox>
             <Border Width="1" Margin="6,4" Background="{DynamicResource Ariadne.BorderMuted}" />
             <!-- 图标按钮：导入稿件 / 导出合并 / 保存 -->
             <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" Command="{Binding ImportCommand}">
@@ -55,6 +65,18 @@
                      BorderThickness="0"
                      Background="Transparent"
                      PlaceholderText="{Binding QuickAiHint}" />
+            <Border Classes="layer" Padding="14">
+              <StackPanel Spacing="10">
+                <TextBlock Text="{Binding QuickEditTitle}" Classes="subtitle" />
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                  <TextBox Grid.Column="0" Text="{Binding QuickEditInstruction, Mode=TwoWay}" PlaceholderText="{Binding QuickEditPlaceholder}" />
+                  <Button Grid.Column="1" Classes="secondary" Content="{Binding QuickEditGenerateText}" Command="{Binding QuickAiCommand}" />
+                </Grid>
+                <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption" />
+                <TextBox Text="{Binding QuickEditDiff}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" IsReadOnly="True" />
+                <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding QuickEditApplyText}" Command="{Binding ApplyQuickEditCommand}" />
+              </StackPanel>
+            </Border>
           </StackPanel>
         </Border>
       </ScrollViewer>
@@ -101,13 +123,15 @@
             </Border>
             <ScrollViewer Margin="8,4">
               <StackPanel Spacing="1">
-                <Button Classes="nav" Command="{Binding SelectAllCommand}">
-                  <StackPanel Orientation="Horizontal" Spacing="8">
-                    <Path Classes="icon" Width="14" Height="14"
-                          Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
-                    <TextBlock Text="{Binding NoDocumentText}" Classes="caption" VerticalAlignment="Center" />
-                  </StackPanel>
-                </Button>
+                <ItemsControl ItemsSource="{Binding WorksTreeNodes}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:WorksTreeItemViewModel}">
+                      <Button Classes="nav" Command="{Binding OpenCommand}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
+                        <TextBlock Text="{Binding DisplayTitle}" Classes="caption" TextWrapping="Wrap" />
+                      </Button>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
                 <TextBlock Text="{Binding EmptyIndexText}" Classes="subtle" Margin="12,12,0,0" />
               </StackPanel>
             </ScrollViewer>
@@ -135,7 +159,17 @@
               </DockPanel>
             </Border>
             <ScrollViewer Margin="12,8">
-              <TextBlock Text="{Binding ProjectAiAnswer}" Classes="subtle" TextWrapping="Wrap" />
+              <StackPanel Spacing="12">
+                <TextBlock Text="{Binding ProjectAiAnswer}" Classes="subtle" TextWrapping="Wrap" />
+                <Separator />
+                <TextBlock Text="{Binding ProjectMemoryText}" Classes="subtitle" />
+                <TextBox Text="{Binding ProjectMemory, Mode=TwoWay}"
+                         PlaceholderText="{Binding ProjectMemoryPlaceholder}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         MinHeight="140" />
+                <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding SaveProjectMemoryText}" Command="{Binding SaveProjectMemoryCommand}" />
+              </StackPanel>
             </ScrollViewer>
           </DockPanel>
         </Grid>

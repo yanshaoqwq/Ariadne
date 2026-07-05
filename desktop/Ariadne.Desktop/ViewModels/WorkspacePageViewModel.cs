@@ -21,7 +21,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private int _nextNodeNumber = 1;
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
+    private string _currentRunId = string.Empty;
+    private string _confirmationReason = string.Empty;
+    private string _annotationTitle = string.Empty;
     private WorkflowNodeViewModel? _selectedNode;
+    private ConfirmationItemViewModel? _selectedConfirmation;
 
     public WorkspacePageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -38,10 +42,22 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         AddStartNodeCommand = new RelayCommand(() => AddNode("start"));
         DeleteSelectedNodeCommand = new RelayCommand(DeleteSelectedNode);
         RunSelectedNodeCommand = new RelayCommand(() => _ = RunSelectedNodeAsync());
+        PauseWorkflowCommand = new RelayCommand(() => _ = PauseWorkflowAsync());
+        StopWorkflowCommand = new RelayCommand(() => _ = StopWorkflowAsync());
+        ResumeWorkflowCommand = new RelayCommand(() => _ = ResumeWorkflowAsync());
         SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync());
+        ApplyNodeConfigCommand = new RelayCommand(() => _ = ApplyNodeConfigAsync());
+        ToggleBreakpointCommand = new RelayCommand(() => _ = ToggleBreakpointAsync());
+        AddAnnotationCommand = new RelayCommand(() => _ = AddAnnotationAsync());
+        ExportSelectionCommand = new RelayCommand(() => _ = ExportWorkflowAsync());
+        PackSelectionCommand = new RelayCommand(() => _ = PackSelectionAsync());
+        RefreshConfirmationsCommand = new RelayCommand(() => _ = LoadConfirmationsAsync());
+        ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"));
+        RejectConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("reject"));
         _projectAiAnswer = displayNames.Text("ui.workspace.project_ai.empty");
 
         Nodes = new ObservableCollection<WorkflowNodeViewModel>();
+        Confirmations = new ObservableCollection<ConfirmationItemViewModel>();
         EntryNodes = new ObservableCollection<NodeLibraryItemViewModel>
         {
             new("start", displayNames.Text("ui.workspace.start_node.title"), () => AddNode("start")),
@@ -71,6 +87,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         AddNode("start", capture: false);
         CaptureSnapshot();
+        _ = LoadWorkflowAsync();
+        _ = LoadConfirmationsAsync();
     }
 
     public string Title => _displayNames.Text("ui.nav.workspace");
@@ -96,6 +114,28 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string NoNodeSelectedText => _displayNames.Text("ui.workspace.no_node_selected");
     public string SelectedNodeTitle => SelectedNode?.Label ?? NoNodeSelectedText;
     public string DeleteText => _displayNames.Text("ui.workspace.context.delete");
+    public string PauseText => _displayNames.Text("ui.workspace.pause");
+    public string StopText => _displayNames.Text("ui.workspace.stop");
+    public string ResumeText => _displayNames.Text("ui.workspace.resume");
+    public string ConfirmationsText => _displayNames.Text("ui.workspace.confirmations");
+    public string ConfirmationsEmptyText => _displayNames.Text("ui.workspace.confirmations.empty");
+    public string RefreshConfirmationsText => _displayNames.Text("ui.workspace.confirmations.reload");
+    public string ConfirmationDiffText => _displayNames.Text("ui.workspace.confirmation.diff");
+    public string ConfirmationReasonText => _displayNames.Text("ui.workspace.confirmation.reason");
+    public string ConfirmationReasonPlaceholder => _displayNames.Text("ui.workspace.confirmation.reason.placeholder");
+    public string ApproveConfirmationText => _displayNames.Text("ui.workspace.confirmation.approve");
+    public string RejectConfirmationText => _displayNames.Text("ui.workspace.confirmation.reject");
+    public string PromptTemplateText => _displayNames.Text("ui.workspace.prompt_template");
+    public string ModelIdText => _displayNames.Text("ui.workspace.model_id");
+    public string NodeBudgetText => _displayNames.Text("ui.workspace.node_budget");
+    public string NodeTimeoutText => _displayNames.Text("ui.workspace.node_timeout");
+    public string BreakpointText => _displayNames.Text("ui.workspace.breakpoint");
+    public string ApplyNodeConfigText => _displayNames.Text("ui.workspace.apply_node_config");
+    public string ExportSelectionText => _displayNames.Text("ui.workspace.export_selection");
+    public string AddAnnotationText => _displayNames.Text("ui.workspace.add_annotation");
+    public string AnnotationTitleText => _displayNames.Text("ui.workspace.annotation_title");
+    public string AnnotationTitlePlaceholder => _displayNames.Text("ui.workspace.annotation_title.placeholder");
+    public string SubworkflowText => _displayNames.Text("ui.workspace.subworkflow");
 
     public bool IsRightPanelOpen { get => _isRightPanelOpen; set => SetProperty(ref _isRightPanelOpen, value); }
     public RelayCommand ToggleRightPanelCommand { get; }
@@ -124,11 +164,25 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand AddStartNodeCommand { get; }
     public RelayCommand DeleteSelectedNodeCommand { get; }
     public RelayCommand RunSelectedNodeCommand { get; }
+    public RelayCommand PauseWorkflowCommand { get; }
+    public RelayCommand StopWorkflowCommand { get; }
+    public RelayCommand ResumeWorkflowCommand { get; }
     public RelayCommand SendProjectAiCommand { get; }
+    public RelayCommand ApplyNodeConfigCommand { get; }
+    public RelayCommand ToggleBreakpointCommand { get; }
+    public RelayCommand AddAnnotationCommand { get; }
+    public RelayCommand ExportSelectionCommand { get; }
+    public RelayCommand PackSelectionCommand { get; }
+    public RelayCommand RefreshConfirmationsCommand { get; }
+    public RelayCommand ApproveConfirmationCommand { get; }
+    public RelayCommand RejectConfirmationCommand { get; }
 
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
     public string ProjectAiMessage { get => _projectAiMessage; set => SetProperty(ref _projectAiMessage, value); }
     public string ProjectAiAnswer { get => _projectAiAnswer; set => SetProperty(ref _projectAiAnswer, value); }
+    public string CurrentRunId { get => _currentRunId; set => SetProperty(ref _currentRunId, value); }
+    public string ConfirmationReason { get => _confirmationReason; set => SetProperty(ref _confirmationReason, value); }
+    public string AnnotationTitle { get => _annotationTitle; set => SetProperty(ref _annotationTitle, value); }
 
     public bool HasUnsavedChanges
     {
@@ -140,6 +194,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<NodeLibraryItemViewModel> EntryNodes { get; }
     public ObservableCollection<NodeLibraryItemViewModel> WritingAgents { get; }
     public ObservableCollection<NodeLibraryItemViewModel> UtilityNodes { get; }
+    public ObservableCollection<ConfirmationItemViewModel> Confirmations { get; }
 
     public WorkflowNodeViewModel? SelectedNode
     {
@@ -155,6 +210,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 
     public bool HasSelectedNode => SelectedNode is not null;
+
+    public ConfirmationItemViewModel? SelectedConfirmation
+    {
+        get => _selectedConfirmation;
+        private set => SetProperty(ref _selectedConfirmation, value);
+    }
 
     public string CtxAddNodeText => _displayNames.Text("ui.workspace.context.add_node");
     public string CtxAddStartText => _displayNames.Text("ui.workspace.context.add_start");
@@ -231,7 +292,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
-            await _backend.SaveWorkflowGraphAsync(BuildGraph()).ConfigureAwait(true);
+            var graph = BuildGraph();
+            await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
+            await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true);
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.save");
         }
@@ -246,10 +309,15 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             var selected = SelectedNode is null ? Nodes.Select(node => node.Id).ToArray() : new[] { SelectedNode.Id };
-            await _backend.SaveWorkflowGraphAsync(BuildGraph()).ConfigureAwait(true);
+            var graph = BuildGraph();
+            await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
+            await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true);
             CaptureSnapshot();
             await _backend.ExportWorkflowSelectionAsync(DefaultWorkflowId, selected).ConfigureAwait(true);
-            StatusText = _displayNames.Text("ui.common.export");
+            StatusText = _displayNames.Format("ui.workspace.exported_selection", new Dictionary<string, string>
+            {
+                ["count"] = selected.Length.ToString(),
+            });
         }
         catch (Exception ex)
         {
@@ -270,9 +338,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             var startNodeId = node.NodeType == "start" ? node.Id : null;
-            await _backend.SaveWorkflowGraphAsync(BuildGraph()).ConfigureAwait(true);
+            var graph = BuildGraph();
+            await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
+            await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true);
             CaptureSnapshot();
             var run = await _backend.RunWorkflowAsync(DefaultWorkflowId, startNodeId).ConfigureAwait(true);
+            CurrentRunId = run.RunId;
             node.StatusText = run.Status;
             StatusText = run.Status;
         }
@@ -283,13 +354,48 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
+    private async Task PauseWorkflowAsync()
+    {
+        await RunControlAsync((workflowId, runId) => _backend.PauseWorkflowAsync(workflowId, runId, StatusText));
+    }
+
+    private async Task StopWorkflowAsync()
+    {
+        await RunControlAsync((workflowId, runId) => _backend.StopWorkflowAsync(workflowId, runId, StatusText));
+    }
+
+    private async Task ResumeWorkflowAsync()
+    {
+        await RunControlAsync((workflowId, runId) => _backend.ResumeWorkflowAsync(workflowId, runId));
+    }
+
+    private async Task RunControlAsync(Func<string, string, Task<WorkflowRunStarted>> action)
+    {
+        if (string.IsNullOrWhiteSpace(CurrentRunId))
+        {
+            StatusText = _displayNames.Text("ui.common.none");
+            return;
+        }
+        try
+        {
+            var result = await action(DefaultWorkflowId, CurrentRunId).ConfigureAwait(true);
+            StatusText = result.Status;
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
     private async Task SendProjectAiAsync()
     {
         try
         {
             if (HasUnsavedChanges)
             {
-                await _backend.SaveWorkflowGraphAsync(BuildGraph()).ConfigureAwait(true);
+                var graph = BuildGraph();
+                await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
+                await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true);
                 CaptureSnapshot();
             }
             var result = await _backend.ProjectAiChatAsync(
@@ -297,6 +403,148 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 ProjectAiMessage.Contains("/run", StringComparison.OrdinalIgnoreCase) ? DefaultWorkflowId : null).ConfigureAwait(true);
             ProjectAiAnswer = result.Answer;
             StatusText = result.WorkflowRun?.Status ?? _displayNames.Text("ui.common.configured");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task ApplyNodeConfigAsync()
+    {
+        if (SelectedNode is null)
+        {
+            StatusText = NoNodeSelectedText;
+            return;
+        }
+        try
+        {
+            await _backend.ApplyNodeDetailPatchAsync(DefaultWorkflowId, new NodeDetailPatch(
+                SelectedNode.Id,
+                SelectedNode.PromptTemplate,
+                new Dictionary<string, string>(),
+                new Dictionary<string, bool>(),
+                new Dictionary<string, string>(),
+                string.IsNullOrWhiteSpace(SelectedNode.ModelId) ? null : SelectedNode.ModelId,
+                ParseNullableDouble(SelectedNode.BudgetUsd),
+                ParseNullableLong(SelectedNode.TimeoutMs))).ConfigureAwait(true);
+            await LoadWorkflowAsync().ConfigureAwait(true);
+            StatusText = _displayNames.Text("ui.common.save");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task ToggleBreakpointAsync()
+    {
+        if (SelectedNode is null)
+        {
+            StatusText = NoNodeSelectedText;
+            return;
+        }
+        try
+        {
+            await _backend.SetNodeBreakpointAsync(DefaultWorkflowId, SelectedNode.Id, SelectedNode.BreakpointEnabled).ConfigureAwait(true);
+            StatusText = BreakpointText;
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task AddAnnotationAsync()
+    {
+        var selected = SelectedNode is null ? Nodes.Select(node => node.Id).ToArray() : new[] { SelectedNode.Id };
+        try
+        {
+            await _backend.UpsertCanvasAnnotationAsync(DefaultWorkflowId, new CanvasAnnotation(
+                $"annotation-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
+                string.IsNullOrWhiteSpace(AnnotationTitle) ? _displayNames.Text("ui.workspace.default_annotation_title") : AnnotationTitle,
+                selected,
+                new Dictionary<string, object?>())).ConfigureAwait(true);
+            StatusText = _displayNames.Text("ui.workspace.annotation_saved");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task PackSelectionAsync()
+    {
+        var selected = SelectedNode is null ? Nodes.Select(node => node.Id).ToArray() : new[] { SelectedNode.Id };
+        try
+        {
+            var title = _displayNames.Format("ui.workspace.subworkflow_title", new Dictionary<string, string>
+            {
+                ["count"] = selected.Length.ToString(),
+            });
+            var graph = await _backend.PackWorkflowSelectionAsync(DefaultWorkflowId, selected, null, title).ConfigureAwait(true);
+            ApplyGraph(graph);
+            CaptureSnapshot();
+            StatusText = _displayNames.Format("ui.workspace.packed_selection", new Dictionary<string, string>
+            {
+                ["count"] = selected.Length.ToString(),
+            });
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task LoadConfirmationsAsync()
+    {
+        try
+        {
+            var entries = await _backend.ListConfirmationsAsync().ConfigureAwait(true);
+            Confirmations.Clear();
+            foreach (var entry in entries)
+            {
+                Confirmations.Add(new ConfirmationItemViewModel(entry, SelectConfirmation));
+            }
+            StatusText = Confirmations.Count == 0 ? ConfirmationsEmptyText : $"{Confirmations.Count}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private void SelectConfirmation(ConfirmationItemViewModel item)
+    {
+        foreach (var confirmation in Confirmations)
+        {
+            confirmation.IsSelected = confirmation == item;
+        }
+        SelectedConfirmation = item;
+    }
+
+    private async Task ResolveSelectedConfirmationAsync(string decision)
+    {
+        if (SelectedConfirmation is null)
+        {
+            StatusText = ConfirmationsEmptyText;
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(CurrentRunId))
+        {
+            StatusText = _displayNames.Text("ui.common.none");
+            return;
+        }
+        try
+        {
+            var result = await _backend.ResolveConfirmationAsync(
+                DefaultWorkflowId,
+                CurrentRunId,
+                SelectedConfirmation.ConfirmationId,
+                decision,
+                string.IsNullOrWhiteSpace(ConfirmationReason) ? null : ConfirmationReason).ConfigureAwait(true);
+            StatusText = result.State;
+            await LoadConfirmationsAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
@@ -362,6 +610,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 {
                     Name = ReadString(graphNode.Data, "name", graphNode.Label ?? NodeLabel(graphNode.Type)),
                     ExposedAsTool = ReadBool(graphNode.Data, "expose_as_tool", graphNode.Type == "start"),
+                    PromptTemplate = ReadString(graphNode.Data, "prompt_template"),
+                    ModelId = ReadString(graphNode.Data, "model_id"),
+                    BudgetUsd = ReadString(graphNode.Data, "budget_usd"),
+                    TimeoutMs = ReadString(graphNode.Data, "timeout_ms"),
+                    BreakpointEnabled = ReadBool(graphNode.Data, "breakpoint", false),
                 };
                 node.SelectCommand = new RelayCommand(() => SelectNode(node));
                 node.RunCommand = new RelayCommand(() => _ = RunNodeAsync(node));
@@ -448,7 +701,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         if (value is JsonElement element)
         {
-            return element.ValueKind == JsonValueKind.String ? element.GetString() ?? fallback : fallback;
+            return element.ValueKind switch
+            {
+                JsonValueKind.String => element.GetString() ?? fallback,
+                JsonValueKind.Number => element.ToString(),
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                _ => fallback,
+            };
         }
         return value.ToString() ?? fallback;
     }
@@ -464,6 +724,16 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             return element.ValueKind == JsonValueKind.True || (element.ValueKind == JsonValueKind.False ? false : fallback);
         }
         return value is bool boolean ? boolean : fallback;
+    }
+
+    private static double? ParseNullableDouble(string text)
+    {
+        return double.TryParse(text, out var value) ? value : null;
+    }
+
+    private static long? ParseNullableLong(string text)
+    {
+        return long.TryParse(text, out var value) ? value : null;
     }
 }
 
@@ -488,6 +758,11 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     private string _name;
     private string _workDir;
     private bool _exposedAsTool;
+    private bool _breakpointEnabled;
+    private string _promptTemplate = string.Empty;
+    private string _modelId = string.Empty;
+    private string _budgetUsd = string.Empty;
+    private string _timeoutMs = string.Empty;
     private string _statusText = string.Empty;
     private double _x;
     private double _y;
@@ -528,6 +803,11 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public string Name { get => _name; set => SetProperty(ref _name, value); }
     public string WorkDir { get => _workDir; set => SetProperty(ref _workDir, value); }
     public bool ExposedAsTool { get => _exposedAsTool; set => SetProperty(ref _exposedAsTool, value); }
+    public bool BreakpointEnabled { get => _breakpointEnabled; set => SetProperty(ref _breakpointEnabled, value); }
+    public string PromptTemplate { get => _promptTemplate; set => SetProperty(ref _promptTemplate, value); }
+    public string ModelId { get => _modelId; set => SetProperty(ref _modelId, value); }
+    public string BudgetUsd { get => _budgetUsd; set => SetProperty(ref _budgetUsd, value); }
+    public string TimeoutMs { get => _timeoutMs; set => SetProperty(ref _timeoutMs, value); }
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
     public double X { get => _x; set => SetProperty(ref _x, value); }
     public double Y { get => _y; set => SetProperty(ref _y, value); }
@@ -546,6 +826,26 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         if (IsStartNode)
         {
             data["expose_as_tool"] = ExposedAsTool;
+        }
+        if (!string.IsNullOrWhiteSpace(PromptTemplate))
+        {
+            data["prompt_template"] = PromptTemplate;
+        }
+        if (!string.IsNullOrWhiteSpace(ModelId))
+        {
+            data["model_id"] = ModelId;
+        }
+        if (!string.IsNullOrWhiteSpace(BudgetUsd))
+        {
+            data["budget_usd"] = BudgetUsd;
+        }
+        if (!string.IsNullOrWhiteSpace(TimeoutMs))
+        {
+            data["timeout_ms"] = TimeoutMs;
+        }
+        if (BreakpointEnabled)
+        {
+            data["breakpoint"] = true;
         }
         return data;
     }
@@ -566,9 +866,32 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     protected override void OnPropertyChanged(string? propertyName = null)
     {
         base.OnPropertyChanged(propertyName);
-        if (propertyName is nameof(Name) or nameof(WorkDir) or nameof(ExposedAsTool) or nameof(X) or nameof(Y))
+        if (propertyName is nameof(Name) or nameof(WorkDir) or nameof(ExposedAsTool)
+            or nameof(PromptTemplate) or nameof(ModelId) or nameof(BudgetUsd) or nameof(TimeoutMs)
+            or nameof(BreakpointEnabled) or nameof(X) or nameof(Y))
         {
             _markDirty();
         }
     }
+}
+
+public sealed class ConfirmationItemViewModel : ViewModelBase
+{
+    private bool _isSelected;
+
+    public ConfirmationItemViewModel(ConfirmationLogEntry entry, Action<ConfirmationItemViewModel> select)
+    {
+        ConfirmationId = entry.ConfirmationId;
+        Summary = entry.Summary;
+        State = entry.State;
+        Diff = entry.Diff;
+        SelectCommand = new RelayCommand(() => select(this));
+    }
+
+    public string ConfirmationId { get; }
+    public string Summary { get; }
+    public string State { get; }
+    public string Diff { get; }
+    public RelayCommand SelectCommand { get; }
+    public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
 }

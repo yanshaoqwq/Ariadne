@@ -165,6 +165,15 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         }, cancellationToken);
     }
 
+    public Task<TemplateDetail> GetTemplateDetailAsync(string baseUrl, string id, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<TemplateDetail>("get_template_detail", new
+        {
+            request = new { base_url = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl },
+            id,
+        }, cancellationToken);
+    }
+
     public Task<TemplateInstallReport> InstallTemplateAsync(string baseUrl, string id, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<TemplateInstallReport>("install_template", new
@@ -177,6 +186,26 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
     public Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<WorkflowRunStarted>("run_workflow", new { workflow_id = workflowId, start_node_id = startNodeId }, cancellationToken);
+    }
+
+    public Task<WorkflowRunStarted> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowRunStarted>("pause_workflow", new { workflow_id = workflowId, run_id = runId, reason }, cancellationToken);
+    }
+
+    public Task<WorkflowRunStarted> StopWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowRunStarted>("stop_workflow", new { workflow_id = workflowId, run_id = runId, reason }, cancellationToken);
+    }
+
+    public Task<WorkflowRunStarted> ResumeWorkflowAsync(string workflowId, string runId, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowRunStarted>("resume_workflow", new { workflow_id = workflowId, run_id = runId }, cancellationToken);
+    }
+
+    public Task<WorkflowRunState> GetWorkflowRunStateAsync(string workflowId, string runId, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowRunState>("get_workflow_run_state", new { workflow_id = workflowId, run_id = runId }, cancellationToken);
     }
 
     public Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default)
@@ -194,6 +223,26 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         }, cancellationToken);
     }
 
+    public Task<string> ReadProjectMemoryAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<string>("read_project_memory", null, cancellationToken);
+    }
+
+    public Task<string> AppendProjectMemoryAsync(string content, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<string>("append_project_memory", new { content }, cancellationToken);
+    }
+
+    public Task WriteProjectMemoryAsync(string content, CancellationToken cancellationToken = default)
+    {
+        return InvokeCommandAsync("write_project_memory", new { content }, cancellationToken);
+    }
+
+    public Task<ProjectReference> ResolveProjectReferenceAsync(string reference, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProjectReference>("resolve_project_reference", new { reference }, cancellationToken);
+    }
+
     public Task<WorkflowGraphData> LoadWorkflowGraphAsync(string? workflowId = null, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<WorkflowGraphData>("load_workflow_graph", new { workflow_id = workflowId }, cancellationToken);
@@ -209,6 +258,21 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         return InvokeCommandAsync("validate_workflow_graph", new { graph_data = graphData }, cancellationToken);
     }
 
+    public Task ApplyNodeDetailPatchAsync(string workflowId, NodeDetailPatch patch, CancellationToken cancellationToken = default)
+    {
+        return InvokeCommandAsync("apply_node_detail_patch", new { workflow_id = workflowId, patch }, cancellationToken);
+    }
+
+    public Task UpsertCanvasAnnotationAsync(string workflowId, CanvasAnnotation annotation, CancellationToken cancellationToken = default)
+    {
+        return InvokeCommandAsync("upsert_canvas_annotation", new { workflow_id = workflowId, annotation }, cancellationToken);
+    }
+
+    public Task SetNodeBreakpointAsync(string workflowId, string nodeId, bool enabled, CancellationToken cancellationToken = default)
+    {
+        return InvokeCommandAsync("set_node_breakpoint", new { workflow_id = workflowId, node_id = nodeId, enabled }, cancellationToken);
+    }
+
     public Task<WorkflowGraphData> ExportWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<WorkflowGraphData>("export_workflow_selection", new
@@ -216,6 +280,32 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
             workflow_id = workflowId,
             selected_node_ids = selectedNodeIds,
         }, cancellationToken);
+    }
+
+    public Task<WorkflowGraphData> PackWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, string? subworkflowNodeId = null, string? title = null, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowGraphData>("pack_workflow_selection", new
+        {
+            workflow_id = workflowId,
+            selected_node_ids = selectedNodeIds,
+            subworkflow_node_id = subworkflowNodeId,
+            title,
+        }, cancellationToken);
+    }
+
+    public Task<WorksTreeNode> GetWorksTreeAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorksTreeNode>("get_works_tree", null, cancellationToken);
+    }
+
+    public Task<DocumentTreeNode> GetDocumentTreeAsync(string? projectId = null, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<DocumentTreeNode>("get_document_tree", new { project_id = projectId }, cancellationToken);
+    }
+
+    public Task<ChapterImportReport> ImportChapterAsync(ChapterImportRequest request, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ChapterImportReport>("import_chapter", new { request }, cancellationToken);
     }
 
     public Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string artifactId, string format = "markdown", CancellationToken cancellationToken = default)
@@ -236,6 +326,28 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
     public Task<string> GetDocumentContentAsync(string documentId, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<string>("get_document_content", new { document_id = documentId }, cancellationToken);
+    }
+
+    public Task<string> GetDocumentContentByPathAsync(string path, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<string>("get_document_content", new { path }, cancellationToken);
+    }
+
+    public Task<QuickEditResult> QuickEditAsync(QuickEditRequest request, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<QuickEditResult>("quick_edit", new { request }, cancellationToken);
+    }
+
+    public Task<PatchApplyReport> ApplyQuickEditAsync(string documentId, string? baseVersion, string text, TextRange range, QuickEditResult result, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<PatchApplyReport>("apply_quick_edit", new
+        {
+            document_id = documentId,
+            base_version = baseVersion,
+            text,
+            range,
+            result,
+        }, cancellationToken);
     }
 
     public Task<ArchivePoint> CreateCheckpointAsync(string message, CancellationToken cancellationToken = default)
@@ -262,6 +374,31 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         }, cancellationToken);
     }
 
+    public Task<IReadOnlyList<ConfirmationLogEntry>> ListConfirmationsAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredListAsync<ConfirmationLogEntry>("list_confirmations", null, cancellationToken);
+    }
+
+    public Task<ConfirmationLogEntry> GetConfirmationAsync(string confirmationId, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ConfirmationLogEntry>("get_confirmation", new { confirmation_id = confirmationId }, cancellationToken);
+    }
+
+    public Task<ConfirmationLogEntry> ResolveConfirmationAsync(string workflowId, string runId, string confirmationId, string decision, string? reviewReason = null, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ConfirmationLogEntry>("resolve_confirmation", new
+        {
+            request = new
+            {
+                workflow_id = workflowId,
+                run_id = runId,
+                confirmation_id = confirmationId,
+                decision,
+                review_reason = reviewReason,
+            },
+        }, cancellationToken);
+    }
+
     public Task<IReadOnlyList<UiRunLogEntry>> QueryRunLogsAsync(string? level = null, string? query = null, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredListAsync<UiRunLogEntry>("query_run_logs", new
@@ -272,6 +409,31 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
                 query = string.IsNullOrWhiteSpace(query) ? null : query,
             },
         }, cancellationToken);
+    }
+
+    public Task MarkRunLogsReadAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeCommandAsync("mark_run_logs_read", null, cancellationToken);
+    }
+
+    public Task<BudgetStatus> GetBudgetStatusAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<BudgetStatus>("get_budget_status", null, cancellationToken);
+    }
+
+    public Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double preauthorizedUsd, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<BudgetStatus>("update_budget_config", new { budget_usd = budgetUsd, preauthorized_usd = preauthorizedUsd }, cancellationToken);
+    }
+
+    public Task SetAutoModeAsync(bool enabled, CancellationToken cancellationToken = default)
+    {
+        return InvokeCommandAsync("set_auto_mode", new { enabled }, cancellationToken);
+    }
+
+    public Task<BackendDiagnosticsReport> GetBackendDiagnosticsAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<BackendDiagnosticsReport>("get_backend_diagnostics", null, cancellationToken);
     }
 
     public async Task<T?> InvokeAsync<T>(

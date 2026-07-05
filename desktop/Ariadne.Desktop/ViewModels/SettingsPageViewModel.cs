@@ -86,6 +86,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _trackSkills = true;
     private bool _trackNonSensitiveConfig = true;
     private string _ignoredPathsText = string.Empty;
+    private string _diagnosticsStatus = string.Empty;
 
     public SettingsPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -288,6 +289,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SaveMiscText => _displayNames.Text("ui.settings.misc.save");
     public string LanguageLabel => _displayNames.Text("ui.settings.misc.language");
     public string LanguageDescText => _displayNames.Text("ui.settings.misc.language.desc");
+    public string DiagnosticsLabel => _displayNames.Text("ui.settings.misc.diagnostics");
+    public string DiagnosticsStatusText => _displayNames.Format("ui.settings.misc.diagnostics.status", new Dictionary<string, string>
+    {
+        ["status"] = DiagnosticsStatus,
+    });
 
     public string ProjectName { get => _projectName; set => SetProperty(ref _projectName, value); }
     public string Locale { get => _locale; set => SetProperty(ref _locale, value); }
@@ -346,6 +352,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool TrackSkills { get => _trackSkills; set => SetProperty(ref _trackSkills, value); }
     public bool TrackNonSensitiveConfig { get => _trackNonSensitiveConfig; set => SetProperty(ref _trackNonSensitiveConfig, value); }
     public string IgnoredPathsText { get => _ignoredPathsText; set => SetProperty(ref _ignoredPathsText, value); }
+    public string DiagnosticsStatus { get => _diagnosticsStatus; set { if (SetProperty(ref _diagnosticsStatus, value)) OnPropertyChanged(nameof(DiagnosticsStatusText)); } }
 
     public string SelectedLanguage
     {
@@ -518,6 +525,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             TrackNonSensitiveConfig = git.Git.TrackNonSensitiveConfig;
             IgnoredPathsText = string.Join(Environment.NewLine, git.Git.IgnoredPaths);
 
+            var diagnostics = await _backend.GetBackendDiagnosticsAsync().ConfigureAwait(true);
+            DiagnosticsStatus = diagnostics.Status;
+
             HasUnsavedChanges = false;
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.configured");
@@ -668,6 +678,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                     item.NormalPolicy,
                     item.AutoModePolicy,
                     string.Empty)).ToArray());
+            var budget = await _backend.UpdateBudgetConfigAsync(ParseDouble(BudgetUsd, 0), ParseDouble(PreauthorizedUsd, 0)).ConfigureAwait(true);
+            await _backend.SetAutoModeAsync(AutoModeEnabled).ConfigureAwait(true);
+            SpentText = $"${budget.SpentUsd:0.####}";
             await _backend.SaveAutomationSettingsAsync(automation).ConfigureAwait(true);
             await _backend.SaveWorkflowSettingsAsync(new WorkflowSettings(new WorkflowConfig(
                 _workflowSchemaVersion,

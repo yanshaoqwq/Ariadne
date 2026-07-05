@@ -2,7 +2,6 @@
     x:Class="Ariadne.Desktop.Views.WelcomeView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:backend="clr-namespace:Ariadne.Desktop.Backend"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:WelcomeViewModel">
 
@@ -65,8 +64,9 @@
           <ScrollViewer Grid.Row="1">
             <ItemsControl ItemsSource="{Binding RecentProjects}">
               <ItemsControl.ItemTemplate>
-                <DataTemplate DataType="{x:Type backend:RecentProjectEntry}">
-                  <Border Classes="layer" Padding="14,12" Margin="0,0,0,10">
+                <DataTemplate DataType="{x:Type vm:RecentProjectItemViewModel}">
+                  <Button Classes="subtle" Padding="0" Margin="0,0,0,10" Command="{Binding OpenCommand}">
+                  <Border Classes="layer" Padding="14,12">
                     <Grid ColumnDefinitions="36,*">
                       <Border
                           Grid.Column="0"
@@ -90,6 +90,7 @@
                       </StackPanel>
                     </Grid>
                   </Border>
+                  </Button>
                 </DataTemplate>
               </ItemsControl.ItemTemplate>
             </ItemsControl>

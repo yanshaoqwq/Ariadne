@@ -2,7 +2,6 @@
     x:Class="Ariadne.Desktop.Views.TemplateMarketPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:backend="clr-namespace:Ariadne.Desktop.Backend"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:Name="Root"
     x:DataType="vm:TemplateMarketPageViewModel">
@@ -60,7 +59,7 @@
             </ItemsPanelTemplate>
           </ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate>
-            <DataTemplate DataType="{x:Type backend:TemplateSummary}">
+            <DataTemplate DataType="{x:Type vm:TemplateCardViewModel}">
               <Border Classes="card" Margin="8" Padding="18" MinHeight="168">
                 <DockPanel>
                   <StackPanel DockPanel.Dock="Top" Spacing="10">
@@ -71,6 +70,11 @@
                       </Border>
                     </Grid>
                     <TextBlock Text="{Binding Id}" Classes="mono" />
+                    <TextBlock Text="{Binding TagsText}" Classes="caption" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button Classes="secondary" Content="{Binding #Root.DataContext.DetailText}" Command="{Binding ShowDetailsCommand}" />
+                    <Button Classes="primary" Content="{Binding #Root.DataContext.ImportText}" Command="{Binding InstallCommand}" />
                   </StackPanel>
                 </DockPanel>
               </Border>
@@ -84,7 +88,6 @@
         </Border>
 
         <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center" Margin="0,8">
-          <Button Classes="primary" Content="{Binding ImportText}" Command="{Binding InstallFirstCommand}" />
           <Button Classes="secondary" Content="{Binding LoadMoreText}" Command="{Binding LoadMoreCommand}" />
         </StackPanel>
       </StackPanel>

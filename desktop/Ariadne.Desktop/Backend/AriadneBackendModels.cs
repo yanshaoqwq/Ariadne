@@ -188,6 +188,13 @@ public sealed record TemplateSummary(
     [property: JsonPropertyName("tags")] IReadOnlyList<string> Tags,
     [property: JsonPropertyName("requires_permissions")] bool RequiresPermissions);
 
+public sealed record TemplateDetail(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("version")] string Version,
+    [property: JsonPropertyName("manifest")] object? Manifest,
+    [property: JsonPropertyName("requires_permissions")] bool RequiresPermissions);
+
 public sealed record TemplateInstallReport(
     [property: JsonPropertyName("workflow_id")] string WorkflowId,
     [property: JsonPropertyName("version")] string Version,
@@ -199,6 +206,14 @@ public sealed record WorkflowRunStarted(
     [property: JsonPropertyName("run_id")] string RunId,
     [property: JsonPropertyName("status")] string Status);
 
+public sealed record WorkflowRunState(
+    [property: JsonPropertyName("workflow_id")] string WorkflowId,
+    [property: JsonPropertyName("run_id")] string RunId,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("pause_reason")] string? PauseReason,
+    [property: JsonPropertyName("stop_reason")] string? StopReason,
+    [property: JsonPropertyName("events")] IReadOnlyList<string> Events);
+
 public sealed record ProjectAiResponse(
     [property: JsonPropertyName("answer")] string Answer,
     [property: JsonPropertyName("chat_history")] IReadOnlyList<ProjectAiChatMessage> ChatHistory,
@@ -208,6 +223,57 @@ public sealed record ProjectAiResponse(
 public sealed record ProjectAiChatMessage(
     [property: JsonPropertyName("role")] string Role,
     [property: JsonPropertyName("content")] string Content);
+
+public sealed record WorksTreeNode(
+    [property: JsonPropertyName("node_id")] string NodeId,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("children")] IReadOnlyList<WorksTreeNode> Children);
+
+public sealed record DocumentTreeNode(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("children")] IReadOnlyList<DocumentTreeNode> Children);
+
+public sealed record ChapterImportRequest(
+    [property: JsonPropertyName("chapter_id")] string ChapterId,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("order")] long Order,
+    [property: JsonPropertyName("source_path")] string SourcePath,
+    [property: JsonPropertyName("target_path")] string TargetPath);
+
+public sealed record ChapterImportReport(
+    [property: JsonPropertyName("entry")] object? Entry,
+    [property: JsonPropertyName("index_invalidation")] object? IndexInvalidation);
+
+public sealed record ProjectReference(
+    [property: JsonPropertyName("reference")] string Reference,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("summary")] string Summary,
+    [property: JsonPropertyName("payload")] object? Payload);
+
+public sealed record QuickEditRequest(
+    [property: JsonPropertyName("selected_text")] string SelectedText,
+    [property: JsonPropertyName("instruction")] string Instruction,
+    [property: JsonPropertyName("context_ref")] string? ContextRef);
+
+public sealed record QuickEditResult(
+    [property: JsonPropertyName("original")] string Original,
+    [property: JsonPropertyName("suggested")] string Suggested,
+    [property: JsonPropertyName("diff")] string Diff);
+
+public sealed record TextRange(
+    [property: JsonPropertyName("start")] long Start,
+    [property: JsonPropertyName("end")] long End);
+
+public sealed record PatchApplyReport(
+    [property: JsonPropertyName("preview")] object? Preview,
+    [property: JsonPropertyName("metadata")] object? Metadata,
+    [property: JsonPropertyName("index_invalidation")] object? IndexInvalidation);
 
 public sealed record WorkflowGraphData(
     [property: JsonPropertyName("workflow_id")] string WorkflowId,
@@ -236,6 +302,22 @@ public sealed record CanvasEdge(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("label")] string? Label,
     [property: JsonPropertyName("data")] Dictionary<string, object?> Data);
+
+public sealed record NodeDetailPatch(
+    [property: JsonPropertyName("node_id")] string NodeId,
+    [property: JsonPropertyName("prompt_template")] string? PromptTemplate,
+    [property: JsonPropertyName("input_aliases")] Dictionary<string, string> InputAliases,
+    [property: JsonPropertyName("tool_enabled")] Dictionary<string, bool> ToolEnabled,
+    [property: JsonPropertyName("approval_policy")] Dictionary<string, string> ApprovalPolicy,
+    [property: JsonPropertyName("model_id")] string? ModelId,
+    [property: JsonPropertyName("budget_usd")] double? BudgetUsd,
+    [property: JsonPropertyName("timeout_ms")] long? TimeoutMs);
+
+public sealed record CanvasAnnotation(
+    [property: JsonPropertyName("annotation_id")] string AnnotationId,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("node_ids")] IReadOnlyList<string> NodeIds,
+    [property: JsonPropertyName("metadata")] Dictionary<string, object?> Metadata);
 
 public sealed record CombinedExportReport(
     [property: JsonPropertyName("artifact_id")] string ArtifactId,
@@ -274,3 +356,22 @@ public sealed record UiRunLogEntry(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("level")] string Level,
     [property: JsonPropertyName("message")] string Message);
+
+public sealed record ConfirmationLogEntry(
+    [property: JsonPropertyName("confirmation_id")] string ConfirmationId,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("node_id")] string NodeId,
+    [property: JsonPropertyName("timestamp_ms")] long TimestampMs,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("handling_method")] string HandlingMethod,
+    [property: JsonPropertyName("summary")] string Summary,
+    [property: JsonPropertyName("diff")] string Diff);
+
+public sealed record DiagnosticItem(
+    [property: JsonPropertyName("component")] string Component,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("reason")] string? Reason);
+
+public sealed record BackendDiagnosticsReport(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("items")] IReadOnlyList<DiagnosticItem> Items);

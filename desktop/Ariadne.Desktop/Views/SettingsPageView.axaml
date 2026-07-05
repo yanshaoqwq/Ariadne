@@ -334,6 +334,12 @@
                 <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding LanguageDescText}" Classes="caption" TextWrapping="Wrap" />
               </Grid>
             </Border>
+            <Border Classes="card" Padding="22">
+              <Grid ColumnDefinitions="180,*" RowDefinitions="Auto" ColumnSpacing="18">
+                <TextBlock Grid.Column="0" Text="{Binding DiagnosticsLabel}" Classes="secondary" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" Text="{Binding DiagnosticsStatusText}" Classes="caption" TextWrapping="Wrap" />
+              </Grid>
+            </Border>
             <Button Classes="primary" Content="{Binding SaveMiscText}" HorizontalAlignment="Right" Command="{Binding SaveMiscCommand}" />
           </StackPanel>
         </Panel>
