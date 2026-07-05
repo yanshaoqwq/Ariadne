@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -27,6 +28,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private IReadOnlyList<CanvasEdge> _edges = Array.Empty<CanvasEdge>();
     private WorkflowNodeViewModel? _selectedNode;
     private ConfirmationItemViewModel? _selectedConfirmation;
+    private WorkflowEdgeViewModel? _selectedEdge;
 
     public WorkspacePageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -55,10 +57,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         RefreshConfirmationsCommand = new RelayCommand(() => _ = LoadConfirmationsAsync());
         ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"));
         RejectConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("reject"));
+        SaveEdgeConfigCommand = new RelayCommand(SaveSelectedEdgeConfig);
         _projectAiAnswer = displayNames.Text("ui.workspace.project_ai.empty");
 
         Nodes = new ObservableCollection<WorkflowNodeViewModel>();
         Confirmations = new ObservableCollection<ConfirmationItemViewModel>();
+        Edges = new ObservableCollection<WorkflowEdgeViewModel>();
         EntryNodes = new ObservableCollection<NodeLibraryItemViewModel>
         {
             new("start", displayNames.Text("ui.workspace.start_node.title"), () => AddNode("start")),
@@ -139,6 +143,16 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SubworkflowText => _displayNames.Text("ui.workspace.subworkflow");
     public string EdgeDetailsText => _displayNames.Text("ui.workspace.edge_details");
     public string EdgeCountText => $"{_edges.Count}";
+    public string SourceAliasText => _displayNames.Text("ui.workspace.edge.source_alias");
+    public string TargetAliasText => _displayNames.Text("ui.workspace.edge.target_alias");
+    public string EdgeLabelText => _displayNames.Text("ui.workspace.edge.label");
+    public string EdgeDataText => _displayNames.Text("ui.workspace.edge.data");
+    public string ApplyEdgeConfigText => _displayNames.Text("ui.workspace.apply_edge_config");
+    public string ForwardAliasText => _displayNames.Text("ui.workspace.edge.forward_alias");
+    public string ReverseAliasText => _displayNames.Text("ui.workspace.edge.reverse_alias");
+    public string ForwardTemplateText => _displayNames.Text("ui.workspace.edge.forward_template");
+    public string ReverseTemplateText => _displayNames.Text("ui.workspace.edge.reverse_template");
+    public string MaxCommunicationCountText => _displayNames.Text("ui.workspace.edge.max_communication_count");
 
     public bool IsRightPanelOpen { get => _isRightPanelOpen; set => SetProperty(ref _isRightPanelOpen, value); }
     public RelayCommand ToggleRightPanelCommand { get; }
@@ -179,6 +193,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand RefreshConfirmationsCommand { get; }
     public RelayCommand ApproveConfirmationCommand { get; }
     public RelayCommand RejectConfirmationCommand { get; }
+    public RelayCommand SaveEdgeConfigCommand { get; }
 
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
     public string ProjectAiMessage { get => _projectAiMessage; set => SetProperty(ref _projectAiMessage, value); }
@@ -198,6 +213,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<NodeLibraryItemViewModel> WritingAgents { get; }
     public ObservableCollection<NodeLibraryItemViewModel> UtilityNodes { get; }
     public ObservableCollection<ConfirmationItemViewModel> Confirmations { get; }
+    public ObservableCollection<WorkflowEdgeViewModel> Edges { get; }
 
     public WorkflowNodeViewModel? SelectedNode
     {
@@ -220,6 +236,20 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         private set => SetProperty(ref _selectedConfirmation, value);
     }
 
+    public WorkflowEdgeViewModel? SelectedEdge
+    {
+        get => _selectedEdge;
+        private set
+        {
+            if (SetProperty(ref _selectedEdge, value))
+            {
+                OnPropertyChanged(nameof(HasSelectedEdge));
+            }
+        }
+    }
+
+    public bool HasSelectedEdge => SelectedEdge is not null;
+
     public string CtxAddNodeText => _displayNames.Text("ui.workspace.context.add_node");
     public string CtxAddStartText => _displayNames.Text("ui.workspace.context.add_start");
     public string CtxPasteText => _displayNames.Text("ui.workspace.context.paste");
@@ -236,7 +266,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             id: $"{nodeType}-{_nextNodeNumber++}",
             nodeType,
             label,
-            defaultWorkDir: nodeType == "start" ? "novels/正篇" : string.Empty,
+            defaultWorkDir: nodeType == "start" ? _displayNames.Text("ui.workspace.start_node.default_work_dir") : string.Empty,
             x: 120 + ((Nodes.Count % 4) * 230),
             y: 80 + ((Nodes.Count / 4) * 170),
             _backend,
@@ -599,6 +629,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             Nodes.Clear();
             SelectedNode = null;
             _edges = graph.Edges.ToArray();
+            Edges.Clear();
+            foreach (var edge in _edges)
+            {
+                Edges.Add(new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge));
+            }
             OnPropertyChanged(nameof(EdgeCountText));
             foreach (var graphNode in graph.Nodes)
             {
@@ -739,6 +774,35 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private static long? ParseNullableLong(string text)
     {
         return long.TryParse(text, out var value) ? value : null;
+    }
+
+    private void SelectEdge(WorkflowEdgeViewModel edge)
+    {
+        foreach (var item in Edges)
+        {
+            item.IsSelected = item == edge;
+        }
+        SelectedEdge = edge;
+        IsProjectAiTab = false;
+    }
+
+    private void SaveSelectedEdgeConfig()
+    {
+        if (SelectedEdge is null)
+        {
+            StatusText = _displayNames.Text("ui.common.none");
+            return;
+        }
+        try
+        {
+            _edges = Edges.Select(edge => edge.ToCanvasEdge()).ToArray();
+            RefreshDirtyState();
+            StatusText = EdgeDetailsText;
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
     }
 }
 
@@ -899,4 +963,128 @@ public sealed class ConfirmationItemViewModel : ViewModelBase
     public string Diff { get; }
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
+}
+
+public sealed class WorkflowEdgeViewModel : ViewModelBase
+{
+    private readonly DisplayNameService _displayNames;
+    private bool _isSelected;
+    private string _sourceHandle;
+    private string _targetHandle;
+    private string _label;
+    private string _dataJson;
+    private string _forwardAlias;
+    private string _reverseAlias;
+    private string _forwardTemplate;
+    private string _reverseTemplate;
+    private string _maxCommunicationCount;
+
+    public WorkflowEdgeViewModel(CanvasEdge edge, DisplayNameService displayNames, Action<WorkflowEdgeViewModel> select)
+    {
+        _displayNames = displayNames;
+        Id = edge.Id;
+        Source = edge.Source;
+        Target = edge.Target;
+        Kind = edge.Kind;
+        _sourceHandle = edge.SourceHandle;
+        _targetHandle = edge.TargetHandle;
+        _label = edge.Label ?? string.Empty;
+        _dataJson = EdgeDataToJson(edge.Data);
+        _forwardAlias = ReadDataString(edge.Data, "forward_alias", "forward_output");
+        _reverseAlias = ReadDataString(edge.Data, "reverse_alias", "reverse_output");
+        _forwardTemplate = ReadDataString(edge.Data, "forward_template", displayNames.Text("ui.workspace.edge.default_forward_template"));
+        _reverseTemplate = ReadDataString(edge.Data, "reverse_template", displayNames.Text("ui.workspace.edge.default_reverse_template"));
+        _maxCommunicationCount = ReadDataString(edge.Data, "max_communication_count", "2");
+        SelectCommand = new RelayCommand(() => select(this));
+    }
+
+    public string Id { get; }
+    public string Source { get; }
+    public string Target { get; }
+    public string Kind { get; }
+    public string Title => $"{Source} -> {Target}";
+    public string SourceHandle { get => _sourceHandle; set => SetProperty(ref _sourceHandle, value); }
+    public string TargetHandle { get => _targetHandle; set => SetProperty(ref _targetHandle, value); }
+    public string Label { get => _label; set => SetProperty(ref _label, value); }
+    public string DataJson { get => _dataJson; set => SetProperty(ref _dataJson, value); }
+    public string ForwardAlias { get => _forwardAlias; set => SetProperty(ref _forwardAlias, value); }
+    public string ReverseAlias { get => _reverseAlias; set => SetProperty(ref _reverseAlias, value); }
+    public string ForwardTemplate { get => _forwardTemplate; set => SetProperty(ref _forwardTemplate, value); }
+    public string ReverseTemplate { get => _reverseTemplate; set => SetProperty(ref _reverseTemplate, value); }
+    public string MaxCommunicationCount { get => _maxCommunicationCount; set => SetProperty(ref _maxCommunicationCount, value); }
+    public RelayCommand SelectCommand { get; }
+    public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
+    public bool IsCommunication => string.Equals(Kind, "communication", StringComparison.OrdinalIgnoreCase);
+
+    public CanvasEdge ToCanvasEdge()
+    {
+        object? data = IsCommunication
+            ? CommunicationData()
+            : string.IsNullOrWhiteSpace(DataJson)
+                ? new Dictionary<string, object?>()
+                : JsonNode.Parse(DataJson);
+        return new CanvasEdge(
+            Id,
+            Source,
+            Target,
+            SourceHandle,
+            TargetHandle,
+            Kind,
+            string.IsNullOrWhiteSpace(Label) ? null : Label,
+            data);
+    }
+
+    private Dictionary<string, object?> CommunicationData()
+    {
+        var count = uint.TryParse(MaxCommunicationCount, out var parsed) && parsed > 0 ? parsed : 2;
+        return new Dictionary<string, object?>
+        {
+            ["forward_alias"] = string.IsNullOrWhiteSpace(ForwardAlias) ? "forward_output" : ForwardAlias,
+            ["reverse_alias"] = string.IsNullOrWhiteSpace(ReverseAlias) ? "reverse_output" : ReverseAlias,
+            ["forward_template"] = string.IsNullOrWhiteSpace(ForwardTemplate)
+                ? _displayNames.Text("ui.workspace.edge.default_forward_template")
+                : ForwardTemplate,
+            ["reverse_template"] = string.IsNullOrWhiteSpace(ReverseTemplate)
+                ? _displayNames.Text("ui.workspace.edge.default_reverse_template")
+                : ReverseTemplate,
+            ["max_communication_count"] = count,
+        };
+    }
+
+    private static string EdgeDataToJson(object? data)
+    {
+        if (data is null)
+        {
+            return "{}";
+        }
+        if (data is JsonElement element)
+        {
+            return element.GetRawText();
+        }
+        return JsonSerializer.Serialize(data, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    }
+
+    private static string ReadDataString(object? data, string key, string fallback)
+    {
+        if (data is JsonElement element && element.ValueKind == JsonValueKind.Object && element.TryGetProperty(key, out var property))
+        {
+            return property.ValueKind switch
+            {
+                JsonValueKind.String => property.GetString() ?? fallback,
+                JsonValueKind.Number => property.ToString(),
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                _ => fallback,
+            };
+        }
+        if (data is JsonObject jsonObject && jsonObject.TryGetPropertyValue(key, out var node) && node is not null)
+        {
+            return node.GetValueKind() == JsonValueKind.String ? node.GetValue<string>() : node.ToJsonString();
+        }
+        if (data is Dictionary<string, object?> dictionary && dictionary.TryGetValue(key, out var value) && value is not null)
+        {
+            return value.ToString() ?? fallback;
+        }
+        return fallback;
+    }
 }

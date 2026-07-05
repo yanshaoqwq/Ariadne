@@ -320,9 +320,44 @@
                   </Grid>
                   <Button Classes="primary" Content="{Binding ApplyNodeConfigText}" Command="{Binding ApplyNodeConfigCommand}" />
                   <TextBlock Text="{Binding EdgeDetailsText}" Classes="subtitle" />
-                  <Border Classes="layer" Padding="10">
-                    <TextBlock Text="{Binding EdgeCountText}" Classes="caption" />
-                  </Border>
+                  <TextBlock Text="{Binding EdgeCountText}" Classes="caption" />
+                  <ItemsControl ItemsSource="{Binding Edges}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate DataType="{x:Type vm:WorkflowEdgeViewModel}">
+                        <Button Classes="nav" Classes.selected="{Binding IsSelected}" Command="{Binding SelectCommand}" HorizontalContentAlignment="Stretch">
+                          <StackPanel Spacing="2">
+                            <TextBlock Text="{Binding Title}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding Kind}" Classes="caption" />
+                          </StackPanel>
+                        </Button>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <StackPanel IsVisible="{Binding HasSelectedEdge}" Spacing="8">
+                    <TextBlock Text="{Binding SourceAliasText}" Classes="caption" />
+                    <TextBox Text="{Binding SelectedEdge.SourceHandle, Mode=TwoWay}" />
+                    <TextBlock Text="{Binding TargetAliasText}" Classes="caption" />
+                    <TextBox Text="{Binding SelectedEdge.TargetHandle, Mode=TwoWay}" />
+                    <TextBlock Text="{Binding EdgeLabelText}" Classes="caption" />
+                    <TextBox Text="{Binding SelectedEdge.Label, Mode=TwoWay}" />
+                    <StackPanel IsVisible="{Binding SelectedEdge.IsCommunication}" Spacing="8">
+                      <TextBlock Text="{Binding ForwardAliasText}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedEdge.ForwardAlias, Mode=TwoWay}" />
+                      <TextBlock Text="{Binding ReverseAliasText}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedEdge.ReverseAlias, Mode=TwoWay}" />
+                      <TextBlock Text="{Binding ForwardTemplateText}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedEdge.ForwardTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" />
+                      <TextBlock Text="{Binding ReverseTemplateText}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedEdge.ReverseTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" />
+                      <TextBlock Text="{Binding MaxCommunicationCountText}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedEdge.MaxCommunicationCount, Mode=TwoWay}" />
+                    </StackPanel>
+                    <StackPanel IsVisible="{Binding !SelectedEdge.IsCommunication}" Spacing="8">
+                      <TextBlock Text="{Binding EdgeDataText}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedEdge.DataJson, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" />
+                    </StackPanel>
+                    <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding ApplyEdgeConfigText}" Command="{Binding SaveEdgeConfigCommand}" />
+                  </StackPanel>
                   <Button Classes="secondary" Content="{Binding ExportSelectionText}" Command="{Binding ExportSelectionCommand}" />
                   <Button Classes="secondary" Content="{Binding SubworkflowText}" Command="{Binding PackSelectionCommand}" />
                   <TextBox Text="{Binding AnnotationTitle, Mode=TwoWay}" PlaceholderText="{Binding AnnotationTitlePlaceholder}" />

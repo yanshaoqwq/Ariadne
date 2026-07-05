@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text.Json;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -189,9 +190,14 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
     private async Task<bool> ConfirmTemplatePermissionsAsync(TemplateSummary template)
     {
         var detail = await _backend.GetTemplateDetailAsync(_repositoryBaseUrl, template.Id).ConfigureAwait(true);
+        var permissionSummary = TemplatePermissionSummary(detail);
+        var message = _displayNames.Text("ui.template.permission_dialog.desc")
+                      + Environment.NewLine
+                      + Environment.NewLine
+                      + permissionSummary;
         var dialog = new ConfirmDialogViewModel(
             _displayNames.Text("ui.template.permission_dialog.title"),
-            _displayNames.Text("ui.template.permission_dialog.desc"),
+            message,
             new[]
             {
                 new DialogButton(_displayNames.Text("ui.template.permission_dialog.confirm"), DialogButtonVariant.Primary, 0),
@@ -205,6 +211,56 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             ["version"] = detail.Version,
         });
         return await DialogService.Current.ConfirmAsync(dialog).ConfigureAwait(true) == 0;
+    }
+
+    private string TemplatePermissionSummary(TemplateDetail detail)
+    {
+        var permissions = ExtractStringArray(detail.Manifest, "required_permissions");
+        if (permissions.Count == 0)
+        {
+            permissions = ExtractStringArray(detail.Manifest, "permissions");
+        }
+        if (permissions.Count == 0)
+        {
+            return _displayNames.Text("ui.template.permission_dialog.empty");
+        }
+        return string.Join(Environment.NewLine, permissions.Select(permission => "- " + permission));
+    }
+
+    private static IReadOnlyList<string> ExtractStringArray(object? value, string key)
+    {
+        if (value is JsonElement element)
+        {
+            return ExtractStringArray(element, key);
+        }
+        return Array.Empty<string>();
+    }
+
+    private static IReadOnlyList<string> ExtractStringArray(JsonElement element, string key)
+    {
+        if (element.ValueKind == JsonValueKind.Object && element.TryGetProperty(key, out var property))
+        {
+            return ExtractStringArray(property);
+        }
+        return Array.Empty<string>();
+    }
+
+    private static IReadOnlyList<string> ExtractStringArray(JsonElement property)
+    {
+        if (property.ValueKind == JsonValueKind.Array)
+        {
+            return property.EnumerateArray()
+                .Select(item => item.ValueKind == JsonValueKind.String ? item.GetString() : item.ToString())
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Select(item => item!)
+                .ToArray();
+        }
+        if (property.ValueKind == JsonValueKind.String)
+        {
+            var value = property.GetString();
+            return string.IsNullOrWhiteSpace(value) ? Array.Empty<string>() : new[] { value };
+        }
+        return Array.Empty<string>();
     }
 }
 

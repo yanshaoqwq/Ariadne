@@ -301,7 +301,7 @@ public sealed record CanvasEdge(
     [property: JsonPropertyName("target_handle")] string TargetHandle,
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("label")] string? Label,
-    [property: JsonPropertyName("data")] Dictionary<string, object?> Data);
+    [property: JsonPropertyName("data")] object? Data);
 
 public sealed record NodeDetailPatch(
     [property: JsonPropertyName("node_id")] string NodeId,
