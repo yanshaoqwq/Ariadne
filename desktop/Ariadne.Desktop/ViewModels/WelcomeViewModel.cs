@@ -133,7 +133,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         IsLoading = true;
         try
         {
-            var root = RecentProjects.FirstOrDefault()?.ProjectRoot ?? await _pickProjectFolder().ConfigureAwait(true);
+            var root = await _pickProjectFolder().ConfigureAwait(true);
             if (string.IsNullOrWhiteSpace(root))
             {
                 StatusText = _displayNames.Text("ui.common.cancel");
