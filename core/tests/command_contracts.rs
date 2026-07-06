@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Mutex, OnceLock};
@@ -653,12 +654,24 @@ fn automation_and_permission_settings_round_trip_config_files() {
         temp.path(),
         PermissionsSettings {
             policy: policy.clone(),
+            tool_controls: BTreeMap::from([(
+                "project_ai".to_owned(),
+                BTreeMap::from([("project-ai-workflow-tools".to_owned(), false)]),
+            )]),
         },
     )
     .unwrap();
     let permissions = get_permissions_settings_impl(temp.path()).unwrap();
 
     assert_eq!(permissions.policy, policy);
+    assert_eq!(
+        permissions
+            .tool_controls
+            .get("project_ai")
+            .and_then(|scope| scope.get("project-ai-workflow-tools")),
+        Some(&false)
+    );
+    assert!(permissions.tool_controls.contains_key("writer"));
 }
 
 #[test]
@@ -981,6 +994,117 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
         .unwrap()
         .unwrap();
     assert!(state.nodes.contains_key(&NodeId::from("start-draft")));
+}
+
+#[test]
+fn project_ai_chat_respects_disabled_workflow_tool_permission() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "tool-flow".to_owned(),
+            name: "Tool Flow".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-draft".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Draft Tool".to_owned()),
+                data: json!({
+                    "name": "Draft Tool",
+                    "work_dir": "draft",
+                    "expose_as_tool": true
+                }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+    save_permissions_settings_impl(
+        temp.path(),
+        PermissionsSettings {
+            policy: PermissionPolicy::default(),
+            tool_controls: BTreeMap::from([(
+                "project_ai".to_owned(),
+                BTreeMap::from([("project-ai-workflow-tools".to_owned(), false)]),
+            )]),
+        },
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 16384];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /chat/completions "));
+        assert!(!request.contains("\"tools\""));
+        assert!(!request.contains("\"name\":\"draft_tool\""));
+        let response_body = r#"{
+          "model":"local-chat",
+          "choices":[{
+            "message":{"content":"工具已关闭"},
+            "finish_reason":"stop"
+          }],
+          "usage":{"prompt_tokens":16,"completion_tokens":3}
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let secrets = MemorySecretStore::default();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "local_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Local Chat".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            models: vec![ModelConfig {
+                model_id: "local-chat".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+        },
+    )
+    .unwrap();
+    save_provider_key_impl(
+        temp.path(),
+        &secrets,
+        "local_chat".to_owned(),
+        "local-key".to_owned(),
+    )
+    .unwrap();
+
+    let response = project_ai_chat_impl(
+        temp.path(),
+        &secrets,
+        ProjectAiRequest {
+            message: "启动草稿工具".to_owned(),
+            chat_history: Vec::new(),
+            references: Vec::new(),
+            workflow_id_to_run: None,
+            append_memory: None,
+        },
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(response.answer, "工具已关闭");
+    assert!(response.workflow_run.is_none());
 }
 
 #[test]

@@ -14,8 +14,8 @@
         <Grid ColumnDefinitions="*,Auto">
           <TextBlock Grid.Column="0" Text="{Binding CurrentDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
-            <Button Classes="subtle" Padding="10,5" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
-            <Button Classes="subtle" Padding="10,5" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
+            <Button Classes="subtle" Classes.selected="{Binding !IsEditMode}" Padding="10,5" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
+            <Button Classes="subtle" Classes.selected="{Binding IsEditMode}" Padding="10,5" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
             <ComboBox ItemsSource="{Binding ExportFormats}"
                       SelectedValue="{Binding ExportFormat, Mode=TwoWay}"
                       SelectedValueBinding="{Binding Value}"
@@ -28,7 +28,7 @@
             </ComboBox>
             <Border Width="1" Margin="6,4" Background="{DynamicResource Ariadne.BorderMuted}" />
             <!-- 图标按钮：导入稿件 / 导出合并 / 保存 -->
-            <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" Command="{Binding ImportCommand}">
+            <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
             </Button>
             <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}" Command="{Binding ExportCommand}">
@@ -41,7 +41,7 @@
         </Grid>
       </Border>
 
-      <!-- 正文阅读区：居中、限宽、衬线、松行高 -->
+      <!-- 正文阅读区：默认为排版阅读，修改模式才进入编辑器 -->
       <ScrollViewer Background="{DynamicResource Ariadne.BackgroundMain}">
         <ScrollViewer.ContextMenu>
           <ContextMenu Classes="ariadne">
@@ -54,20 +54,42 @@
             <MenuItem Header="{Binding CtxToggleEditText}" Command="{Binding ToggleEditCommand}" />
           </ContextMenu>
         </ScrollViewer.ContextMenu>
-        <Border MaxWidth="760" Margin="0,40" HorizontalAlignment="Center" Classes="card" Padding="56,48">
-          <StackPanel Spacing="20">
-            <TextBlock Text="{Binding StatusText}" Classes="caption" />
+        <Grid MaxWidth="840" Margin="0,32" HorizontalAlignment="Center" RowDefinitions="Auto,Auto" RowSpacing="14">
+          <Border Grid.Row="0"
+                  Background="{DynamicResource Ariadne.BackgroundSurface}"
+                  BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                  BorderThickness="1"
+                  CornerRadius="{DynamicResource Ariadne.Radius.Large}"
+                  Padding="32,22">
+            <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" RowSpacing="8" ColumnSpacing="16">
+              <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentTitle}" Classes="title" TextWrapping="Wrap" />
+              <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CharacterCountText}" Classes="caption" VerticalAlignment="Center" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding StatusText}" Classes="caption" TextWrapping="Wrap" />
+            </Grid>
+          </Border>
+
+          <Border Grid.Row="1"
+                  Background="{DynamicResource Ariadne.BackgroundSurface}"
+                  BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                  BorderThickness="1"
+                  CornerRadius="{DynamicResource Ariadne.Radius.Large}"
+                  Padding="56,50">
+          <StackPanel Spacing="22">
+            <SelectableTextBlock Text="{Binding DocumentBodyText}"
+                                 Classes="reading"
+                                 IsVisible="{Binding !IsEditMode}" />
             <TextBox Text="{Binding DocumentContent, Mode=TwoWay}"
                      x:Name="DocumentEditor"
-                     Classes="reading"
+                     Classes="document-editor"
+                     IsVisible="{Binding IsEditMode}"
                      KeyDown="OnDocumentEditorKeyDown"
                      AcceptsReturn="True"
                      TextWrapping="Wrap"
-                     MinHeight="420"
+                     MinHeight="520"
                      BorderThickness="0"
                      Background="Transparent"
                      PlaceholderText="{Binding QuickAiHint}" />
-            <Border Classes="layer" Padding="14">
+            <Border Classes="layer" Padding="14" IsVisible="{Binding IsEditMode}">
               <StackPanel Spacing="10">
                 <TextBlock Text="{Binding QuickEditTitle}" Classes="subtitle" />
                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
@@ -80,7 +102,8 @@
               </StackPanel>
             </Border>
           </StackPanel>
-        </Border>
+          </Border>
+        </Grid>
       </ScrollViewer>
     </DockPanel>
 
@@ -116,20 +139,27 @@
           <DockPanel IsVisible="{Binding IsNavTreeTab}">
             <Border DockPanel.Dock="Top" Padding="10,10,10,4">
               <StackPanel Spacing="8">
-                <Button Classes="subtle" Padding="10,6" HorizontalAlignment="Left" ToolTip.Tip="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
-                  <StackPanel Orientation="Horizontal" Spacing="7">
-                    <Path Classes="icon" Width="15" Height="15"
-                          Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
-                    <TextBlock Text="{Binding OutlineText}" Classes="caption" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Button Classes="subtle" Padding="10,6" ToolTip.Tip="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
+                    <StackPanel Orientation="Horizontal" Spacing="7">
+                      <Path Classes="icon" Width="15" Height="15"
+                            Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
+                      <TextBlock Text="{Binding OutlineText}" Classes="caption" VerticalAlignment="Center" />
+                    </StackPanel>
+                  </Button>
+                  <Button Classes="subtle" Padding="10,6" Content="{Binding ImportText}" Command="{Binding ToggleImportPanelCommand}" />
+                </StackPanel>
+                <Border Classes="layer" Padding="12" IsVisible="{Binding IsImportPanelOpen}">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="{Binding ImportTitle}" Classes="subtitle" />
+                    <TextBox Text="{Binding ImportChapterId, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterIdText}" />
+                    <TextBox Text="{Binding ImportChapterTitle, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterTitleText}" />
+                    <TextBox Text="{Binding ImportOrder, Mode=TwoWay}" PlaceholderText="{Binding ImportOrderText}" />
+                    <TextBox Text="{Binding ImportSourcePath, Mode=TwoWay}" PlaceholderText="{Binding ImportSourcePlaceholder}" />
+                    <TextBox Text="{Binding ImportTargetPath, Mode=TwoWay}" PlaceholderText="{Binding ImportTargetPlaceholder}" />
+                    <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
                   </StackPanel>
-                </Button>
-                <TextBlock Text="{Binding ImportTitle}" Classes="subtitle" />
-                <TextBox Text="{Binding ImportChapterId, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterIdText}" />
-                <TextBox Text="{Binding ImportChapterTitle, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterTitleText}" />
-                <TextBox Text="{Binding ImportOrder, Mode=TwoWay}" PlaceholderText="{Binding ImportOrderText}" />
-                <TextBox Text="{Binding ImportSourcePath, Mode=TwoWay}" PlaceholderText="{Binding ImportSourcePlaceholder}" />
-                <TextBox Text="{Binding ImportTargetPath, Mode=TwoWay}" PlaceholderText="{Binding ImportTargetPlaceholder}" />
-                <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
+                </Border>
               </StackPanel>
             </Border>
             <ScrollViewer Margin="8,4">

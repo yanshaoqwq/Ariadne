@@ -10,6 +10,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private readonly IAriadneBackendClient _backend;
     private bool _isRightPanelOpen = true;
     private bool _isNavTreeTab = true;
+    private bool _isImportPanelOpen;
     private string _documentContent = string.Empty;
     private string _statusText = string.Empty;
     private string _projectAiMessage = string.Empty;
@@ -39,6 +40,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
+        OpenImportPanelCommand = new RelayCommand(OpenImportPanel);
+        ToggleImportPanelCommand = new RelayCommand(() => IsImportPanelOpen = !IsImportPanelOpen);
         ImportCommand = new RelayCommand(() => _ = ImportChapterAsync());
         ExportCommand = new RelayCommand(() => _ = ExportAsync());
         SaveCommand = new RelayCommand(() => _ = SaveAsync());
@@ -46,7 +49,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         EditModeCommand = new RelayCommand(() => IsEditMode = true);
         CopyCommand = new RelayCommand(() => RequestEditorCopy?.Invoke());
         SelectAllCommand = new RelayCommand(() => RequestEditorSelectAll?.Invoke());
-        QuickAiCommand = new RelayCommand(() => _ = QuickEditAsync());
+        QuickAiCommand = new RelayCommand(() =>
+        {
+            IsEditMode = true;
+            _ = QuickEditAsync();
+        });
         InsertOutlineCommand = new RelayCommand(InsertOutlineReference);
         ToggleEditCommand = new RelayCommand(() => IsEditMode = !IsEditMode);
         SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync());
@@ -89,9 +96,19 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public bool IsProjectAiTab => !_isNavTreeTab;
 
+    public bool IsImportPanelOpen
+    {
+        get => _isImportPanelOpen;
+        set => SetProperty(ref _isImportPanelOpen, value);
+    }
+
     public RelayCommand ShowNavTreeCommand { get; }
 
     public RelayCommand ShowProjectAiCommand { get; }
+
+    public RelayCommand OpenImportPanelCommand { get; }
+
+    public RelayCommand ToggleImportPanelCommand { get; }
 
     public RelayCommand ImportCommand { get; }
 
@@ -134,7 +151,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string DocumentContent
     {
         get => _documentContent;
-        set => SetProperty(ref _documentContent, value);
+        set
+        {
+            if (SetProperty(ref _documentContent, value))
+            {
+                OnPropertyChanged(nameof(DocumentBodyText));
+                OnPropertyChanged(nameof(CharacterCountText));
+            }
+        }
     }
 
     public bool HasUnsavedChanges
@@ -225,6 +249,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public string CurrentDocumentText => DocumentTitle;
 
+    public string DocumentBodyText => string.IsNullOrWhiteSpace(DocumentContent)
+        ? (string.IsNullOrWhiteSpace(_currentDocumentId)
+            ? NoDocumentText
+            : _displayNames.Text("ui.works.empty_document"))
+        : DocumentContent;
+
+    public string CharacterCountText => _displayNames.Format("ui.works.characters_count", new Dictionary<string, string>
+    {
+        ["count"] = DocumentContent.Length.ToString(),
+    });
+
     public string EmptyIndexText => _displayNames.Text("ui.works.empty_index");
 
     public string QuickAiHint => _displayNames.Text("ui.works.quick_ai_hint");
@@ -290,6 +325,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 DocumentContent = await _backend.GetDocumentContentByPathAsync(item.Path).ConfigureAwait(true);
                 _currentDocumentId = ProjectRelativePath(item.Path);
                 DocumentTitle = item.Title;
+                OnPropertyChanged(nameof(DocumentBodyText));
             }
             finally
             {
@@ -315,6 +351,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 ImportSourcePath,
                 ImportTargetPath)).ConfigureAwait(true);
             StatusText = _displayNames.Text("ui.common.import");
+            IsImportPanelOpen = false;
             await LoadWorksTreeAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
@@ -375,6 +412,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void InsertOutlineReference()
     {
+        IsEditMode = true;
         if (string.IsNullOrWhiteSpace(_currentDocumentId))
         {
             DocumentContent += Environment.NewLine + "@planning/outline.md";
@@ -382,6 +420,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         DocumentContent += Environment.NewLine + "@planning/outline.md";
         StatusText = OutlineText;
+    }
+
+    private void OpenImportPanel()
+    {
+        IsRightPanelOpen = true;
+        IsNavTreeTab = true;
+        IsImportPanelOpen = true;
     }
 
     private async Task QuickEditAsync()

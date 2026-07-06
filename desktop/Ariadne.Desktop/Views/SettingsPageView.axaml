@@ -276,6 +276,32 @@
                 </WrapPanel>
               </StackPanel>
             </Border>
+            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionToolControlsSelected}">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding ToolControlsLabel}" Classes="subtitle" />
+                <ItemsControl ItemsSource="{Binding ToolControlGroups}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:ToolControlGroupViewModel}">
+                      <StackPanel Spacing="8" Margin="0,0,0,18">
+                        <TextBlock Text="{Binding DisplayName}" Classes="secondary" />
+                        <ItemsControl ItemsSource="{Binding Controls}">
+                          <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                              <WrapPanel />
+                            </ItemsPanelTemplate>
+                          </ItemsControl.ItemsPanel>
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:ToolControlItemViewModel}">
+                              <CheckBox Margin="0,0,18,8" IsChecked="{Binding IsEnabled, Mode=TwoWay}" Content="{Binding DisplayName}" />
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </StackPanel>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Border>
             <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionPathsSelected}">
               <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
                 <StackPanel Grid.Column="0" Spacing="8">

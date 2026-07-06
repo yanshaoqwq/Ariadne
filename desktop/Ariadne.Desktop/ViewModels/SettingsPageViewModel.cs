@@ -113,6 +113,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         ConfirmationPolicies = new ObservableCollection<ConfirmationPolicyViewModel>();
         NodePresets = new ObservableCollection<NodeTypePresetViewModel>();
         AvailableModels = new ObservableCollection<ModelOptionViewModel>();
+        ToolControlGroups = new ObservableCollection<ToolControlGroupViewModel>();
         SectionIndexItems = new ObservableCollection<SettingsSectionIndexItemViewModel>();
 
         Tabs = new ObservableCollection<SettingsTabViewModel>
@@ -194,6 +195,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool IsSectionConfirmationsSelected => IsSectionSelected("confirmations");
     public bool IsSectionRuntimeSelected => IsSectionSelected("runtime");
     public bool IsSectionCapabilitiesSelected => IsSectionSelected("capabilities");
+    public bool IsSectionToolControlsSelected => IsSectionSelected("tool_controls");
     public bool IsSectionPathsSelected => IsSectionSelected("paths");
     public bool IsSectionThemeSelected => IsSectionSelected("theme");
     public bool IsSectionWorkspaceSelected => IsSectionSelected("workspace");
@@ -207,6 +209,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<ConfirmationPolicyViewModel> ConfirmationPolicies { get; }
     public ObservableCollection<NodeTypePresetViewModel> NodePresets { get; }
     public ObservableCollection<ModelOptionViewModel> AvailableModels { get; }
+    public ObservableCollection<ToolControlGroupViewModel> ToolControlGroups { get; }
     public ObservableCollection<SettingsSectionIndexItemViewModel> SectionIndexItems { get; }
 
     public RelayCommand SaveGeneralCommand { get; }
@@ -289,6 +292,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string AllowHttpSkillText => _displayNames.Text("ui.settings.permissions.allow_http_skill");
     public string AllowWasmNetworkText => _displayNames.Text("ui.settings.permissions.allow_wasm_network");
     public string AllowSecretReadText => _displayNames.Text("ui.settings.permissions.allow_secret_read");
+    public string ToolControlsLabel => _displayNames.Text("ui.settings.permissions.tool_controls");
     public string ReadableRootsLabel => _displayNames.Text("ui.settings.permissions.read_roots");
     public string WritableRootsLabel => _displayNames.Text("ui.settings.permissions.write_roots");
     public string PathPlaceholder => _displayNames.Text("ui.settings.permissions.path_placeholder");
@@ -452,6 +456,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             "permissions" => new[]
             {
                 ("capabilities", "ui.settings.section.capabilities"),
+                ("tool_controls", "ui.settings.section.tool_controls"),
                 ("paths", "ui.settings.section.paths"),
             },
             "personalization" => new[]
@@ -510,6 +515,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         OnPropertyChanged(nameof(IsSectionConfirmationsSelected));
         OnPropertyChanged(nameof(IsSectionRuntimeSelected));
         OnPropertyChanged(nameof(IsSectionCapabilitiesSelected));
+        OnPropertyChanged(nameof(IsSectionToolControlsSelected));
         OnPropertyChanged(nameof(IsSectionPathsSelected));
         OnPropertyChanged(nameof(IsSectionThemeSelected));
         OnPropertyChanged(nameof(IsSectionWorkspaceSelected));
@@ -766,7 +772,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 AllowWasmNetwork,
                 AllowSecretRead,
                 Lines(WritableRootsText),
-                Lines(ReadableRootsText)))).ConfigureAwait(true);
+                Lines(ReadableRootsText)),
+                ToToolControls())).ConfigureAwait(true);
         });
     }
 
@@ -835,6 +842,36 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         AllowSecretRead = settings.Policy.AllowSecretRead;
         ReadableRootsText = string.Join(Environment.NewLine, settings.Policy.ReadableFileRoots);
         WritableRootsText = string.Join(Environment.NewLine, settings.Policy.WritableFileRoots);
+        ApplyToolControls(settings.ToolControls);
+    }
+
+    private void ApplyToolControls(IReadOnlyDictionary<string, IReadOnlyDictionary<string, bool>>? toolControls)
+    {
+        ToolControlGroups.Clear();
+        foreach (var (scope, controls) in (toolControls ?? new Dictionary<string, IReadOnlyDictionary<string, bool>>()).OrderBy(item => item.Key, StringComparer.Ordinal))
+        {
+            var group = new ToolControlGroupViewModel(scope, ToolScopeLabel(scope));
+            foreach (var (tool, enabled) in controls.OrderBy(item => item.Key, StringComparer.Ordinal))
+            {
+                group.Controls.Add(new ToolControlItemViewModel(
+                    tool,
+                    ToolLabel(scope, tool),
+                    enabled,
+                    () => HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot));
+            }
+            ToolControlGroups.Add(group);
+        }
+    }
+
+    private IReadOnlyDictionary<string, IReadOnlyDictionary<string, bool>> ToToolControls()
+    {
+        return ToolControlGroups.ToDictionary(
+            group => group.Scope,
+            group => (IReadOnlyDictionary<string, bool>)group.Controls.ToDictionary(
+                item => item.ToolId,
+                item => item.IsEnabled,
+                StringComparer.Ordinal),
+            StringComparer.Ordinal);
     }
 
     private void ApplyNodePresets(NodePresetSettings settings)
@@ -881,6 +918,45 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             "high_risk_permission" => _displayNames.Text("ui.settings.automation.confirmation.high_risk_permission"),
             "budget_exceeded" => _displayNames.Text("ui.settings.automation.confirmation.budget_exceeded"),
             _ => kind,
+        };
+    }
+
+    private string ToolScopeLabel(string scope)
+    {
+        return scope switch
+        {
+            "project_ai" => _displayNames.Text("ui.settings.permissions.tool_scope.project_ai"),
+            "outliner" => _displayNames.Text("agent.outliner"),
+            "designer" => _displayNames.Text("agent.designer"),
+            "planner" => _displayNames.Text("agent.planner"),
+            "detail" => _displayNames.Text("agent.detail"),
+            "writer" => _displayNames.Text("agent.writer"),
+            "critic" => _displayNames.Text("agent.critic"),
+            "prudent" => _displayNames.Text("agent.prudent"),
+            "polisher" => _displayNames.Text("agent.polisher"),
+            "summarizer" => _displayNames.Text("agent.summarizer"),
+            _ => scope,
+        };
+    }
+
+    private string ToolLabel(string scope, string tool)
+    {
+        if (tool == "project-ai-workflow-tools")
+        {
+            return _displayNames.Text("ui.settings.permissions.tool.project_ai_workflow_tools");
+        }
+
+        var prefix = scope.Replace("_", "-", StringComparison.Ordinal) + "-";
+        var action = tool.StartsWith(prefix, StringComparison.Ordinal) ? tool[prefix.Length..] : tool;
+        return action switch
+        {
+            "register" => _displayNames.Text("ui.settings.permissions.tool.register"),
+            "find" => _displayNames.Text("ui.settings.permissions.tool.find"),
+            "search" => _displayNames.Text("ui.settings.permissions.tool.search"),
+            "insert-lines" => _displayNames.Text("ui.settings.permissions.tool.insert_lines"),
+            "replace-lines" => _displayNames.Text("ui.settings.permissions.tool.replace_lines"),
+            "rewrite-file" => _displayNames.Text("ui.settings.permissions.tool.rewrite_file"),
+            _ => tool,
         };
     }
 
@@ -1022,6 +1098,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         var confirmationSnapshot = string.Join("|", ConfirmationPolicies.Select(policy =>
             $"{policy.Kind}:{policy.NormalPolicy}:{policy.AutoModePolicy}"));
+        var toolControlSnapshot = string.Join("|", ToolControlGroups.SelectMany(group =>
+            group.Controls.Select(item => $"{group.Scope}:{item.ToolId}:{item.IsEnabled}")));
         return string.Join('\u001f', new[]
         {
             ProjectName,
@@ -1063,6 +1141,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             AllowSecretRead.ToString(),
             ReadableRootsText,
             WritableRootsText,
+            toolControlSnapshot,
             Theme,
             GitAutoColor,
             GitManualColor,
@@ -1102,6 +1181,49 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 }
 
 public sealed record LanguageOption(string Code, string Label);
+
+public sealed class ToolControlGroupViewModel
+{
+    public ToolControlGroupViewModel(string scope, string displayName)
+    {
+        Scope = scope;
+        DisplayName = displayName;
+        Controls = new ObservableCollection<ToolControlItemViewModel>();
+    }
+
+    public string Scope { get; }
+    public string DisplayName { get; }
+    public ObservableCollection<ToolControlItemViewModel> Controls { get; }
+}
+
+public sealed class ToolControlItemViewModel : ViewModelBase
+{
+    private readonly Action _markDirty;
+    private bool _isEnabled;
+
+    public ToolControlItemViewModel(string toolId, string displayName, bool isEnabled, Action markDirty)
+    {
+        ToolId = toolId;
+        DisplayName = displayName;
+        _isEnabled = isEnabled;
+        _markDirty = markDirty;
+    }
+
+    public string ToolId { get; }
+    public string DisplayName { get; }
+
+    public bool IsEnabled
+    {
+        get => _isEnabled;
+        set
+        {
+            if (SetProperty(ref _isEnabled, value))
+            {
+                _markDirty();
+            }
+        }
+    }
+}
 
 public sealed class ConfirmationPolicyViewModel : ViewModelBase
 {

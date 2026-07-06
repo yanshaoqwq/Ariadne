@@ -386,6 +386,13 @@
     <Setter Property="LineHeight" Value="30" />
     <Setter Property="TextWrapping" Value="Wrap" />
   </Style>
+  <Style Selector="SelectableTextBlock.reading">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Reading}" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="LineHeight" Value="30" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+  </Style>
 
   <!-- ============================ 卡片 / 层 ============================ -->
   <!-- 浮起卡片：表面色 + 发丝边框 + 柔投影，圆角 8 -->
@@ -596,6 +603,14 @@
   </Style>
   <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <Style Selector="TextBox.document-editor">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Reading}" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="LineHeight" Value="30" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
   </Style>
 
   <Style Selector="ComboBox">

@@ -109,7 +109,8 @@ public sealed record ConfirmationPolicySetting(
     [property: JsonPropertyName("policy")] string Policy);
 
 public sealed record PermissionsSettings(
-    [property: JsonPropertyName("policy")] PermissionPolicy Policy);
+    [property: JsonPropertyName("policy")] PermissionPolicy Policy,
+    [property: JsonPropertyName("tool_controls")] IReadOnlyDictionary<string, IReadOnlyDictionary<string, bool>> ToolControls);
 
 public sealed record PermissionPolicy(
     [property: JsonPropertyName("allow_network")] bool AllowNetwork,

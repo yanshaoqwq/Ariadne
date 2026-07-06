@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -254,6 +254,8 @@ pub struct PermissionsConfig {
     pub schema_version: u32,
     #[serde(default)]
     pub policy: PermissionPolicy,
+    #[serde(default = "default_permission_tool_controls")]
+    pub tool_controls: BTreeMap<String, BTreeMap<String, bool>>,
 }
 
 impl Default for PermissionsConfig {
@@ -262,8 +264,89 @@ impl Default for PermissionsConfig {
         Self {
             schema_version: current_schema_version(),
             policy: PermissionPolicy::default(),
+            tool_controls: default_permission_tool_controls(),
         }
     }
+}
+
+pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, bool>> {
+    let mut controls = BTreeMap::new();
+    controls.insert(
+        "project_ai".to_owned(),
+        enabled_tools(&["project-ai-workflow-tools"]),
+    );
+    controls.insert(
+        "outliner".to_owned(),
+        enabled_tools(&[
+            "outliner-register",
+            "outliner-find",
+            "outliner-search",
+            "outliner-insert-lines",
+            "outliner-replace-lines",
+            "outliner-rewrite-file",
+        ]),
+    );
+    controls.insert(
+        "designer".to_owned(),
+        enabled_tools(&[
+            "designer-register",
+            "designer-find",
+            "designer-search",
+            "designer-insert-lines",
+            "designer-replace-lines",
+            "designer-rewrite-file",
+        ]),
+    );
+    controls.insert(
+        "planner".to_owned(),
+        enabled_tools(&[
+            "planner-register",
+            "planner-find",
+            "planner-search",
+            "planner-insert-lines",
+            "planner-replace-lines",
+            "planner-rewrite-file",
+        ]),
+    );
+    controls.insert(
+        "detail".to_owned(),
+        enabled_tools(&["detail-find", "detail-search"]),
+    );
+    controls.insert(
+        "writer".to_owned(),
+        enabled_tools(&[
+            "writer-find",
+            "writer-search",
+            "writer-insert-lines",
+            "writer-replace-lines",
+        ]),
+    );
+    controls.insert(
+        "critic".to_owned(),
+        enabled_tools(&["critic-find", "critic-search"]),
+    );
+    controls.insert(
+        "prudent".to_owned(),
+        enabled_tools(&["prudent-find", "prudent-search"]),
+    );
+    controls.insert(
+        "polisher".to_owned(),
+        enabled_tools(&[
+            "polisher-find",
+            "polisher-search",
+            "polisher-insert-lines",
+            "polisher-replace-lines",
+        ]),
+    );
+    controls.insert("summarizer".to_owned(), BTreeMap::new());
+    controls
+}
+
+fn enabled_tools(tools: &[&str]) -> BTreeMap<String, bool> {
+    tools
+        .iter()
+        .map(|tool| ((*tool).to_owned(), true))
+        .collect()
 }
 
 /// RAG 配置文件。

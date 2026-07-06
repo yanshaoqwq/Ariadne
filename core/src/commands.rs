@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -9,8 +10,8 @@ use crate::config::MemorySecretStore;
 #[cfg(feature = "system-keychain")]
 use crate::config::SystemKeychainSecretStore;
 use crate::config::{
-    AppConfig, ApprovalPromptConfig, ConfigStore, GitConfig, ModelConfig, ProviderConfig,
-    RagConfig, SecretRef, SecretStore, SecretValue, WorkflowConfig,
+    default_permission_tool_controls, AppConfig, ApprovalPromptConfig, ConfigStore, GitConfig,
+    ModelConfig, ProviderConfig, RagConfig, SecretRef, SecretStore, SecretValue, WorkflowConfig,
 };
 use crate::contracts::{
     ensure_path_under_root, ApprovalPolicy, CoreResult, Edge, EdgeId, NodeId, NodeInstance,
@@ -248,6 +249,8 @@ impl Default for ConfirmationAutoModePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionsSettings {
     pub policy: PermissionPolicy,
+    #[serde(default)]
+    pub tool_controls: BTreeMap<String, BTreeMap<String, bool>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1740,6 +1743,7 @@ pub fn get_permissions_settings_impl(project_root: &Path) -> CommandResult<Permi
         .map_err(error_to_string)?;
     Ok(PermissionsSettings {
         policy: config.permissions.policy,
+        tool_controls: normalize_tool_controls(config.permissions.tool_controls),
     })
 }
 
@@ -1751,7 +1755,20 @@ pub fn save_permissions_settings_impl(
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     config.permissions.policy = settings.policy;
+    config.permissions.tool_controls = normalize_tool_controls(settings.tool_controls);
     config_store.save(&config).map_err(error_to_string)
+}
+
+fn normalize_tool_controls(
+    mut controls: BTreeMap<String, BTreeMap<String, bool>>,
+) -> BTreeMap<String, BTreeMap<String, bool>> {
+    for (scope, defaults) in default_permission_tool_controls() {
+        let scope_controls = controls.entry(scope).or_default();
+        for (tool, enabled) in defaults {
+            scope_controls.entry(tool).or_insert(enabled);
+        }
+    }
+    controls
 }
 
 pub fn resolve_confirmation_impl(
@@ -2187,6 +2204,14 @@ fn project_ai_llm_messages(
 }
 
 fn project_ai_workflow_tools(project_root: &Path) -> CommandResult<Vec<ProjectWorkflowTool>> {
+    let project_config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls);
+    if !tool_control_enabled(&tool_controls, "project_ai", "project-ai-workflow-tools") {
+        return Ok(Vec::new());
+    }
+
     let workflows_root = absolute_path(&project_root.join("workflows"));
     reject_symlink_root(&workflows_root)?;
     if !workflows_root.exists() {
@@ -2229,6 +2254,9 @@ fn project_ai_workflow_tools(project_root: &Path) -> CommandResult<Vec<ProjectWo
                 .trim_matches('_')
                 .to_owned();
             }
+            if !tool_control_enabled(&tool_controls, "project_ai", &tool_name) {
+                continue;
+            }
             tools.push(ProjectWorkflowTool {
                 tool_name,
                 display_name,
@@ -2238,6 +2266,17 @@ fn project_ai_workflow_tools(project_root: &Path) -> CommandResult<Vec<ProjectWo
         }
     }
     Ok(tools)
+}
+
+fn tool_control_enabled(
+    controls: &BTreeMap<String, BTreeMap<String, bool>>,
+    scope: &str,
+    tool: &str,
+) -> bool {
+    controls
+        .get(scope)
+        .and_then(|scope_controls| scope_controls.get(tool).copied())
+        .unwrap_or(true)
 }
 
 fn workflow_json_paths(root: &Path) -> CommandResult<Vec<PathBuf>> {
