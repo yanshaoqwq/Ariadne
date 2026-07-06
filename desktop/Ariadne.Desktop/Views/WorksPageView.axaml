@@ -173,7 +173,7 @@
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
-                <TextBlock Text="{Binding EmptyIndexText}" Classes="subtle" Margin="12,12,0,0" />
+                <TextBlock Text="{Binding EmptyIndexText}" Classes="subtle" Margin="12,12,0,0" IsVisible="{Binding IsWorksTreeEmpty}" />
               </StackPanel>
             </ScrollViewer>
           </DockPanel>

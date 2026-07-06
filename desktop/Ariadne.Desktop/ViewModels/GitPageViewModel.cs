@@ -24,7 +24,7 @@ public sealed class GitPageViewModel : ViewModelBase
         CreateCheckpointCommand = new RelayCommand(() => _ = CreateCheckpointAsync());
         ViewDetailsCommand = new RelayCommand(() => ViewDetails(SelectedCommit));
         RestoreCommand = new RelayCommand(() => _ = RestoreSelectedAsync());
-        CopyIdCommand = new RelayCommand(() => CopyCommitId(SelectedCommit));
+        CopyIdCommand = new RelayCommand(() => _ = CopyCommitIdAsync(SelectedCommit));
         _ = RefreshAsync();
     }
 
@@ -37,6 +37,7 @@ public sealed class GitPageViewModel : ViewModelBase
     public RelayCommand RestoreCommand { get; }
     public RelayCommand CopyIdCommand { get; }
     public ObservableCollection<GitHistoryItemViewModel> Commits { get; }
+    public Func<string, Task>? RequestCopyText { get; set; }
 
     public string CheckpointMessage { get => _checkpointMessage; set => SetProperty(ref _checkpointMessage, value); }
     public string RestoreBranchName { get => _restoreBranchName; set => SetProperty(ref _restoreBranchName, value); }
@@ -111,7 +112,7 @@ public sealed class GitPageViewModel : ViewModelBase
                     ViewDetails,
                     CreateCheckpointFromItemAsync,
                     RestoreCommitAsync,
-                    CopyCommitId));
+                    CopyCommitIdAsync));
             }
             SelectedCommit = Commits.FirstOrDefault();
             if (SelectedCommit is not null)
@@ -153,7 +154,7 @@ public sealed class GitPageViewModel : ViewModelBase
                     ViewDetails,
                     CreateCheckpointFromItemAsync,
                     RestoreCommitAsync,
-                    CopyCommitId));
+                    CopyCommitIdAsync));
             }
             SelectedCommit = Commits.FirstOrDefault();
             if (SelectedCommit is not null)
@@ -222,9 +223,22 @@ public sealed class GitPageViewModel : ViewModelBase
         StatusText = commit?.Summary ?? NoSelectionText;
     }
 
-    private void CopyCommitId(GitHistoryItemViewModel? commit)
+    private async Task CopyCommitIdAsync(GitHistoryItemViewModel? commit)
     {
-        StatusText = commit?.CommitId ?? NoSelectionText;
+        if (commit is null)
+        {
+            StatusText = NoSelectionText;
+            return;
+        }
+
+        if (RequestCopyText is not null)
+        {
+            await RequestCopyText(commit.CommitId).ConfigureAwait(true);
+            StatusText = _displayNames.Text("ui.git.copied_commit_id");
+            return;
+        }
+
+        StatusText = commit.CommitId;
     }
 
     private void SelectCommit(GitHistoryItemViewModel item)
@@ -268,7 +282,7 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         Action<GitHistoryItemViewModel> viewDetails,
         Func<GitHistoryItemViewModel, Task> createCheckpoint,
         Func<GitHistoryItemViewModel, Task> restore,
-        Action<GitHistoryItemViewModel> copyId)
+        Func<GitHistoryItemViewModel, Task> copyId)
     {
         CommitId = commitId;
         Summary = summary;
@@ -298,7 +312,7 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         CopyIdCommand = new RelayCommand(() =>
         {
             select(this);
-            copyId(this);
+            _ = copyId(this);
         });
     }
 

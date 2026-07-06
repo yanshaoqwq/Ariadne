@@ -6,6 +6,9 @@ namespace Ariadne.Desktop.ViewModels;
 
 public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 {
+    private const char SnapshotSeparator = '\u001f';
+    private const int SnapshotOnboardingSeenIndex = 44;
+
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
     private SettingsTabViewModel _selectedTab;
@@ -140,7 +143,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         SavePermissionsCommand = new RelayCommand(() => _ = SavePermissionsAsync());
         SavePersonalizationCommand = new RelayCommand(() => _ = SavePersonalizationAsync());
         SaveMiscCommand = new RelayCommand(() => _ = SaveMiscAsync());
-        ResetOnboardingCommand = new RelayCommand(() => OnboardingSeen = false);
+        ResetOnboardingCommand = new RelayCommand(() => _ = ResetOnboardingAsync());
 
         _ = LoadAsync();
     }
@@ -794,6 +797,43 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         });
     }
 
+    private async Task ResetOnboardingAsync()
+    {
+        IsLoading = true;
+        var wasDirty = HasUnsavedChanges;
+        try
+        {
+            OnboardingSeen = false;
+            var preferences = new UiPreferences(
+                Theme,
+                GitAutoColor,
+                GitManualColor,
+                ProjectPanelVisible,
+                _uiPreferences?.ProjectPanelPosition,
+                _uiPreferences?.PanelStates ?? new Dictionary<string, bool>(),
+                OnboardingSeen);
+            await _backend.SaveUiPreferencesAsync(preferences).ConfigureAwait(true);
+            _uiPreferences = preferences;
+            StatusText = _displayNames.Text("ui.common.configured");
+            if (wasDirty)
+            {
+                MarkOnboardingSavedInSnapshot();
+            }
+            else
+            {
+                CaptureSnapshot();
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
     private async Task SaveMiscAsync()
     {
         await RunWithStatusAsync(async () =>
@@ -1094,13 +1134,25 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         HasUnsavedChanges = false;
     }
 
+    private void MarkOnboardingSavedInSnapshot()
+    {
+        var savedParts = _savedSnapshot.Split(SnapshotSeparator);
+        var currentParts = CurrentSnapshot().Split(SnapshotSeparator);
+        if (savedParts.Length == currentParts.Length && currentParts.Length > SnapshotOnboardingSeenIndex)
+        {
+            savedParts[SnapshotOnboardingSeenIndex] = currentParts[SnapshotOnboardingSeenIndex];
+            _savedSnapshot = string.Join(SnapshotSeparator, savedParts);
+        }
+        HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+    }
+
     private string CurrentSnapshot()
     {
         var confirmationSnapshot = string.Join("|", ConfirmationPolicies.Select(policy =>
             $"{policy.Kind}:{policy.NormalPolicy}:{policy.AutoModePolicy}"));
         var toolControlSnapshot = string.Join("|", ToolControlGroups.SelectMany(group =>
             group.Controls.Select(item => $"{group.Scope}:{item.ToolId}:{item.IsEnabled}")));
-        return string.Join('\u001f', new[]
+        return string.Join(SnapshotSeparator, new[]
         {
             ProjectName,
             Locale,

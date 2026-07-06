@@ -142,6 +142,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public ObservableCollection<ExportFormatOption> ExportFormats { get; }
 
+    public bool IsWorksTreeEmpty => WorksTreeNodes.Count == 0;
+
     public bool IsEditMode
     {
         get => _isEditMode;
@@ -312,6 +314,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         catch (Exception ex)
         {
             StatusText = ex.Message;
+        }
+        finally
+        {
+            OnPropertyChanged(nameof(IsWorksTreeEmpty));
         }
     }
 

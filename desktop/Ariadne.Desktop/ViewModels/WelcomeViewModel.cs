@@ -26,8 +26,8 @@ public sealed class WelcomeViewModel : ViewModelBase
         _statusText = displayNames.Text("ui.common.loading");
         CreateProjectCommand = new RelayCommand(() => _ = CreateProjectAsync());
         OpenProjectCommand = new RelayCommand(() => _ = OpenProjectAsync());
-        TutorialCommand = new RelayCommand(() => StatusText = TutorialText);
-        FeedbackCommand = new RelayCommand(() => StatusText = FeedbackText);
+        TutorialCommand = new RelayCommand(() => _ = ShowTutorialAsync());
+        FeedbackCommand = new RelayCommand(() => _ = ShowFeedbackAsync());
     }
 
     public string BrandName => _displayNames.Text("ui.brand.name");
@@ -154,6 +154,18 @@ public sealed class WelcomeViewModel : ViewModelBase
     private IReadOnlyList<RecentProjectItemViewModel> WrapRecentProjects(IReadOnlyList<RecentProjectEntry> entries)
     {
         return entries.Select(entry => new RecentProjectItemViewModel(entry, () => _ = OpenProjectRootAsync(entry.ProjectRoot))).ToArray();
+    }
+
+    private async Task ShowTutorialAsync()
+    {
+        StatusText = TutorialText;
+        await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateTutorialDialog(_displayNames)).ConfigureAwait(true);
+    }
+
+    private async Task ShowFeedbackAsync()
+    {
+        StatusText = FeedbackText;
+        await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateFeedbackDialog(_displayNames)).ConfigureAwait(true);
     }
 
     private async Task OpenProjectRootAsync(string root)

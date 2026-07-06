@@ -1,6 +1,8 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
+using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
 
@@ -20,6 +22,8 @@ public partial class GitPageView : UserControl
     {
         InitializeComponent();
         LayoutUpdated += OnFirstLayout;
+        DataContextChanged += (_, _) => AttachClipboardActions();
+        AttachClipboardActions();
     }
 
     public void OnCommitPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -46,6 +50,23 @@ public partial class GitPageView : UserControl
             }
         }
         Canvas.SetTop(GitTogglePill, _togglePillTop);
+    }
+
+    private void AttachClipboardActions()
+    {
+        if (DataContext is GitPageViewModel viewModel)
+        {
+            viewModel.RequestCopyText = CopyTextAsync;
+        }
+    }
+
+    private async Task CopyTextAsync(string text)
+    {
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard is not null)
+        {
+            await clipboard.SetTextAsync(text);
+        }
     }
 
     // ===================== 右侧 Pill 点击 & 拖拽 =====================

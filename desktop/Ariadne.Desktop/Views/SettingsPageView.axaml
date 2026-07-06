@@ -81,7 +81,7 @@
               </Grid>
             </Border>
             <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionDirectoriesSelected}">
-              <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+              <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding DocumentsDir, Mode=TwoWay}" />
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding WorkflowsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
@@ -90,9 +90,9 @@
                 <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding SkillsDir, Mode=TwoWay}" />
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding ExportsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ExportsDir, Mode=TwoWay}" />
-                <Button Grid.Row="4" Grid.Column="1" Classes="primary" Content="{Binding SaveGeneralText}" HorizontalAlignment="Right" Command="{Binding SaveGeneralCommand}" />
               </Grid>
             </Border>
+            <Button Classes="primary" Content="{Binding SaveGeneralText}" HorizontalAlignment="Right" Command="{Binding SaveGeneralCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsModelsSelected}" Spacing="18">
@@ -156,15 +156,15 @@
             </Border>
 
             <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionSecretSelected}">
-              <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+              <Grid RowDefinitions="Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ApiKeyLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <Grid Grid.Row="0" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="10">
                   <TextBox Grid.Column="0" Text="{Binding ApiKey, Mode=TwoWay}" PlaceholderText="{Binding ApiKeyPlaceholder}" PasswordChar="*" />
                   <Button Grid.Column="1" Classes="secondary" Content="{Binding SaveKeyText}" Command="{Binding SaveProviderKeyCommand}" />
                 </Grid>
-                <Button Grid.Row="1" Grid.Column="1" Classes="primary" Content="{Binding SaveModelText}" HorizontalAlignment="Right" Command="{Binding SaveModelCommand}" />
               </Grid>
             </Border>
+            <Button Classes="primary" Content="{Binding SaveModelText}" HorizontalAlignment="Right" Command="{Binding SaveModelCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsPresetsSelected}" Spacing="18">

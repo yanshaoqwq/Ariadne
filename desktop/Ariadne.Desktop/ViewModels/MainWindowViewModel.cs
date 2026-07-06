@@ -142,9 +142,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public RelayCommand ToggleSidebarCommand => new(() => SidebarExpanded = !SidebarExpanded);
 
-    public RelayCommand OpenVersionCommand => new(() => BackendStatus = VersionText);
+    public RelayCommand OpenVersionCommand => new(() => _ = ShowVersionAsync());
 
-    public RelayCommand OpenFeedbackCommand => new(() => BackendStatus = FeedbackText);
+    public RelayCommand OpenFeedbackCommand => new(() => _ = ShowFeedbackAsync());
 
     public RelayCommand CreateProjectCommand => new(() => Welcome.CreateProjectCommand.Execute(null));
 
@@ -202,6 +202,18 @@ public sealed class MainWindowViewModel : ViewModelBase
         _suppressAutoModeSave = false;
         CurrentPage = Welcome;
         _ = Welcome.LoadAsync();
+    }
+
+    private async Task ShowVersionAsync()
+    {
+        BackendStatus = VersionText;
+        await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateVersionDialog(_displayNames, VersionText)).ConfigureAwait(true);
+    }
+
+    private async Task ShowFeedbackAsync()
+    {
+        BackendStatus = FeedbackText;
+        await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateFeedbackDialog(_displayNames)).ConfigureAwait(true);
     }
 
     private NavigationItemViewModel CreateNav(string id, string key, Avalonia.Media.Geometry? icon)
