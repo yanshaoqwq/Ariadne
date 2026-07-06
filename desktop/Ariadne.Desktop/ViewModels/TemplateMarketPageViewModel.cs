@@ -158,6 +158,28 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             {
                 ["version"] = detail.Version,
             });
+            var message = detail.Name
+                          + Environment.NewLine
+                          + _displayNames.Format("ui.template.detail.version", new Dictionary<string, string>
+                          {
+                              ["version"] = detail.Version,
+                          })
+                          + Environment.NewLine
+                          + Environment.NewLine
+                          + _displayNames.Text("ui.template.permission_dialog.desc")
+                          + Environment.NewLine
+                          + TemplatePermissionSummary(detail);
+            var dialog = new ConfirmDialogViewModel(
+                _displayNames.Text("ui.template.detail"),
+                message,
+                new[]
+                {
+                    new DialogButton(_displayNames.Text("ui.common.close"), DialogButtonVariant.Primary, 0),
+                })
+            {
+                CancelResultIndex = 0,
+            };
+            await DialogService.Current.ConfirmAsync(dialog).ConfigureAwait(true);
         }
         catch (Exception ex)
         {

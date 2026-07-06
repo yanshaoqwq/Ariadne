@@ -9,6 +9,7 @@ namespace Ariadne.Desktop.ViewModels;
 public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 {
     private const string DefaultWorkflowId = "default";
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
@@ -26,6 +27,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _confirmationReason = string.Empty;
     private string _annotationTitle = string.Empty;
     private IReadOnlyList<CanvasEdge> _edges = Array.Empty<CanvasEdge>();
+    private CanvasNode? _clipboardNode;
     private WorkflowNodeViewModel? _selectedNode;
     private ConfirmationItemViewModel? _selectedConfirmation;
     private WorkflowEdgeViewModel? _selectedEdge;
@@ -58,6 +60,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"));
         RejectConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("reject"));
         SaveEdgeConfigCommand = new RelayCommand(SaveSelectedEdgeConfig);
+        CopySelectedNodeCommand = new RelayCommand(CopySelectedNode);
+        CutSelectedNodeCommand = new RelayCommand(CutSelectedNode);
+        PasteNodeCommand = new RelayCommand(PasteNode);
+        FitViewCommand = new RelayCommand(FitView);
         _projectAiAnswer = displayNames.Text("ui.workspace.project_ai.empty");
 
         Nodes = new ObservableCollection<WorkflowNodeViewModel>();
@@ -194,6 +200,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand ApproveConfirmationCommand { get; }
     public RelayCommand RejectConfirmationCommand { get; }
     public RelayCommand SaveEdgeConfigCommand { get; }
+    public RelayCommand CopySelectedNodeCommand { get; }
+    public RelayCommand CutSelectedNodeCommand { get; }
+    public RelayCommand PasteNodeCommand { get; }
+    public RelayCommand FitViewCommand { get; }
 
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
     public string ProjectAiMessage { get => _projectAiMessage; set => SetProperty(ref _projectAiMessage, value); }
@@ -263,7 +273,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         var label = NodeLabel(nodeType);
         var node = new WorkflowNodeViewModel(
-            id: $"{nodeType}-{_nextNodeNumber++}",
+            id: NextNodeId(nodeType),
             nodeType,
             label,
             defaultWorkDir: nodeType == "start" ? _displayNames.Text("ui.workspace.start_node.default_work_dir") : string.Empty,
@@ -272,14 +282,44 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             _backend,
             () => SelectNode(node: null),
             RefreshDirtyState);
-        node.SelectCommand = new RelayCommand(() => SelectNode(node));
-        node.RunCommand = new RelayCommand(() => _ = RunNodeAsync(node));
+        AttachNodeCommands(node);
         Nodes.Add(node);
         SelectNode(node);
         if (capture)
         {
             RefreshDirtyState();
         }
+    }
+
+    private WorkflowNodeViewModel CreateNodeFromCanvas(CanvasNode graphNode)
+    {
+        var node = new WorkflowNodeViewModel(
+            graphNode.Id,
+            graphNode.Type,
+            graphNode.Label ?? NodeLabel(graphNode.Type),
+            ReadString(graphNode.Data, "work_dir"),
+            graphNode.Position?.X ?? 120 + ((Nodes.Count % 4) * 230),
+            graphNode.Position?.Y ?? 80 + ((Nodes.Count / 4) * 170),
+            _backend,
+            () => SelectNode(node: null),
+            RefreshDirtyState)
+        {
+            Name = ReadString(graphNode.Data, "name", graphNode.Label ?? NodeLabel(graphNode.Type)),
+            ExposedAsTool = ReadBool(graphNode.Data, "expose_as_tool", graphNode.Type == "start"),
+            PromptTemplate = ReadString(graphNode.Data, "prompt_template"),
+            ModelId = ReadString(graphNode.Data, "model_id"),
+            BudgetUsd = ReadString(graphNode.Data, "budget_usd"),
+            TimeoutMs = ReadString(graphNode.Data, "timeout_ms"),
+            BreakpointEnabled = ReadBool(graphNode.Data, "breakpoint", false),
+        };
+        AttachNodeCommands(node);
+        return node;
+    }
+
+    private void AttachNodeCommands(WorkflowNodeViewModel node)
+    {
+        node.SelectCommand = new RelayCommand(() => SelectNode(node));
+        node.RunCommand = new RelayCommand(() => _ = RunNodeAsync(node));
     }
 
     private void SelectNode(WorkflowNodeViewModel? node)
@@ -299,11 +339,111 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         if (SelectedNode is null)
         {
+            StatusText = NoNodeSelectedText;
             return;
         }
-        Nodes.Remove(SelectedNode);
+        DeleteNode(SelectedNode);
+        StatusText = _displayNames.Format("ui.workspace.deleted_selection", new Dictionary<string, string>
+        {
+            ["count"] = "1",
+        });
+    }
+
+    private void DeleteNode(WorkflowNodeViewModel node)
+    {
+        Nodes.Remove(node);
+        _edges = _edges
+            .Where(edge => edge.Source != node.Id && edge.Target != node.Id)
+            .ToArray();
+        Edges.Clear();
+        foreach (var edge in _edges)
+        {
+            Edges.Add(new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge));
+        }
         SelectedNode = null;
+        SelectedEdge = null;
+        OnPropertyChanged(nameof(EdgeCountText));
         RefreshDirtyState();
+    }
+
+    private void CopySelectedNode()
+    {
+        if (SelectedNode is null)
+        {
+            StatusText = NoNodeSelectedText;
+            return;
+        }
+
+        _clipboardNode = SelectedNode.ToCanvasNode();
+        StatusText = _displayNames.Format("ui.workspace.copied_selection", new Dictionary<string, string>
+        {
+            ["count"] = "1",
+        });
+    }
+
+    private void CutSelectedNode()
+    {
+        if (SelectedNode is null)
+        {
+            StatusText = NoNodeSelectedText;
+            return;
+        }
+
+        _clipboardNode = SelectedNode.ToCanvasNode();
+        DeleteNode(SelectedNode);
+        StatusText = _displayNames.Format("ui.workspace.cut_selection", new Dictionary<string, string>
+        {
+            ["count"] = "1",
+        });
+    }
+
+    private void PasteNode()
+    {
+        if (_clipboardNode is null)
+        {
+            StatusText = _displayNames.Text("ui.common.none");
+            return;
+        }
+
+        var data = JsonSerializer.Deserialize<Dictionary<string, object?>>(
+            JsonSerializer.Serialize(_clipboardNode.Data, JsonOptions),
+            JsonOptions) ?? new Dictionary<string, object?>();
+        var position = new CanvasPosition(
+            (_clipboardNode.Position?.X ?? 120) + 36,
+            (_clipboardNode.Position?.Y ?? 80) + 36);
+        var pasted = _clipboardNode with
+        {
+            Id = NextNodeId(_clipboardNode.Type),
+            Data = data,
+            Position = position,
+        };
+        var node = CreateNodeFromCanvas(pasted);
+        Nodes.Add(node);
+        SelectNode(node);
+        RefreshDirtyState();
+        StatusText = _displayNames.Format("ui.workspace.pasted_selection", new Dictionary<string, string>
+        {
+            ["count"] = "1",
+        });
+    }
+
+    private void FitView()
+    {
+        if (Nodes.Count == 0)
+        {
+            StatusText = _displayNames.Text("ui.common.none");
+            return;
+        }
+
+        var minX = Nodes.Min(node => node.X);
+        var minY = Nodes.Min(node => node.Y);
+        foreach (var node in Nodes)
+        {
+            node.X = Math.Max(24, node.X - minX + 48);
+            node.Y = Math.Max(24, node.Y - minY + 48);
+        }
+        RefreshDirtyState();
+        StatusText = CtxFitViewText;
     }
 
     private async Task LoadWorkflowAsync()
@@ -637,27 +777,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             OnPropertyChanged(nameof(EdgeCountText));
             foreach (var graphNode in graph.Nodes)
             {
-                var node = new WorkflowNodeViewModel(
-                    graphNode.Id,
-                    graphNode.Type,
-                    graphNode.Label ?? NodeLabel(graphNode.Type),
-                    ReadString(graphNode.Data, "work_dir"),
-                    graphNode.Position?.X ?? 120 + ((Nodes.Count % 4) * 230),
-                    graphNode.Position?.Y ?? 80 + ((Nodes.Count / 4) * 170),
-                    _backend,
-                    () => SelectNode(node: null),
-                    RefreshDirtyState)
-                {
-                    Name = ReadString(graphNode.Data, "name", graphNode.Label ?? NodeLabel(graphNode.Type)),
-                    ExposedAsTool = ReadBool(graphNode.Data, "expose_as_tool", graphNode.Type == "start"),
-                    PromptTemplate = ReadString(graphNode.Data, "prompt_template"),
-                    ModelId = ReadString(graphNode.Data, "model_id"),
-                    BudgetUsd = ReadString(graphNode.Data, "budget_usd"),
-                    TimeoutMs = ReadString(graphNode.Data, "timeout_ms"),
-                    BreakpointEnabled = ReadBool(graphNode.Data, "breakpoint", false),
-                };
-                node.SelectCommand = new RelayCommand(() => SelectNode(node));
-                node.RunCommand = new RelayCommand(() => _ = RunNodeAsync(node));
+                var node = CreateNodeFromCanvas(graphNode);
                 Nodes.Add(node);
             }
             if (Nodes.Count == 0)
@@ -682,7 +802,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
-            var graph = JsonSerializer.Deserialize<WorkflowGraphData>(_savedSnapshot, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            var graph = JsonSerializer.Deserialize<WorkflowGraphData>(_savedSnapshot, JsonOptions);
             if (graph is not null)
             {
                 ApplyGraph(graph);
@@ -705,7 +825,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private string CurrentSnapshot()
     {
-        return JsonSerializer.Serialize(BuildGraph(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return JsonSerializer.Serialize(BuildGraph(), JsonOptions);
     }
 
     private string NodeLabel(string nodeType)
@@ -731,6 +851,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             "summarizer" => _displayNames.Text("agent.summarizer"),
             _ => nodeType,
         };
+    }
+
+    private string NextNodeId(string nodeType)
+    {
+        string id;
+        do
+        {
+            id = $"{nodeType}-{_nextNodeNumber++}";
+        }
+        while (Nodes.Any(node => node.Id == id));
+        return id;
     }
 
     private static string ReadString(Dictionary<string, object?> data, string key, string fallback = "")
@@ -917,6 +1048,16 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
             data["breakpoint"] = true;
         }
         return data;
+    }
+
+    public CanvasNode ToCanvasNode()
+    {
+        return new CanvasNode(
+            Id,
+            NodeType,
+            Label,
+            ToData(),
+            new CanvasPosition(X, Y));
     }
 
     private async Task RunAsync()

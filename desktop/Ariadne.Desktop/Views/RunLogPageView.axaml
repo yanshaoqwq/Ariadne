@@ -16,7 +16,7 @@
         VerticalAlignment="Stretch">
       <Border Grid.ColumnSpan="6" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" />
       <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="subtitle" VerticalAlignment="Center" Margin="18,0,0,0" />
-      <TextBox Grid.Column="1" Text="{Binding SearchQuery, Mode=TwoWay}" PlaceholderText="{Binding SearchPlaceholder}" MaxWidth="320" HorizontalAlignment="Left" Margin="18,0" VerticalAlignment="Center" />
+      <TextBox Grid.Column="1" Text="{Binding SearchQuery, Mode=TwoWay}" PlaceholderText="{Binding SearchPlaceholder}" MaxWidth="320" HorizontalAlignment="Left" Margin="18,0,8,0" VerticalAlignment="Center" KeyDown="OnSearchKeyDown" />
       <ComboBox Grid.Column="2"
                 ItemsSource="{Binding LevelOptions}"
                 SelectedValue="{Binding SelectedLevel, Mode=TwoWay}"
@@ -30,8 +30,13 @@
           </DataTemplate>
         </ComboBox.ItemTemplate>
       </ComboBox>
-      <Button Grid.Column="3" Classes="secondary" Content="{Binding MarkReadText}" Command="{Binding MarkReadCommand}" VerticalAlignment="Center" Margin="0,0,8,0" />
-      <Button Grid.Column="4" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshCommand}" VerticalAlignment="Center" Margin="0,0,18,0" />
+      <Button Grid.Column="3" Classes="primary" Width="36" Height="32" Padding="0" Command="{Binding SearchCommand}" VerticalAlignment="Center" Margin="0,0,8,0" ToolTip.Tip="{Binding SearchText}">
+        <Path Classes="icon" Width="15" Height="15"
+              Stroke="{DynamicResource Ariadne.TextOnAccent}"
+              Data="{StaticResource Ariadne.Icon.Search}" />
+      </Button>
+      <Button Grid.Column="4" Classes="secondary" Content="{Binding MarkReadText}" Command="{Binding MarkReadCommand}" VerticalAlignment="Center" Margin="0,0,8,0" />
+      <Button Grid.Column="5" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshCommand}" VerticalAlignment="Center" Margin="0,0,18,0" />
     </Grid>
 
     <ScrollViewer Grid.Row="1">

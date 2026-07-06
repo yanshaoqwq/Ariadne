@@ -15,6 +15,12 @@
             <MenuItem Header="{Binding CtxAddNodeText}" Command="{Binding AddContextNodeCommand}" />
             <MenuItem Header="{Binding CtxAddStartText}" Command="{Binding AddStartNodeCommand}" />
             <Separator />
+            <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopySelectedNodeCommand}" />
+            <MenuItem Header="{Binding CtxCutText}" Command="{Binding CutSelectedNodeCommand}" />
+            <MenuItem Header="{Binding CtxPasteText}" Command="{Binding PasteNodeCommand}" />
+            <Separator />
+            <MenuItem Header="{Binding CtxFitViewText}" Command="{Binding FitViewCommand}" />
+            <Separator />
             <MenuItem Header="{Binding CtxDeleteText}" Command="{Binding DeleteSelectedNodeCommand}" />
           </ContextMenu>
         </Canvas.ContextMenu>

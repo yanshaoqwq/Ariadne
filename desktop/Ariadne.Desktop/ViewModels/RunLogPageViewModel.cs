@@ -24,6 +24,7 @@ public sealed class RunLogPageViewModel : ViewModelBase
             new("warning", displayNames.Text("ui.level.warning")),
             new("error", displayNames.Text("ui.level.error")),
         };
+        SearchCommand = new RelayCommand(() => _ = RefreshAsync());
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync());
         MarkReadCommand = new RelayCommand(() => _ = MarkReadAsync());
         _ = RefreshAsync();
@@ -36,6 +37,8 @@ public sealed class RunLogPageViewModel : ViewModelBase
     public string AllLevelsText => _displayNames.Text("ui.run_log.all_levels");
 
     public string RefreshText => _displayNames.Text("ui.common.refresh");
+
+    public string SearchText => _displayNames.Text("ui.common.search");
 
     public string MarkReadText => _displayNames.Text("ui.run_log.mark_read");
 
@@ -50,6 +53,8 @@ public sealed class RunLogPageViewModel : ViewModelBase
     public ObservableCollection<UiRunLogEntry> Logs { get; }
 
     public ObservableCollection<RunLogLevelOption> LevelOptions { get; }
+
+    public RelayCommand SearchCommand { get; }
 
     public RelayCommand RefreshCommand { get; }
 

@@ -564,6 +564,7 @@
   "ui.workspace.exported_selection": "已导出 {count} 个节点。",
   "ui.workspace.packed_selection": "已打包 {count} 个节点为子流程。",
   "ui.workspace.copied_selection": "已复制 {count} 个节点。",
+  "ui.workspace.cut_selection": "已剪切 {count} 个节点。",
   "ui.workspace.deleted_selection": "已删除 {count} 个节点。",
   "ui.workspace.deleted_edge": "已删除连线。",
   "ui.workspace.pasted_selection": "已粘贴 {count} 个节点。",
