@@ -471,31 +471,23 @@ fn validate_template_url(url: &str) -> CommandResult<()> {
 
 ## Issue 15：预算默认 0 但无 UI 警告，新用户无法运行 LLM 节点
 
-**Title:** 🔴 预算默认为 0 但无警告提示，新用户无法运行 LLM 节点
+Title: 🟡 预算显示 $0.0/$0.0 易引误解；手动设为 0.0 会阻断所有 LLM 调用
 
-**Labels:** ux, priority:high
+Labels: ux, config
 
-**Body:**
+问题描述：
 
-## 问题描述
+BudgetConfigFile 的 budget_usd 默认为 0.0，UI 预算条显示 $0.0/$0.0。但这并不阻断 LLM 调用——实际预算执行使用 BudgetLimits，其 daily_usd/monthly_usd/single_call_usd 默认均为 None，exceeds(None, value) 返回 false，即默认无日/月限额。
 
-`BudgetConfigFile::default()` 的 `budget_usd` 为 0.0，`validate_money` 允许通过（`0.0 >= 0.0`）。但 `evaluate_budget` 中 `exceeds(0.0, any_positive)` 总是 true，所以任何 LLM 调用都会触发 daily budget exceeded pause。
+存在两个问题：
 
-## 影响
+UX 误导：$0.0/$0.0 让用户以为无法运行 LLM，但实际默认可以运行（单次 >$1 需确认，<$1 直接放行）
+0.0 footgun：如果用户在设置中手动将日限额/月限额/预授权额度设为 0.0（误以为 0 = 无限制），exceeds(Some(0.0), any_positive) = true 会阻断所有 LLM 调用
+建议修复：
 
-- 新用户创建项目后尝试运行工作流，所有 LLM 节点立即暂停
-- 错误信息为 "daily budget limit exceeded"，但用户从未设置过预算
-- 预算条显示 `$0.0/$0.0`，没有提示需要配置
-
-## 建议修复
-
-**后端**：
-- `validate_money` 对 budget 字段拒绝 0 值，或
-- `evaluate_budget` 在 budget=0 时使用特殊逻辑（如不检查日限额，仅检查单次限额）
-
-**前端**：
-- 预算为 0 时显示警告色 + 提示文案"请先在设置中配置预算"
-- 首次运行工作流时弹出预算配置引导
+UI 在 budget_usd = 0 时显示"预算未设置，LLM 调用默认无限制"提示
+validate_money 对限额字段将 0.0 解释为"无限制"（映射为 None），或在 UI 中明确标注"0 表示禁止"
+预算条在 budget_usd = 0 时使用灰色+提示文案替代空进度条
 
 ---
 
