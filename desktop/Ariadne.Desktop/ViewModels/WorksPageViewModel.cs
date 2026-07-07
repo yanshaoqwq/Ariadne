@@ -28,6 +28,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _importSourcePath = string.Empty;
     private string _importTargetPath = string.Empty;
     private string _savedSnapshot = string.Empty;
+    private string _savedProjectMemorySnapshot = string.Empty;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
     private bool _isEditMode;
@@ -528,7 +529,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
-            ProjectMemory = await _backend.ReadProjectMemoryAsync().ConfigureAwait(true);
+            _suppressDirtyTracking = true;
+            try
+            {
+                ProjectMemory = await _backend.ReadProjectMemoryAsync().ConfigureAwait(true);
+            }
+            finally
+            {
+                _suppressDirtyTracking = false;
+            }
+            CaptureProjectMemorySnapshot();
         }
         catch (Exception ex)
         {
@@ -541,6 +551,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             await _backend.WriteProjectMemoryAsync(ProjectMemory).ConfigureAwait(true);
+            CaptureProjectMemorySnapshot();
             StatusText = _displayNames.Text("ui.common.save");
         }
         catch (Exception ex)
@@ -560,10 +571,18 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         switch (choice)
         {
             case UnsavedLeaveChoice.Save:
-                await SaveAsync().ConfigureAwait(true);
+                if (HasUnsavedDocumentChanges)
+                {
+                    await SaveAsync().ConfigureAwait(true);
+                }
+                if (HasUnsavedProjectMemoryChanges)
+                {
+                    await SaveProjectMemoryAsync().ConfigureAwait(true);
+                }
                 return !HasUnsavedChanges;
             case UnsavedLeaveChoice.Discard:
                 RestoreSnapshot();
+                RestoreProjectMemorySnapshot();
                 return true;
             default:
                 return false;
@@ -576,13 +595,33 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         RefreshDirtyState();
     }
 
+    private void CaptureProjectMemorySnapshot()
+    {
+        _savedProjectMemorySnapshot = ProjectMemory;
+        RefreshDirtyState();
+    }
+
     private void RestoreSnapshot()
     {
         _suppressDirtyTracking = true;
         try
         {
             DocumentContent = _savedSnapshot;
-            HasUnsavedChanges = false;
+            RefreshDirtyState();
+        }
+        finally
+        {
+            _suppressDirtyTracking = false;
+        }
+    }
+
+    private void RestoreProjectMemorySnapshot()
+    {
+        _suppressDirtyTracking = true;
+        try
+        {
+            ProjectMemory = _savedProjectMemorySnapshot;
+            RefreshDirtyState();
         }
         finally
         {
@@ -592,13 +631,18 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void RefreshDirtyState()
     {
-        HasUnsavedChanges = DocumentContent != _savedSnapshot;
+        HasUnsavedChanges = HasUnsavedDocumentChanges || HasUnsavedProjectMemoryChanges;
     }
+
+    private bool HasUnsavedDocumentChanges => DocumentContent != _savedSnapshot;
+
+    private bool HasUnsavedProjectMemoryChanges => ProjectMemory != _savedProjectMemorySnapshot;
 
     protected override void OnPropertyChanged(string? propertyName = null)
     {
         base.OnPropertyChanged(propertyName);
-        if (!_suppressDirtyTracking && propertyName == nameof(DocumentContent))
+        if (!_suppressDirtyTracking
+            && propertyName is nameof(DocumentContent) or nameof(ProjectMemory))
         {
             RefreshDirtyState();
         }
