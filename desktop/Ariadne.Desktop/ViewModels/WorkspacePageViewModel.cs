@@ -204,6 +204,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand CutSelectedNodeCommand { get; }
     public RelayCommand PasteNodeCommand { get; }
     public RelayCommand FitViewCommand { get; }
+    public Action? RequestFitView { get; set; }
 
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
     public string ProjectAiMessage { get => _projectAiMessage; set => SetProperty(ref _projectAiMessage, value); }
@@ -435,14 +436,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             return;
         }
 
-        var minX = Nodes.Min(node => node.X);
-        var minY = Nodes.Min(node => node.Y);
-        foreach (var node in Nodes)
-        {
-            node.X = Math.Max(24, node.X - minX + 48);
-            node.Y = Math.Max(24, node.Y - minY + 48);
-        }
-        RefreshDirtyState();
+        RequestFitView?.Invoke();
         StatusText = CtxFitViewText;
     }
 

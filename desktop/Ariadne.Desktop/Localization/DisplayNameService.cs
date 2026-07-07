@@ -32,6 +32,8 @@ public sealed class DisplayNameService
         new Dictionary<string, string>(),
         string.Empty);
 
+    public event EventHandler? LanguageChanged;
+
     /// 当前语言代码（zh / en / ja）。
     public string CurrentLanguage { get; private set; } = "zh";
 
@@ -46,7 +48,7 @@ public sealed class DisplayNameService
         var resourceDir = FindResourceDir();
         var baseNames = LoadJson(Path.Combine(resourceDir, "display_name.json"));
 
-        var systemLang = DetectSystemLanguage();
+        var systemLang = NormalizeLanguageCode(DetectSystemLanguage());
         var overlay = LoadOverlay(resourceDir, systemLang);
 
         var service = new DisplayNameService(baseNames, overlay, resourceDir)
@@ -59,9 +61,32 @@ public sealed class DisplayNameService
     /// 运行时切换语言（保存后调用此方法）。
     public void SwitchLanguage(string langCode)
     {
-        var lang = SupportedLanguages.Contains(langCode) ? langCode : "zh";
+        var lang = NormalizeLanguageCode(langCode);
         _overlay = LoadOverlay(_resourceDir, lang);
         CurrentLanguage = lang;
+        LanguageChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public static string NormalizeLanguageCode(string? langCode)
+    {
+        var lang = (langCode ?? string.Empty).Trim().ToLowerInvariant();
+        if (SupportedLanguages.Contains(lang))
+        {
+            return lang;
+        }
+        if (lang.StartsWith("zh", StringComparison.Ordinal))
+        {
+            return "zh";
+        }
+        if (lang.StartsWith("en", StringComparison.Ordinal))
+        {
+            return "en";
+        }
+        if (lang.StartsWith("ja", StringComparison.Ordinal) || lang.StartsWith("jp", StringComparison.Ordinal))
+        {
+            return "ja";
+        }
+        return "zh";
     }
 
     /// 查找 key 对应的文案：优先叠加层，缺则回退中文基底，再缺则返回 [key] 以便自查。

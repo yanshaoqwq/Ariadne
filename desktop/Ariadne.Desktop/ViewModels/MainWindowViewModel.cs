@@ -47,6 +47,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         };
 
         PrimaryNavigationItems[0].IsSelected = false;
+        _displayNames.LanguageChanged += (_, _) => RefreshLocalizedText();
     }
 
     public WelcomeViewModel Welcome { get; }
@@ -174,6 +175,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task EnterProjectAsync(CurrentProjectStatus project, bool createPage)
     {
+        await ApplySavedLanguageAsync().ConfigureAwait(true);
         await Welcome.LoadAsync().ConfigureAwait(true);
         RefreshProjectMenuItems();
         ProjectTitle = _displayNames.Format("ui.window.project_title", new Dictionary<string, string>
@@ -183,6 +185,19 @@ public sealed class MainWindowViewModel : ViewModelBase
         BackendStatus = ProjectTitle;
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
         SelectNavigationItem(PrimaryNavigationItems[0], createPage);
+    }
+
+    private async Task ApplySavedLanguageAsync()
+    {
+        try
+        {
+            var appSettings = await _backend.GetAppSettingsAsync().ConfigureAwait(true);
+            _displayNames.SwitchLanguage(appSettings.App.Locale);
+        }
+        catch
+        {
+            // 项目尚未完全可用时保留当前语言；后续进入设置页仍会按配置刷新。
+        }
     }
 
     private void LeaveProject()
@@ -224,6 +239,37 @@ public sealed class MainWindowViewModel : ViewModelBase
             icon,
             () => CreatePage(id, key),
             item => _ = SelectNavigationItemAsync(item));
+    }
+
+    private void RefreshLocalizedText()
+    {
+        OnPropertyChanged(nameof(AppName));
+        OnPropertyChanged(nameof(AppLogoLetter));
+        OnPropertyChanged(nameof(ToggleSidebarText));
+        OnPropertyChanged(nameof(MinimizeWindowText));
+        OnPropertyChanged(nameof(MaximizeWindowText));
+        OnPropertyChanged(nameof(CloseWindowText));
+        OnPropertyChanged(nameof(BudgetLabel));
+        OnPropertyChanged(nameof(AutoModeLabel));
+        OnPropertyChanged(nameof(ProjectMenuText));
+        OnPropertyChanged(nameof(CreateProjectText));
+        OnPropertyChanged(nameof(OpenProjectText));
+        OnPropertyChanged(nameof(LeaveProjectText));
+        OnPropertyChanged(nameof(FeedbackText));
+        OnPropertyChanged(nameof(VersionText));
+        foreach (var item in AllNavigationItems())
+        {
+            item.Title = item.Id switch
+            {
+                "workspace" => _displayNames.Text("ui.nav.workspace"),
+                "works" => _displayNames.Text("ui.nav.works"),
+                "git" => _displayNames.Text("ui.nav.git"),
+                "run_logs" => _displayNames.Text("ui.nav.run_logs"),
+                "templates" => _displayNames.Text("ui.nav.templates"),
+                "settings" => _displayNames.Text("ui.nav.settings"),
+                _ => item.Title,
+            };
+        }
     }
 
     private object CreatePage(string id, string key)

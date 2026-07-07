@@ -3,6 +3,7 @@ namespace Ariadne.Desktop.ViewModels;
 public sealed class NodeTypePresetViewModel : ViewModelBase
 {
     private readonly Action _onChange;
+    private string _displayName;
     private string _modelId;
     private string _timeoutMs;
     private string _budgetUsd;
@@ -18,7 +19,7 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
     {
         NodeType = nodeType;
         DisplayNameKey = displayNameKey;
-        DisplayName = displayName;
+        _displayName = displayName;
         _modelId = modelId;
         _timeoutMs = timeoutMs;
         _budgetUsd = budgetUsd;
@@ -27,7 +28,7 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
 
     public string NodeType { get; }
     public string DisplayNameKey { get; }
-    public string DisplayName { get; }
+    public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
 
     public string ModelId
     {

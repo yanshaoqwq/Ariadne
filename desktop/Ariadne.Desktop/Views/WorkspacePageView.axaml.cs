@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Media;
 using Avalonia.VisualTree;
 using Ariadne.Desktop.ViewModels;
 
@@ -34,11 +35,14 @@ public partial class WorkspacePageView : UserControl
     private double _nodeDragOriginY;
 
     private bool _layoutInitialized;
+    private WorkspacePageViewModel? _attachedViewModel;
 
     public WorkspacePageView()
     {
         InitializeComponent();
+        DataContextChanged += (_, _) => AttachViewActions();
         LayoutUpdated += OnFirstLayout;
+        AttachViewActions();
     }
 
     private void OnFirstLayout(object? sender, EventArgs e)
@@ -51,6 +55,32 @@ public partial class WorkspacePageView : UserControl
         PositionBottomPill();
         PositionRightPill();
         SyncNodeContainerPositions();
+    }
+
+    private void AttachViewActions()
+    {
+        if (_attachedViewModel is not null && !ReferenceEquals(_attachedViewModel, DataContext))
+        {
+            _attachedViewModel.RequestFitView = null;
+            _attachedViewModel = null;
+        }
+
+        if (DataContext is WorkspacePageViewModel viewModel)
+        {
+            viewModel.RequestFitView = FitViewToNodes;
+            _attachedViewModel = viewModel;
+        }
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        if (_attachedViewModel is not null)
+        {
+            _attachedViewModel.RequestFitView = null;
+            _attachedViewModel = null;
+        }
+
+        base.OnDetachedFromVisualTree(e);
     }
 
     // ===================== 收起/展开下栏（库底部 Pill 点击） =====================
@@ -291,6 +321,27 @@ public partial class WorkspacePageView : UserControl
         }
 
         SyncNodeContainerPositions(NodesItemsControl);
+    }
+
+    private void FitViewToNodes()
+    {
+        if (DataContext is not WorkspacePageViewModel { Nodes.Count: > 0 } viewModel
+            || NodesItemsControl is null)
+        {
+            return;
+        }
+
+        var minX = viewModel.Nodes.Min(node => node.X);
+        var minY = viewModel.Nodes.Min(node => node.Y);
+        if (NodesItemsControl.RenderTransform is not TranslateTransform transform)
+        {
+            transform = new TranslateTransform();
+            NodesItemsControl.RenderTransform = transform;
+        }
+
+        transform.X = Math.Max(0, 48 - minX);
+        transform.Y = Math.Max(0, 48 - minY);
+        SyncNodeContainerPositions();
     }
 
     private static void SyncNodeContainerPositions(Control control)

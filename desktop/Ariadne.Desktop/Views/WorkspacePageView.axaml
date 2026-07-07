@@ -42,6 +42,9 @@
         <TextBlock Canvas.Left="18" Canvas.Bottom="18" Text="{Binding StatusText}" Classes="caption" />
 
         <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}">
+          <ItemsControl.RenderTransform>
+            <TranslateTransform />
+          </ItemsControl.RenderTransform>
           <ItemsControl.ItemsPanel>
             <ItemsPanelTemplate>
               <Canvas />

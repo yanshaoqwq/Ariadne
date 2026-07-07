@@ -7,7 +7,103 @@ namespace Ariadne.Desktop.ViewModels;
 public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 {
     private const char SnapshotSeparator = '\u001f';
+    private const int SnapshotLocaleIndex = 1;
     private const int SnapshotOnboardingSeenIndex = 44;
+    private static readonly string[] LocalizedPropertyNames =
+    {
+        nameof(Title),
+        nameof(GeneralTitle),
+        nameof(ModelsTitle),
+        nameof(PresetsTitle),
+        nameof(AutomationTitle),
+        nameof(PermissionsTitle),
+        nameof(PersonalizationTitle),
+        nameof(MiscTitle),
+        nameof(ProjectNameLabel),
+        nameof(LocaleLabel),
+        nameof(DocumentsDirLabel),
+        nameof(WorkflowsDirLabel),
+        nameof(SkillsDirLabel),
+        nameof(ExportsDirLabel),
+        nameof(SaveGeneralText),
+        nameof(ProviderIdLabel),
+        nameof(ProviderTypeLabel),
+        nameof(ProviderDisplayNameLabel),
+        nameof(BaseUrlLabel),
+        nameof(BaseUrlPlaceholder),
+        nameof(ProviderEnabledText),
+        nameof(MakeDefaultLlmText),
+        nameof(MakeDefaultEmbeddingText),
+        nameof(MakeDefaultRerankerText),
+        nameof(AvailableModelsText),
+        nameof(ManualModelsText),
+        nameof(ModelsTextLabel),
+        nameof(ModelsPlaceholder),
+        nameof(EmbeddingModelLabel),
+        nameof(EmbeddingModelPlaceholder),
+        nameof(ApiKeyLabel),
+        nameof(ApiKeyPlaceholder),
+        nameof(SaveModelText),
+        nameof(SaveKeyText),
+        nameof(RefreshText),
+        nameof(ProviderStatusLabel),
+        nameof(PresetNodeTypeLabel),
+        nameof(PresetNodeModelLabel),
+        nameof(PresetNodeTimeoutLabel),
+        nameof(PresetNodeBudgetLabel),
+        nameof(DefaultModelLabel),
+        nameof(DefaultTimeoutLabel),
+        nameof(DefaultBudgetLabel),
+        nameof(TemplateRepositoryLabel),
+        nameof(SavePresetsText),
+        nameof(SaveTemplateRepositoryText),
+        nameof(BudgetLabel),
+        nameof(PreauthorizedBudgetLabel),
+        nameof(AutoModeLabel),
+        nameof(SpentLabel),
+        nameof(NormalModeLabel),
+        nameof(AutoModePolicyLabel),
+        nameof(WorkflowLimitLabel),
+        nameof(WorkflowDefaultTimeoutLabel),
+        nameof(MaxLoopIterationsLabel),
+        nameof(MaxToolRoundsLabel),
+        nameof(CheckpointEnabledLabel),
+        nameof(RuntimeAutosaveLabel),
+        nameof(SaveAutomationText),
+        nameof(AllowNetworkText),
+        nameof(AllowWebSearchText),
+        nameof(AllowHttpSkillText),
+        nameof(AllowWasmNetworkText),
+        nameof(AllowSecretReadText),
+        nameof(ToolControlsLabel),
+        nameof(ReadableRootsLabel),
+        nameof(WritableRootsLabel),
+        nameof(PathPlaceholder),
+        nameof(SavePermissionsText),
+        nameof(ThemeLabel),
+        nameof(GitAutoColorLabel),
+        nameof(GitManualColorLabel),
+        nameof(ProjectPanelVisibleText),
+        nameof(OnboardingSeenText),
+        nameof(SavePersonalizationText),
+        nameof(RagLabel),
+        nameof(RerankerEnabledText),
+        nameof(ChunkSizeLabel),
+        nameof(ChunkOverlapLabel),
+        nameof(GitLabel),
+        nameof(TrackDocumentsText),
+        nameof(TrackWorkflowsText),
+        nameof(TrackSkillsText),
+        nameof(TrackConfigText),
+        nameof(IgnoredPathsLabel),
+        nameof(IgnoredPathsPlaceholder),
+        nameof(SaveMiscText),
+        nameof(LanguageLabel),
+        nameof(LanguageDescText),
+        nameof(TutorialText),
+        nameof(DiagnosticsLabel),
+        nameof(DiagnosticsStatusText),
+    };
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
@@ -397,11 +493,25 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             if (SetProperty(ref _selectedLanguage, value))
             {
                 _displayNames.SwitchLanguage(value);
+                RefreshLocalizedText();
+                _ = PersistLanguageAsync(value);
             }
         }
     }
 
     private SettingsTabViewModel CreateTab(string id, string key) => new(id, _displayNames.Text(key), SelectTab);
+
+    private void ApplySavedLanguage(string locale)
+    {
+        var language = DisplayNameService.NormalizeLanguageCode(locale);
+        if (_displayNames.CurrentLanguage != language)
+        {
+            _displayNames.SwitchLanguage(language);
+        }
+        RefreshLocalizedText();
+        _selectedLanguage = language;
+        OnPropertyChanged(nameof(SelectedLanguage));
+    }
 
     private void SelectTab(SettingsTabViewModel tab)
     {
@@ -428,6 +538,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void RebuildSectionIndex()
     {
+        var previousSectionId = string.IsNullOrWhiteSpace(_selectedSectionId)
+            ? null
+            : _selectedSectionId;
         SectionIndexItems.Clear();
         var items = SelectedTab.Id switch
         {
@@ -480,7 +593,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             SectionIndexItems.Add(new SettingsSectionIndexItemViewModel(id, _displayNames.Text(key), SelectSection));
         }
-        _selectedSection = SectionIndexItems.FirstOrDefault();
+        _selectedSection = previousSectionId is null
+            ? SectionIndexItems.FirstOrDefault()
+            : SectionIndexItems.FirstOrDefault(item => item.Id == previousSectionId)
+              ?? SectionIndexItems.FirstOrDefault();
         if (_selectedSection is not null)
         {
             _selectedSection.IsSelected = true;
@@ -538,6 +654,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             _schemaVersion = app.App.SchemaVersion;
             ProjectName = app.App.ProjectName;
             Locale = app.App.Locale;
+            ApplySavedLanguage(app.App.Locale);
             DocumentsDir = app.App.DocumentsDir;
             WorkflowsDir = app.App.WorkflowsDir;
             SkillsDir = app.App.SkillsDir;
@@ -817,7 +934,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             StatusText = _displayNames.Text("ui.common.configured");
             if (wasDirty)
             {
-                MarkOnboardingSavedInSnapshot();
+                MarkSavedSnapshotValue(SnapshotOnboardingSeenIndex);
             }
             else
             {
@@ -1134,16 +1251,102 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         HasUnsavedChanges = false;
     }
 
-    private void MarkOnboardingSavedInSnapshot()
+    private async Task PersistLanguageAsync(string language)
+    {
+        IsLoading = true;
+        var wasDirty = HasUnsavedChanges;
+        try
+        {
+            var savedSettings = await _backend.GetAppSettingsAsync().ConfigureAwait(true);
+            var savedApp = savedSettings.App with { Locale = language };
+            await _backend.SaveAppSettingsAsync(new AppSettings(savedApp)).ConfigureAwait(true);
+            _schemaVersion = savedApp.SchemaVersion;
+            Locale = language;
+            StatusText = _displayNames.Text("ui.common.configured");
+            if (wasDirty)
+            {
+                MarkSavedSnapshotValue(SnapshotLocaleIndex);
+            }
+            else
+            {
+                CaptureSnapshot();
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private void MarkSavedSnapshotValue(int snapshotIndex)
     {
         var savedParts = _savedSnapshot.Split(SnapshotSeparator);
         var currentParts = CurrentSnapshot().Split(SnapshotSeparator);
-        if (savedParts.Length == currentParts.Length && currentParts.Length > SnapshotOnboardingSeenIndex)
+        if (savedParts.Length == currentParts.Length && currentParts.Length > snapshotIndex)
         {
-            savedParts[SnapshotOnboardingSeenIndex] = currentParts[SnapshotOnboardingSeenIndex];
+            savedParts[snapshotIndex] = currentParts[snapshotIndex];
             _savedSnapshot = string.Join(SnapshotSeparator, savedParts);
         }
         HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+    }
+
+    private void RefreshLocalizedText()
+    {
+        foreach (var propertyName in LocalizedPropertyNames)
+        {
+            OnPropertyChanged(propertyName);
+        }
+
+        foreach (var option in LanguageOptions)
+        {
+            option.Label = option.Code switch
+            {
+                "zh" => _displayNames.Text("ui.settings.misc.language.zh"),
+                "en" => _displayNames.Text("ui.settings.misc.language.en"),
+                "ja" => _displayNames.Text("ui.settings.misc.language.ja"),
+                _ => option.Label,
+            };
+        }
+
+        foreach (var tab in Tabs)
+        {
+            tab.Title = tab.Id switch
+            {
+                "general" => _displayNames.Text("ui.settings.tab.general"),
+                "models" => _displayNames.Text("ui.settings.tab.models"),
+                "presets" => _displayNames.Text("ui.settings.tab.presets"),
+                "automation" => _displayNames.Text("ui.settings.tab.automation"),
+                "permissions" => _displayNames.Text("ui.settings.tab.permissions"),
+                "personalization" => _displayNames.Text("ui.settings.tab.personalization"),
+                "misc" => _displayNames.Text("ui.settings.tab.misc"),
+                _ => tab.Title,
+            };
+        }
+
+        foreach (var policy in ConfirmationPolicies)
+        {
+            policy.Label = ConfirmationLabel(policy.Kind);
+        }
+
+        foreach (var preset in NodePresets)
+        {
+            preset.DisplayName = _displayNames.Text(preset.DisplayNameKey);
+        }
+
+        foreach (var group in ToolControlGroups)
+        {
+            group.DisplayName = ToolScopeLabel(group.Scope);
+            foreach (var control in group.Controls)
+            {
+                control.DisplayName = ToolLabel(group.Scope, control.ToolId);
+            }
+        }
+
+        RebuildSectionIndex();
     }
 
     private string CurrentSnapshot()
@@ -1232,37 +1435,52 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 }
 
-public sealed record LanguageOption(string Code, string Label);
-
-public sealed class ToolControlGroupViewModel
+public sealed class LanguageOption : ViewModelBase
 {
+    private string _label;
+
+    public LanguageOption(string code, string label)
+    {
+        Code = code;
+        _label = label;
+    }
+
+    public string Code { get; }
+    public string Label { get => _label; set => SetProperty(ref _label, value); }
+}
+
+public sealed class ToolControlGroupViewModel : ViewModelBase
+{
+    private string _displayName;
+
     public ToolControlGroupViewModel(string scope, string displayName)
     {
         Scope = scope;
-        DisplayName = displayName;
+        _displayName = displayName;
         Controls = new ObservableCollection<ToolControlItemViewModel>();
     }
 
     public string Scope { get; }
-    public string DisplayName { get; }
+    public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
     public ObservableCollection<ToolControlItemViewModel> Controls { get; }
 }
 
 public sealed class ToolControlItemViewModel : ViewModelBase
 {
     private readonly Action _markDirty;
+    private string _displayName;
     private bool _isEnabled;
 
     public ToolControlItemViewModel(string toolId, string displayName, bool isEnabled, Action markDirty)
     {
         ToolId = toolId;
-        DisplayName = displayName;
+        _displayName = displayName;
         _isEnabled = isEnabled;
         _markDirty = markDirty;
     }
 
     public string ToolId { get; }
-    public string DisplayName { get; }
+    public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
 
     public bool IsEnabled
     {
@@ -1279,6 +1497,7 @@ public sealed class ToolControlItemViewModel : ViewModelBase
 
 public sealed class ConfirmationPolicyViewModel : ViewModelBase
 {
+    private string _label;
     private bool _normalAllowByDefault;
     private bool _autoModeAutoApproval;
 
@@ -1287,14 +1506,14 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
     public ConfirmationPolicyViewModel(string kind, string label, string normalPolicy, string autoModePolicy, Action markDirty)
     {
         Kind = kind;
-        Label = label;
+        _label = label;
         _markDirty = markDirty;
         _normalAllowByDefault = normalPolicy == "allow_by_default";
         _autoModeAutoApproval = string.IsNullOrWhiteSpace(autoModePolicy) || autoModePolicy == "auto_approval";
     }
 
     public string Kind { get; }
-    public string Label { get; }
+    public string Label { get => _label; set => SetProperty(ref _label, value); }
     public string NormalPolicy => NormalAllowByDefault ? "allow_by_default" : "manual_review";
     public string AutoModePolicy => AutoModeAutoApproval ? "auto_approval" : "allow_by_default";
 
@@ -1328,16 +1547,17 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
 public sealed class SettingsTabViewModel : ViewModelBase
 {
     private bool _isSelected;
+    private string _title;
 
     public SettingsTabViewModel(string id, string title, Action<SettingsTabViewModel> select)
     {
         Id = id;
-        Title = title;
+        _title = title;
         SelectCommand = new RelayCommand(() => select(this));
     }
 
     public string Id { get; }
-    public string Title { get; }
+    public string Title { get => _title; set => SetProperty(ref _title, value); }
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
 }

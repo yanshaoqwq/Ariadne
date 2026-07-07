@@ -28,6 +28,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         OpenProjectCommand = new RelayCommand(() => _ = OpenProjectAsync());
         TutorialCommand = new RelayCommand(() => _ = ShowTutorialAsync());
         FeedbackCommand = new RelayCommand(() => _ = ShowFeedbackAsync());
+        _displayNames.LanguageChanged += (_, _) => RefreshLocalizedText();
     }
 
     public string BrandName => _displayNames.Text("ui.brand.name");
@@ -55,6 +56,17 @@ public sealed class WelcomeViewModel : ViewModelBase
     public void SetProjectFolderPicker(Func<Task<string?>> picker)
     {
         _pickProjectFolder = picker;
+    }
+
+    private void RefreshLocalizedText()
+    {
+        OnPropertyChanged(nameof(BrandName));
+        OnPropertyChanged(nameof(Subtitle));
+        OnPropertyChanged(nameof(RecentProjectsTitle));
+        OnPropertyChanged(nameof(CreateProjectText));
+        OnPropertyChanged(nameof(OpenProjectText));
+        OnPropertyChanged(nameof(TutorialText));
+        OnPropertyChanged(nameof(FeedbackText));
     }
 
     public string StatusText

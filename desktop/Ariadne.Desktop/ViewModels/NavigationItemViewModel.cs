@@ -7,11 +7,12 @@ public sealed class NavigationItemViewModel : ViewModelBase
 {
     private bool _isSelected;
     private int _badgeCount;
+    private string _title;
 
     public NavigationItemViewModel(string id, string title, Geometry? icon, Func<object> pageFactory, Action<NavigationItemViewModel> select)
     {
         Id = id;
-        Title = title;
+        _title = title;
         Icon = icon;
         PageFactory = pageFactory;
         SelectCommand = new RelayCommand(() => select(this));
@@ -19,7 +20,7 @@ public sealed class NavigationItemViewModel : ViewModelBase
 
     public string Id { get; }
 
-    public string Title { get; }
+    public string Title { get => _title; set => SetProperty(ref _title, value); }
 
     /// 矢量图标几何（来自主题资源 Ariadne.Icon.*），用 Path 渲染，不依赖任何字体。
     public Geometry? Icon { get; }
