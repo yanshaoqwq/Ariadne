@@ -36,6 +36,7 @@ public partial class WorksPageView : UserControl
         {
             _attachedViewModel.RequestEditorCopy = null;
             _attachedViewModel.RequestEditorSelectAll = null;
+            _attachedViewModel.RequestEditorSelection = null;
             _attachedViewModel = null;
         }
 
@@ -51,6 +52,7 @@ public partial class WorksPageView : UserControl
             DocumentEditor.SelectionEnd = DocumentEditor.Text?.Length ?? 0;
             DocumentEditor.Focus();
         };
+        viewModel.RequestEditorSelection = CurrentEditorSelection;
         _attachedViewModel = viewModel;
     }
 
@@ -60,10 +62,18 @@ public partial class WorksPageView : UserControl
         {
             _attachedViewModel.RequestEditorCopy = null;
             _attachedViewModel.RequestEditorSelectAll = null;
+            _attachedViewModel.RequestEditorSelection = null;
             _attachedViewModel = null;
         }
 
         base.OnDetachedFromVisualTree(e);
+    }
+
+    private EditorTextSelection CurrentEditorSelection()
+    {
+        var start = Math.Min(DocumentEditor.SelectionStart, DocumentEditor.SelectionEnd);
+        var end = Math.Max(DocumentEditor.SelectionStart, DocumentEditor.SelectionEnd);
+        return new EditorTextSelection(start, end, DocumentEditor.SelectedText ?? string.Empty);
     }
 
     private async Task CopySelectionAsync()

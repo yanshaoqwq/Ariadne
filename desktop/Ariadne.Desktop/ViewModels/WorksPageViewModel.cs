@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -30,6 +31,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
     private bool _isEditMode;
+    private TextRange? _pendingQuickEditRange;
 
     public WorksPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -137,6 +139,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand SaveProjectMemoryCommand { get; }
     public Action? RequestEditorCopy { get; set; }
     public Action? RequestEditorSelectAll { get; set; }
+    public Func<EditorTextSelection>? RequestEditorSelection { get; set; }
 
     public ObservableCollection<WorksTreeItemViewModel> WorksTreeNodes { get; }
 
@@ -418,12 +421,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void InsertOutlineReference()
     {
-        IsEditMode = true;
         if (string.IsNullOrWhiteSpace(_currentDocumentId))
         {
-            DocumentContent += Environment.NewLine + "@planning/outline.md";
+            StatusText = NoDocumentText;
             return;
         }
+        IsEditMode = true;
         DocumentContent += Environment.NewLine + "@planning/outline.md";
         StatusText = OutlineText;
     }
@@ -439,13 +442,23 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(DocumentContent) || string.IsNullOrWhiteSpace(QuickEditInstruction))
+            var selection = RequestEditorSelection?.Invoke();
+            var hasSelection = selection is { } currentSelection
+                               && currentSelection.End > currentSelection.Start
+                               && !string.IsNullOrWhiteSpace(currentSelection.Text);
+            var selectedText = hasSelection && selection is not null
+                ? selection.Text
+                : DocumentContent;
+            if (string.IsNullOrWhiteSpace(selectedText) || string.IsNullOrWhiteSpace(QuickEditInstruction))
             {
                 StatusText = QuickAiHint;
                 return;
             }
+            _pendingQuickEditRange = hasSelection && selection is not null
+                ? Utf8Range(DocumentContent, selection.Start, selection.End)
+                : Utf8Range(DocumentContent, 0, DocumentContent.Length);
             var result = await _backend.QuickEditAsync(new QuickEditRequest(
-                DocumentContent,
+                selectedText,
                 QuickEditInstruction,
                 string.IsNullOrWhiteSpace(_currentDocumentId) ? null : _currentDocumentId)).ConfigureAwait(true);
             _pendingQuickEdit = result;
@@ -478,7 +491,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 _currentDocumentId,
                 null,
                 DocumentContent,
-                new TextRange(0, DocumentContent.Length),
+                _pendingQuickEditRange ?? Utf8Range(DocumentContent, 0, DocumentContent.Length),
                 _pendingQuickEdit).ConfigureAwait(true);
             _suppressDirtyTracking = true;
             try
@@ -490,6 +503,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 _suppressDirtyTracking = false;
             }
             CaptureSnapshot();
+            _pendingQuickEdit = null;
+            _pendingQuickEditRange = null;
             StatusText = _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
@@ -621,9 +636,21 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         return normalized.TrimStart('/');
     }
+
+    private static TextRange Utf8Range(string document, int start, int end)
+    {
+        var length = document.Length;
+        var startIndex = Math.Clamp(Math.Min(start, end), 0, length);
+        var endIndex = Math.Clamp(Math.Max(start, end), 0, length);
+        return new TextRange(
+            Encoding.UTF8.GetByteCount(document[..startIndex]),
+            Encoding.UTF8.GetByteCount(document[..endIndex]));
+    }
 }
 
 public sealed record ExportFormatOption(string Value, string Label);
+
+public sealed record EditorTextSelection(int Start, int End, string Text);
 
 public sealed class WorksTreeItemViewModel
 {
