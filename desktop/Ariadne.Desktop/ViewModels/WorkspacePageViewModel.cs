@@ -45,24 +45,24 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         SaveCommand = new RelayCommand(() => _ = SaveWorkflowAsync());
         AddContextNodeCommand = new RelayCommand(() => AddNode("llm"));
         AddStartNodeCommand = new RelayCommand(() => AddNode("start"));
-        DeleteSelectedNodeCommand = new RelayCommand(DeleteSelectedNode);
-        RunSelectedNodeCommand = new RelayCommand(() => _ = RunSelectedNodeAsync());
-        PauseWorkflowCommand = new RelayCommand(() => _ = PauseWorkflowAsync());
-        StopWorkflowCommand = new RelayCommand(() => _ = StopWorkflowAsync());
-        ResumeWorkflowCommand = new RelayCommand(() => _ = ResumeWorkflowAsync());
-        SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync());
-        ApplyNodeConfigCommand = new RelayCommand(() => _ = ApplyNodeConfigAsync());
-        ToggleBreakpointCommand = new RelayCommand(() => _ = ToggleBreakpointAsync());
+        DeleteSelectedNodeCommand = new RelayCommand(() => _ = DeleteSelectedNodeAsync(), () => HasSelectedNode);
+        RunSelectedNodeCommand = new RelayCommand(() => _ = RunSelectedNodeAsync(), () => HasSelectedNode);
+        PauseWorkflowCommand = new RelayCommand(() => _ = PauseWorkflowAsync(), HasCurrentRun);
+        StopWorkflowCommand = new RelayCommand(() => _ = StopWorkflowAsync(), HasCurrentRun);
+        ResumeWorkflowCommand = new RelayCommand(() => _ = ResumeWorkflowAsync(), HasCurrentRun);
+        SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync(), HasProjectAiMessage);
+        ApplyNodeConfigCommand = new RelayCommand(() => _ = ApplyNodeConfigAsync(), () => HasSelectedNode);
+        ToggleBreakpointCommand = new RelayCommand(() => _ = ToggleBreakpointAsync(), () => HasSelectedNode);
         AddAnnotationCommand = new RelayCommand(() => _ = AddAnnotationAsync());
         ExportSelectionCommand = new RelayCommand(() => _ = ExportWorkflowAsync());
         PackSelectionCommand = new RelayCommand(() => _ = PackSelectionAsync());
         RefreshConfirmationsCommand = new RelayCommand(() => _ = LoadConfirmationsAsync());
-        ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"));
-        RejectConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("reject"));
-        SaveEdgeConfigCommand = new RelayCommand(SaveSelectedEdgeConfig);
-        CopySelectedNodeCommand = new RelayCommand(CopySelectedNode);
-        CutSelectedNodeCommand = new RelayCommand(CutSelectedNode);
-        PasteNodeCommand = new RelayCommand(PasteNode);
+        ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"), CanResolveConfirmation);
+        RejectConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("reject"), CanResolveConfirmation);
+        SaveEdgeConfigCommand = new RelayCommand(SaveSelectedEdgeConfig, () => HasSelectedEdge);
+        CopySelectedNodeCommand = new RelayCommand(CopySelectedNode, () => HasSelectedNode);
+        CutSelectedNodeCommand = new RelayCommand(() => _ = CutSelectedNodeAsync(), () => HasSelectedNode);
+        PasteNodeCommand = new RelayCommand(PasteNode, () => _clipboardNode is not null);
         FitViewCommand = new RelayCommand(FitView);
         _projectAiAnswer = displayNames.Text("ui.workspace.project_ai.empty");
 
@@ -207,9 +207,29 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public Action? RequestFitView { get; set; }
 
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
-    public string ProjectAiMessage { get => _projectAiMessage; set => SetProperty(ref _projectAiMessage, value); }
+    public string ProjectAiMessage
+    {
+        get => _projectAiMessage;
+        set
+        {
+            if (SetProperty(ref _projectAiMessage, value))
+            {
+                SendProjectAiCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
     public string ProjectAiAnswer { get => _projectAiAnswer; set => SetProperty(ref _projectAiAnswer, value); }
-    public string CurrentRunId { get => _currentRunId; set => SetProperty(ref _currentRunId, value); }
+    public string CurrentRunId
+    {
+        get => _currentRunId;
+        set
+        {
+            if (SetProperty(ref _currentRunId, value))
+            {
+                NotifyRunCommandStates();
+            }
+        }
+    }
     public string ConfirmationReason { get => _confirmationReason; set => SetProperty(ref _confirmationReason, value); }
     public string AnnotationTitle { get => _annotationTitle; set => SetProperty(ref _annotationTitle, value); }
 
@@ -235,6 +255,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 OnPropertyChanged(nameof(HasSelectedNode));
                 OnPropertyChanged(nameof(SelectedNodeTitle));
+                NotifyNodeCommandStates();
             }
         }
     }
@@ -244,7 +265,13 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ConfirmationItemViewModel? SelectedConfirmation
     {
         get => _selectedConfirmation;
-        private set => SetProperty(ref _selectedConfirmation, value);
+        private set
+        {
+            if (SetProperty(ref _selectedConfirmation, value))
+            {
+                NotifyConfirmationCommandStates();
+            }
+        }
     }
 
     public WorkflowEdgeViewModel? SelectedEdge
@@ -255,11 +282,15 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             if (SetProperty(ref _selectedEdge, value))
             {
                 OnPropertyChanged(nameof(HasSelectedEdge));
+                SaveEdgeConfigCommand.NotifyCanExecuteChanged();
             }
         }
     }
 
     public bool HasSelectedEdge => SelectedEdge is not null;
+    private bool HasCurrentRun() => !string.IsNullOrWhiteSpace(CurrentRunId);
+    private bool HasProjectAiMessage() => !string.IsNullOrWhiteSpace(ProjectAiMessage);
+    private bool CanResolveConfirmation() => SelectedConfirmation is not null && HasCurrentRun();
 
     public string CtxAddNodeText => _displayNames.Text("ui.workspace.context.add_node");
     public string CtxAddStartText => _displayNames.Text("ui.workspace.context.add_start");
@@ -269,6 +300,30 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string CtxCopyText => _displayNames.Text("ui.workspace.context.copy");
     public string CtxCutText => _displayNames.Text("ui.workspace.context.cut");
     public string CtxDeleteText => _displayNames.Text("ui.workspace.context.delete");
+
+    private void NotifyNodeCommandStates()
+    {
+        DeleteSelectedNodeCommand.NotifyCanExecuteChanged();
+        RunSelectedNodeCommand.NotifyCanExecuteChanged();
+        ApplyNodeConfigCommand.NotifyCanExecuteChanged();
+        ToggleBreakpointCommand.NotifyCanExecuteChanged();
+        CopySelectedNodeCommand.NotifyCanExecuteChanged();
+        CutSelectedNodeCommand.NotifyCanExecuteChanged();
+    }
+
+    private void NotifyRunCommandStates()
+    {
+        PauseWorkflowCommand.NotifyCanExecuteChanged();
+        StopWorkflowCommand.NotifyCanExecuteChanged();
+        ResumeWorkflowCommand.NotifyCanExecuteChanged();
+        NotifyConfirmationCommandStates();
+    }
+
+    private void NotifyConfirmationCommandStates()
+    {
+        ApproveConfirmationCommand.NotifyCanExecuteChanged();
+        RejectConfirmationCommand.NotifyCanExecuteChanged();
+    }
 
     private void AddNode(string nodeType, bool capture = true)
     {
@@ -336,14 +391,22 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
-    private void DeleteSelectedNode()
+    private async Task DeleteSelectedNodeAsync()
     {
-        if (SelectedNode is null)
+        var node = SelectedNode;
+        if (node is null)
         {
             StatusText = NoNodeSelectedText;
             return;
         }
-        DeleteNode(SelectedNode);
+        if (!await ConfirmDangerAsync(
+                "ui.dialog.workspace.delete_node.title",
+                "ui.dialog.workspace.delete_node.message",
+                "ui.dialog.workspace.delete_node.confirm").ConfigureAwait(true))
+        {
+            return;
+        }
+        DeleteNode(node);
         StatusText = _displayNames.Format("ui.workspace.deleted_selection", new Dictionary<string, string>
         {
             ["count"] = "1",
@@ -369,29 +432,40 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void CopySelectedNode()
     {
-        if (SelectedNode is null)
+        var node = SelectedNode;
+        if (node is null)
         {
             StatusText = NoNodeSelectedText;
             return;
         }
 
-        _clipboardNode = SelectedNode.ToCanvasNode();
+        _clipboardNode = node.ToCanvasNode();
+        PasteNodeCommand.NotifyCanExecuteChanged();
         StatusText = _displayNames.Format("ui.workspace.copied_selection", new Dictionary<string, string>
         {
             ["count"] = "1",
         });
     }
 
-    private void CutSelectedNode()
+    private async Task CutSelectedNodeAsync()
     {
-        if (SelectedNode is null)
+        var node = SelectedNode;
+        if (node is null)
         {
             StatusText = NoNodeSelectedText;
             return;
         }
+        if (!await ConfirmDangerAsync(
+                "ui.dialog.workspace.cut_node.title",
+                "ui.dialog.workspace.cut_node.message",
+                "ui.dialog.workspace.cut_node.confirm").ConfigureAwait(true))
+        {
+            return;
+        }
 
-        _clipboardNode = SelectedNode.ToCanvasNode();
-        DeleteNode(SelectedNode);
+        _clipboardNode = node.ToCanvasNode();
+        PasteNodeCommand.NotifyCanExecuteChanged();
+        DeleteNode(node);
         StatusText = _displayNames.Format("ui.workspace.cut_selection", new Dictionary<string, string>
         {
             ["count"] = "1",
@@ -538,6 +612,18 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private async Task StopWorkflowAsync()
     {
+        if (string.IsNullOrWhiteSpace(CurrentRunId))
+        {
+            StatusText = _displayNames.Text("ui.common.none");
+            return;
+        }
+        if (!await ConfirmDangerAsync(
+                "ui.dialog.workspace.stop_run.title",
+                "ui.dialog.workspace.stop_run.message",
+                "ui.dialog.workspace.stop_run.confirm").ConfigureAwait(true))
+        {
+            return;
+        }
         await RunControlAsync((workflowId, runId) => _backend.StopWorkflowAsync(workflowId, runId, StatusText));
     }
 
@@ -568,6 +654,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(ProjectAiMessage))
+            {
+                StatusText = ProjectAiPlaceholder;
+                return;
+            }
             if (HasUnsavedChanges)
             {
                 var graph = BuildGraph();
@@ -635,6 +726,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private async Task AddAnnotationAsync()
     {
         var selected = SelectedNode is null ? Nodes.Select(node => node.Id).ToArray() : new[] { SelectedNode.Id };
+        if (SelectedNode is null && selected.Length > 1
+            && !await ConfirmAllNodesAsync("ui.dialog.workspace.annotate_all.message").ConfigureAwait(true))
+        {
+            return;
+        }
         try
         {
             await _backend.UpsertCanvasAnnotationAsync(DefaultWorkflowId, new CanvasAnnotation(
@@ -653,6 +749,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private async Task PackSelectionAsync()
     {
         var selected = SelectedNode is null ? Nodes.Select(node => node.Id).ToArray() : new[] { SelectedNode.Id };
+        if (SelectedNode is null && selected.Length > 1
+            && !await ConfirmDangerAsync(
+                    "ui.dialog.workspace.pack_all.title",
+                    "ui.dialog.workspace.pack_all.message",
+                    "ui.dialog.workspace.pack_all.confirm").ConfigureAwait(true))
+        {
+            return;
+        }
         try
         {
             var title = _displayNames.Format("ui.workspace.subworkflow_title", new Dictionary<string, string>
@@ -712,6 +816,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             StatusText = _displayNames.Text("ui.common.none");
             return;
         }
+        if (string.Equals(decision, "reject", StringComparison.Ordinal)
+            && !await ConfirmDangerAsync(
+                    "ui.dialog.workspace.reject_confirmation.title",
+                    "ui.dialog.workspace.reject_confirmation.message",
+                    "ui.dialog.workspace.reject_confirmation.confirm").ConfigureAwait(true))
+        {
+            return;
+        }
         try
         {
             var result = await _backend.ResolveConfirmationAsync(
@@ -727,6 +839,40 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             StatusText = ex.Message;
         }
+    }
+
+    private Task<bool> ConfirmAllNodesAsync(string messageKey)
+    {
+        return ConfirmDialogAsync(
+            "ui.dialog.workspace.all_nodes.title",
+            messageKey,
+            "ui.dialog.workspace.all_nodes.confirm",
+            DialogButtonVariant.Primary);
+    }
+
+    private Task<bool> ConfirmDangerAsync(string titleKey, string messageKey, string confirmKey)
+    {
+        return ConfirmDialogAsync(titleKey, messageKey, confirmKey, DialogButtonVariant.Danger);
+    }
+
+    private async Task<bool> ConfirmDialogAsync(
+        string titleKey,
+        string messageKey,
+        string confirmKey,
+        DialogButtonVariant confirmVariant)
+    {
+        var dialog = new ConfirmDialogViewModel(
+            _displayNames.Text(titleKey),
+            _displayNames.Text(messageKey),
+            new[]
+            {
+                new DialogButton(_displayNames.Text(confirmKey), confirmVariant, 0),
+                new DialogButton(_displayNames.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
+            })
+        {
+            CancelResultIndex = 1,
+        };
+        return await DialogService.Current.ConfirmAsync(dialog).ConfigureAwait(true) == 0;
     }
 
     public async Task<bool> ConfirmLeaveIfNeededAsync()
