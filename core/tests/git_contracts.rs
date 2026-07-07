@@ -29,6 +29,20 @@ fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
     );
 }
 
+fn git_stdout<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 #[test]
 fn git_service_initializes_and_reports_health() {
     let (_temp_dir, service) = init_test_repo();
@@ -56,6 +70,25 @@ fn git_service_creates_archive_and_checkpoint_commits() {
     assert_eq!(commits.len(), 2);
     assert_eq!(commits[0].checkpoint_kind, Some(CheckpointKind::Auto));
     assert_eq!(commits[1].checkpoint_kind, Some(CheckpointKind::Manual));
+}
+
+#[test]
+fn git_service_excludes_default_runtime_paths_from_checkpoints() {
+    let (temp_dir, service) = init_test_repo();
+    fs::create_dir_all(temp_dir.path().join("documents")).unwrap();
+    fs::create_dir_all(temp_dir.path().join(".runtime")).unwrap();
+    fs::write(temp_dir.path().join("documents").join("chapter.md"), "正文").unwrap();
+    fs::write(
+        temp_dir.path().join(".runtime").join("runtime.db"),
+        "runtime",
+    )
+    .unwrap();
+
+    service.create_checkpoint("node-1", None).unwrap();
+
+    let tree = git_stdout(temp_dir.path(), ["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(tree.contains("documents/chapter.md"));
+    assert!(!tree.contains(".runtime/runtime.db"));
 }
 
 #[test]

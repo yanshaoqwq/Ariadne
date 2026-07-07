@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -13,6 +14,20 @@ use crate::git::models::{
 pub struct GitService {
     repo_root: PathBuf,
     lock: Mutex<()>,
+}
+
+/// Git 暂存策略。所有路径都按仓库根目录解析，排除项使用 literal pathspec。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitStagePolicy {
+    pub ignored_paths: Vec<String>,
+}
+
+impl Default for GitStagePolicy {
+    fn default() -> Self {
+        Self {
+            ignored_paths: default_ignored_paths(),
+        }
+    }
 }
 
 impl GitService {
@@ -81,9 +96,19 @@ impl GitService {
         name: &str,
         message: Option<&str>,
     ) -> CoreResult<ArchivePoint> {
+        self.create_archive_point_with_policy(name, message, &GitStagePolicy::default())
+    }
+
+    /// 使用指定暂存策略创建用户命名存档点 commit。
+    pub fn create_archive_point_with_policy(
+        &self,
+        name: &str,
+        message: Option<&str>,
+        policy: &GitStagePolicy,
+    ) -> CoreResult<ArchivePoint> {
         validate_non_empty("archive point name", name)?;
         let _guard = self.git_guard()?;
-        self.stage_all()?;
+        self.stage_all(policy)?;
         let commit_message = message
             .map(str::to_owned)
             .unwrap_or_else(|| format!("Archive: {name}"));
@@ -102,9 +127,19 @@ impl GitService {
         node_id: &str,
         message: Option<&str>,
     ) -> CoreResult<Checkpoint> {
+        self.create_checkpoint_with_policy(node_id, message, &GitStagePolicy::default())
+    }
+
+    /// 使用指定暂存策略创建节点级 checkpoint commit。
+    pub fn create_checkpoint_with_policy(
+        &self,
+        node_id: &str,
+        message: Option<&str>,
+        policy: &GitStagePolicy,
+    ) -> CoreResult<Checkpoint> {
         validate_non_empty("node_id", node_id)?;
         let _guard = self.git_guard()?;
-        self.stage_all()?;
+        self.stage_all(policy)?;
         let commit_message = message
             .map(str::to_owned)
             .unwrap_or_else(|| format!("Checkpoint: node {node_id}"));
@@ -199,8 +234,15 @@ impl GitService {
     }
 
     /// 暂存所有当前变更。
-    fn stage_all(&self) -> CoreResult<()> {
-        self.run_git(["add", "--all"])?;
+    fn stage_all(&self, policy: &GitStagePolicy) -> CoreResult<()> {
+        let mut args = vec![
+            "add".to_owned(),
+            "--all".to_owned(),
+            "--".to_owned(),
+            ".".to_owned(),
+        ];
+        args.extend(policy.exclude_pathspecs());
+        self.run_git(args)?;
         Ok(())
     }
 
@@ -251,6 +293,48 @@ impl GitService {
             },
         })
     }
+}
+
+impl GitStagePolicy {
+    /// 追加排除路径，自动去重和规范化。
+    pub fn with_ignored_paths(mut self, paths: impl IntoIterator<Item = String>) -> Self {
+        self.ignored_paths.extend(paths);
+        self
+    }
+
+    fn exclude_pathspecs(&self) -> Vec<String> {
+        self.ignored_paths
+            .iter()
+            .filter_map(|path| normalize_excluded_path(path))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|path| format!(":(exclude,top,literal){path}"))
+            .collect()
+    }
+}
+
+fn normalize_excluded_path(path: &str) -> Option<String> {
+    let normalized = path.trim().replace('\\', "/");
+    let normalized = normalized.trim_matches('/');
+    if normalized.is_empty()
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || component == "..")
+    {
+        return None;
+    }
+    Some(normalized.to_owned())
+}
+
+fn default_ignored_paths() -> Vec<String> {
+    vec![
+        ".cache".to_owned(),
+        ".runtime".to_owned(),
+        ".indexes".to_owned(),
+        ".knowledge".to_owned(),
+        "costs.db".to_owned(),
+        "runtime.db".to_owned(),
+    ]
 }
 
 fn checkpoint_kind_from_summary(summary: &str) -> Option<CheckpointKind> {

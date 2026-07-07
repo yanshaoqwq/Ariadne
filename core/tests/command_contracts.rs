@@ -22,7 +22,7 @@ use ariadne::commands::{
     ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate, RagSettings,
     ResolveConfirmationRequest, TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
-use ariadne::config::{MemorySecretStore, ModelConfig, SecretStore};
+use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
 use ariadne::contracts::{
     NodeId, PermissionPolicy, PortValue, ProviderCapability, ProviderType, RunId, RunStatus,
     WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
@@ -515,14 +515,45 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
     );
     assert_eq!(provider.providers[0].provider, "openai");
     assert_eq!(provider.providers[0].models[0].model_id, "gpt-test");
+    let config = ConfigStore::new(temp.path()).load_or_create().unwrap();
+    let key_id = config.providers.providers[0]
+        .api_key
+        .as_ref()
+        .unwrap()
+        .key_id
+        .clone();
+    assert!(key_id.starts_with("project."));
+    assert!(key_id.ends_with(".provider.openai"));
     assert_eq!(
         secrets
-            .get_secret("provider.openai")
+            .get_secret(&key_id)
             .unwrap()
             .unwrap()
             .expose_secret(),
         "sk-secret"
     );
+    assert!(secrets.get_secret("provider.openai").unwrap().is_none());
+}
+
+#[test]
+fn provider_key_status_is_namespaced_by_project_root() {
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+
+    save_provider_key_impl(
+        project_a.path(),
+        &secrets,
+        "openai".to_owned(),
+        "sk-project-a".to_owned(),
+    )
+    .unwrap();
+
+    let status_a = get_provider_config_impl(project_a.path(), &secrets).unwrap();
+    let status_b = get_provider_config_impl(project_b.path(), &secrets).unwrap();
+
+    assert!(status_a.has_openai_key);
+    assert!(!status_b.has_openai_key);
 }
 
 #[test]
@@ -749,6 +780,36 @@ fn git_commands_create_checkpoint_and_return_history() {
 
     assert_eq!(checkpoint.message, "章节完成");
     assert_eq!(history[0].summary, "章节完成");
+}
+
+#[test]
+fn git_checkpoint_respects_tracking_and_ignored_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    run_git(temp.path(), ["config", "user.name", "Ariadne Test"]);
+    run_git(
+        temp.path(),
+        ["config", "user.email", "ariadne@example.test"],
+    );
+
+    let mut git = get_git_settings_impl(temp.path()).unwrap().git;
+    git.track_skills = false;
+    git.ignored_paths.push("scratch".to_owned());
+    save_git_settings_impl(temp.path(), GitSettings { git }).unwrap();
+
+    std::fs::create_dir_all(temp.path().join("skills")).unwrap();
+    std::fs::create_dir_all(temp.path().join("scratch")).unwrap();
+    std::fs::write(temp.path().join("documents").join("chapter.md"), "正文").unwrap();
+    std::fs::write(temp.path().join("skills").join("skill.md"), "skill").unwrap();
+    std::fs::write(temp.path().join("scratch").join("draft.md"), "scratch").unwrap();
+
+    create_checkpoint_impl(temp.path(), "受控存档".to_owned()).unwrap();
+
+    let tree = git_stdout(temp.path(), ["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(tree.contains("documents/chapter.md"));
+    assert!(tree.contains(".config/app.yaml"));
+    assert!(!tree.contains("skills/skill.md"));
+    assert!(!tree.contains("scratch/draft.md"));
 }
 
 #[test]
@@ -1210,4 +1271,18 @@ fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn git_stdout<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
 }

@@ -38,7 +38,9 @@ use crate::frontend::{
     UiPreferencesStore, UiRunLogEntry, UiRunLogFilter, UiRunLogKind, UiRunLogLevel, UiRunLogStore,
     WorksTreeNode,
 };
-use crate::git::{ArchivePoint, BranchGraphNode, GitCommitSummary, GitService, RestoreReport};
+use crate::git::{
+    ArchivePoint, BranchGraphNode, GitCommitSummary, GitService, GitStagePolicy, RestoreReport,
+};
 use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
 use crate::providers::{
     ContentPart, LlmMessage, LlmRole, OpenAiCompatibleLlmProvider, ToolDefinition,
@@ -1864,9 +1866,30 @@ pub fn create_checkpoint_impl(project_root: &Path, message: String) -> CommandRe
     } else {
         message.trim().to_owned()
     };
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let policy = git_stage_policy_from_config(&config.git);
     GitService::new(project_root)
-        .create_archive_point(&name, Some(&name))
+        .create_archive_point_with_policy(&name, Some(&name), &policy)
         .map_err(error_to_string)
+}
+
+fn git_stage_policy_from_config(config: &GitConfig) -> GitStagePolicy {
+    let mut ignored_paths = config.ignored_paths.clone();
+    if !config.track_documents {
+        ignored_paths.push("documents".to_owned());
+    }
+    if !config.track_workflows {
+        ignored_paths.push("workflows".to_owned());
+    }
+    if !config.track_skills {
+        ignored_paths.push("skills".to_owned());
+    }
+    if !config.track_non_sensitive_config {
+        ignored_paths.push(".config".to_owned());
+    }
+    GitStagePolicy::default().with_ignored_paths(ignored_paths)
 }
 
 pub fn get_provider_config_impl(
@@ -1877,14 +1900,14 @@ pub fn get_provider_config_impl(
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
-    let providers = provider_status_list(&config.providers.providers)
+    let providers = provider_status_list(project_root, &config.providers.providers)
         .into_iter()
         .map(|provider| {
             let key_id = provider
                 .api_key
                 .as_ref()
                 .map(|secret| secret.key_id.clone())
-                .unwrap_or_else(|| provider_key_id(&provider.provider_id));
+                .unwrap_or_else(|| provider_key_id(project_root, &provider.provider_id));
             let has_key = secrets
                 .get_secret(&key_id)
                 .map(|secret| secret.is_some())
@@ -1929,7 +1952,7 @@ pub fn save_provider_key_impl(
     if key.trim().is_empty() {
         return Err("provider key cannot be empty".to_owned());
     }
-    let key_id = provider_key_id(&provider);
+    let key_id = provider_key_id(project_root, &provider);
     secrets
         .set_secret(&key_id, SecretValue::new(key))
         .map_err(error_to_string)?;
@@ -3213,8 +3236,8 @@ fn ensure_provider_config<'a>(
     providers.last_mut().expect("provider was just pushed")
 }
 
-fn provider_status_list(configured: &[ProviderConfig]) -> Vec<ProviderConfig> {
-    let mut providers = default_provider_status_configs();
+fn provider_status_list(project_root: &Path, configured: &[ProviderConfig]) -> Vec<ProviderConfig> {
+    let mut providers = default_provider_status_configs(project_root);
     for configured_provider in configured {
         if let Some(existing) = providers
             .iter_mut()
@@ -3228,7 +3251,7 @@ fn provider_status_list(configured: &[ProviderConfig]) -> Vec<ProviderConfig> {
     providers
 }
 
-fn default_provider_status_configs() -> Vec<ProviderConfig> {
+fn default_provider_status_configs(project_root: &Path) -> Vec<ProviderConfig> {
     vec![
         ProviderConfig {
             provider_id: "openai".to_owned(),
@@ -3236,7 +3259,7 @@ fn default_provider_status_configs() -> Vec<ProviderConfig> {
             display_name: "OpenAI".to_owned(),
             enabled: false,
             base_url: None,
-            api_key: Some(SecretRef::new(provider_key_id("openai"))),
+            api_key: Some(SecretRef::new(provider_key_id(project_root, "openai"))),
             models: Vec::new(),
         },
         ProviderConfig {
@@ -3245,7 +3268,7 @@ fn default_provider_status_configs() -> Vec<ProviderConfig> {
             display_name: "Anthropic".to_owned(),
             enabled: false,
             base_url: None,
-            api_key: Some(SecretRef::new(provider_key_id("anthropic"))),
+            api_key: Some(SecretRef::new(provider_key_id(project_root, "anthropic"))),
             models: Vec::new(),
         },
         ProviderConfig {
@@ -3254,7 +3277,7 @@ fn default_provider_status_configs() -> Vec<ProviderConfig> {
             display_name: "Gemini".to_owned(),
             enabled: false,
             base_url: None,
-            api_key: Some(SecretRef::new(provider_key_id("gemini"))),
+            api_key: Some(SecretRef::new(provider_key_id(project_root, "gemini"))),
             models: Vec::new(),
         },
     ]
@@ -3299,8 +3322,19 @@ fn normalize_provider(provider: &str) -> CommandResult<String> {
     Ok(provider)
 }
 
-fn provider_key_id(provider: &str) -> String {
-    format!("provider.{provider}")
+fn provider_key_id(project_root: &Path, provider: &str) -> String {
+    format!(
+        "project.{}.provider.{provider}",
+        project_secret_namespace(project_root)
+    )
+}
+
+fn project_secret_namespace(project_root: &Path) -> String {
+    let root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| absolute_path(project_root));
+    let normalized = root.to_string_lossy().replace('\\', "/");
+    crate::skills::stable_text_hash(&normalized)
 }
 
 fn validate_project_root(project_root: &Path) -> CommandResult<()> {
