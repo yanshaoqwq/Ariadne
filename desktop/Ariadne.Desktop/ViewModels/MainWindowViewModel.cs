@@ -147,11 +147,11 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public RelayCommand OpenFeedbackCommand => new(() => _ = ShowFeedbackAsync());
 
-    public RelayCommand CreateProjectCommand => new(() => Welcome.CreateProjectCommand.Execute(null));
+    public RelayCommand CreateProjectCommand => new(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.CreateProjectCommand));
 
-    public RelayCommand OpenProjectCommand => new(() => Welcome.OpenProjectCommand.Execute(null));
+    public RelayCommand OpenProjectCommand => new(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectCommand));
 
-    public RelayCommand LeaveProjectCommand => new(LeaveProject);
+    public RelayCommand LeaveProjectCommand => new(() => _ = LeaveProjectAsync());
 
     public async Task InitializeAsync()
     {
@@ -200,8 +200,13 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
     }
 
-    private void LeaveProject()
+    private async Task LeaveProjectAsync()
     {
+        if (!await ConfirmCurrentPageLeaveAsync().ConfigureAwait(true))
+        {
+            return;
+        }
+
         _backend.ClearProjectRoot();
         foreach (var nav in AllNavigationItems())
         {
@@ -217,6 +222,16 @@ public sealed class MainWindowViewModel : ViewModelBase
         _suppressAutoModeSave = false;
         CurrentPage = Welcome;
         _ = Welcome.LoadAsync();
+    }
+
+    private async Task RunWelcomeCommandAfterLeaveGuardAsync(RelayCommand command)
+    {
+        if (!await ConfirmCurrentPageLeaveAsync().ConfigureAwait(true))
+        {
+            return;
+        }
+
+        command.Execute(null);
     }
 
     private async Task ShowVersionAsync()
@@ -293,7 +308,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
 
-        if (CurrentPage is IUnsavedChangesGuard guard && !await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+        if (!await ConfirmCurrentPageLeaveAsync().ConfigureAwait(true))
         {
             return;
         }
@@ -303,6 +318,12 @@ public sealed class MainWindowViewModel : ViewModelBase
             nav.IsSelected = nav == item;
         }
         CurrentPage = item.PageFactory();
+    }
+
+    private async Task<bool> ConfirmCurrentPageLeaveAsync()
+    {
+        return CurrentPage is not IUnsavedChangesGuard guard
+               || await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true);
     }
 
     private void SelectNavigationItem(NavigationItemViewModel item, bool createPage)
@@ -322,7 +343,10 @@ public sealed class MainWindowViewModel : ViewModelBase
         ProjectMenuItems.Clear();
         foreach (var item in Welcome.RecentProjects)
         {
-            ProjectMenuItems.Add(new ProjectMenuItemViewModel(item.Name, item.ProjectRoot, item.OpenCommand));
+            ProjectMenuItems.Add(new ProjectMenuItemViewModel(
+                item.Name,
+                item.ProjectRoot,
+                new RelayCommand(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(item.OpenCommand))));
         }
     }
 

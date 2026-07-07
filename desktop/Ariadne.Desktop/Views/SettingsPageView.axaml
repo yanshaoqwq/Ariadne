@@ -73,11 +73,9 @@
           <StackPanel IsVisible="{Binding IsGeneralSelected}" Spacing="18">
             <TextBlock Text="{Binding GeneralTitle}" Classes="title" />
             <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionProjectSelected}">
-              <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+              <Grid ColumnDefinitions="180,*" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProjectNameLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ProjectName, Mode=TwoWay}" />
-                <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding LocaleLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding Locale, Mode=TwoWay}" />
               </Grid>
             </Border>
             <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionDirectoriesSelected}">

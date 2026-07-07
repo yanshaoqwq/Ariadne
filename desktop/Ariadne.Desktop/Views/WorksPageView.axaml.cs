@@ -1,3 +1,4 @@
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
@@ -7,6 +8,8 @@ namespace Ariadne.Desktop.Views;
 
 public partial class WorksPageView : UserControl
 {
+    private WorksPageViewModel? _attachedViewModel;
+
     public WorksPageView()
     {
         InitializeComponent();
@@ -29,6 +32,13 @@ public partial class WorksPageView : UserControl
 
     private void AttachEditorActions()
     {
+        if (_attachedViewModel is not null && !ReferenceEquals(_attachedViewModel, DataContext))
+        {
+            _attachedViewModel.RequestEditorCopy = null;
+            _attachedViewModel.RequestEditorSelectAll = null;
+            _attachedViewModel = null;
+        }
+
         if (DataContext is not WorksPageViewModel viewModel)
         {
             return;
@@ -41,6 +51,19 @@ public partial class WorksPageView : UserControl
             DocumentEditor.SelectionEnd = DocumentEditor.Text?.Length ?? 0;
             DocumentEditor.Focus();
         };
+        _attachedViewModel = viewModel;
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        if (_attachedViewModel is not null)
+        {
+            _attachedViewModel.RequestEditorCopy = null;
+            _attachedViewModel.RequestEditorSelectAll = null;
+            _attachedViewModel = null;
+        }
+
+        base.OnDetachedFromVisualTree(e);
     }
 
     private async Task CopySelectionAsync()

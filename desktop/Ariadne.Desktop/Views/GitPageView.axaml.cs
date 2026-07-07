@@ -17,6 +17,7 @@ public partial class GitPageView : UserControl
     private double _pilDragOriginTop;
     private double _togglePillTop = -1;
     private bool _layoutInitialized;
+    private GitPageViewModel? _attachedViewModel;
 
     public GitPageView()
     {
@@ -54,10 +55,28 @@ public partial class GitPageView : UserControl
 
     private void AttachClipboardActions()
     {
+        if (_attachedViewModel is not null && !ReferenceEquals(_attachedViewModel, DataContext))
+        {
+            _attachedViewModel.RequestCopyText = null;
+            _attachedViewModel = null;
+        }
+
         if (DataContext is GitPageViewModel viewModel)
         {
             viewModel.RequestCopyText = CopyTextAsync;
+            _attachedViewModel = viewModel;
         }
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        if (_attachedViewModel is not null)
+        {
+            _attachedViewModel.RequestCopyText = null;
+            _attachedViewModel = null;
+        }
+
+        base.OnDetachedFromVisualTree(e);
     }
 
     private async Task CopyTextAsync(string text)
