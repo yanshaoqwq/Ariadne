@@ -816,6 +816,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 MakeDefaultEmbedding,
                 MakeDefaultReranker);
             await _backend.SaveProviderSettingsAsync(update).ConfigureAwait(true);
+            if (!string.IsNullOrWhiteSpace(ApiKey))
+            {
+                await _backend.SaveProviderKeyAsync(ProviderId, ApiKey).ConfigureAwait(true);
+                ApiKey = string.Empty;
+            }
             await LoadProviderConfigAsync().ConfigureAwait(true);
         });
     }
