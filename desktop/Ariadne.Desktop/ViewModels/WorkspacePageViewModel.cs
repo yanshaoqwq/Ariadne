@@ -148,7 +148,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string AnnotationTitlePlaceholder => _displayNames.Text("ui.workspace.annotation_title.placeholder");
     public string SubworkflowText => _displayNames.Text("ui.workspace.subworkflow");
     public string EdgeDetailsText => _displayNames.Text("ui.workspace.edge_details");
-    public string EdgeCountText => $"{_edges.Count}";
+    public string EdgeCountText => $"{Edges.Count}";
     public string SourceAliasText => _displayNames.Text("ui.workspace.edge.source_alias");
     public string TargetAliasText => _displayNames.Text("ui.workspace.edge.target_alias");
     public string EdgeLabelText => _displayNames.Text("ui.workspace.edge.label");
@@ -359,7 +359,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         Edges.Clear();
         foreach (var edge in _edges)
         {
-            Edges.Add(new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge));
+            Edges.Add(new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge, RefreshDirtyState));
         }
         SelectedNode = null;
         SelectedEdge = null;
@@ -751,7 +751,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 node.Label,
                 node.ToData(),
                 new CanvasPosition(node.X, node.Y))).ToArray(),
-            _edges,
+            Edges.Select(edge => edge.ToCanvasEdge()).ToArray(),
             new Dictionary<string, object?>());
     }
 
@@ -766,7 +766,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             Edges.Clear();
             foreach (var edge in _edges)
             {
-                Edges.Add(new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge));
+                Edges.Add(new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge, RefreshDirtyState));
             }
             OnPropertyChanged(nameof(EdgeCountText));
             foreach (var graphNode in graph.Nodes)
@@ -813,7 +813,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         if (!_suppressSnapshotChecks)
         {
-            HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+            try
+            {
+                HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+            }
+            catch
+            {
+                HasUnsavedChanges = true;
+            }
         }
     }
 
@@ -1103,6 +1110,7 @@ public sealed class ConfirmationItemViewModel : ViewModelBase
 public sealed class WorkflowEdgeViewModel : ViewModelBase
 {
     private readonly DisplayNameService _displayNames;
+    private readonly Action _markDirty;
     private bool _isSelected;
     private string _sourceHandle;
     private string _targetHandle;
@@ -1114,9 +1122,14 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     private string _reverseTemplate;
     private string _maxCommunicationCount;
 
-    public WorkflowEdgeViewModel(CanvasEdge edge, DisplayNameService displayNames, Action<WorkflowEdgeViewModel> select)
+    public WorkflowEdgeViewModel(
+        CanvasEdge edge,
+        DisplayNameService displayNames,
+        Action<WorkflowEdgeViewModel> select,
+        Action markDirty)
     {
         _displayNames = displayNames;
+        _markDirty = markDirty;
         Id = edge.Id;
         Source = edge.Source;
         Target = edge.Target;
@@ -1150,6 +1163,17 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
     public bool IsCommunication => string.Equals(Kind, "communication", StringComparison.OrdinalIgnoreCase);
+
+    protected override void OnPropertyChanged(string? propertyName = null)
+    {
+        base.OnPropertyChanged(propertyName);
+        if (propertyName is nameof(SourceHandle) or nameof(TargetHandle) or nameof(Label)
+            or nameof(DataJson) or nameof(ForwardAlias) or nameof(ReverseAlias)
+            or nameof(ForwardTemplate) or nameof(ReverseTemplate) or nameof(MaxCommunicationCount))
+        {
+            _markDirty();
+        }
+    }
 
     public CanvasEdge ToCanvasEdge()
     {
