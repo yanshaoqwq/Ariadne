@@ -55,6 +55,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         nameof(DefaultTimeoutLabel),
         nameof(DefaultBudgetLabel),
         nameof(TemplateRepositoryLabel),
+        nameof(OpenTemplateMarketText),
         nameof(SavePresetsText),
         nameof(SaveTemplateRepositoryText),
         nameof(BudgetLabel),
@@ -107,6 +108,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
+    private readonly Func<Task>? _openTemplateMarket;
     private SettingsTabViewModel _selectedTab;
     private SettingsSectionIndexItemViewModel? _selectedSection;
     private string _selectedSectionId = string.Empty;
@@ -189,10 +191,14 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _ignoredPathsText = string.Empty;
     private string _diagnosticsStatus = string.Empty;
 
-    public SettingsPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
+    public SettingsPageViewModel(
+        DisplayNameService displayNames,
+        IAriadneBackendClient backend,
+        Func<Task>? openTemplateMarket = null)
     {
         _displayNames = displayNames;
         _backend = backend;
+        _openTemplateMarket = openTemplateMarket;
         _selectedLanguage = displayNames.CurrentLanguage;
         _statusText = displayNames.Text("ui.common.loading");
 
@@ -235,6 +241,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         SaveProviderKeyCommand = new RelayCommand(() => _ = SaveProviderKeyAsync());
         SavePresetsCommand = new RelayCommand(() => _ = SavePresetsAsync());
         SaveTemplateRepositoryCommand = new RelayCommand(() => _ = SaveTemplateRepositoryAsync());
+        OpenTemplateMarketCommand = new RelayCommand(() => _ = OpenTemplateMarketAsync());
         SaveAutomationCommand = new RelayCommand(() => _ = SaveAutomationAsync());
         SavePermissionsCommand = new RelayCommand(() => _ = SavePermissionsAsync());
         SavePersonalizationCommand = new RelayCommand(() => _ = SavePersonalizationAsync());
@@ -317,6 +324,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand SaveProviderKeyCommand { get; }
     public RelayCommand SavePresetsCommand { get; }
     public RelayCommand SaveTemplateRepositoryCommand { get; }
+    public RelayCommand OpenTemplateMarketCommand { get; }
     public RelayCommand SaveAutomationCommand { get; }
     public RelayCommand SavePermissionsCommand { get; }
     public RelayCommand SavePersonalizationCommand { get; }
@@ -369,6 +377,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string DefaultTimeoutLabel => _displayNames.Text("ui.settings.presets.default_timeout_ms");
     public string DefaultBudgetLabel => _displayNames.Text("ui.settings.presets.default_budget_usd");
     public string TemplateRepositoryLabel => _displayNames.Text("ui.settings.presets.template_repository");
+    public string OpenTemplateMarketText => _displayNames.Text("ui.settings.presets.open_market");
     public string SavePresetsText => _displayNames.Text("ui.settings.presets.save");
     public string SaveTemplateRepositoryText => _displayNames.Text("ui.settings.presets.save_template_repository");
 
@@ -859,6 +868,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             var saved = await _backend.SaveTemplateRepositorySettingsAsync(new TemplateRepositorySettings(TemplateRepositoryBaseUrl)).ConfigureAwait(true);
             TemplateRepositoryBaseUrl = saved.BaseUrl;
         });
+    }
+
+    private async Task OpenTemplateMarketAsync()
+    {
+        if (_openTemplateMarket is null)
+        {
+            StatusText = _displayNames.Text("ui.nav.templates");
+            return;
+        }
+
+        await _openTemplateMarket().ConfigureAwait(true);
     }
 
     private async Task SaveAutomationAsync()

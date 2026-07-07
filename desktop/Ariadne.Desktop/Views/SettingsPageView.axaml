@@ -207,7 +207,10 @@
               <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding TemplateRepositoryLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding TemplateRepositoryBaseUrl, Mode=TwoWay}" />
-                <Button Grid.Row="1" Grid.Column="1" Classes="primary" Content="{Binding SaveTemplateRepositoryText}" HorizontalAlignment="Right" Command="{Binding SaveTemplateRepositoryCommand}" />
+                <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+                  <Button Classes="secondary" Content="{Binding OpenTemplateMarketText}" Command="{Binding OpenTemplateMarketCommand}" />
+                  <Button Classes="primary" Content="{Binding SaveTemplateRepositoryText}" Command="{Binding SaveTemplateRepositoryCommand}" />
+                </StackPanel>
               </Grid>
             </Border>
           </StackPanel>

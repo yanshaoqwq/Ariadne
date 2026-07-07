@@ -296,9 +296,18 @@ public sealed class MainWindowViewModel : ViewModelBase
             "git" => new GitPageViewModel(_displayNames, _backend),
             "run_logs" => new RunLogPageViewModel(_displayNames, _backend),
             "templates" => new TemplateMarketPageViewModel(_displayNames, _backend),
-            "settings" => new SettingsPageViewModel(_displayNames, _backend),
+            "settings" => new SettingsPageViewModel(_displayNames, _backend, () => OpenNavigationItemByIdAsync("templates")),
             _ => Welcome,
         };
+    }
+
+    private async Task OpenNavigationItemByIdAsync(string id)
+    {
+        var item = AllNavigationItems().FirstOrDefault(nav => nav.Id == id);
+        if (item is not null)
+        {
+            await SelectNavigationItemAsync(item).ConfigureAwait(true);
+        }
     }
 
     private async Task SelectNavigationItemAsync(NavigationItemViewModel item)
