@@ -3,8 +3,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 use ariadne::contracts::{
-    ArtifactKind, Edge, EdgeId, NodeId, NodeInstance, PermissionPolicy, PortEndpoint, PortValue,
-    ProviderCapability, ProviderDefinition, ProviderType, RunId, SourceSpan, TextRange,
+    ArtifactKind, Edge, EdgeId, NodeId, NodeInstance, PatchHunk, PermissionPolicy, PortEndpoint,
+    PortValue, ProviderCapability, ProviderDefinition, ProviderType, RunId, SourceSpan, TextRange,
     WorkflowDefinition, WorkflowEdgeKind, WorkflowId, EXECUTION_INPUT_PORT, EXECUTION_OUTPUT_PORT,
 };
 use ariadne::costs::{BudgetLimits, SqliteCostLedger};
@@ -335,6 +335,32 @@ fn quick_edit_generates_result_and_patch() {
 }
 
 #[test]
+fn quick_edit_patch_replaces_only_selected_span() {
+    let document = "第一行：旧词，保留前后\n第二行不动\n";
+    let start = document.find("旧词").unwrap();
+    let end = start + "旧词".len();
+    let range = TextRange {
+        start: start as u64,
+        end: end as u64,
+    };
+    let result = ariadne::frontend::QuickEditResult {
+        original: "旧词".to_owned(),
+        suggested: "新词".to_owned(),
+        diff: "- 旧词\n+ 新词".to_owned(),
+    };
+
+    let patch = quick_edit_to_patch(document, "doc-1", None, range, &result).unwrap();
+
+    assert_eq!(
+        patch.hunks,
+        vec![PatchHunk {
+            range,
+            replacement: "新词".to_owned(),
+        }]
+    );
+}
+
+#[test]
 fn quick_edit_patch_can_apply_through_document_service() {
     let temp = tempfile::tempdir().unwrap();
     let artifact_root = temp.path().join(".runtime").join("artifacts");
@@ -632,10 +658,14 @@ fn works_service_exports_epub_and_pdf_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let service = test_document_service(temp.path());
     let chapter_path = temp.path().join("documents").join("chapter1.md");
+    let chapter_body = std::iter::once("第一章正文".to_owned())
+        .chain((1..=80).map(|line| format!("第{line:02}行中文内容")))
+        .collect::<Vec<_>>()
+        .join("\n");
     service
         .save_document(DocumentWriteRequest {
             path: chapter_path.clone(),
-            content: "第一章正文\n\n第二段".to_owned(),
+            content: chapter_body,
             format: None,
         })
         .unwrap();
@@ -683,6 +713,19 @@ fn works_service_exports_epub_and_pdf_artifacts() {
         .any(|window| window == b"OEBPS/content.opf"));
     assert!(pdf_bytes.starts_with(b"%PDF-1.4"));
     assert!(pdf_bytes.ends_with(b"%%EOF\n"));
+    let pdf_text = String::from_utf8_lossy(&pdf_bytes);
+    assert!(pdf_text.contains("/Subtype /Type0"));
+    assert!(pdf_text.contains("/BaseFont /STSong-Light"));
+    assert!(pdf_text.contains("/Count 2"));
+    assert!(pdf_text.contains(&utf16be_hex("第一章正文")));
+}
+
+fn utf16be_hex(value: &str) -> String {
+    let mut encoded = String::new();
+    for unit in value.encode_utf16() {
+        encoded.push_str(&format!("{unit:04X}"));
+    }
+    encoded
 }
 
 #[test]

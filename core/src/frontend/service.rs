@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::contracts::{
-    ensure_path_under_root, ArtifactKind, CoreError, CoreResult, NodeId, NodeInstance,
-    PermissionPolicy, PortEndpoint, PortValue, RunId, TextRange, WorkflowDefinition, WorkflowId,
+    ensure_path_under_root, ArtifactKind, CoreError, CoreResult, DocumentPatch, NodeId,
+    NodeInstance, PatchHunk, PermissionPolicy, PortEndpoint, PortValue, RunId, TextRange,
+    WorkflowDefinition, WorkflowId,
 };
 use crate::diagnostics::{BackendDiagnosticsReport, DiagnosticStatus};
 use crate::documents::{
@@ -18,7 +19,7 @@ use crate::documents::{
 use crate::git::GitService;
 use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
 use crate::providers::{ContentPart, LlmMessage, LlmProvider};
-use crate::rag::{FindRequest, FindScope, MemoryWritingKnowledgeBase, PatchSession};
+use crate::rag::{FindRequest, FindScope, MemoryWritingKnowledgeBase};
 use crate::skills::{WorkflowManifest, WORKFLOW_MANIFEST_FILE};
 use crate::workflow::{RuntimeConfirmationState, WorkflowRunState};
 
@@ -1147,26 +1148,48 @@ fn render_chapters_epub(chapters: &[(String, String)]) -> CoreResult<Vec<u8>> {
     Ok(write_zip_archive(&files))
 }
 
+const PDF_MAX_LINE_WIDTH: usize = 68;
+const PDF_LINES_PER_PAGE: usize = 52;
+
 fn render_chapters_pdf(chapters: &[(String, String)]) -> Vec<u8> {
     let text = render_chapters_markdown(chapters);
-    let mut stream = String::from("BT\n/F1 11 Tf\n50 780 Td\n14 TL\n");
-    for line in pdf_lines(&text) {
-        stream.push('(');
-        stream.push_str(&escape_pdf_text(&line));
-        stream.push_str(") Tj\nT*\n");
-    }
-    stream.push_str("ET\n");
-    let objects = vec![
+    let pages = pdf_pages(&text);
+    let page_count = pages.len();
+    let font_object_id = 3 + page_count * 2;
+    let page_kids = (0..page_count)
+        .map(|index| format!("{} 0 R", 3 + index * 2))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut objects = vec![
         "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_owned(),
-        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_owned(),
-        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n".to_owned(),
-        format!(
-            "4 0 obj\n<< /Length {} >>\nstream\n{}endstream\nendobj\n",
+        format!("2 0 obj\n<< /Type /Pages /Kids [{page_kids}] /Count {page_count} >>\nendobj\n"),
+    ];
+
+    for (index, lines) in pages.iter().enumerate() {
+        let page_object_id = 3 + index * 2;
+        let content_object_id = page_object_id + 1;
+        objects.push(format!(
+            "{page_object_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 {font_object_id} 0 R >> >> /Contents {content_object_id} 0 R >>\nendobj\n"
+        ));
+
+        let mut stream = String::from("BT\n/F1 11 Tf\n50 780 Td\n14 TL\n");
+        for line in lines {
+            stream.push_str(&pdf_utf16_hex_text(line));
+            stream.push_str(" Tj\nT*\n");
+        }
+        stream.push_str("ET\n");
+        objects.push(format!(
+            "{content_object_id} 0 obj\n<< /Length {} >>\nstream\n{}endstream\nendobj\n",
             stream.len(),
             stream
-        ),
-        "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_owned(),
-    ];
+        ));
+    }
+
+    objects.push(format!(
+        "{font_object_id} 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> /DW 1000 >>] >>\nendobj\n"
+    ));
+
     let mut bytes = b"%PDF-1.4\n%\xFF\xFF\xFF\xFF\n".to_vec();
     let mut offsets = Vec::new();
     for object in &objects {
@@ -1189,6 +1212,17 @@ fn render_chapters_pdf(chapters: &[(String, String)]) -> Vec<u8> {
         .as_bytes(),
     );
     bytes
+}
+
+fn pdf_pages(text: &str) -> Vec<Vec<String>> {
+    let lines = pdf_wrapped_lines(text);
+    if lines.is_empty() {
+        return vec![Vec::new()];
+    }
+    lines
+        .chunks(PDF_LINES_PER_PAGE)
+        .map(|chunk| chunk.to_vec())
+        .collect()
 }
 
 fn markdown_to_xhtml_body(markdown: &str) -> String {
@@ -1220,33 +1254,46 @@ fn escape_xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn pdf_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .flat_map(|line| {
-            if line.trim().is_empty() {
-                vec![String::new()]
-            } else {
-                line.as_bytes()
-                    .chunks(72)
-                    .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-                    .collect()
+fn pdf_wrapped_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for raw_line in text.lines() {
+        if raw_line.trim().is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut width = 0usize;
+        for ch in raw_line.chars() {
+            let char_width = pdf_char_width(ch);
+            if width > 0 && width + char_width > PDF_MAX_LINE_WIDTH {
+                lines.push(current);
+                current = String::new();
+                width = 0;
             }
-        })
-        .take(54)
-        .collect()
+            current.push(ch);
+            width += char_width;
+        }
+        lines.push(current);
+    }
+    lines
 }
 
-fn escape_pdf_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| match ch {
-            '(' => "\\(".to_owned(),
-            ')' => "\\)".to_owned(),
-            '\\' => "\\\\".to_owned(),
-            ch if ch.is_ascii() => ch.to_string(),
-            _ => "?".to_owned(),
-        })
-        .collect()
+fn pdf_char_width(ch: char) -> usize {
+    if ch.is_ascii() {
+        1
+    } else {
+        2
+    }
+}
+
+fn pdf_utf16_hex_text(value: &str) -> String {
+    let mut encoded = String::from("<");
+    for unit in value.encode_utf16() {
+        encoded.push_str(&format!("{unit:04X}"));
+    }
+    encoded.push('>');
+    encoded
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1979,6 +2026,7 @@ pub fn quick_edit_to_patch(
     range: TextRange,
     result: &QuickEditResult,
 ) -> CoreResult<crate::contracts::DocumentPatch> {
+    validate_non_empty("document_id", document_id)?;
     let start = usize::try_from(range.start)
         .map_err(|_| CoreError::validation("quick edit range start exceeds usize"))?;
     let end = usize::try_from(range.end)
@@ -1992,14 +2040,20 @@ pub fn quick_edit_to_patch(
             "quick edit range is not a valid UTF-8 slice",
         ));
     }
-    let mut session = PatchSession::new(document_id, base_version, document)?;
-    let (start_line, end_line) = byte_range_to_line_range(document, start, end)?;
-    session.replace_lines(
-        start_line,
-        end_line,
-        &format!("{}\n", result.suggested.trim_end()),
-    )?;
-    Ok(session.commit()?.patch)
+    let selected = &document[start..end];
+    let hunks = if selected == result.suggested {
+        Vec::new()
+    } else {
+        vec![PatchHunk {
+            range,
+            replacement: result.suggested.clone(),
+        }]
+    };
+    Ok(DocumentPatch {
+        document_id: document_id.to_owned(),
+        base_version,
+        hunks,
+    })
 }
 
 /// 为当前文档应用 quick edit patch。
@@ -2013,32 +2067,6 @@ pub fn apply_quick_edit_patch(
 ) -> CoreResult<crate::documents::PatchApplyReport> {
     let patch = quick_edit_to_patch(text, document_id, base_version, range, result)?;
     documents.apply_patch(&patch, None, None)
-}
-
-fn byte_range_to_line_range(document: &str, start: usize, end: usize) -> CoreResult<(u64, u64)> {
-    let mut line_start = None;
-    let mut line_end = None;
-    let mut offset = 0usize;
-    for (index, line) in document.split_inclusive('\n').enumerate() {
-        let next = offset + line.len();
-        let line_no = u64::try_from(index + 1)
-            .map_err(|_| CoreError::validation("line number exceeds u64"))?;
-        if line_start.is_none() && start >= offset && start < next {
-            line_start = Some(line_no);
-        }
-        if end > offset && end <= next {
-            line_end = Some(line_no);
-            break;
-        }
-        offset = next;
-    }
-    if document.is_empty() {
-        return Ok((1, 1));
-    }
-    Ok((
-        line_start.ok_or_else(|| CoreError::validation("quick edit start line not found"))?,
-        line_end.ok_or_else(|| CoreError::validation("quick edit end line not found"))?,
-    ))
 }
 
 fn simple_diff(original: &str, suggested: &str) -> String {
