@@ -40,7 +40,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ToggleLibraryCommand = new RelayCommand(() => IsLibraryOpen = !IsLibraryOpen);
         ShowProjectAiCommand = new RelayCommand(() => IsProjectAiTab = true);
         ShowNodeDetailsCommand = new RelayCommand(() => IsProjectAiTab = false);
-        ImportCommand = new RelayCommand(() => _ = LoadWorkflowAsync());
+        ImportCommand = new RelayCommand(() => _ = LoadWorkflowWithUnsavedCheckAsync());
         ExportCommand = new RelayCommand(() => _ = ExportWorkflowAsync());
         SaveCommand = new RelayCommand(() => _ = SaveWorkflowAsync());
         AddContextNodeCommand = new RelayCommand(() => AddNode("llm"));
@@ -453,6 +453,16 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             StatusText = ex.Message;
         }
+    }
+
+    private async Task LoadWorkflowWithUnsavedCheckAsync()
+    {
+        if (!await ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+        {
+            return;
+        }
+
+        await LoadWorkflowAsync().ConfigureAwait(true);
     }
 
     private async Task SaveWorkflowAsync()

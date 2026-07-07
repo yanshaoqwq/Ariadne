@@ -328,11 +328,22 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
+            var nextDocumentId = ProjectRelativePath(item.Path);
+            if (string.Equals(nextDocumentId, _currentDocumentId, StringComparison.Ordinal)
+                && !string.IsNullOrWhiteSpace(_currentDocumentId))
+            {
+                return;
+            }
+            if (!await ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+            {
+                return;
+            }
+
             _suppressDirtyTracking = true;
             try
             {
                 DocumentContent = await _backend.GetDocumentContentByPathAsync(item.Path).ConfigureAwait(true);
-                _currentDocumentId = ProjectRelativePath(item.Path);
+                _currentDocumentId = nextDocumentId;
                 DocumentTitle = item.Title;
                 OnPropertyChanged(nameof(DocumentBodyText));
             }
