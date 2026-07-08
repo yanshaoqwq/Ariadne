@@ -397,6 +397,39 @@ fn runtime_fails_target_when_data_edge_output_is_missing() {
         .any(|event| event.event_type == WorkflowRuntimeEventType::NodeFailed));
 }
 
+#[test]
+fn runtime_rejects_data_edge_alias_missing_before_execution() {
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf"),
+        name: "Missing alias".to_owned(),
+        nodes: vec![node("planner", "planner"), node("writer", "writer")],
+        edges: vec![
+            Edge {
+                id: EdgeId::from("data-1"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("planner"),
+                    port_name: "outline".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("writer"),
+                    port_name: "prompt_input".to_owned(),
+                },
+                alias: None,
+                communication: None,
+            },
+            control_edge("control-1", "planner", "writer"),
+        ],
+        metadata: Value::Null,
+    };
+    let error = match WorkflowRuntime::new(&workflow, RunId::from("run-1")) {
+        Ok(_) => panic!("missing data alias should be rejected before execution"),
+        Err(error) => error,
+    };
+
+    assert!(format!("{error:?}").contains("requires a non-empty alias"));
+}
+
 /// 验证 communication 到达最大次数后暂停运行。
 #[test]
 fn runtime_pauses_when_communication_count_is_exhausted() {

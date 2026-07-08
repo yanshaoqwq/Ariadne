@@ -41,6 +41,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _suppressDirtyTracking;
     private bool _suppressDocumentBlockChanges;
     private bool _documentDirty;
+    private bool _documentContentCacheValid = true;
     private int _documentCharacterCount;
     private int _nextDocumentBlockId;
     private bool _isEditMode;
@@ -387,6 +388,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             _documentContent = content;
+            _documentContentCacheValid = true;
             _documentCharacterCount = content.Length;
             RebuildDocumentBlocks(content);
         }
@@ -414,9 +416,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
 
         _documentCharacterCount += newText.Length - oldText.Length;
-        _documentContent = string.Empty;
-        OnPropertyChanged(nameof(DocumentContent));
-        OnPropertyChanged(nameof(DocumentBodyText));
+        _documentContentCacheValid = false;
         OnPropertyChanged(nameof(CharacterCountText));
         QuickAiCommand.NotifyCanExecuteChanged();
         if (!_suppressDirtyTracking)
@@ -438,9 +438,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private string AssembleDocumentContent()
     {
+        if (_documentContentCacheValid)
+        {
+            return _documentContent;
+        }
+
         if (DocumentBlocks.Count == 0)
         {
-            return string.Empty;
+            _documentContent = string.Empty;
+            _documentContentCacheValid = true;
+            return _documentContent;
         }
 
         var builder = new StringBuilder(_documentCharacterCount);
@@ -449,6 +456,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             builder.Append(block.Text);
         }
         _documentContent = builder.ToString();
+        _documentContentCacheValid = true;
         return _documentContent;
     }
 

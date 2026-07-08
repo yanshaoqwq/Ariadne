@@ -1261,6 +1261,7 @@ fn module_settings_round_trip_config_files() {
     save_git_settings_impl(temp.path(), GitSettings { git }).unwrap();
     assert!(!get_git_settings_impl(temp.path()).unwrap().git.track_skills);
 
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_TEMPLATE_REPOSITORY", "1");
     save_template_repository_settings_impl(
         temp.path(),
         &TemplateRepositorySettings {

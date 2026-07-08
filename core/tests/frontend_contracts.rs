@@ -33,6 +33,10 @@ use ariadne::skills::{WorkflowManifest, WorkflowTemplateLoader};
 use ariadne::workflow::{WorkflowNodeRuntimeState, WorkflowRunState};
 use serde_json::{json, Value};
 
+fn allow_local_template_repository_for_test() {
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_TEMPLATE_REPOSITORY", "1");
+}
+
 struct MockQuickEditProvider;
 
 impl Provider for MockQuickEditProvider {
@@ -209,6 +213,7 @@ fn workflow_breakpoint_helper_updates_node_config() {
 
 #[test]
 fn template_repository_client_uses_search_detail_and_download_endpoints() {
+    allow_local_template_repository_for_test();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
@@ -259,6 +264,7 @@ fn template_repository_client_uses_search_detail_and_download_endpoints() {
 
 #[test]
 fn template_repository_client_rejects_oversized_streaming_response() {
+    allow_local_template_repository_for_test();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {

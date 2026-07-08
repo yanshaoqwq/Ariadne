@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use reqwest::blocking::Client;
+use reqwest::{blocking::Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -25,6 +26,7 @@ use crate::skills::{WorkflowManifest, WORKFLOW_MANIFEST_FILE};
 use crate::workflow::{RuntimeConfirmationState, WorkflowRunState};
 
 const MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+const ALLOW_LOCAL_TEMPLATE_REPOSITORY_ENV: &str = "ARIADNE_ALLOW_LOCAL_TEMPLATE_REPOSITORY";
 
 /// 最近项目和项目初始化状态，默认落在 `.runtime/recent_projects.json`。
 #[derive(Debug, Clone)]
@@ -1881,7 +1883,7 @@ impl TemplateRepositoryClient {
     /// 创建模板仓库客户端。
     pub fn new(base_url: impl Into<String>) -> CoreResult<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
-        validate_non_empty("template repository base_url", &base_url)?;
+        validate_template_repository_base_url(&base_url)?;
         Ok(Self {
             base_url,
             client: Client::new(),
@@ -1895,6 +1897,7 @@ impl TemplateRepositoryClient {
         tags: &[String],
         page: u32,
     ) -> CoreResult<Vec<TemplateSummary>> {
+        validate_template_repository_base_url(&self.base_url)?;
         let response = self
             .client
             .get(format!("{}/templates/search", self.base_url))
@@ -1908,6 +1911,7 @@ impl TemplateRepositoryClient {
     /// 获取模板详情。
     pub fn detail(&self, id: &str) -> CoreResult<TemplateDetail> {
         validate_non_empty("template id", id)?;
+        validate_template_repository_base_url(&self.base_url)?;
         let response = self
             .client
             .get(format!("{}/templates/{id}", self.base_url))
@@ -1919,6 +1923,7 @@ impl TemplateRepositoryClient {
     /// 下载模板 manifest。
     pub fn download(&self, id: &str) -> CoreResult<Value> {
         validate_non_empty("template id", id)?;
+        validate_template_repository_base_url(&self.base_url)?;
         let response = self
             .client
             .get(format!("{}/templates/{id}/download", self.base_url))
@@ -2094,6 +2099,88 @@ fn simple_diff(original: &str, suggested: &str) -> String {
         return String::new();
     }
     format!("- {original}\n+ {suggested}")
+}
+
+pub fn validate_template_repository_base_url(base_url: &str) -> CoreResult<()> {
+    validate_template_repository_base_url_with_policy(
+        base_url,
+        std::env::var_os(ALLOW_LOCAL_TEMPLATE_REPOSITORY_ENV).is_some(),
+    )
+}
+
+fn validate_template_repository_base_url_with_policy(
+    base_url: &str,
+    allow_local: bool,
+) -> CoreResult<()> {
+    let trimmed = base_url.trim();
+    validate_non_empty("template repository base_url", trimmed)?;
+    let url = Url::parse(trimmed).map_err(|error| {
+        CoreError::validation(format!(
+            "template repository base_url must be a valid URL: {error}"
+        ))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(CoreError::validation(format!(
+            "template repository base_url must use http or https, got '{}'",
+            url.scheme()
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(CoreError::validation(
+            "template repository base_url cannot contain userinfo",
+        ));
+    }
+    if allow_local {
+        return Ok(());
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| CoreError::validation("template repository base_url must include a host"))?;
+    if matches!(host, "localhost" | "0.0.0.0") {
+        return Err(CoreError::validation(
+            "template repository host cannot target local addresses",
+        ));
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip_is_private_or_local(ip) {
+            return Err(CoreError::validation(
+                "template repository host cannot target private or local addresses",
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(port) = url.port_or_known_default() {
+        let addresses = (host, port)
+            .to_socket_addrs()
+            .map_err(template_repo_error)?;
+        for address in addresses {
+            if ip_is_private_or_local(address.ip()) {
+                return Err(CoreError::validation(
+                    "template repository host cannot target private or local addresses",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ip_is_private_or_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+    }
 }
 
 fn parse_success_json<T: serde::de::DeserializeOwned>(
@@ -2273,4 +2360,36 @@ pub fn now_timestamp_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_repository_url_rejects_local_targets_without_override() {
+        let local =
+            validate_template_repository_base_url_with_policy("http://127.0.0.1:8080", false)
+                .unwrap_err();
+        assert!(local
+            .to_string()
+            .contains("cannot target private or local addresses"));
+
+        let userinfo = validate_template_repository_base_url_with_policy(
+            "https://user:pass@example.com",
+            false,
+        )
+        .unwrap_err();
+        assert!(userinfo.to_string().contains("cannot contain userinfo"));
+
+        let scheme =
+            validate_template_repository_base_url_with_policy("file:///tmp/templates", false)
+                .unwrap_err();
+        assert!(scheme.to_string().contains("must use http or https"));
+    }
+
+    #[test]
+    fn template_repository_url_allows_local_targets_with_explicit_override() {
+        validate_template_repository_base_url_with_policy("http://127.0.0.1:8080", true).unwrap();
+    }
 }

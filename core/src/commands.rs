@@ -3928,15 +3928,7 @@ fn template_client(request: TemplateRepositoryRequest) -> CommandResult<Template
 }
 
 fn validate_template_url(url: &str) -> CommandResult<()> {
-    let trimmed = url.trim();
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        Ok(())
-    } else {
-        let scheme = trimmed.split("://").next().unwrap_or(trimmed);
-        Err(format!(
-            "template URL must use http or https, got '{scheme}'"
-        ))
-    }
+    crate::frontend::validate_template_repository_base_url(url).map_err(error_to_string)
 }
 
 struct CommandLlmRuntime {
