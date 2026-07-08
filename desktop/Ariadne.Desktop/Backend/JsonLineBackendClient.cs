@@ -289,6 +289,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<ProjectReference>("resolve_project_reference", new { reference }, cancellationToken);
     }
 
+    public Task<IReadOnlyList<WorkflowSummary>> ListWorkflowGraphsAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredListAsync<WorkflowSummary>("list_workflow_graphs", null, cancellationToken);
+    }
+
     public Task<WorkflowGraphData> LoadWorkflowGraphAsync(string? workflowId = null, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<WorkflowGraphData>("load_workflow_graph", new { workflow_id = workflowId }, cancellationToken);

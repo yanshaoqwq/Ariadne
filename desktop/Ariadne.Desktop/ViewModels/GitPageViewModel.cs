@@ -8,16 +8,24 @@ public sealed class GitPageViewModel : ViewModelBase
 {
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
+    private readonly Func<Task<bool>> _confirmProjectReload;
+    private readonly Func<Task> _reloadProjectData;
     private bool _isRightPanelOpen = true;
     private string _checkpointMessage = string.Empty;
     private string _restoreBranchName = string.Empty;
     private string _statusText = string.Empty;
     private GitHistoryItemViewModel? _selectedCommit;
 
-    public GitPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
+    public GitPageViewModel(
+        DisplayNameService displayNames,
+        IAriadneBackendClient backend,
+        Func<Task<bool>>? confirmProjectReload = null,
+        Func<Task>? reloadProjectData = null)
     {
         _displayNames = displayNames;
         _backend = backend;
+        _confirmProjectReload = confirmProjectReload ?? (() => Task.FromResult(true));
+        _reloadProjectData = reloadProjectData ?? (() => Task.CompletedTask);
         Commits = new ObservableCollection<GitHistoryItemViewModel>();
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync());
@@ -204,10 +212,15 @@ public sealed class GitPageViewModel : ViewModelBase
             {
                 return;
             }
+            if (!await _confirmProjectReload().ConfigureAwait(true))
+            {
+                return;
+            }
             var report = await _backend.RestoreToNewBranchAsync(commit.CommitId, branch).ConfigureAwait(true);
             StatusText = report.NewBranch;
             RestoreBranchName = string.Empty;
             await RefreshAsync().ConfigureAwait(true);
+            await _reloadProjectData().ConfigureAwait(true);
         }
         catch (Exception ex)
         {

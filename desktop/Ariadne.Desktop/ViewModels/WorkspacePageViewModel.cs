@@ -8,7 +8,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
+public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable
 {
     private const string DefaultWorkflowId = "default";
     private const double MinRightPanelWidth = 300;
@@ -32,6 +32,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
     private string _currentRunId = string.Empty;
+    private string _selectedWorkflowId = DefaultWorkflowId;
+    private string _currentWorkflowName = "Default";
+    private bool _suppressWorkflowSelectionChange;
     private long _workflowEventCursor;
     private CancellationTokenSource? _workflowEventPollingCts;
     private string _confirmationReason = string.Empty;
@@ -90,6 +93,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         Nodes = new ObservableCollection<WorkflowNodeViewModel>();
         StartNodes = new ObservableCollection<WorkflowNodeViewModel>();
+        WorkflowSummaries = new ObservableCollection<WorkflowSummary>();
         Confirmations = new ObservableCollection<ConfirmationItemViewModel>();
         Edges = new ObservableCollection<WorkflowEdgeViewModel>();
         EntryNodes = new ObservableCollection<NodeLibraryItemViewModel>
@@ -120,7 +124,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         };
 
         CaptureSnapshot();
-        _ = LoadWorkflowAsync();
+        _ = InitializeWorkflowAsync();
         _ = LoadConfirmationsAsync();
     }
 
@@ -131,6 +135,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string UndoText => _displayNames.Text("ui.action.undo");
     public string RedoText => _displayNames.Text("ui.action.redo");
     public string RunText => _displayNames.Text("ui.workspace.run");
+    public string WorkflowSelectorText => _displayNames.Text("ui.workspace.workflow_selector");
     public string RunFromStartText => _displayNames.Text("ui.workspace.run_from_start");
     public string CurrentRunText => _displayNames.Text("ui.workspace.current_run");
     public string CurrentRunValueText => string.IsNullOrWhiteSpace(CurrentRunId) ? _displayNames.Text("ui.common.none") : CurrentRunId;
@@ -341,6 +346,28 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
         }
     }
+    public string SelectedWorkflowId
+    {
+        get => _selectedWorkflowId;
+        set
+        {
+            var next = string.IsNullOrWhiteSpace(value) ? DefaultWorkflowId : value;
+            if (_suppressWorkflowSelectionChange)
+            {
+                SetSelectedWorkflowId(next);
+                return;
+            }
+            if (!string.Equals(next, _selectedWorkflowId, StringComparison.Ordinal))
+            {
+                _ = SwitchWorkflowAsync(next);
+            }
+        }
+    }
+    public string CurrentWorkflowName
+    {
+        get => _currentWorkflowName;
+        private set => SetProperty(ref _currentWorkflowName, value);
+    }
     public string ConfirmationReason { get => _confirmationReason; set => SetProperty(ref _confirmationReason, value); }
     public string AnnotationTitle { get => _annotationTitle; set => SetProperty(ref _annotationTitle, value); }
 
@@ -352,6 +379,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public ObservableCollection<WorkflowNodeViewModel> Nodes { get; }
     public ObservableCollection<WorkflowNodeViewModel> StartNodes { get; }
+    public ObservableCollection<WorkflowSummary> WorkflowSummaries { get; }
     public ObservableCollection<NodeLibraryItemViewModel> EntryNodes { get; }
     public ObservableCollection<NodeLibraryItemViewModel> WritingAgents { get; }
     public ObservableCollection<NodeLibraryItemViewModel> UtilityNodes { get; }
@@ -581,6 +609,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             x: Math.Max(0, x),
             y: Math.Max(0, y),
             _backend,
+            () => CurrentWorkflowId,
             () => SelectNode(node: null),
             RefreshDirtyState);
         AttachNodeCommands(node);
@@ -603,6 +632,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             graphNode.Position?.X ?? 120 + ((Nodes.Count % 4) * 230),
             graphNode.Position?.Y ?? 80 + ((Nodes.Count / 4) * 170),
             _backend,
+            () => CurrentWorkflowId,
             () => SelectNode(node: null),
             RefreshDirtyState)
         {
@@ -781,11 +811,64 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         return new GridLength(Math.Clamp(width, MinRightPanelWidth, MaxRightPanelWidth));
     }
 
-    private async Task LoadWorkflowAsync()
+    private async Task InitializeWorkflowAsync()
+    {
+        await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
+        await LoadWorkflowAsync(SelectedWorkflowId).ConfigureAwait(true);
+    }
+
+    private async Task RefreshWorkflowSummariesAsync()
+    {
+        var selected = SelectedWorkflowId;
+        var summaries = await _backend.ListWorkflowGraphsAsync().ConfigureAwait(true);
+        WorkflowSummaries.Clear();
+        foreach (var summary in summaries)
+        {
+            WorkflowSummaries.Add(summary);
+        }
+        if (WorkflowSummaries.All(summary => summary.WorkflowId != selected))
+        {
+            selected = WorkflowSummaries.FirstOrDefault()?.WorkflowId ?? DefaultWorkflowId;
+        }
+        _suppressWorkflowSelectionChange = true;
+        try
+        {
+            SetSelectedWorkflowId(selected);
+        }
+        finally
+        {
+            _suppressWorkflowSelectionChange = false;
+        }
+    }
+
+    private async Task SwitchWorkflowAsync(string workflowId)
+    {
+        if (!await ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+        {
+            OnPropertyChanged(nameof(SelectedWorkflowId));
+            return;
+        }
+        SetSelectedWorkflowId(workflowId);
+        CurrentRunId = string.Empty;
+        _workflowEventPollingCts?.Cancel();
+        await LoadWorkflowAsync(workflowId).ConfigureAwait(true);
+    }
+
+    private void SetSelectedWorkflowId(string workflowId)
+    {
+        if (SetProperty(ref _selectedWorkflowId, string.IsNullOrWhiteSpace(workflowId) ? DefaultWorkflowId : workflowId, nameof(SelectedWorkflowId)))
+        {
+            var summary = WorkflowSummaries.FirstOrDefault(item => item.WorkflowId == _selectedWorkflowId);
+            CurrentWorkflowName = summary?.Name ?? _selectedWorkflowId;
+        }
+    }
+
+    private async Task LoadWorkflowAsync(string? workflowId = null)
     {
         try
         {
-            var graph = await _backend.LoadWorkflowGraphAsync(DefaultWorkflowId).ConfigureAwait(true);
+            var graph = await _backend.LoadWorkflowGraphAsync(string.IsNullOrWhiteSpace(workflowId) ? SelectedWorkflowId : workflowId).ConfigureAwait(true);
+            CurrentWorkflowName = graph.Name;
             ApplyGraph(graph);
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.open");
@@ -803,7 +886,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             return;
         }
 
-        await LoadWorkflowAsync().ConfigureAwait(true);
+        await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
+        await LoadWorkflowAsync(SelectedWorkflowId).ConfigureAwait(true);
     }
 
     private async Task SaveWorkflowAsync()
@@ -814,6 +898,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
             await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true);
             CaptureSnapshot();
+            await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
             StatusText = _displayNames.Text("ui.common.save");
         }
         catch (Exception ex)
@@ -831,7 +916,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
             await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true);
             CaptureSnapshot();
-            await _backend.ExportWorkflowSelectionAsync(DefaultWorkflowId, selected).ConfigureAwait(true);
+            await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
+            await _backend.ExportWorkflowSelectionAsync(CurrentWorkflowId, selected).ConfigureAwait(true);
             StatusText = _displayNames.Format("ui.workspace.exported_selection", new Dictionary<string, string>
             {
                 ["count"] = selected.Length.ToString(),
@@ -865,7 +951,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
             await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true);
             CaptureSnapshot();
-            var run = await _backend.RunWorkflowAsync(DefaultWorkflowId, startNodeId).ConfigureAwait(true);
+            await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
+            var run = await _backend.RunWorkflowAsync(CurrentWorkflowId, startNodeId).ConfigureAwait(true);
             CurrentRunId = run.RunId;
             _workflowEventCursor = 0;
             node.StatusText = run.Status;
@@ -915,7 +1002,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
-            var result = await action(DefaultWorkflowId, CurrentRunId).ConfigureAwait(true);
+            var result = await action(CurrentWorkflowId, CurrentRunId).ConfigureAwait(true);
             CurrentRunId = result.RunId;
             StatusText = result.Status;
             StartWorkflowEventPolling(result.RunId);
@@ -942,7 +1029,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             try
             {
                 var result = await _backend
-                    .GetWorkflowEventsAsync(DefaultWorkflowId, runId, _workflowEventCursor, 100, cancellationToken)
+                    .GetWorkflowEventsAsync(CurrentWorkflowId, runId, _workflowEventCursor, 100, cancellationToken)
                     .ConfigureAwait(true);
                 _workflowEventCursor = result.NextSequence;
                 ApplyWorkflowEvents(result);
@@ -1034,7 +1121,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             var result = await _backend.ProjectAiChatAsync(
                 ProjectAiMessage,
                 _projectAiHistory,
-                ProjectAiMessage.Contains("/run", StringComparison.OrdinalIgnoreCase) ? DefaultWorkflowId : null).ConfigureAwait(true);
+                ProjectAiMessage.Contains("/run", StringComparison.OrdinalIgnoreCase) ? CurrentWorkflowId : null).ConfigureAwait(true);
             ProjectAiAnswer = result.Answer;
             _projectAiHistory.Clear();
             foreach (var message in result.ChatHistory)
@@ -1065,7 +1152,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
-            await _backend.ApplyNodeDetailPatchAsync(DefaultWorkflowId, new NodeDetailPatch(
+            await _backend.ApplyNodeDetailPatchAsync(CurrentWorkflowId, new NodeDetailPatch(
                 SelectedNode.Id,
                 SelectedNode.PromptTemplate,
                 new Dictionary<string, string>(),
@@ -1092,7 +1179,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
-            await _backend.SetNodeBreakpointAsync(DefaultWorkflowId, SelectedNode.Id, SelectedNode.BreakpointEnabled).ConfigureAwait(true);
+            await _backend.SetNodeBreakpointAsync(CurrentWorkflowId, SelectedNode.Id, SelectedNode.BreakpointEnabled).ConfigureAwait(true);
             StatusText = BreakpointText;
         }
         catch (Exception ex)
@@ -1111,7 +1198,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
-            await _backend.UpsertCanvasAnnotationAsync(DefaultWorkflowId, new CanvasAnnotation(
+            await _backend.UpsertCanvasAnnotationAsync(CurrentWorkflowId, new CanvasAnnotation(
                 $"annotation-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                 string.IsNullOrWhiteSpace(AnnotationTitle) ? _displayNames.Text("ui.workspace.default_annotation_title") : AnnotationTitle,
                 selected,
@@ -1141,9 +1228,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 ["count"] = selected.Length.ToString(),
             });
-            var graph = await _backend.PackWorkflowSelectionAsync(DefaultWorkflowId, selected, null, title).ConfigureAwait(true);
+            var graph = await _backend.PackWorkflowSelectionAsync(CurrentWorkflowId, selected, null, title).ConfigureAwait(true);
             ApplyGraph(graph);
             CaptureSnapshot();
+            await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
             StatusText = _displayNames.Format("ui.workspace.packed_selection", new Dictionary<string, string>
             {
                 ["count"] = selected.Length.ToString(),
@@ -1212,7 +1300,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             var result = await _backend.ResolveConfirmationAsync(
-                DefaultWorkflowId,
+                CurrentWorkflowId,
                 CurrentRunId,
                 SelectedConfirmation.ConfirmationId,
                 decision,
@@ -1283,11 +1371,19 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
+    public async Task ReloadProjectDataAsync()
+    {
+        CurrentRunId = string.Empty;
+        _workflowEventPollingCts?.Cancel();
+        await InitializeWorkflowAsync().ConfigureAwait(true);
+        await LoadConfirmationsAsync().ConfigureAwait(true);
+    }
+
     private WorkflowGraphData BuildGraph()
     {
         return new WorkflowGraphData(
-            DefaultWorkflowId,
-            "Default",
+            CurrentWorkflowId,
+            CurrentWorkflowName,
             Nodes.Select(node => new CanvasNode(
                 node.Id,
                 node.NodeType,
@@ -1371,6 +1467,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         return JsonSerializer.Serialize(BuildGraph(), JsonOptions);
     }
+
+    private string CurrentWorkflowId => string.IsNullOrWhiteSpace(SelectedWorkflowId) ? DefaultWorkflowId : SelectedWorkflowId;
 
     private string NodeLabel(string nodeType)
     {
@@ -1544,6 +1642,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     private static readonly IBrush SelectedBrush = new SolidColorBrush(Color.Parse("#2E726B"));
 
     private readonly IAriadneBackendClient _backend;
+    private readonly Func<string> _currentWorkflowId;
     private readonly Action _markDirty;
     private string _name;
     private string _workDir;
@@ -1566,6 +1665,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         double x,
         double y,
         IAriadneBackendClient backend,
+        Func<string> currentWorkflowId,
         Action clearSelection,
         Action markDirty)
     {
@@ -1578,6 +1678,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         _x = x;
         _y = y;
         _backend = backend;
+        _currentWorkflowId = currentWorkflowId;
         _markDirty = markDirty;
         SelectCommand = new RelayCommand(() => clearSelection());
         RunCommand = new RelayCommand(() => _ = RunAsync());
@@ -1699,7 +1800,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     {
         try
         {
-            var run = await _backend.RunWorkflowAsync("default", IsStartNode ? Id : null).ConfigureAwait(true);
+            var run = await _backend.RunWorkflowAsync(_currentWorkflowId(), IsStartNode ? Id : null).ConfigureAwait(true);
             StatusText = run.Status;
         }
         catch (Exception ex)

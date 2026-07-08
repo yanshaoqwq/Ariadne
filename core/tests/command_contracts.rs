@@ -12,18 +12,18 @@ use ariadne::commands::{
     get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
     get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
     get_rag_settings_impl, get_template_repository_settings_impl, get_workflow_settings_impl,
-    load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl,
-    resolve_confirmation_impl, resolve_project_references, run_workflow, run_workflow_impl,
-    save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
-    save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
-    save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
-    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
-    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
-    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
-    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, NodePresetSettings,
-    PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest,
-    ProviderSettingsUpdate, RagSettings, ResolveConfirmationRequest, TemplateRepositorySettings,
-    WorkflowGraphData, WorkflowSettings,
+    list_workflow_graphs_impl, load_workflow_graph_impl, pack_workflow_selection_impl,
+    project_ai_chat, project_ai_chat_impl, resolve_confirmation_impl, resolve_project_references,
+    run_workflow, run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
+    save_document_content_impl, save_git_settings_impl, save_node_preset_settings_impl,
+    save_permissions_settings_impl, save_provider_key_impl, save_provider_settings_impl,
+    save_rag_settings_impl, save_template_repository_settings_impl, save_workflow_graph_impl,
+    save_workflow_settings_impl, update_budget_config_impl, validate_display_name_language_pack,
+    AppSettings, AriadneAppState, AutomationSettings, CanvasEdge, CanvasNode,
+    ConfirmationAutoModePolicy, ConfirmationDecision, ConfirmationNormalPolicy,
+    ConfirmationPolicySetting, GitSettings, NodePresetSettings, PermissionsSettings,
+    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate, RagSettings,
+    ResolveConfirmationRequest, TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
 use ariadne::contracts::{
@@ -194,6 +194,71 @@ fn workflow_graph_commands_save_and_load_canvas_shape() {
     assert_eq!(loaded.workflow_id, "draft-flow");
     assert_eq!(loaded.nodes[0].id, "writer");
     assert_eq!(loaded.nodes[0].data["prompt_template"], "writer.default");
+}
+
+#[test]
+fn workflow_graph_list_returns_all_saved_workflows() {
+    let temp = tempfile::tempdir().unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "draft-flow".to_owned(),
+            name: "Draft Flow".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Start".to_owned()),
+                data: Value::Null,
+                position: json!({ "x": 0.0, "y": 0.0 }),
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "review/review-flow".to_owned(),
+            name: "Review Flow".to_owned(),
+            nodes: vec![
+                CanvasNode {
+                    id: "a".to_owned(),
+                    r#type: "start".to_owned(),
+                    label: Some("A".to_owned()),
+                    data: Value::Null,
+                    position: json!({ "x": 0.0, "y": 0.0 }),
+                },
+                CanvasNode {
+                    id: "b".to_owned(),
+                    r#type: "writer".to_owned(),
+                    label: Some("B".to_owned()),
+                    data: Value::Null,
+                    position: json!({ "x": 100.0, "y": 0.0 }),
+                },
+            ],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+
+    let workflows = list_workflow_graphs_impl(temp.path()).unwrap();
+
+    assert_eq!(
+        workflows
+            .iter()
+            .map(|workflow| workflow.workflow_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["draft-flow", "review/review-flow"]
+    );
+    assert_eq!(workflows[0].name, "Draft Flow");
+    assert_eq!(workflows[0].node_count, 1);
+    assert_eq!(workflows[1].name, "Review Flow");
+    assert_eq!(workflows[1].node_count, 2);
+    let loaded =
+        load_workflow_graph_impl(temp.path(), Some(workflows[1].workflow_id.clone())).unwrap();
+    assert_eq!(loaded.name, "Review Flow");
 }
 
 #[cfg(unix)]

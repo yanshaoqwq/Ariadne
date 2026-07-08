@@ -101,6 +101,8 @@ public interface IAriadneBackendClient
 
     Task<ProjectReference> ResolveProjectReferenceAsync(string reference, CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<WorkflowSummary>> ListWorkflowGraphsAsync(CancellationToken cancellationToken = default);
+
     Task<WorkflowGraphData> LoadWorkflowGraphAsync(string? workflowId = null, CancellationToken cancellationToken = default);
 
     Task SaveWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default);

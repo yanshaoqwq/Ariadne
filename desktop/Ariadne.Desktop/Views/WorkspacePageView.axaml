@@ -2,6 +2,7 @@
     x:Class="Ariadne.Desktop.Views.WorkspacePageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:backend="clr-namespace:Ariadne.Desktop.Backend"
     xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:WorkspacePageViewModel">
@@ -55,6 +56,28 @@
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
+
+        <StackPanel Canvas.Top="12" Canvas.Left="16" Orientation="Horizontal" Spacing="8">
+          <TextBlock Text="{Binding WorkflowSelectorText}" Classes="caption" VerticalAlignment="Center" />
+          <ComboBox ItemsSource="{Binding WorkflowSummaries}"
+                    SelectedValue="{Binding SelectedWorkflowId, Mode=TwoWay}"
+                    SelectedValueBinding="{Binding WorkflowId}"
+                    MinWidth="220"
+                    MaxWidth="320"
+                    ToolTip.Tip="{Binding CurrentWorkflowName}">
+            <ComboBox.ItemTemplate>
+              <DataTemplate DataType="{x:Type backend:WorkflowSummary}">
+                <Grid RowDefinitions="Auto,Auto" MinWidth="190">
+                  <TextBlock Grid.Row="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                  <TextBlock Grid.Row="1"
+                             Classes="caption"
+                             Text="{Binding Path}"
+                             TextTrimming="CharacterEllipsis" />
+                </Grid>
+              </DataTemplate>
+            </ComboBox.ItemTemplate>
+          </ComboBox>
+        </StackPanel>
 
         <StackPanel x:Name="TopToolbar" Canvas.Top="12" Canvas.Right="16" Orientation="Horizontal" Spacing="4">
           <Button Classes="icon-btn" ToolTip.Tip="{Binding UndoText}" Command="{Binding UndoCommand}">

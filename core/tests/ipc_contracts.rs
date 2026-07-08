@@ -206,3 +206,73 @@ fn ipc_lists_workflow_tools_for_external_agents() {
         "string"
     );
 }
+
+#[test]
+fn ipc_lists_saved_workflow_graphs_for_desktop_selector() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "draft/main".to_owned(),
+            name: "Draft Main".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-draft".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Start".to_owned()),
+                data: Value::Null,
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "review".to_owned(),
+            name: "Review".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-review".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Start".to_owned()),
+                data: Value::Null,
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "list_workflow_graphs".to_owned(),
+            params: Value::Null,
+        },
+    );
+
+    assert!(response.ok, "{:?}", response.error);
+    let data = response
+        .data
+        .expect("ipc response should include workflow summaries");
+    let summaries = data
+        .as_array()
+        .expect("workflow summaries should be a list");
+    let ids: Vec<_> = summaries
+        .iter()
+        .map(|summary| summary["workflow_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["draft/main", "review"]);
+    assert_eq!(summaries[0]["name"], "Draft Main");
+    assert_eq!(summaries[0]["path"], "workflows/draft/main.json");
+    assert_eq!(summaries[0]["node_count"], 1);
+    assert_eq!(summaries[0]["edge_count"], 0);
+}

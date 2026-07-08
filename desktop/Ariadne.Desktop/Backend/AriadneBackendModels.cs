@@ -317,6 +317,13 @@ public sealed record WorkflowGraphData(
     [property: JsonPropertyName("edges")] IReadOnlyList<CanvasEdge> Edges,
     [property: JsonPropertyName("metadata")] Dictionary<string, object?> Metadata);
 
+public sealed record WorkflowSummary(
+    [property: JsonPropertyName("workflow_id")] string WorkflowId,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("node_count")] int NodeCount,
+    [property: JsonPropertyName("edge_count")] int EdgeCount);
+
 public sealed record CanvasNode(
     [property: JsonPropertyName("id")] string Id,
     [property: JsonPropertyName("type")] string Type,

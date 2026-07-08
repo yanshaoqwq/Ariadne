@@ -317,7 +317,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             "workspace" => new WorkspacePageViewModel(_displayNames, _backend),
             "works" => new WorksPageViewModel(_displayNames, _backend),
-            "git" => new GitPageViewModel(_displayNames, _backend),
+            "git" => new GitPageViewModel(_displayNames, _backend, ConfirmCachedProjectPagesLeaveAsync, ReloadCachedProjectPagesAsync),
             "run_logs" => new RunLogPageViewModel(_displayNames, _backend),
             "templates" => new TemplateMarketPageViewModel(_displayNames, _backend),
             "settings" => new SettingsPageViewModel(_displayNames, _backend, () => OpenNavigationItemByIdAsync("templates")),
@@ -359,6 +359,32 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         return CurrentPage is not IUnsavedChangesGuard guard
                || await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true);
+    }
+
+    private async Task<bool> ConfirmCachedProjectPagesLeaveAsync()
+    {
+        foreach (var page in _pageCache.Values)
+        {
+            if (page is IUnsavedChangesGuard guard
+                && !await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private async Task ReloadCachedProjectPagesAsync()
+    {
+        foreach (var page in _pageCache.Values)
+        {
+            if (page is IProjectDataReloadable reloadable)
+            {
+                await reloadable.ReloadProjectDataAsync().ConfigureAwait(true);
+            }
+        }
+        await RefreshBudgetStatusAsync().ConfigureAwait(true);
+        await RefreshSidebarBadgesAsync(new SidebarBadgeCounts(0, 0, 0)).ConfigureAwait(true);
     }
 
     private void SelectNavigationItem(NavigationItemViewModel item, bool createPage)

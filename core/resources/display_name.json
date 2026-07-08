@@ -533,6 +533,7 @@
   "ui.workspace.save": "保存",
   "ui.workspace.import": "导入图",
   "ui.workspace.export": "导出图",
+  "ui.workspace.workflow_selector": "工作流",
   "ui.workspace.run": "运行",
   "ui.workspace.run_from_start": "从起始节点运行",
   "ui.workspace.current_run": "当前运行",

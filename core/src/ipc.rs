@@ -222,6 +222,7 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             let params: WorkflowIdParams = params(request.params)?;
             ok(commands::load_workflow_graph(state, params.workflow_id)?)
         }
+        "list_workflow_graphs" => ok(commands::list_workflow_graphs(state)?),
         "validate_workflow_graph" => {
             let params: WorkflowGraphParams = params(request.params)?;
             ok(commands::validate_workflow_graph(params.graph_data)?)

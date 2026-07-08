@@ -6,7 +6,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
+public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable
 {
     private const double MinRightPanelWidth = 280;
     private const double MaxRightPanelWidth = 520;
@@ -828,6 +828,39 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             default:
                 return false;
         }
+    }
+
+    public async Task ReloadProjectDataAsync()
+    {
+        await LoadWorksTreeAsync().ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(_currentDocumentId))
+        {
+            return;
+        }
+
+        try
+        {
+            _suppressDirtyTracking = true;
+            var document = await _backend.GetDocumentContentDetailsAsync(_currentDocumentId).ConfigureAwait(true);
+            DocumentContent = document.Content;
+            _currentDocumentVersion = document.Metadata.Version;
+            DocumentTitle = Path.GetFileNameWithoutExtension(document.Metadata.Path);
+            ClearPendingQuickEdit();
+        }
+        catch (Exception ex)
+        {
+            _currentDocumentId = string.Empty;
+            _currentDocumentVersion = null;
+            DocumentContent = string.Empty;
+            DocumentTitle = NoDocumentText;
+            StatusText = ex.Message;
+        }
+        finally
+        {
+            _suppressDirtyTracking = false;
+        }
+        OnCurrentDocumentChanged();
+        CaptureSnapshot();
     }
 
     private void CaptureSnapshot()

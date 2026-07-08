@@ -158,6 +158,15 @@ pub struct WorkflowGraphData {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSummary {
+    pub workflow_id: String,
+    pub name: String,
+    pub path: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanvasNode {
     pub id: String,
@@ -759,6 +768,11 @@ pub fn load_workflow_graph(
 ) -> CommandResult<WorkflowGraphData> {
     let project_root = project_root_from_state(&state, None)?;
     load_workflow_graph_impl(&project_root, workflow_id)
+}
+
+pub fn list_workflow_graphs(state: &AriadneAppState) -> CommandResult<Vec<WorkflowSummary>> {
+    let project_root = project_root_from_state(&state, None)?;
+    list_workflow_graphs_impl(&project_root)
 }
 
 pub fn validate_workflow_graph(graph_data: WorkflowGraphData) -> CommandResult<()> {
@@ -1981,6 +1995,49 @@ pub fn load_workflow_graph_impl(
 ) -> CommandResult<WorkflowGraphData> {
     let workflow = load_workflow_definition(project_root, workflow_id)?;
     Ok(workflow_to_graph(workflow))
+}
+
+pub fn list_workflow_graphs_impl(project_root: &Path) -> CommandResult<Vec<WorkflowSummary>> {
+    validate_project_root(project_root)?;
+    let workflows_root = absolute_path(&project_root.join("workflows"));
+    reject_symlink_root(&workflows_root)?;
+    if !workflows_root.exists() {
+        return Ok(vec![WorkflowSummary {
+            workflow_id: "default".to_owned(),
+            name: "Default Workflow".to_owned(),
+            path: "workflows/default.json".to_owned(),
+            node_count: 0,
+            edge_count: 0,
+        }]);
+    }
+
+    let mut paths = workflow_json_paths(&workflows_root)?;
+    paths.sort();
+    let mut summaries = Vec::new();
+    for path in paths {
+        ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
+        let content = std::fs::read_to_string(&path).map_err(error_to_string)?;
+        let workflow: WorkflowDefinition =
+            serde_json::from_str(&content).map_err(error_to_string)?;
+        let workflow_id = workflow_id_from_path(&workflows_root, &path)?;
+        summaries.push(WorkflowSummary {
+            workflow_id,
+            name: workflow.name,
+            path: relative_id(project_root, &path)?,
+            node_count: workflow.nodes.len(),
+            edge_count: workflow.edges.len(),
+        });
+    }
+    if summaries.is_empty() {
+        summaries.push(WorkflowSummary {
+            workflow_id: "default".to_owned(),
+            name: "Default Workflow".to_owned(),
+            path: "workflows/default.json".to_owned(),
+            node_count: 0,
+            edge_count: 0,
+        });
+    }
+    Ok(summaries)
 }
 
 pub fn save_workflow_graph_impl(
@@ -4142,6 +4199,21 @@ fn workflow_path(project_root: &Path, workflow_id: Option<String>) -> CommandRes
             Ok(path)
         }
         _ => Ok(workflows_root.join("default.json")),
+    }
+}
+
+fn workflow_id_from_path(workflows_root: &Path, path: &Path) -> CommandResult<String> {
+    let relative = path
+        .strip_prefix(workflows_root)
+        .map_err(error_to_string)?
+        .with_extension("");
+    let id = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    if id.trim().is_empty() {
+        Err("workflow path does not contain a workflow id".to_owned())
+    } else {
+        Ok(id)
     }
 }
 
