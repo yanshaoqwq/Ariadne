@@ -96,6 +96,30 @@ fn app_state_root_can_be_separated_from_project_root_env() {
 }
 
 #[test]
+fn app_state_rejects_missing_or_uninitialized_project_root() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let state = AriadneAppState::new(
+        project.path().to_path_buf(),
+        app_state.path().to_path_buf(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let missing = project.path().join("missing");
+    let missing_error = state.set_project_root(&missing).unwrap_err();
+    assert!(missing_error.contains("does not exist"));
+
+    let uninitialized = project.path().join("plain");
+    std::fs::create_dir_all(&uninitialized).unwrap();
+    let uninitialized_error = state.set_project_root(&uninitialized).unwrap_err();
+    assert!(uninitialized_error.contains("not initialized"));
+
+    std::fs::create_dir_all(uninitialized.join(".config")).unwrap();
+    state.set_project_root(&uninitialized).unwrap();
+    assert_eq!(state.project_root().unwrap(), uninitialized);
+}
+
+#[test]
 fn workflow_graph_commands_save_and_load_canvas_shape() {
     let temp = tempfile::tempdir().unwrap();
     let graph = WorkflowGraphData {

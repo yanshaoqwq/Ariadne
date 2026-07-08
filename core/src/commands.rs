@@ -112,7 +112,7 @@ impl AriadneAppState {
 
     pub fn set_project_root(&self, project_root: impl Into<PathBuf>) -> CommandResult<()> {
         let project_root = project_root.into();
-        validate_project_root(&project_root)?;
+        validate_initialized_project_root(&project_root)?;
         let mut locked = self
             .project_root
             .lock()
