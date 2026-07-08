@@ -139,6 +139,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ResumeText => _displayNames.Text("ui.workspace.resume");
     public string ConfirmationsText => _displayNames.Text("ui.workspace.confirmations");
     public string ConfirmationsEmptyText => _displayNames.Text("ui.workspace.confirmations.empty");
+    public string ConfirmationCountText => _displayNames.Format("ui.workspace.confirmations.count", new Dictionary<string, string>
+    {
+        ["count"] = Confirmations.Count.ToString(),
+    });
     public string RefreshConfirmationsText => _displayNames.Text("ui.workspace.confirmations.reload");
     public string ConfirmationDiffText => _displayNames.Text("ui.workspace.confirmation.diff");
     public string ConfirmationReasonText => _displayNames.Text("ui.workspace.confirmation.reason");
@@ -300,12 +304,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             if (SetProperty(ref _selectedConfirmation, value))
             {
                 OnPropertyChanged(nameof(HasSelectedConfirmation));
+                OnPropertyChanged(nameof(HasPendingConfirmations));
                 NotifyConfirmationCommandStates();
             }
         }
     }
 
     public bool HasSelectedConfirmation => SelectedConfirmation is not null;
+    public bool HasPendingConfirmations => Confirmations.Count > 0;
 
     public WorkflowEdgeViewModel? SelectedEdge
     {
@@ -833,6 +839,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 SelectConfirmation(Confirmations[0]);
             }
+            OnPropertyChanged(nameof(HasPendingConfirmations));
+            OnPropertyChanged(nameof(ConfirmationCountText));
             StatusText = Confirmations.Count == 0 ? ConfirmationsEmptyText : $"{Confirmations.Count}";
         }
         catch (Exception ex)

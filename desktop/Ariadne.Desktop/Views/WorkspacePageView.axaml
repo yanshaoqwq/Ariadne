@@ -228,36 +228,32 @@
               </ItemsControl.ItemTemplate>
             </ItemsControl>
           </StackPanel>
-          <Grid Margin="14,8,14,12" ColumnDefinitions="1.05*,1.45*" ColumnSpacing="18" IsVisible="{Binding IsExecutionPanel}">
-            <Border Grid.Column="0" Classes="soft-panel" Padding="16">
-            <StackPanel Spacing="12">
-              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                <TextBlock Grid.Column="0" Text="{Binding RunFromStartText}" Classes="subtitle" VerticalAlignment="Center" />
-                <Button Grid.Column="1" Classes="secondary" Content="{Binding RefreshConfirmationsText}" Command="{Binding RefreshConfirmationsCommand}" />
-              </Grid>
-              <ItemsControl ItemsSource="{Binding StartNodes}">
-                <ItemsControl.ItemTemplate>
-                  <DataTemplate DataType="{x:Type vm:WorkflowNodeViewModel}">
-                    <Border BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" Padding="0,7">
-                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                        <StackPanel Grid.Column="0" Spacing="2">
-                          <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                          <TextBlock Text="{Binding WorkDir}" Classes="caption" TextWrapping="Wrap" />
-                          <TextBlock Text="{Binding StatusText}" Classes="subtle" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <Button Grid.Column="1" Classes="primary" Content="{Binding $parent[UserControl].DataContext.RunText}" Command="{Binding RunCommand}" />
-                      </Grid>
-                    </Border>
-                  </DataTemplate>
-                </ItemsControl.ItemTemplate>
-              </ItemsControl>
-              <TextBlock Text="{Binding NoStartNodesText}" Classes="subtle" IsVisible="{Binding !HasStartNodes}" />
-              <Border Classes="layer" Padding="12">
-                <StackPanel Spacing="10">
-                  <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
-                    <TextBlock Grid.Column="0" Text="{Binding CurrentRunText}" Classes="caption" />
-                    <TextBlock Grid.Column="1" Text="{Binding CurrentRunValueText}" Classes="mono" TextWrapping="Wrap" />
-                  </Grid>
+          <Border Margin="14,8,14,12" Classes="soft-panel" Padding="16" IsVisible="{Binding IsExecutionPanel}">
+            <Grid ColumnDefinitions="*,300" ColumnSpacing="22">
+              <StackPanel Grid.Column="0" Spacing="12">
+                <TextBlock Text="{Binding RunFromStartText}" Classes="subtitle" />
+                <ItemsControl ItemsSource="{Binding StartNodes}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:WorkflowNodeViewModel}">
+                      <Border BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" Padding="0,8">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                          <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding WorkDir}" Classes="caption" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding StatusText}" Classes="subtle" TextWrapping="Wrap" />
+                          </StackPanel>
+                          <Button Grid.Column="1" Classes="primary" Content="{Binding $parent[UserControl].DataContext.RunText}" Command="{Binding RunCommand}" />
+                        </Grid>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="{Binding NoStartNodesText}" Classes="subtle" IsVisible="{Binding !HasStartNodes}" />
+              </StackPanel>
+              <Border Grid.Column="1" Classes="layer" Padding="14">
+                <StackPanel Spacing="12">
+                  <TextBlock Text="{Binding CurrentRunText}" Classes="subtitle" />
+                  <TextBlock Text="{Binding CurrentRunValueText}" Classes="mono" TextWrapping="Wrap" />
                   <StackPanel Orientation="Horizontal" Spacing="8">
                     <Button Classes="secondary" Content="{Binding PauseText}" Command="{Binding PauseWorkflowCommand}" />
                     <Button Classes="danger" Content="{Binding StopText}" Command="{Binding StopWorkflowCommand}" />
@@ -265,47 +261,86 @@
                   </StackPanel>
                 </StackPanel>
               </Border>
+            </Grid>
+          </Border>
+        </DockPanel>
+      </Border>
+
+      <Border Grid.Row="0"
+              Grid.RowSpan="3"
+              Background="{DynamicResource Ariadne.BackgroundMain}"
+              BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+              BorderThickness="0,0,1,0"
+              IsVisible="{Binding HasPendingConfirmations}">
+        <Grid Margin="28,24" RowDefinitions="Auto,*" RowSpacing="18">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+            <StackPanel Grid.Column="0" Spacing="4">
+              <TextBlock Text="{Binding ConfirmationsText}" Classes="display" />
+              <TextBlock Text="{Binding ConfirmationCountText}" Classes="caption" TextWrapping="Wrap" />
             </StackPanel>
+            <Button Grid.Column="1"
+                    Classes="secondary"
+                    Content="{Binding RefreshConfirmationsText}"
+                    Command="{Binding RefreshConfirmationsCommand}"
+                    VerticalAlignment="Top" />
+          </Grid>
+
+          <Grid Grid.Row="1" ColumnDefinitions="300,*" ColumnSpacing="18">
+            <Border Grid.Column="0" Classes="soft-panel" Padding="14">
+              <ScrollViewer>
+                <StackPanel Spacing="6">
+                  <ItemsControl ItemsSource="{Binding Confirmations}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate DataType="{x:Type vm:ConfirmationItemViewModel}">
+                        <Button Classes="nav"
+                                Classes.selected="{Binding IsSelected}"
+                                Command="{Binding SelectCommand}"
+                                HorizontalContentAlignment="Stretch">
+                          <Grid RowDefinitions="Auto,Auto" RowSpacing="4">
+                            <TextBlock Grid.Row="0"
+                                       Text="{Binding Summary}"
+                                       FontWeight="SemiBold"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="1"
+                                       Text="{Binding State}"
+                                       Classes="caption"
+                                       TextWrapping="Wrap" />
+                          </Grid>
+                        </Button>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </ScrollViewer>
             </Border>
 
-            <Border Grid.Column="1" Classes="soft-panel" Padding="16">
-            <Grid RowDefinitions="Auto,*,Auto" RowSpacing="10">
-              <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                <TextBlock Grid.Column="0" Text="{Binding ConfirmationsText}" Classes="subtitle" VerticalAlignment="Center" />
-                <TextBlock Grid.Column="1" Text="{Binding StatusText}" Classes="caption" VerticalAlignment="Center" TextWrapping="Wrap" />
-              </Grid>
-              <Grid Grid.Row="1" ColumnDefinitions="240,*" ColumnSpacing="12">
-                <ScrollViewer Grid.Column="0">
-                  <StackPanel Spacing="4">
-                    <ItemsControl ItemsSource="{Binding Confirmations}">
-                      <ItemsControl.ItemTemplate>
-                        <DataTemplate DataType="{x:Type vm:ConfirmationItemViewModel}">
-                          <Button Classes="nav" Classes.selected="{Binding IsSelected}" Command="{Binding SelectCommand}" HorizontalContentAlignment="Left">
-                            <StackPanel Spacing="3">
-                              <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" />
-                              <TextBlock Text="{Binding State}" Classes="caption" />
-                            </StackPanel>
-                          </Button>
-                        </DataTemplate>
-                      </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                    <TextBlock Text="{Binding $parent[UserControl].DataContext.ConfirmationsEmptyText}" Classes="subtle" IsVisible="{Binding !$parent[UserControl].DataContext.HasSelectedConfirmation}" />
+            <Border Grid.Column="1" Classes="document-surface" Padding="22">
+              <Grid RowDefinitions="Auto,*,Auto" RowSpacing="14">
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                  <TextBlock Grid.Column="0" Text="{Binding ConfirmationDiffText}" Classes="subtitle" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="1" Text="{Binding SelectedConfirmation.ConfirmationId}" Classes="mono" VerticalAlignment="Center" TextWrapping="Wrap" />
+                </Grid>
+                <TextBox Grid.Row="1"
+                         Text="{Binding SelectedConfirmation.Diff}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         IsReadOnly="True"
+                         MinHeight="320"
+                         Classes="detail-editor" />
+                <Grid Grid.Row="2" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                  <TextBox Grid.Column="0"
+                           Text="{Binding ConfirmationReason, Mode=TwoWay}"
+                           PlaceholderText="{Binding ConfirmationReasonPlaceholder}"
+                           VerticalAlignment="Center" />
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button Classes="secondary" Content="{Binding RejectConfirmationText}" Command="{Binding RejectConfirmationCommand}" />
+                    <Button Classes="primary" Content="{Binding ApproveConfirmationText}" Command="{Binding ApproveConfirmationCommand}" />
                   </StackPanel>
-                </ScrollViewer>
-                <StackPanel Grid.Column="1" Spacing="8">
-                  <TextBlock Text="{Binding ConfirmationDiffText}" Classes="caption" />
-                  <TextBox Text="{Binding SelectedConfirmation.Diff}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="86" IsReadOnly="True" />
-                  <TextBox Text="{Binding ConfirmationReason, Mode=TwoWay}" PlaceholderText="{Binding ConfirmationReasonPlaceholder}" />
-                </StackPanel>
+                </Grid>
               </Grid>
-              <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                <Button Classes="secondary" Content="{Binding RejectConfirmationText}" Command="{Binding RejectConfirmationCommand}" />
-                <Button Classes="primary" Content="{Binding ApproveConfirmationText}" Command="{Binding ApproveConfirmationCommand}" />
-              </StackPanel>
-            </Grid>
             </Border>
           </Grid>
-        </DockPanel>
+        </Grid>
       </Border>
     </Grid>
 

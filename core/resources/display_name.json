@@ -565,6 +565,7 @@
   "ui.workspace.edge.data": "连线数据 JSON",
   "ui.workspace.confirmations": "确认项",
   "ui.workspace.confirmations.empty": "暂无待确认项。",
+  "ui.workspace.confirmations.count": "{count} 项待处理",
   "ui.workspace.confirmations.reload": "刷新确认项",
   "ui.workspace.confirmation.open": "审阅确认项",
   "ui.workspace.confirmation.diff": "变更内容",
