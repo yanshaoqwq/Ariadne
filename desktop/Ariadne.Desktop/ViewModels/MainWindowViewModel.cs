@@ -17,8 +17,6 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _notificationText = string.Empty;
     private string _budgetStatusText;
     private double _budgetUsagePercent;
-    private bool _autoModeEnabled;
-    private bool _suppressAutoModeSave;
     private bool _sidebarExpanded = true;
     private readonly Dictionary<string, object> _pageCache = new();
 
@@ -79,11 +77,6 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public string BudgetLabel => _displayNames.Text("ui.layout.budget");
 
-    public string AutoModeLabel => _displayNames.Text("ui.settings.automation.auto_mode");
-    public string AutoModeStateText => AutoModeEnabled
-        ? _displayNames.Text("ui.common.enabled")
-        : _displayNames.Text("ui.common.disabled");
-
     public string ProjectMenuText => _displayNames.Text("ui.layout.switch_recent_projects");
 
     public string CreateProjectText => _displayNames.Text("ui.layout.create_project");
@@ -141,24 +134,6 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         get => _budgetUsagePercent;
         set => SetProperty(ref _budgetUsagePercent, value);
-    }
-
-    public bool AutoModeEnabled
-    {
-        get => _autoModeEnabled;
-        set
-        {
-            if (!SetProperty(ref _autoModeEnabled, value))
-            {
-                return;
-            }
-            OnPropertyChanged(nameof(AutoModeStateText));
-            if (_suppressAutoModeSave)
-            {
-                return;
-            }
-            _ = SetAutoModeAsync(value);
-        }
     }
 
     public bool SidebarExpanded
@@ -265,9 +240,6 @@ public sealed class MainWindowViewModel : ViewModelBase
         _pageCache.Clear();
         BudgetStatusText = _displayNames.Text("ui.common.none");
         BudgetUsagePercent = 0;
-        _suppressAutoModeSave = true;
-        AutoModeEnabled = false;
-        _suppressAutoModeSave = false;
         CurrentPage = Welcome;
         _ = Welcome.LoadAsync();
     }
@@ -313,8 +285,6 @@ public sealed class MainWindowViewModel : ViewModelBase
         OnPropertyChanged(nameof(MaximizeWindowText));
         OnPropertyChanged(nameof(CloseWindowText));
         OnPropertyChanged(nameof(BudgetLabel));
-        OnPropertyChanged(nameof(AutoModeLabel));
-        OnPropertyChanged(nameof(AutoModeStateText));
         OnPropertyChanged(nameof(ProjectMenuText));
         OnPropertyChanged(nameof(CreateProjectText));
         OnPropertyChanged(nameof(OpenProjectText));
@@ -454,31 +424,12 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
     }
 
-    private async Task SetAutoModeAsync(bool enabled)
-    {
-        try
-        {
-            await _backend.SetAutoModeAsync(enabled).ConfigureAwait(true);
-            await RefreshBudgetStatusAsync().ConfigureAwait(true);
-        }
-        catch (Exception ex)
-        {
-            NotificationText = ex.Message;
-            _suppressAutoModeSave = true;
-            AutoModeEnabled = !enabled;
-            _suppressAutoModeSave = false;
-        }
-    }
-
     private void ApplyBudgetStatus(BudgetStatus status)
     {
         if (status.BudgetUsd <= 0)
         {
             BudgetUsagePercent = 0;
             BudgetStatusText = _displayNames.Text("ui.layout.budget_unlimited");
-            _suppressAutoModeSave = true;
-            AutoModeEnabled = status.AutoModeEnabled;
-            _suppressAutoModeSave = false;
             return;
         }
         var total = status.BudgetUsd <= 0 ? 0 : Math.Clamp(status.SpentUsd / status.BudgetUsd, 0, 1);
@@ -488,9 +439,6 @@ public sealed class MainWindowViewModel : ViewModelBase
             ["spent"] = status.SpentUsd.ToString("0.##"),
             ["budget"] = status.BudgetUsd.ToString("0.##"),
         });
-        _suppressAutoModeSave = true;
-        AutoModeEnabled = status.AutoModeEnabled;
-        _suppressAutoModeSave = false;
     }
 
     private IEnumerable<NavigationItemViewModel> AllNavigationItems()

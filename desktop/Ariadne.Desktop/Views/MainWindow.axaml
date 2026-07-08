@@ -31,7 +31,7 @@
     <Panel>
     <Grid RowDefinitions="40,*">
 
-      <!-- ================= 顶栏（自定义标题栏 + 项目 + 预算 + Auto Mode） ================= -->
+      <!-- ================= 顶栏（自定义标题栏 + 项目 + 预算） ================= -->
       <Grid
           Grid.Row="0"
           ColumnDefinitions="Auto,*,Auto,Auto"
@@ -99,30 +99,22 @@
             VerticalAlignment="Center"
             Margin="0,0,18,0" />
 
-        <!-- 预算条 + Auto Mode -->
+        <!-- 预算条 -->
         <StackPanel
             Grid.Column="2"
             Orientation="Horizontal"
-            Spacing="16"
+            Spacing="8"
             VerticalAlignment="Center"
             Margin="0,0,12,0">
-          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-            <TextBlock Text="{Binding BudgetLabel}" Classes="caption" VerticalAlignment="Center" />
-            <ProgressBar
-                Width="92"
-                Height="8"
-                Minimum="0"
-                Maximum="100"
-                Value="{Binding BudgetUsagePercent}"
-                VerticalAlignment="Center" />
-            <TextBlock Text="{Binding BudgetStatusText}" Classes="caption" VerticalAlignment="Center" />
-          </StackPanel>
-          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-            <TextBlock Text="{Binding AutoModeLabel}" Classes="caption" VerticalAlignment="Center" />
-            <Border Classes="chip" Padding="8,2" VerticalAlignment="Center">
-              <TextBlock Text="{Binding AutoModeStateText}" Classes="caption" />
-            </Border>
-          </StackPanel>
+          <TextBlock Text="{Binding BudgetLabel}" Classes="caption" VerticalAlignment="Center" />
+          <ProgressBar
+              Width="92"
+              Height="8"
+              Minimum="0"
+              Maximum="100"
+              Value="{Binding BudgetUsagePercent}"
+              VerticalAlignment="Center" />
+          <TextBlock Text="{Binding BudgetStatusText}" Classes="caption" VerticalAlignment="Center" />
         </StackPanel>
 
         <!-- 窗口控制（矢量 Path，不依赖字体） -->
