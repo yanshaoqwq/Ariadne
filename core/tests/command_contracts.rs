@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use ariadne::commands::{
     create_checkpoint_impl, fetch_provider_models_impl, get_app_settings_impl,
-    get_automation_settings_impl, get_budget_status_impl, get_document_content_impl,
-    get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
+    get_automation_settings_impl, get_backend_diagnostics, get_budget_status_impl,
+    get_document_content_impl, get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
     get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
     get_rag_settings_impl, get_template_repository_settings_impl, get_workflow_settings_impl,
     load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat_impl,
@@ -16,8 +16,8 @@ use ariadne::commands::{
     save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
     save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
     save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
-    update_budget_config_impl, AppSettings, AutomationSettings, CanvasEdge, CanvasNode,
-    ConfirmationAutoModePolicy, ConfirmationDecision, ConfirmationNormalPolicy,
+    update_budget_config_impl, AppSettings, AriadneAppState, AutomationSettings, CanvasEdge,
+    CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision, ConfirmationNormalPolicy,
     ConfirmationPolicySetting, GitSettings, NodePresetSettings, PermissionsSettings,
     ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate, RagSettings,
     ResolveConfirmationRequest, TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
@@ -27,6 +27,7 @@ use ariadne::contracts::{
     NodeId, PermissionPolicy, PortValue, ProviderCapability, ProviderType, RunId, RunStatus,
     WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
+use ariadne::diagnostics::DiagnosticStatus;
 use ariadne::frontend::{ConfirmationLogEntry, ConfirmationLogState, FileConfirmationLogStore};
 use ariadne::workflow::{
     RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRuntime,
@@ -686,6 +687,95 @@ fn provider_model_fetch_returns_configured_and_embedding_models() {
         .iter()
         .any(|model| model.model_id == "text-embedding-3-small"
             && model.capability == ProviderCapability::Embedding));
+}
+
+#[test]
+fn provider_settings_reject_non_http_base_url() {
+    let temp = tempfile::tempdir().unwrap();
+    let error = save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "local_file".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Local File".to_owned(),
+            enabled: true,
+            base_url: Some("file:///tmp/provider".to_owned()),
+            models: vec![ModelConfig {
+                model_id: "local".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("provider base_url must use http or https"));
+}
+
+#[test]
+fn node_preset_settings_reject_unknown_configured_model() {
+    let temp = tempfile::tempdir().unwrap();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "openai".to_owned(),
+            provider_type: ProviderType::OpenAi,
+            display_name: "OpenAI".to_owned(),
+            enabled: true,
+            base_url: None,
+            models: vec![ModelConfig {
+                model_id: "gpt-configured".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+        },
+    )
+    .unwrap();
+    let mut settings = NodePresetSettings::default();
+    settings.default_model_id = "missing-model".to_owned();
+    for preset in &mut settings.presets {
+        preset.model_id = "gpt-configured".to_owned();
+    }
+
+    let error = save_node_preset_settings_impl(temp.path(), settings).unwrap_err();
+
+    assert!(error.contains("default_model_id references a model that is not configured"));
+}
+
+#[test]
+fn backend_diagnostics_reports_provider_configuration_gaps() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+
+    assert_ne!(report.status, DiagnosticStatus::Healthy);
+    assert!(report
+        .items
+        .iter()
+        .any(|item| item.component == "providers.llm.default"
+            && item.status == DiagnosticStatus::Degraded));
+    assert!(report
+        .items
+        .iter()
+        .any(|item| item.component == "providers.embedding.default"
+            && item.status == DiagnosticStatus::Degraded));
 }
 
 #[test]

@@ -53,6 +53,12 @@ impl BackendDiagnosticsReport {
     pub fn requires_attention(&self) -> bool {
         self.status != DiagnosticStatus::Healthy
     }
+
+    /// 追加命令层可直接检查的配置诊断项，并重新聚合总状态。
+    pub fn extend_items(&mut self, items: impl IntoIterator<Item = DiagnosticItem>) {
+        self.items.extend(items);
+        self.status = aggregate_status(&self.items);
+    }
 }
 
 fn runtime_store_item(health: RuntimeStoreHealth) -> DiagnosticItem {

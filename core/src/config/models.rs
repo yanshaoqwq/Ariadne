@@ -188,6 +188,9 @@ impl ProviderConfig {
                 "open_ai_compatible provider requires base_url",
             ));
         }
+        if let Some(base_url) = self.base_url.as_deref() {
+            validate_provider_base_url(base_url)?;
+        }
 
         let mut model_ids = BTreeSet::new();
         for model in &self.models {
@@ -201,6 +204,21 @@ impl ProviderConfig {
         }
 
         Ok(())
+    }
+}
+
+fn validate_provider_base_url(base_url: &str) -> CoreResult<()> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::validation("provider base_url cannot be empty"));
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Ok(())
+    } else {
+        let scheme = trimmed.split("://").next().unwrap_or(trimmed);
+        Err(CoreError::validation(format!(
+            "provider base_url must use http or https, got '{scheme}'"
+        )))
     }
 }
 

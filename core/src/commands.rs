@@ -19,7 +19,7 @@ use crate::contracts::{
     WorkflowEdgeKind, WorkflowId,
 };
 use crate::costs::{CostLedger, CostQuery, SqliteCostLedger};
-use crate::diagnostics::BackendDiagnosticsReport;
+use crate::diagnostics::{BackendDiagnosticsReport, DiagnosticItem, DiagnosticStatus};
 use crate::documents::{
     ChapterDocumentIndex, DocumentReadRequest, DocumentRepository, DocumentWriteRequest,
     FileDocumentService,
@@ -801,9 +801,12 @@ pub fn start_workflow(
     std::thread::Builder::new()
         .name(format!("ariadne-workflow-{}", run_id.as_str()))
         .spawn(move || {
-            if let Err(error) =
-                run_workflow_impl_with_run_id(&worker_root, secrets.as_ref(), request, worker_run_id)
-            {
+            if let Err(error) = run_workflow_impl_with_run_id(
+                &worker_root,
+                secrets.as_ref(),
+                request,
+                worker_run_id,
+            ) {
                 eprintln!("[ariadne] workflow worker failed: {error}");
             }
         })
@@ -854,17 +857,10 @@ pub fn resume_workflow(
     run_id: String,
 ) -> CommandResult<WorkflowActionResult> {
     let project_root = project_root_from_state(&state, None)?;
-    let result = update_workflow_run_control(
-        &project_root,
-        workflow_id,
-        run_id,
-        |runtime| runtime.resume(),
-    )?;
-    spawn_continue_if_queued(
-        &project_root,
-        Arc::clone(&state.secret_store),
-        &result,
-    )?;
+    let result = update_workflow_run_control(&project_root, workflow_id, run_id, |runtime| {
+        runtime.resume()
+    })?;
+    spawn_continue_if_queued(&project_root, Arc::clone(&state.secret_store), &result)?;
     Ok(result)
 }
 
@@ -882,11 +878,7 @@ pub fn override_confirmation_output(
             runtime.override_confirmation_output(&request.confirmation_id, request.new_outputs)
         },
     )?;
-    spawn_continue_if_queued(
-        &project_root,
-        Arc::clone(&state.secret_store),
-        &result,
-    )?;
+    spawn_continue_if_queued(&project_root, Arc::clone(&state.secret_store), &result)?;
     Ok(result)
 }
 
@@ -910,11 +902,7 @@ pub fn resume_from_node(
             )
         },
     )?;
-    spawn_continue_if_queued(
-        &project_root,
-        Arc::clone(&state.secret_store),
-        &result,
-    )?;
+    spawn_continue_if_queued(&project_root, Arc::clone(&state.secret_store), &result)?;
     Ok(result)
 }
 
@@ -1380,12 +1368,97 @@ pub fn install_template(
 
 pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<BackendDiagnosticsReport> {
     let project_root = project_root_from_state(&state, None)?;
-    Ok(BackendDiagnosticsReport::collect(
+    let config = ConfigStore::new(&project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let mut report = BackendDiagnosticsReport::collect(
         SqliteWorkflowRuntimeStore::health(&project_root),
         None,
         Vec::new(),
         Vec::new(),
-    ))
+    );
+    report.extend_items(provider_config_diagnostic_items(&config.providers));
+    Ok(report)
+}
+
+fn provider_config_diagnostic_items(
+    providers: &crate::config::ProvidersConfig,
+) -> Vec<DiagnosticItem> {
+    let mut items = Vec::new();
+    match providers.validate() {
+        Ok(()) => items.push(DiagnosticItem {
+            component: "providers.config".to_owned(),
+            status: DiagnosticStatus::Healthy,
+            reason: None,
+        }),
+        Err(error) => items.push(DiagnosticItem {
+            component: "providers.config".to_owned(),
+            status: DiagnosticStatus::Unavailable,
+            reason: Some(error.to_string()),
+        }),
+    }
+
+    match select_llm_provider(providers).and_then(|provider| select_llm_model_id(&provider)) {
+        Ok(model_id) => items.push(DiagnosticItem {
+            component: "providers.llm.default".to_owned(),
+            status: DiagnosticStatus::Healthy,
+            reason: Some(format!("default LLM model: {model_id}")),
+        }),
+        Err(reason) => items.push(DiagnosticItem {
+            component: "providers.llm.default".to_owned(),
+            status: DiagnosticStatus::Degraded,
+            reason: Some(reason),
+        }),
+    }
+
+    let embedding_item = match providers.default_embedding_provider_id.as_deref() {
+        Some(provider_id) => match providers
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == provider_id)
+        {
+            Some(provider) if !provider.enabled => DiagnosticItem {
+                component: "providers.embedding.default".to_owned(),
+                status: DiagnosticStatus::Unavailable,
+                reason: Some(format!(
+                    "default embedding provider is disabled: {provider_id}"
+                )),
+            },
+            Some(provider)
+                if provider
+                    .models
+                    .iter()
+                    .any(|model| model.capability == ProviderCapability::Embedding) =>
+            {
+                DiagnosticItem {
+                    component: "providers.embedding.default".to_owned(),
+                    status: DiagnosticStatus::Healthy,
+                    reason: None,
+                }
+            }
+            Some(_) => DiagnosticItem {
+                component: "providers.embedding.default".to_owned(),
+                status: DiagnosticStatus::Degraded,
+                reason: Some(format!(
+                    "default embedding provider has no embedding model: {provider_id}"
+                )),
+            },
+            None => DiagnosticItem {
+                component: "providers.embedding.default".to_owned(),
+                status: DiagnosticStatus::Unavailable,
+                reason: Some(format!(
+                    "default embedding provider is missing: {provider_id}"
+                )),
+            },
+        },
+        None => DiagnosticItem {
+            component: "providers.embedding.default".to_owned(),
+            status: DiagnosticStatus::Degraded,
+            reason: Some("retrieval embedding model is not configured".to_owned()),
+        },
+    };
+    items.push(embedding_item);
+    items
 }
 
 pub fn default_project_root() -> PathBuf {
@@ -1530,7 +1603,13 @@ fn run_workflow_impl_with_run_id(
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
     let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).map_err(error_to_string)?;
     runtime.state.start_node_id = start_node_id.as_deref().map(NodeId::from);
-    let status = execute_workflow_runtime(project_root, &document_root, secrets, &workflow, &mut runtime)?;
+    let status = execute_workflow_runtime(
+        project_root,
+        &document_root,
+        secrets,
+        &workflow,
+        &mut runtime,
+    )?;
     Ok(WorkflowRunStarted {
         run_id: run_id.as_str().to_owned(),
         status: run_status_label(status).to_owned(),
@@ -1559,10 +1638,19 @@ fn continue_workflow_run_impl(
     }
     let (workflow, start_node_id) =
         workflow_for_run_state(project_root, &workflow_id_typed, &state)?;
-    let document_root =
-        workflow_document_root(project_root, &workflow, start_node_id.as_ref().map(NodeId::as_str))?;
+    let document_root = workflow_document_root(
+        project_root,
+        &workflow,
+        start_node_id.as_ref().map(NodeId::as_str),
+    )?;
     let mut runtime = WorkflowRuntime::from_state(state);
-    let status = execute_workflow_runtime(project_root, &document_root, secrets, &workflow, &mut runtime)?;
+    let status = execute_workflow_runtime(
+        project_root,
+        &document_root,
+        secrets,
+        &workflow,
+        &mut runtime,
+    )?;
     Ok(WorkflowRunStarted {
         run_id,
         status: run_status_label(status).to_owned(),
@@ -2819,6 +2907,7 @@ fn write_node_preset_settings(
     settings: &NodePresetSettings,
 ) -> CommandResult<()> {
     validate_project_root(project_root)?;
+    let configured_model_ids = configured_model_ids_for_presets(project_root)?;
     for preset in &settings.presets {
         if preset.node_type.trim().is_empty() {
             return Err("node_type cannot be empty".to_owned());
@@ -2836,10 +2925,20 @@ fn write_node_preset_settings(
             ));
         }
         validate_money("budget_usd", preset.budget_usd)?;
+        ensure_preset_model_is_configured(
+            &configured_model_ids,
+            &preset.model_id,
+            &format!("preset {}", preset.node_type),
+        )?;
     }
     if settings.default_model_id.trim().is_empty() {
         return Err("default_model_id cannot be empty".to_owned());
     }
+    ensure_preset_model_is_configured(
+        &configured_model_ids,
+        &settings.default_model_id,
+        "default_model_id",
+    )?;
     if settings.default_timeout_ms == 0 {
         return Err("default_timeout_ms cannot be zero".to_owned());
     }
@@ -2853,6 +2952,32 @@ fn write_node_preset_settings(
         serde_json::to_string_pretty(settings).map_err(error_to_string)?,
     )
     .map_err(error_to_string)
+}
+
+fn configured_model_ids_for_presets(project_root: &Path) -> CommandResult<HashSet<String>> {
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    Ok(config
+        .providers
+        .providers
+        .into_iter()
+        .flat_map(|provider| provider.models.into_iter())
+        .map(|model| model.model_id)
+        .collect())
+}
+
+fn ensure_preset_model_is_configured(
+    configured_model_ids: &HashSet<String>,
+    model_id: &str,
+    field: &str,
+) -> CommandResult<()> {
+    if configured_model_ids.is_empty() || configured_model_ids.contains(model_id) {
+        return Ok(());
+    }
+    Err(format!(
+        "{field} references a model that is not configured in model settings: {model_id}"
+    ))
 }
 
 fn default_node_preset_model_id() -> String {
@@ -2929,8 +3054,7 @@ fn normalize_confirmation_policy_setting(
     mut setting: ConfirmationPolicySetting,
 ) -> ConfirmationPolicySetting {
     if !setting.legacy_policy.trim().is_empty() {
-        let (normal_policy, auto_mode_policy) =
-            policies_from_legacy_policy(&setting.legacy_policy);
+        let (normal_policy, auto_mode_policy) = policies_from_legacy_policy(&setting.legacy_policy);
         setting.normal_policy = normal_policy;
         setting.auto_mode_policy = auto_mode_policy;
     }

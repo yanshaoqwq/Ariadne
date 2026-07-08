@@ -4,7 +4,12 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:WorkspacePageViewModel">
-  <Grid Background="{DynamicResource Ariadne.BackgroundMain}" ColumnDefinitions="*,4,340">
+  <Grid Background="{DynamicResource Ariadne.BackgroundMain}">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="*" />
+      <ColumnDefinition Width="{Binding RightPanelSplitterWidth}" />
+      <ColumnDefinition Width="{Binding RightPanelColumnWidth}" MinWidth="0" />
+    </Grid.ColumnDefinitions>
 
     <Grid x:Name="WorkspaceGrid" Grid.Column="0" RowDefinitions="*,Auto,220">
       <Canvas x:Name="CanvasOverlay" Grid.Row="0"
@@ -30,7 +35,10 @@
 
         <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
           <ItemsControl.RenderTransform>
-            <TranslateTransform />
+            <TransformGroup>
+              <ScaleTransform ScaleX="{Binding CanvasZoom}" ScaleY="{Binding CanvasZoom}" />
+              <TranslateTransform />
+            </TransformGroup>
           </ItemsControl.RenderTransform>
           <ItemsControl.ItemsPanel>
             <ItemsPanelTemplate>
@@ -64,12 +72,25 @@
           <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}" Command="{Binding SaveCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
           </Button>
+          <Border Width="1" Height="20" Margin="4,6" Background="{DynamicResource Ariadne.BorderMuted}" />
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomOutText}" Command="{Binding ZoomOutCommand}">
+            <TextBlock Text="{Binding ZoomOutGlyphText}" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Button>
+          <Button Classes="subtle" MinWidth="58" Padding="8,0" ToolTip.Tip="{Binding ResetZoomText}" Command="{Binding ResetZoomCommand}">
+            <TextBlock Text="{Binding CanvasZoomText}" Classes="caption" VerticalAlignment="Center" />
+          </Button>
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomInText}" Command="{Binding ZoomInCommand}">
+            <TextBlock Text="{Binding ZoomInGlyphText}" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Button>
         </StackPanel>
         <TextBlock Canvas.Left="18" Canvas.Bottom="18" Text="{Binding StatusText}" Classes="caption" />
 
         <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}">
           <ItemsControl.RenderTransform>
-            <TranslateTransform />
+            <TransformGroup>
+              <ScaleTransform ScaleX="{Binding CanvasZoom}" ScaleY="{Binding CanvasZoom}" />
+              <TranslateTransform />
+            </TransformGroup>
           </ItemsControl.RenderTransform>
           <ItemsControl.ItemsPanel>
             <ItemsPanelTemplate>
@@ -166,6 +187,40 @@
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
+
+        <Border Canvas.Right="16"
+                Canvas.Bottom="34"
+                Width="156"
+                Height="100"
+                Background="{DynamicResource Ariadne.BackgroundSurface}"
+                BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                BorderThickness="1"
+                CornerRadius="8"
+                Padding="8"
+                Opacity="0.9"
+                ToolTip.Tip="{Binding MinimapText}">
+          <Canvas ClipToBounds="True">
+            <ItemsControl x:Name="MiniMapItemsControl" ItemsSource="{Binding Nodes}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                  <Canvas />
+                </ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate DataType="{x:Type vm:WorkflowNodeViewModel}">
+                  <Border Canvas.Left="{Binding MiniMapX}"
+                          Canvas.Top="{Binding MiniMapY}"
+                          Width="10"
+                          Height="6"
+                          CornerRadius="2"
+                          Background="{Binding NodeBorderBrush}"
+                          BorderBrush="{DynamicResource Ariadne.BackgroundSurface}"
+                          BorderThickness="1" />
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </Canvas>
+        </Border>
 
         <Border x:Name="LibraryTogglePill"
                 Canvas.Bottom="0"

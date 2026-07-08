@@ -65,6 +65,7 @@ public partial class WorkspacePageView : UserControl
         PositionRightPill();
         SyncNodeContainerPositions();
         SyncEdgePositions();
+        SyncMiniMapPositions();
     }
 
     private void AttachViewActions()
@@ -93,6 +94,7 @@ public partial class WorkspacePageView : UserControl
             _attachedViewModel = viewModel;
             ScheduleNodeContainerSync();
             ScheduleEdgeSync();
+            ScheduleMiniMapSync();
         }
     }
 
@@ -131,6 +133,7 @@ public partial class WorkspacePageView : UserControl
         }
         ScheduleNodeContainerSync();
         ScheduleEdgeSync();
+        ScheduleMiniMapSync();
     }
 
     private void OnEdgesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -144,6 +147,7 @@ public partial class WorkspacePageView : UserControl
         {
             ScheduleNodeContainerSync();
             ScheduleEdgeSync();
+            ScheduleMiniMapSync();
         }
     }
 
@@ -155,6 +159,11 @@ public partial class WorkspacePageView : UserControl
     private void ScheduleEdgeSync()
     {
         Dispatcher.UIThread.Post(SyncEdgePositions, DispatcherPriority.Background);
+    }
+
+    private void ScheduleMiniMapSync()
+    {
+        Dispatcher.UIThread.Post(SyncMiniMapPositions, DispatcherPriority.Background);
     }
 
     // ===================== 收起/展开下栏（库底部 Pill 点击） =====================
@@ -334,7 +343,7 @@ public partial class WorkspacePageView : UserControl
         }
         _draggedNode = node;
         _nodeDragging = true;
-        _nodeDragStart = e.GetPosition(CanvasOverlay);
+        _nodeDragStart = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
         _nodeDragOriginX = node.X;
         _nodeDragOriginY = node.Y;
         e.Pointer.Capture((IInputElement?)sender);
@@ -388,13 +397,15 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        var position = e.GetPosition(CanvasOverlay);
+        var position = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
         var newX = _nodeDragOriginX + position.X - _nodeDragStart.X;
         var newY = _nodeDragOriginY + position.Y - _nodeDragStart.Y;
-        node.X = Clamp(newX, 0, Math.Max(0, CanvasOverlay.Bounds.Width - 202));
-        node.Y = Clamp(newY, 0, Math.Max(0, CanvasOverlay.Bounds.Height - 150));
+        var zoom = CurrentCanvasZoom();
+        node.X = Clamp(newX, 0, Math.Max(0, (CanvasOverlay.Bounds.Width / zoom) - 202));
+        node.Y = Clamp(newY, 0, Math.Max(0, (CanvasOverlay.Bounds.Height / zoom) - 150));
         SyncNodeContainerPositions();
         SyncEdgePositions();
+        SyncMiniMapPositions();
         e.Handled = true;
     }
 
@@ -452,7 +463,7 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        var target = FindNodeAt(e.GetPosition(CanvasOverlay));
+        var target = FindNodeAt(ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay)));
         if (target is not null && target != _edgeSourceNode)
         {
             viewModel.CreateDataEdge(_edgeSourceNode.Id, target.Id);
@@ -512,19 +523,11 @@ public partial class WorkspacePageView : UserControl
 
         var minX = viewModel.Nodes.Min(node => node.X);
         var minY = viewModel.Nodes.Min(node => node.Y);
-        if (NodesItemsControl.RenderTransform is not TranslateTransform transform)
-        {
-            transform = new TranslateTransform();
-            NodesItemsControl.RenderTransform = transform;
-        }
-
-        transform.X = Math.Max(0, 48 - minX);
-        transform.Y = Math.Max(0, 48 - minY);
-        if (EdgesItemsControl?.RenderTransform is not TranslateTransform edgeTransform)
-        {
-            edgeTransform = new TranslateTransform();
-            EdgesItemsControl!.RenderTransform = edgeTransform;
-        }
+        var zoom = CurrentCanvasZoom();
+        var transform = EnsureTranslateTransform(NodesItemsControl);
+        transform.X = Math.Max(0, 48 - (minX * zoom));
+        transform.Y = Math.Max(0, 48 - (minY * zoom));
+        var edgeTransform = EnsureTranslateTransform(EdgesItemsControl!);
         edgeTransform.X = transform.X;
         edgeTransform.Y = transform.Y;
         SyncNodeContainerPositions();
@@ -549,6 +552,16 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
+    private void SyncMiniMapPositions()
+    {
+        if (MiniMapItemsControl is null)
+        {
+            return;
+        }
+
+        SyncMiniMapContainerPositions(MiniMapItemsControl);
+    }
+
     private static void SyncNodeContainerPositions(Control control)
     {
         if (control.DataContext is WorkflowNodeViewModel node)
@@ -561,6 +574,69 @@ public partial class WorkspacePageView : UserControl
         {
             SyncNodeContainerPositions(child);
         }
+    }
+
+    private static void SyncMiniMapContainerPositions(Control control)
+    {
+        if (control.DataContext is WorkflowNodeViewModel node)
+        {
+            Canvas.SetLeft(control, node.MiniMapX);
+            Canvas.SetTop(control, node.MiniMapY);
+        }
+
+        foreach (var child in control.GetVisualChildren().OfType<Control>())
+        {
+            SyncMiniMapContainerPositions(child);
+        }
+    }
+
+    private Point ToLogicalCanvasPoint(Point canvasPosition)
+    {
+        var zoom = CurrentCanvasZoom();
+        var offset = CurrentCanvasOffset();
+        return new Point(
+            (canvasPosition.X - offset.X) / zoom,
+            (canvasPosition.Y - offset.Y) / zoom);
+    }
+
+    private double CurrentCanvasZoom()
+    {
+        return DataContext is WorkspacePageViewModel viewModel
+            ? Math.Max(0.1, viewModel.CanvasZoom)
+            : 1.0;
+    }
+
+    private Point CurrentCanvasOffset()
+    {
+        if (NodesItemsControl is null)
+        {
+            return default;
+        }
+        var transform = EnsureTranslateTransform(NodesItemsControl);
+        return new Point(transform.X, transform.Y);
+    }
+
+    private static TranslateTransform EnsureTranslateTransform(Control control)
+    {
+        if (control.RenderTransform is TranslateTransform translate)
+        {
+            return translate;
+        }
+        if (control.RenderTransform is TransformGroup group)
+        {
+            var existing = group.Children.OfType<TranslateTransform>().FirstOrDefault();
+            if (existing is not null)
+            {
+                return existing;
+            }
+            var added = new TranslateTransform();
+            group.Children.Add(added);
+            return added;
+        }
+        var replacement = new TransformGroup();
+        replacement.Children.Add(new TranslateTransform());
+        control.RenderTransform = replacement;
+        return replacement.Children.OfType<TranslateTransform>().First();
     }
 
     private static double Clamp(double v, double lo, double hi) =>

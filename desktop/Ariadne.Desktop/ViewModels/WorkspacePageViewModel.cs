@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Avalonia.Controls;
 using Avalonia.Media;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
@@ -18,6 +19,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _isLibraryOpen = true;
     private bool _isExecutionPanel;
     private bool _isProjectAiTab = true;
+    private double _canvasZoom = 1.0;
     private string _statusText = string.Empty;
     private bool _hasUnsavedChanges;
     private string _savedSnapshot = string.Empty;
@@ -43,6 +45,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         _backend = backend;
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ToggleLibraryCommand = new RelayCommand(() => IsLibraryOpen = !IsLibraryOpen);
+        ZoomInCommand = new RelayCommand(() => AdjustCanvasZoom(0.1));
+        ZoomOutCommand = new RelayCommand(() => AdjustCanvasZoom(-0.1));
+        ResetZoomCommand = new RelayCommand(() => CanvasZoom = 1.0);
         ShowNodeLibraryCommand = new RelayCommand(() => IsExecutionPanel = false);
         ShowExecutionCommand = new RelayCommand(() => IsExecutionPanel = true);
         ShowProjectAiCommand = new RelayCommand(() => IsProjectAiTab = true);
@@ -180,11 +185,49 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ForwardTemplateText => _displayNames.Text("ui.workspace.edge.forward_template");
     public string ReverseTemplateText => _displayNames.Text("ui.workspace.edge.reverse_template");
     public string MaxCommunicationCountText => _displayNames.Text("ui.workspace.edge.max_communication_count");
+    public string ZoomInText => _displayNames.Text("ui.workspace.zoom_in");
+    public string ZoomOutText => _displayNames.Text("ui.workspace.zoom_out");
+    public string ResetZoomText => _displayNames.Text("ui.workspace.zoom_reset");
+    public string ZoomInGlyphText => _displayNames.Text("ui.workspace.zoom_in_glyph");
+    public string ZoomOutGlyphText => _displayNames.Text("ui.workspace.zoom_out_glyph");
+    public string MinimapText => _displayNames.Text("ui.workspace.minimap");
+    public string CanvasZoomText => _displayNames.Format("ui.workspace.zoom_percent", new Dictionary<string, string>
+    {
+        ["percent"] = Math.Round(CanvasZoom * 100).ToString("0"),
+    });
 
-    public bool IsRightPanelOpen { get => _isRightPanelOpen; set => SetProperty(ref _isRightPanelOpen, value); }
+    public bool IsRightPanelOpen
+    {
+        get => _isRightPanelOpen;
+        set
+        {
+            if (SetProperty(ref _isRightPanelOpen, value))
+            {
+                OnPropertyChanged(nameof(RightPanelSplitterWidth));
+                OnPropertyChanged(nameof(RightPanelColumnWidth));
+            }
+        }
+    }
     public RelayCommand ToggleRightPanelCommand { get; }
+    public GridLength RightPanelSplitterWidth => IsRightPanelOpen ? new GridLength(4) : new GridLength(0);
+    public GridLength RightPanelColumnWidth => IsRightPanelOpen ? new GridLength(340) : new GridLength(0);
     public bool IsLibraryOpen { get => _isLibraryOpen; set => SetProperty(ref _isLibraryOpen, value); }
     public RelayCommand ToggleLibraryCommand { get; }
+    public double CanvasZoom
+    {
+        get => _canvasZoom;
+        private set
+        {
+            var clamped = Math.Clamp(Math.Round(value, 2), 0.4, 1.8);
+            if (SetProperty(ref _canvasZoom, clamped))
+            {
+                OnPropertyChanged(nameof(CanvasZoomText));
+            }
+        }
+    }
+    public RelayCommand ZoomInCommand { get; }
+    public RelayCommand ZoomOutCommand { get; }
+    public RelayCommand ResetZoomCommand { get; }
 
     public bool IsExecutionPanel
     {
@@ -678,6 +721,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         RequestFitView?.Invoke();
         StatusText = CtxFitViewText;
+    }
+
+    private void AdjustCanvasZoom(double delta)
+    {
+        CanvasZoom += delta;
+        StatusText = CanvasZoomText;
     }
 
     private async Task LoadWorkflowAsync()
@@ -1385,8 +1434,30 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
             }
         }
     }
-    public double X { get => _x; set => SetProperty(ref _x, value); }
-    public double Y { get => _y; set => SetProperty(ref _y, value); }
+    public double X
+    {
+        get => _x;
+        set
+        {
+            if (SetProperty(ref _x, value))
+            {
+                OnPropertyChanged(nameof(MiniMapX));
+            }
+        }
+    }
+    public double Y
+    {
+        get => _y;
+        set
+        {
+            if (SetProperty(ref _y, value))
+            {
+                OnPropertyChanged(nameof(MiniMapY));
+            }
+        }
+    }
+    public double MiniMapX => Math.Clamp(X * 0.1, 2, 142);
+    public double MiniMapY => Math.Clamp(Y * 0.1, 2, 86);
     public bool IsSelected
     {
         get => _isSelected;
