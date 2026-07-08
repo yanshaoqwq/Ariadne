@@ -2,6 +2,7 @@
     x:Class="Ariadne.Desktop.Views.SettingsPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:SettingsPageViewModel">
   <Grid RowDefinitions="Auto,*" Background="{DynamicResource Ariadne.BackgroundMain}">
@@ -30,7 +31,7 @@
             <DataTemplate DataType="{x:Type vm:SettingsTabViewModel}">
               <Button
                   Classes="tab"
-                  Classes.selected="{Binding IsSelected}"
+                  ctl:SelectedClass.IsSelected="{Binding IsSelected}"
                   MinWidth="82"
                   Padding="14,8"
                   Command="{Binding SelectCommand}">
@@ -55,7 +56,7 @@
               <DataTemplate DataType="{x:Type vm:SettingsSectionIndexItemViewModel}">
                 <Button
                     Classes="nav"
-                    Classes.selected="{Binding IsSelected}"
+                    ctl:SelectedClass.IsSelected="{Binding IsSelected}"
                     HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Left"
                     Margin="0,1"

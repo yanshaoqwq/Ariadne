@@ -2,6 +2,7 @@
     x:Class="Ariadne.Desktop.Views.WorkspacePageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:WorkspacePageViewModel">
   <Grid Background="{DynamicResource Ariadne.BackgroundMain}">
@@ -270,9 +271,9 @@
               BorderThickness="0,1,0,0">
         <DockPanel>
           <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="2" Margin="14,5,14,0">
-            <Button Classes="tab" Classes.selected="{Binding IsNodeLibraryPanel}"
+            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsNodeLibraryPanel}"
                     Content="{Binding NodeLibraryText}" Command="{Binding ShowNodeLibraryCommand}" />
-            <Button Classes="tab" Classes.selected="{Binding IsExecutionPanel}"
+            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsExecutionPanel}"
                     Content="{Binding ExecutionText}" Command="{Binding ShowExecutionCommand}" />
           </StackPanel>
           <StackPanel Margin="12,4,12,12" Spacing="8" IsVisible="{Binding IsNodeLibraryPanel}">
@@ -406,7 +407,7 @@
                     <ItemsControl.ItemTemplate>
                       <DataTemplate DataType="{x:Type vm:ConfirmationItemViewModel}">
                         <Button Classes="nav"
-                                Classes.selected="{Binding IsSelected}"
+                                ctl:SelectedClass.IsSelected="{Binding IsSelected}"
                                 Command="{Binding SelectCommand}"
                                 HorizontalContentAlignment="Stretch"
                                 Padding="12,10">
@@ -483,9 +484,9 @@
           IsVisible="{Binding IsRightPanelOpen}">
         <DockPanel>
           <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="12,8,12,0">
-            <Button Classes="tab" Classes.selected="{Binding IsProjectAiTab}"
+            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsProjectAiTab}"
                     Content="{Binding ProjectAiText}" Command="{Binding ShowProjectAiCommand}" />
-            <Button Classes="tab" Classes.selected="{Binding IsNodeDetailsTab}"
+            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsNodeDetailsTab}"
                     Content="{Binding NodeDetailsText}" Command="{Binding ShowNodeDetailsCommand}" />
           </StackPanel>
           <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" Margin="0,6,0,0" />
@@ -586,7 +587,7 @@
                       <ItemsControl ItemsSource="{Binding Edges}">
                         <ItemsControl.ItemTemplate>
                           <DataTemplate DataType="{x:Type vm:WorkflowEdgeViewModel}">
-                            <Button Classes="nav" Classes.selected="{Binding IsSelected}" Command="{Binding SelectCommand}" HorizontalContentAlignment="Stretch">
+                            <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Command="{Binding SelectCommand}" HorizontalContentAlignment="Stretch">
                               <StackPanel Spacing="2">
                                 <TextBlock Text="{Binding Title}" TextWrapping="Wrap" />
                                 <TextBlock Text="{Binding Kind}" Classes="caption" />

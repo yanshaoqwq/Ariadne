@@ -506,6 +506,13 @@
   <Style Selector="Button.subtle:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
   </Style>
+  <Style Selector="Button.subtle.selected /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
+  <Style Selector="Button.subtle.selected TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
 
   <!-- 危险按钮 -->
   <Style Selector="Button.danger">

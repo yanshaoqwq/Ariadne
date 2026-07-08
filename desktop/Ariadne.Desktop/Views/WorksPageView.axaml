@@ -2,6 +2,7 @@
     x:Class="Ariadne.Desktop.Views.WorksPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:WorksPageViewModel">
   <!-- 作品页：中阅读/修改器 + 右栏（顶部标签切换 导航树/项目 AI，可收起）。无左栏。 -->
@@ -19,8 +20,8 @@
         <Grid ColumnDefinitions="*,Auto">
           <TextBlock Grid.Column="0" Text="{Binding CurrentDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
-            <Button Classes="subtle" Classes.selected="{Binding !IsEditMode}" Padding="10,5" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
-            <Button Classes="subtle" Classes.selected="{Binding IsEditMode}" Padding="10,5" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
+            <Button Classes="subtle" ctl:SelectedClass.IsSelected="{Binding !IsEditMode}" Padding="10,5" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
+            <Button Classes="subtle" ctl:SelectedClass.IsSelected="{Binding IsEditMode}" Padding="10,5" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
             <ComboBox ItemsSource="{Binding ExportFormats}"
                       SelectedValue="{Binding ExportFormat, Mode=TwoWay}"
                       SelectedValueBinding="{Binding Value}"
@@ -164,9 +165,9 @@
               Background="{DynamicResource Ariadne.BackgroundSurface}"
               Margin="12,8,8,0">
           <StackPanel Grid.Column="0" Orientation="Horizontal">
-            <Button Classes="tab" Classes.selected="{Binding IsNavTreeTab}"
+            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsNavTreeTab}"
                     Content="{Binding NavTreeText}" Command="{Binding ShowNavTreeCommand}" />
-            <Button Classes="tab" Classes.selected="{Binding IsProjectAiTab}"
+            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsProjectAiTab}"
                     Content="{Binding ProjectAiText}" Command="{Binding ShowProjectAiCommand}" />
           </StackPanel>
           <Button Grid.Column="1" Classes="panel-collapse" VerticalAlignment="Center"

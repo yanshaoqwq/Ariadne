@@ -2,6 +2,7 @@
     x:Class="Ariadne.Desktop.Views.MainWindow"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:MainWindowViewModel"
     Width="1280"
@@ -188,7 +189,7 @@
                 <ItemsControl ItemsSource="{Binding PrimaryNavigationItems}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
-                      <Button Classes="nav" Classes.selected="{Binding IsSelected}" Margin="0,2" Padding="8,7" Command="{Binding SelectCommand}">
+                      <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Margin="0,2" Padding="8,7" Command="{Binding SelectCommand}">
                         <Grid ColumnDefinitions="Auto,26,*,Auto">
                           <!-- 选中竖条 pill -->
                           <Border
@@ -219,7 +220,7 @@
                 <ItemsControl ItemsSource="{Binding SecondaryNavigationItems}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
-                      <Button Classes="nav" Classes.selected="{Binding IsSelected}" Margin="0,2" Padding="8,7" Command="{Binding SelectCommand}">
+                      <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Margin="0,2" Padding="8,7" Command="{Binding SelectCommand}">
                         <Grid ColumnDefinitions="Auto,26,*,Auto">
                           <Border
                               Grid.Column="0"
