@@ -358,9 +358,8 @@
               </Grid>
             </Border>
             <Border Classes="settings-section" Padding="22">
-              <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
-                <CheckBox Grid.Row="0" Grid.Column="1" IsChecked="{Binding ProjectPanelVisible, Mode=TwoWay}" Content="{Binding ProjectPanelVisibleText}" />
-                <CheckBox Grid.Row="1" Grid.Column="1" IsChecked="{Binding OnboardingSeen, Mode=TwoWay}" Content="{Binding OnboardingSeenText}" />
+              <Grid RowDefinitions="Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+                <CheckBox Grid.Row="0" Grid.Column="1" IsChecked="{Binding OnboardingSeen, Mode=TwoWay}" Content="{Binding OnboardingSeenText}" />
               </Grid>
             </Border>
             <Button Classes="primary" Content="{Binding SavePersonalizationText}" HorizontalAlignment="Right" Command="{Binding SavePersonalizationCommand}" />

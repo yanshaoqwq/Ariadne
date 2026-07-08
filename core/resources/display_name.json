@@ -289,7 +289,7 @@
   "ui.settings.permissions.remove_path": "移除路径",
   "ui.settings.permissions.save": "保存权限配置",
   "ui.settings.personalization.title": "个性化",
-  "ui.settings.personalization.desc": "主题、颜色和作品页悬浮项目面板。",
+  "ui.settings.personalization.desc": "主题、颜色和工作台显示偏好。",
   "ui.settings.personalization.git_auto_color": "Git 自动存档点颜色",
   "ui.settings.personalization.git_manual_color": "主动/章节完成存档点颜色",
   "ui.settings.personalization.project_panel": "作品页悬浮项目面板",
