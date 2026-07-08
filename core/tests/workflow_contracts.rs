@@ -4,7 +4,7 @@ use std::path::Path;
 
 use ariadne::contracts::{
     CommunicationEdgeConfig, DocumentPatch, Edge, EdgeId, NodeId, NodeInstance, PatchHunk,
-    PermissionPolicy, PortEndpoint, PortValue, RunControl, RunId, RunStatus, TextRange,
+    PermissionPolicy, PortEndpoint, PortMap, PortValue, RunControl, RunId, RunStatus, TextRange,
     WorkflowDefinition, WorkflowEdgeKind, WorkflowId, COMMUNICATION_PORT, EXECUTION_INPUT_PORT,
     EXECUTION_OUTPUT_PORT,
 };
@@ -307,6 +307,45 @@ fn runtime_schedules_control_edges_and_passes_data_aliases() {
     assert!(executor.calls[1].inputs.contains_key("本章大纲"));
 }
 
+/// 验证没有 control 边时，data 边本身也会作为依赖阻塞目标节点。
+#[test]
+fn runtime_treats_data_edges_as_dependencies_without_control_edge() {
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf"),
+        name: "Data dependency".to_owned(),
+        nodes: vec![node("planner", "planner"), node("writer", "writer")],
+        edges: vec![Edge {
+            id: EdgeId::from("data-1"),
+            kind: WorkflowEdgeKind::Data,
+            from: PortEndpoint {
+                node_id: NodeId::from("planner"),
+                port_name: "outline".to_owned(),
+            },
+            to: PortEndpoint {
+                node_id: NodeId::from("writer"),
+                port_name: "prompt_input".to_owned(),
+            },
+            alias: Some("outline".to_owned()),
+            communication: None,
+        }],
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+    let mut executor = ScriptedExecutor::default();
+    executor.push("planner", inline_output("outline", "去旧城"));
+    executor.push("writer", WorkflowNodeExecutionOutput::default());
+
+    let status = runtime.run(&workflow, &mut executor).unwrap();
+
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(executor.calls[0].node_id.as_str(), "planner");
+    assert_eq!(executor.calls[1].node_id.as_str(), "writer");
+    assert!(matches!(
+        executor.calls[1].inputs.get("outline"),
+        Some(PortValue::Inline { value }) if value == &json!("去旧城")
+    ));
+}
+
 /// 验证 data 边缺失上游输出时不会静默跳过，而是记录节点失败事件。
 #[test]
 fn runtime_fails_target_when_data_edge_output_is_missing() {
@@ -449,6 +488,70 @@ fn runtime_stops_communication_when_node_declares_end() {
         Some("node_declared_complete")
     );
     assert!(communication.last_message_hash.is_some());
+}
+
+/// 验证恢复路径会完整重置 communication 边，包括 next_sender/hash/message 缓存。
+#[test]
+fn resume_from_node_resets_communication_runtime_state() {
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf"),
+        name: "Communication reset".to_owned(),
+        nodes: vec![node("prudent", "prudent"), node("polisher", "polisher")],
+        edges: vec![Edge {
+            id: EdgeId::from("comm-1"),
+            kind: WorkflowEdgeKind::Communication,
+            from: PortEndpoint {
+                node_id: NodeId::from("prudent"),
+                port_name: COMMUNICATION_PORT.to_owned(),
+            },
+            to: PortEndpoint {
+                node_id: NodeId::from("polisher"),
+                port_name: COMMUNICATION_PORT.to_owned(),
+            },
+            alias: None,
+            communication: Some(communication_config(3)),
+        }],
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+    let mut executor = ScriptedExecutor::default();
+    executor.push("prudent", communication_output("这里节奏太快"));
+    executor.push("polisher", ending_communication_output("已完成"));
+
+    assert_eq!(
+        runtime.run(&workflow, &mut executor).unwrap(),
+        RunStatus::Succeeded
+    );
+    let completed = runtime
+        .state
+        .communication_edges
+        .get(&EdgeId::from("comm-1"))
+        .unwrap();
+    assert!(completed.completed);
+    assert_eq!(completed.next_sender_node_id, NodeId::from("prudent"));
+    assert!(completed.last_message_hash.is_some());
+    assert!(!completed.messages.is_empty());
+
+    runtime.state.status = RunStatus::Paused;
+    runtime.state.control = RunControl::Pause;
+    runtime.state.pause_reason = Some("manual resume test".to_owned());
+    runtime
+        .resume_from_node(&workflow, &NodeId::from("prudent"), PortMap::new())
+        .unwrap();
+
+    let reset = runtime
+        .state
+        .communication_edges
+        .get(&EdgeId::from("comm-1"))
+        .unwrap();
+    assert_eq!(reset.initiator_node_id, NodeId::from("prudent"));
+    assert_eq!(reset.next_sender_node_id, NodeId::from("prudent"));
+    assert!(!reset.completed);
+    assert_eq!(reset.completed_reason, None);
+    assert_eq!(reset.pause_reason, None);
+    assert_eq!(reset.message_count, 0);
+    assert_eq!(reset.last_message_hash, None);
+    assert!(reset.messages.is_empty());
 }
 
 /// 验证待确认项会暂停运行，审批后再次 run 不会重复执行已完成节点。
@@ -1431,10 +1534,7 @@ fn routed_external_executor_dispatches_registered_handlers() {
 #[cfg(test)]
 mod prudent_rejection_contracts {
     use ariadne::contracts::{NodeId, PortMap, PortValue, RunId, WorkflowId};
-    use ariadne::workflow::{
-        BuiltinWorkflowNodeExecutor, NoopExternalNodeExecutor, RuntimeConfirmationState,
-        WorkflowRuntime,
-    };
+    use ariadne::workflow::{RuntimeConfirmationState, WorkflowRuntime};
     use serde_json::json;
 
     use super::*;
@@ -1503,7 +1603,7 @@ mod prudent_rejection_contracts {
 
         // 模拟 prudent 节点已成功，生成一个被拒的确认项
         use ariadne::contracts::RunStatus;
-        use ariadne::workflow::{RuntimeConfirmation, WorkflowNodeRuntimeState, WorkflowRunState};
+        use ariadne::workflow::{RuntimeConfirmation, WorkflowNodeRuntimeState};
         runtime.state.nodes.insert(
             NodeId::from("writer"),
             WorkflowNodeRuntimeState {

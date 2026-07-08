@@ -11,11 +11,15 @@ namespace Ariadne.Desktop.ViewModels;
 public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 {
     private const string DefaultWorkflowId = "default";
+    private const double MinRightPanelWidth = 300;
+    private const double MaxRightPanelWidth = 560;
+    private const double CollapsedRightPanelWidth = 24;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
     private bool _isRightPanelOpen = true;
+    private GridLength _rightPanelColumnWidth = new(360);
     private bool _isLibraryOpen = true;
     private bool _isExecutionPanel;
     private bool _isProjectAiTab = true;
@@ -216,7 +220,23 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
     public RelayCommand ToggleRightPanelCommand { get; }
     public GridLength RightPanelSplitterWidth => IsRightPanelOpen ? new GridLength(4) : new GridLength(0);
-    public GridLength RightPanelColumnWidth => IsRightPanelOpen ? new GridLength(340) : new GridLength(0);
+    public GridLength RightPanelColumnWidth
+    {
+        get => IsRightPanelOpen ? _rightPanelColumnWidth : new GridLength(CollapsedRightPanelWidth);
+        set
+        {
+            if (!IsRightPanelOpen)
+            {
+                return;
+            }
+            var normalized = NormalizeRightPanelWidth(value);
+            if (!_rightPanelColumnWidth.Equals(normalized))
+            {
+                _rightPanelColumnWidth = normalized;
+                OnPropertyChanged();
+            }
+        }
+    }
     public bool IsLibraryOpen { get => _isLibraryOpen; set => SetProperty(ref _isLibraryOpen, value); }
     public RelayCommand ToggleLibraryCommand { get; }
     public double CanvasZoom
@@ -749,6 +769,16 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         CanvasZoom += delta;
         StatusText = CanvasZoomText;
+    }
+
+    private static GridLength NormalizeRightPanelWidth(GridLength value)
+    {
+        if (value.IsStar)
+        {
+            return new GridLength(360);
+        }
+        var width = value.IsAuto ? 360 : value.Value;
+        return new GridLength(Math.Clamp(width, MinRightPanelWidth, MaxRightPanelWidth));
     }
 
     private async Task LoadWorkflowAsync()

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text;
+using Avalonia.Controls;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -7,9 +8,14 @@ namespace Ariadne.Desktop.ViewModels;
 
 public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 {
+    private const double MinRightPanelWidth = 280;
+    private const double MaxRightPanelWidth = 520;
+    private const double CollapsedRightPanelWidth = 24;
+
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
     private bool _isRightPanelOpen = true;
+    private GridLength _rightPanelColumnWidth = new(320);
     private bool _isNavTreeTab = true;
     private bool _isImportPanelOpen;
     private string _documentContent = string.Empty;
@@ -83,10 +89,37 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool IsRightPanelOpen
     {
         get => _isRightPanelOpen;
-        set => SetProperty(ref _isRightPanelOpen, value);
+        set
+        {
+            if (SetProperty(ref _isRightPanelOpen, value))
+            {
+                OnPropertyChanged(nameof(RightPanelSplitterWidth));
+                OnPropertyChanged(nameof(RightPanelColumnWidth));
+            }
+        }
     }
 
     public RelayCommand ToggleRightPanelCommand { get; }
+
+    public GridLength RightPanelSplitterWidth => IsRightPanelOpen ? new GridLength(4) : new GridLength(0);
+
+    public GridLength RightPanelColumnWidth
+    {
+        get => IsRightPanelOpen ? _rightPanelColumnWidth : new GridLength(CollapsedRightPanelWidth);
+        set
+        {
+            if (!IsRightPanelOpen)
+            {
+                return;
+            }
+            var normalized = NormalizeRightPanelWidth(value);
+            if (!_rightPanelColumnWidth.Equals(normalized))
+            {
+                _rightPanelColumnWidth = normalized;
+                OnPropertyChanged();
+            }
+        }
+    }
 
     /// 右栏标签：true=导航树（含章节树/大纲），false=项目 AI。
     public bool IsNavTreeTab
@@ -644,6 +677,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         IsRightPanelOpen = true;
         IsNavTreeTab = true;
         IsImportPanelOpen = true;
+    }
+
+    private static GridLength NormalizeRightPanelWidth(GridLength value)
+    {
+        if (value.IsStar)
+        {
+            return new GridLength(320);
+        }
+        var width = value.IsAuto ? 320 : value.Value;
+        return new GridLength(Math.Clamp(width, MinRightPanelWidth, MaxRightPanelWidth));
     }
 
     private async Task QuickEditAsync()

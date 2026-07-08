@@ -5,7 +5,12 @@
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:WorksPageViewModel">
   <!-- 作品页：中阅读/修改器 + 右栏（顶部标签切换 导航树/项目 AI，可收起）。无左栏。 -->
-  <Grid ColumnDefinitions="*,Auto" Background="{DynamicResource Ariadne.BackgroundMain}">
+  <Grid Background="{DynamicResource Ariadne.BackgroundMain}">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="*" />
+      <ColumnDefinition Width="{Binding RightPanelSplitterWidth}" />
+      <ColumnDefinition Width="{Binding RightPanelColumnWidth, Mode=TwoWay}" MinWidth="24" MaxWidth="520" />
+    </Grid.ColumnDefinitions>
 
     <!-- ============ 中：阅读/修改器 ============ -->
     <DockPanel Grid.Column="0">
@@ -141,9 +146,14 @@
     </DockPanel>
 
     <!-- ============ 右：导航树 / 项目 AI（右上标签切换，可收起） ============ -->
-    <Panel Grid.Column="1">
+    <GridSplitter Grid.Column="1"
+                  Width="4"
+                  Background="{DynamicResource Ariadne.BorderMuted}"
+                  ResizeDirection="Columns"
+                  IsVisible="{Binding IsRightPanelOpen}" />
+
+    <Panel Grid.Column="2">
       <Border
-          Width="280"
           Background="{DynamicResource Ariadne.BackgroundSurface}"
           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
           BorderThickness="1,0,0,0"
