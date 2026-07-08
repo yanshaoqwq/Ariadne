@@ -100,14 +100,27 @@ pub fn run_watch_workflow_events(
     let state = AriadneAppState::default_for_process();
     let mut next_sequence = after_sequence;
     let interval = Duration::from_millis(interval_ms.max(50));
+    let mut missing_run_wait_ms = 0u64;
     loop {
-        let result = commands::get_workflow_events(
+        let result = match commands::get_workflow_events(
             &state,
             workflow_id.to_owned(),
             run_id.to_owned(),
             Some(next_sequence),
             limit,
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(error)
+                if error.contains("workflow run not found") && missing_run_wait_ms < 30_000 =>
+            {
+                thread::sleep(interval);
+                missing_run_wait_ms =
+                    missing_run_wait_ms.saturating_add(interval.as_millis() as u64);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        missing_run_wait_ms = 0;
         let terminal = workflow_status_is_terminal(&result.status);
         if !result.events.is_empty() || terminal {
             next_sequence = result.next_sequence;

@@ -16,7 +16,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _backendStatus;
     private string _notificationText = string.Empty;
     private string _budgetStatusText;
-    private double _budgetUsageWidth;
+    private double _budgetUsagePercent;
     private bool _autoModeEnabled;
     private bool _suppressAutoModeSave;
     private bool _sidebarExpanded = true;
@@ -137,10 +137,10 @@ public sealed class MainWindowViewModel : ViewModelBase
         set => SetProperty(ref _budgetStatusText, value);
     }
 
-    public double BudgetUsageWidth
+    public double BudgetUsagePercent
     {
-        get => _budgetUsageWidth;
-        set => SetProperty(ref _budgetUsageWidth, value);
+        get => _budgetUsagePercent;
+        set => SetProperty(ref _budgetUsagePercent, value);
     }
 
     public bool AutoModeEnabled
@@ -264,7 +264,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         NotificationText = string.Empty;
         _pageCache.Clear();
         BudgetStatusText = _displayNames.Text("ui.common.none");
-        BudgetUsageWidth = 0;
+        BudgetUsagePercent = 0;
         _suppressAutoModeSave = true;
         AutoModeEnabled = false;
         _suppressAutoModeSave = false;
@@ -450,7 +450,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         catch (Exception ex)
         {
             BudgetStatusText = ex.Message;
-            BudgetUsageWidth = 0;
+            BudgetUsagePercent = 0;
         }
     }
 
@@ -474,7 +474,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         if (status.BudgetUsd <= 0)
         {
-            BudgetUsageWidth = 0;
+            BudgetUsagePercent = 0;
             BudgetStatusText = _displayNames.Text("ui.layout.budget_unlimited");
             _suppressAutoModeSave = true;
             AutoModeEnabled = status.AutoModeEnabled;
@@ -482,7 +482,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
         var total = status.BudgetUsd <= 0 ? 0 : Math.Clamp(status.SpentUsd / status.BudgetUsd, 0, 1);
-        BudgetUsageWidth = total * 92;
+        BudgetUsagePercent = total * 100;
         BudgetStatusText = _displayNames.Format("ui.layout.budget_status", new Dictionary<string, string>
         {
             ["spent"] = status.SpentUsd.ToString("0.##"),

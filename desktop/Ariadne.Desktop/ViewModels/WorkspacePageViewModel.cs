@@ -28,6 +28,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
     private string _currentRunId = string.Empty;
+    private long _workflowEventCursor;
+    private CancellationTokenSource? _workflowEventPollingCts;
     private string _confirmationReason = string.Empty;
     private string _annotationTitle = string.Empty;
     private IReadOnlyList<CanvasEdge> _edges = Array.Empty<CanvasEdge>();
@@ -74,6 +76,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"), CanResolveConfirmation);
         RejectConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("reject"), CanResolveConfirmation);
         SaveEdgeConfigCommand = new RelayCommand(SaveSelectedEdgeConfig, () => HasSelectedEdge);
+        InsertForwardTemplateVariableCommand = new RelayCommand(InsertForwardTemplateVariable, () => SelectedEdge?.IsCommunication == true);
+        InsertReverseTemplateVariableCommand = new RelayCommand(InsertReverseTemplateVariable, () => SelectedEdge?.IsCommunication == true);
         CopySelectedNodeCommand = new RelayCommand(CopySelectedNode, () => HasSelectedNode);
         CutSelectedNodeCommand = new RelayCommand(() => _ = CutSelectedNodeAsync(), () => HasSelectedNode);
         PasteNodeCommand = new RelayCommand(PasteNode, () => _clipboardNode is not null);
@@ -185,6 +189,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ForwardTemplateText => _displayNames.Text("ui.workspace.edge.forward_template");
     public string ReverseTemplateText => _displayNames.Text("ui.workspace.edge.reverse_template");
     public string MaxCommunicationCountText => _displayNames.Text("ui.workspace.edge.max_communication_count");
+    public string InsertForwardVariableText => _displayNames.Text("ui.workspace.edge.insert_forward_variable");
+    public string InsertReverseVariableText => _displayNames.Text("ui.workspace.edge.insert_reverse_variable");
+    public string TemplatePreviewText => _displayNames.Text("ui.workspace.edge.template_preview");
     public string ZoomInText => _displayNames.Text("ui.workspace.zoom_in");
     public string ZoomOutText => _displayNames.Text("ui.workspace.zoom_out");
     public string ResetZoomText => _displayNames.Text("ui.workspace.zoom_reset");
@@ -282,6 +289,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand ApproveConfirmationCommand { get; }
     public RelayCommand RejectConfirmationCommand { get; }
     public RelayCommand SaveEdgeConfigCommand { get; }
+    public RelayCommand InsertForwardTemplateVariableCommand { get; }
+    public RelayCommand InsertReverseTemplateVariableCommand { get; }
     public RelayCommand CopySelectedNodeCommand { get; }
     public RelayCommand CutSelectedNodeCommand { get; }
     public RelayCommand PasteNodeCommand { get; }
@@ -375,6 +384,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 OnPropertyChanged(nameof(HasSelectedEdge));
                 SaveEdgeConfigCommand.NotifyCanExecuteChanged();
+                InsertForwardTemplateVariableCommand.NotifyCanExecuteChanged();
+                InsertReverseTemplateVariableCommand.NotifyCanExecuteChanged();
             }
         }
     }
@@ -815,8 +826,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             CaptureSnapshot();
             var run = await _backend.RunWorkflowAsync(DefaultWorkflowId, startNodeId).ConfigureAwait(true);
             CurrentRunId = run.RunId;
+            _workflowEventCursor = 0;
             node.StatusText = run.Status;
             StatusText = run.Status;
+            StartWorkflowEventPolling(run.RunId);
         }
         catch (Exception ex)
         {
@@ -863,11 +876,101 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             var result = await action(DefaultWorkflowId, CurrentRunId).ConfigureAwait(true);
             StatusText = result.Status;
+            StartWorkflowEventPolling(result.RunId);
         }
         catch (Exception ex)
         {
             StatusText = ex.Message;
         }
+    }
+
+    private void StartWorkflowEventPolling(string runId)
+    {
+        _workflowEventPollingCts?.Cancel();
+        _workflowEventPollingCts?.Dispose();
+        _workflowEventPollingCts = new CancellationTokenSource();
+        var token = _workflowEventPollingCts.Token;
+        _ = PollWorkflowEventsAsync(runId, token);
+    }
+
+    private async Task PollWorkflowEventsAsync(string runId, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var result = await _backend
+                    .GetWorkflowEventsAsync(DefaultWorkflowId, runId, _workflowEventCursor, 100, cancellationToken)
+                    .ConfigureAwait(true);
+                _workflowEventCursor = result.NextSequence;
+                ApplyWorkflowEvents(result);
+                if (WorkflowRunIsTerminal(result.Status))
+                {
+                    return;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                StatusText = ex.Message;
+                return;
+            }
+
+            try
+            {
+                await Task.Delay(750, cancellationToken).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    private void ApplyWorkflowEvents(WorkflowEventsResult result)
+    {
+        StatusText = result.Status;
+        foreach (var runtimeEvent in result.Events)
+        {
+            if (!string.IsNullOrWhiteSpace(runtimeEvent.NodeId))
+            {
+                var node = Nodes.FirstOrDefault(item => item.Id == runtimeEvent.NodeId);
+                if (node is not null)
+                {
+                    node.StatusText = NodeStatusFromEvent(runtimeEvent.EventType, runtimeEvent.Message);
+                }
+            }
+            if (runtimeEvent.EventType is "confirmation_updated")
+            {
+                _ = LoadConfirmationsAsync();
+            }
+        }
+        if (result.Events.Any(item => item.EventType is "run_paused" or "confirmation_updated"))
+        {
+            _ = LoadConfirmationsAsync();
+        }
+    }
+
+    private static string NodeStatusFromEvent(string eventType, string fallback)
+    {
+        return eventType switch
+        {
+            "node_started" => "running",
+            "node_succeeded" => "succeeded",
+            "node_paused" => "paused",
+            "node_failed" => "failed",
+            "node_skipped" => "skipped",
+            "node_retry_scheduled" => "retry_scheduled",
+            _ => fallback,
+        };
+    }
+
+    private static bool WorkflowRunIsTerminal(string status)
+    {
+        return status is "stopped" or "succeeded" or "failed";
     }
 
     private async Task SendProjectAiAsync()
@@ -898,6 +1001,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
             ProjectAiMessage = string.Empty;
             StatusText = result.WorkflowRun?.Status ?? _displayNames.Text("ui.common.configured");
+            if (result.WorkflowRun is not null)
+            {
+                CurrentRunId = result.WorkflowRun.RunId;
+                _workflowEventCursor = 0;
+                StartWorkflowEventPolling(result.WorkflowRun.RunId);
+            }
         }
         catch (Exception ex)
         {
@@ -1332,6 +1441,33 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
+    private void InsertForwardTemplateVariable()
+    {
+        if (SelectedEdge?.IsCommunication != true)
+        {
+            return;
+        }
+        SelectedEdge.ForwardTemplate = AppendTemplateVariable(SelectedEdge.ForwardTemplate, "{{input.forward_output}}");
+    }
+
+    private void InsertReverseTemplateVariable()
+    {
+        if (SelectedEdge?.IsCommunication != true)
+        {
+            return;
+        }
+        SelectedEdge.ReverseTemplate = AppendTemplateVariable(SelectedEdge.ReverseTemplate, "{{input.reverse_output}}");
+    }
+
+    private static string AppendTemplateVariable(string template, string variable)
+    {
+        if (template.Contains(variable, StringComparison.Ordinal))
+        {
+            return template;
+        }
+        return string.IsNullOrWhiteSpace(template) ? variable : $"{template.TrimEnd()}\n{variable}";
+    }
+
     private void RefreshStartNodes()
     {
         StartNodes.Clear();
@@ -1659,6 +1795,8 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     public string ReverseAlias { get => _reverseAlias; set => SetProperty(ref _reverseAlias, value); }
     public string ForwardTemplate { get => _forwardTemplate; set => SetProperty(ref _forwardTemplate, value); }
     public string ReverseTemplate { get => _reverseTemplate; set => SetProperty(ref _reverseTemplate, value); }
+    public string ForwardTemplatePreview => TemplatePreview(ForwardTemplate, "forward_output", _displayNames.Text("ui.workspace.edge.preview_forward_value"));
+    public string ReverseTemplatePreview => TemplatePreview(ReverseTemplate, "reverse_output", _displayNames.Text("ui.workspace.edge.preview_reverse_value"));
     public string MaxCommunicationCount { get => _maxCommunicationCount; set => SetProperty(ref _maxCommunicationCount, value); }
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
@@ -1702,6 +1840,14 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
             or nameof(DataJson) or nameof(ForwardAlias) or nameof(ReverseAlias)
             or nameof(ForwardTemplate) or nameof(ReverseTemplate) or nameof(MaxCommunicationCount))
         {
+            if (propertyName is nameof(ForwardTemplate))
+            {
+                OnPropertyChanged(nameof(ForwardTemplatePreview));
+            }
+            if (propertyName is nameof(ReverseTemplate))
+            {
+                OnPropertyChanged(nameof(ReverseTemplatePreview));
+            }
             _markDirty();
         }
     }
@@ -1776,5 +1922,11 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
             return value.ToString() ?? fallback;
         }
         return fallback;
+    }
+
+    private static string TemplatePreview(string template, string alias, string value)
+    {
+        return (string.IsNullOrWhiteSpace(template) ? "{{input." + alias + "}}" : template)
+            .Replace("{{input." + alias + "}}", value, StringComparison.Ordinal);
     }
 }

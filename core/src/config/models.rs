@@ -291,79 +291,79 @@ pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, b
     let mut controls = BTreeMap::new();
     controls.insert(
         "project_ai".to_owned(),
-        enabled_tools(&["project-ai-workflow-tools"]),
+        tool_controls(&[("project-ai-workflow-tools", false)]),
     );
     controls.insert(
         "outliner".to_owned(),
-        enabled_tools(&[
-            "outliner-register",
-            "outliner-find",
-            "outliner-search",
-            "outliner-insert-lines",
-            "outliner-replace-lines",
-            "outliner-rewrite-file",
+        tool_controls(&[
+            ("outliner-register", false),
+            ("outliner-find", true),
+            ("outliner-search", true),
+            ("outliner-insert-lines", false),
+            ("outliner-replace-lines", false),
+            ("outliner-rewrite-file", false),
         ]),
     );
     controls.insert(
         "designer".to_owned(),
-        enabled_tools(&[
-            "designer-register",
-            "designer-find",
-            "designer-search",
-            "designer-insert-lines",
-            "designer-replace-lines",
-            "designer-rewrite-file",
+        tool_controls(&[
+            ("designer-register", false),
+            ("designer-find", true),
+            ("designer-search", true),
+            ("designer-insert-lines", false),
+            ("designer-replace-lines", false),
+            ("designer-rewrite-file", false),
         ]),
     );
     controls.insert(
         "planner".to_owned(),
-        enabled_tools(&[
-            "planner-register",
-            "planner-find",
-            "planner-search",
-            "planner-insert-lines",
-            "planner-replace-lines",
-            "planner-rewrite-file",
+        tool_controls(&[
+            ("planner-register", false),
+            ("planner-find", true),
+            ("planner-search", true),
+            ("planner-insert-lines", false),
+            ("planner-replace-lines", false),
+            ("planner-rewrite-file", false),
         ]),
     );
     controls.insert(
         "detail".to_owned(),
-        enabled_tools(&["detail-find", "detail-search"]),
+        tool_controls(&[("detail-find", true), ("detail-search", true)]),
     );
     controls.insert(
         "writer".to_owned(),
-        enabled_tools(&[
-            "writer-find",
-            "writer-search",
-            "writer-insert-lines",
-            "writer-replace-lines",
+        tool_controls(&[
+            ("writer-find", true),
+            ("writer-search", true),
+            ("writer-insert-lines", false),
+            ("writer-replace-lines", false),
         ]),
     );
     controls.insert(
         "critic".to_owned(),
-        enabled_tools(&["critic-find", "critic-search"]),
+        tool_controls(&[("critic-find", true), ("critic-search", true)]),
     );
     controls.insert(
         "prudent".to_owned(),
-        enabled_tools(&["prudent-find", "prudent-search"]),
+        tool_controls(&[("prudent-find", true), ("prudent-search", true)]),
     );
     controls.insert(
         "polisher".to_owned(),
-        enabled_tools(&[
-            "polisher-find",
-            "polisher-search",
-            "polisher-insert-lines",
-            "polisher-replace-lines",
+        tool_controls(&[
+            ("polisher-find", true),
+            ("polisher-search", true),
+            ("polisher-insert-lines", false),
+            ("polisher-replace-lines", false),
         ]),
     );
     controls.insert("summarizer".to_owned(), BTreeMap::new());
     controls
 }
 
-fn enabled_tools(tools: &[&str]) -> BTreeMap<String, bool> {
+fn tool_controls(tools: &[(&str, bool)]) -> BTreeMap<String, bool> {
     tools
         .iter()
-        .map(|tool| ((*tool).to_owned(), true))
+        .map(|(tool, enabled)| ((*tool).to_owned(), *enabled))
         .collect()
 }
 

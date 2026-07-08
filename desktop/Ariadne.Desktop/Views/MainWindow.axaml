@@ -108,19 +108,13 @@
             Margin="0,0,12,0">
           <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
             <TextBlock Text="{Binding BudgetLabel}" Classes="caption" VerticalAlignment="Center" />
-            <Border
+            <ProgressBar
                 Width="92"
-                Height="6"
-                CornerRadius="3"
-                Background="{DynamicResource Ariadne.BackgroundHover}"
-                VerticalAlignment="Center">
-              <Border
-                  Width="{Binding BudgetUsageWidth}"
-                  Height="6"
-                  CornerRadius="3"
-                  HorizontalAlignment="Left"
-                  Background="{DynamicResource Ariadne.AccentPrimary}" />
-            </Border>
+                Height="8"
+                Minimum="0"
+                Maximum="100"
+                Value="{Binding BudgetUsagePercent}"
+                VerticalAlignment="Center" />
             <TextBlock Text="{Binding BudgetStatusText}" Classes="caption" VerticalAlignment="Center" />
           </StackPanel>
           <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">

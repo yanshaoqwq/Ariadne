@@ -951,6 +951,20 @@ fn automation_and_permission_settings_round_trip_config_files() {
         Some(&false)
     );
     assert!(permissions.tool_controls.contains_key("writer"));
+    assert_eq!(
+        permissions
+            .tool_controls
+            .get("writer")
+            .and_then(|scope| scope.get("writer-insert-lines")),
+        Some(&false)
+    );
+    assert_eq!(
+        permissions
+            .tool_controls
+            .get("writer")
+            .and_then(|scope| scope.get("writer-find")),
+        Some(&true)
+    );
 }
 
 #[test]
@@ -1210,6 +1224,17 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+        },
+    )
+    .unwrap();
+    save_permissions_settings_impl(
+        temp.path(),
+        PermissionsSettings {
+            policy: PermissionPolicy::default(),
+            tool_controls: BTreeMap::from([(
+                "project_ai".to_owned(),
+                BTreeMap::from([("project-ai-workflow-tools".to_owned(), true)]),
+            )]),
         },
     )
     .unwrap();

@@ -600,10 +600,28 @@
                                 <TextBox Text="{Binding SelectedEdge.ReverseAlias, Mode=TwoWay}" />
                               </StackPanel>
                             </Grid>
-                            <TextBlock Text="{Binding ForwardTemplateText}" Classes="caption" />
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                              <TextBlock Grid.Column="0" Text="{Binding ForwardTemplateText}" Classes="caption" VerticalAlignment="Center" />
+                              <Button Grid.Column="1" Classes="secondary" Padding="8,3" Content="{Binding InsertForwardVariableText}" Command="{Binding InsertForwardTemplateVariableCommand}" />
+                            </Grid>
                             <TextBox Text="{Binding SelectedEdge.ForwardTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76" />
-                            <TextBlock Text="{Binding ReverseTemplateText}" Classes="caption" />
+                            <Border Classes="layer" Padding="10,7">
+                              <StackPanel Spacing="3">
+                                <TextBlock Text="{Binding TemplatePreviewText}" Classes="caption" />
+                                <TextBlock Text="{Binding SelectedEdge.ForwardTemplatePreview}" TextWrapping="Wrap" FontSize="12" />
+                              </StackPanel>
+                            </Border>
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                              <TextBlock Grid.Column="0" Text="{Binding ReverseTemplateText}" Classes="caption" VerticalAlignment="Center" />
+                              <Button Grid.Column="1" Classes="secondary" Padding="8,3" Content="{Binding InsertReverseVariableText}" Command="{Binding InsertReverseTemplateVariableCommand}" />
+                            </Grid>
                             <TextBox Text="{Binding SelectedEdge.ReverseTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76" />
+                            <Border Classes="layer" Padding="10,7">
+                              <StackPanel Spacing="3">
+                                <TextBlock Text="{Binding TemplatePreviewText}" Classes="caption" />
+                                <TextBlock Text="{Binding SelectedEdge.ReverseTemplatePreview}" TextWrapping="Wrap" FontSize="12" />
+                              </StackPanel>
+                            </Border>
                             <TextBlock Text="{Binding MaxCommunicationCountText}" Classes="caption" />
                             <TextBox Text="{Binding SelectedEdge.MaxCommunicationCount, Mode=TwoWay}" />
                           </StackPanel>
