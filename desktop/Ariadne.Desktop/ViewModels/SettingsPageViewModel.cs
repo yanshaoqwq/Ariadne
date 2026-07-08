@@ -9,6 +9,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 {
     private const char SnapshotSeparator = '\u001f';
     private const int SnapshotLocaleIndex = 1;
+    private const int SnapshotModelStartIndex = 7;
+    private const int SnapshotModelEndIndex = 18;
     private const int SnapshotOnboardingSeenIndex = 45;
     private static readonly string[] LocalizedPropertyNames =
     {
@@ -120,6 +122,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _isLoading;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
+    private bool _suppressProviderSelectionChange;
     private string _savedSnapshot = string.Empty;
 
     private int _schemaVersion = 1;
@@ -474,9 +477,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         get => _selectedProviderOption;
         set
         {
-            if (SetProperty(ref _selectedProviderOption, value) && value is not null)
+            var previous = _selectedProviderOption;
+            if (SetProperty(ref _selectedProviderOption, value)
+                && value is not null
+                && !_suppressProviderSelectionChange)
             {
-                SelectProviderForEditing(value.ProviderId);
+                _ = SwitchProviderForEditingAsync(value, previous);
             }
         }
     }
@@ -857,6 +863,59 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         else
         {
             CaptureSnapshot();
+        }
+    }
+
+    private async Task SwitchProviderForEditingAsync(
+        ProviderOptionViewModel target,
+        ProviderOptionViewModel? previous)
+    {
+        if (string.Equals(target.ProviderId, ProviderId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (HasUnsavedChanges && IsModelsSelected)
+        {
+            var choice = await DialogService.Current.ConfirmUnsavedLeaveAsync().ConfigureAwait(true);
+            switch (choice)
+            {
+                case UnsavedLeaveChoice.Save:
+                    try
+                    {
+                        await SaveProviderConnectionAsync().ConfigureAwait(true);
+                        MarkSavedSnapshotRange(SnapshotModelStartIndex, SnapshotModelEndIndex);
+                    }
+                    catch (Exception ex)
+                    {
+                        StatusText = ex.Message;
+                        RestoreSelectedProviderOption(previous);
+                        return;
+                    }
+                    break;
+                case UnsavedLeaveChoice.Discard:
+                    break;
+                default:
+                    RestoreSelectedProviderOption(previous);
+                    return;
+            }
+        }
+
+        SelectProviderForEditing(target.ProviderId);
+        MarkSavedSnapshotRange(SnapshotModelStartIndex, SnapshotModelEndIndex);
+    }
+
+    private void RestoreSelectedProviderOption(ProviderOptionViewModel? option)
+    {
+        _suppressProviderSelectionChange = true;
+        try
+        {
+            _selectedProviderOption = option;
+            OnPropertyChanged(nameof(SelectedProviderOption));
+        }
+        finally
+        {
+            _suppressProviderSelectionChange = false;
         }
     }
 
@@ -1426,14 +1485,26 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void MarkSavedSnapshotValue(int snapshotIndex)
     {
+        MarkSavedSnapshotRange(snapshotIndex, snapshotIndex);
+    }
+
+    private void MarkSavedSnapshotRange(int startIndex, int endIndex)
+    {
+        var currentSnapshot = CurrentSnapshot();
         var savedParts = _savedSnapshot.Split(SnapshotSeparator);
-        var currentParts = CurrentSnapshot().Split(SnapshotSeparator);
-        if (savedParts.Length == currentParts.Length && currentParts.Length > snapshotIndex)
+        var currentParts = currentSnapshot.Split(SnapshotSeparator);
+        if (savedParts.Length == currentParts.Length
+            && startIndex >= 0
+            && endIndex >= startIndex
+            && currentParts.Length > endIndex)
         {
-            savedParts[snapshotIndex] = currentParts[snapshotIndex];
+            for (var index = startIndex; index <= endIndex; index++)
+            {
+                savedParts[index] = currentParts[index];
+            }
             _savedSnapshot = string.Join(SnapshotSeparator, savedParts);
         }
-        HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+        HasUnsavedChanges = currentSnapshot != _savedSnapshot;
     }
 
     private void RefreshLocalizedText()

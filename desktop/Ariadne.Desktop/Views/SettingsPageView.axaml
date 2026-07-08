@@ -49,22 +49,24 @@
           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
           BorderThickness="0,0,1,0"
           Padding="18,24,14,24">
-        <ItemsControl ItemsSource="{Binding SectionIndexItems}">
-          <ItemsControl.ItemTemplate>
-            <DataTemplate DataType="{x:Type vm:SettingsSectionIndexItemViewModel}">
-              <Button
-                  Classes="nav"
-                  Classes.selected="{Binding IsSelected}"
-                  HorizontalAlignment="Stretch"
-                  HorizontalContentAlignment="Left"
-                  Margin="0,1"
-                  Padding="10,8"
-                  Command="{Binding SelectCommand}">
-                <TextBlock Text="{Binding Title}" TextWrapping="Wrap" />
-              </Button>
-            </DataTemplate>
-          </ItemsControl.ItemTemplate>
-        </ItemsControl>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <ItemsControl ItemsSource="{Binding SectionIndexItems}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="{x:Type vm:SettingsSectionIndexItemViewModel}">
+                <Button
+                    Classes="nav"
+                    Classes.selected="{Binding IsSelected}"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Margin="0,1"
+                    Padding="10,8"
+                    Command="{Binding SelectCommand}">
+                  <TextBlock Text="{Binding Title}" TextWrapping="Wrap" />
+                </Button>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
       </Border>
 
       <ScrollViewer Grid.Column="1" Padding="34,28">
