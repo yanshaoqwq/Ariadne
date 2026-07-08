@@ -121,6 +121,16 @@ fn app_state_rejects_missing_or_uninitialized_project_root() {
 }
 
 #[test]
+fn command_impls_reject_missing_project_root_without_creating_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing-project");
+
+    let error = get_app_settings_impl(&missing).unwrap_err();
+    assert!(error.contains("project root does not exist"));
+    assert!(!missing.exists());
+}
+
+#[test]
 fn workflow_graph_commands_save_and_load_canvas_shape() {
     let temp = tempfile::tempdir().unwrap();
     let graph = WorkflowGraphData {

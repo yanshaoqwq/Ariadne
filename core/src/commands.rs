@@ -4228,11 +4228,6 @@ fn validate_project_root(project_root: &Path) -> CommandResult<()> {
     if project_root.as_os_str().is_empty() {
         return Err("project_root cannot be empty".to_owned());
     }
-    Ok(())
-}
-
-fn validate_existing_project_root(project_root: &Path) -> CommandResult<()> {
-    validate_project_root(project_root)?;
     if !project_root.exists() {
         return Err(format!(
             "project root does not exist: {}",
@@ -4246,6 +4241,10 @@ fn validate_existing_project_root(project_root: &Path) -> CommandResult<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_existing_project_root(project_root: &Path) -> CommandResult<()> {
+    validate_project_root(project_root)
 }
 
 fn validate_initialized_project_root(project_root: &Path) -> CommandResult<()> {
