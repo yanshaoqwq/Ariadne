@@ -786,17 +786,7 @@ pub fn run_workflow(
     workflow_id: String,
     start_node_id: Option<String>,
 ) -> CommandResult<WorkflowRunStarted> {
-    let project_root = project_root_from_state(&state, None)?;
-    let response = run_workflow_impl(
-        &project_root,
-        state.secret_store.as_ref(),
-        RunWorkflowRequest {
-            workflow_id,
-            start_node_id,
-            initial_inputs: BTreeMap::new(),
-        },
-    )?;
-    Ok(response)
+    start_workflow(state, workflow_id, start_node_id)
 }
 
 pub fn start_workflow(
@@ -805,17 +795,27 @@ pub fn start_workflow(
     start_node_id: Option<String>,
 ) -> CommandResult<WorkflowRunStarted> {
     let project_root = project_root_from_state(state, None)?;
-    validate_existing_project_root(&project_root)?;
+    start_workflow_request(
+        &project_root,
+        Arc::clone(&state.secret_store),
+        RunWorkflowRequest {
+            workflow_id,
+            start_node_id,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+}
+
+fn start_workflow_request(
+    project_root: &Path,
+    secrets: Arc<dyn SecretStore>,
+    request: RunWorkflowRequest,
+) -> CommandResult<WorkflowRunStarted> {
+    validate_existing_project_root(project_root)?;
     let run_id = new_run_id()?;
     let run_id_text = run_id.as_str().to_owned();
-    let request = RunWorkflowRequest {
-        workflow_id,
-        start_node_id,
-        initial_inputs: BTreeMap::new(),
-    };
     let worker_workflow_id = request.workflow_id.clone();
-    let secrets = Arc::clone(&state.secret_store);
-    let worker_root = project_root.clone();
+    let worker_root = project_root.to_path_buf();
     let worker_run_id = run_id.clone();
     let worker_run_id_text = run_id_text.clone();
     std::thread::Builder::new()
@@ -1326,7 +1326,16 @@ pub fn project_ai_chat(
     request: ProjectAiRequest,
 ) -> CommandResult<ProjectAiResponse> {
     let project_root = project_root_from_state(&state, None)?;
-    project_ai_chat_impl(&project_root, state.secret_store.as_ref(), request)
+    let runner_root = project_root.clone();
+    let runner_secrets = Arc::clone(&state.secret_store);
+    project_ai_chat_with_runner(
+        &project_root,
+        state.secret_store.as_ref(),
+        request,
+        &mut move |request| {
+            start_workflow_request(&runner_root, Arc::clone(&runner_secrets), request)
+        },
+    )
 }
 
 pub fn resolve_project_reference(
@@ -2362,6 +2371,17 @@ pub fn project_ai_chat_impl(
     secrets: &dyn SecretStore,
     request: ProjectAiRequest,
 ) -> CommandResult<ProjectAiResponse> {
+    project_ai_chat_with_runner(project_root, secrets, request, &mut |request| {
+        run_workflow_impl(project_root, secrets, request)
+    })
+}
+
+fn project_ai_chat_with_runner(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    request: ProjectAiRequest,
+    workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
+) -> CommandResult<ProjectAiResponse> {
     validate_project_root(project_root)?;
     if request.message.trim().is_empty()
         && request.chat_history.is_empty()
@@ -2385,15 +2405,11 @@ pub fn project_ai_chat_impl(
     let project_memory = memory_store.read_all().map_err(error_to_string)?;
     let resolved_references = resolve_project_references(project_root, &request.references)?;
     let mut workflow_run = if let Some(workflow_id) = request.workflow_id_to_run.clone() {
-        Some(run_workflow_impl(
-            project_root,
-            secrets,
-            RunWorkflowRequest {
-                workflow_id,
-                start_node_id: None,
-                initial_inputs: BTreeMap::new(),
-            },
-        )?)
+        Some(workflow_runner(RunWorkflowRequest {
+            workflow_id,
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        })?)
     } else {
         None
     };
@@ -2414,6 +2430,7 @@ pub fn project_ai_chat_impl(
             &request.chat_history,
             &request.message,
             &workflow_tools,
+            workflow_runner,
         )?;
         if workflow_run.is_none() {
             workflow_run = tool_workflow_run;
@@ -2457,6 +2474,7 @@ fn project_ai_answer(
     chat_history: &[ProjectAiChatMessage],
     message: &str,
     workflow_tools: &[ProjectWorkflowTool],
+    workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
 ) -> CommandResult<(String, Option<WorkflowRunStarted>)> {
     let runtime = llm_runtime(project_root, secrets)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
@@ -2486,15 +2504,11 @@ fn project_ai_answer(
                 .cloned()
                 .map(|tool| (tool, call.arguments.clone()))
         }) {
-        Some(run_workflow_impl(
-            project_root,
-            secrets,
-            RunWorkflowRequest {
-                workflow_id: tool.workflow_id,
-                start_node_id: Some(tool.start_node_id),
-                initial_inputs: workflow_tool_initial_inputs(arguments)?,
-            },
-        )?)
+        Some(workflow_runner(RunWorkflowRequest {
+            workflow_id: tool.workflow_id,
+            start_node_id: Some(tool.start_node_id),
+            initial_inputs: workflow_tool_initial_inputs(arguments)?,
+        })?)
     } else {
         None
     };

@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use ariadne::commands::{
     create_checkpoint_impl, fetch_provider_models_impl, get_app_settings_impl,
@@ -10,8 +11,8 @@ use ariadne::commands::{
     get_document_content_impl, get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
     get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
     get_rag_settings_impl, get_template_repository_settings_impl, get_workflow_settings_impl,
-    load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat_impl,
-    resolve_confirmation_impl, resolve_project_references, run_workflow_impl,
+    load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl,
+    resolve_confirmation_impl, resolve_project_references, run_workflow, run_workflow_impl,
     save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
     save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
     save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
@@ -30,12 +31,31 @@ use ariadne::contracts::{
 use ariadne::diagnostics::DiagnosticStatus;
 use ariadne::frontend::{ConfirmationLogEntry, ConfirmationLogState, FileConfirmationLogStore};
 use ariadne::workflow::{
-    RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRuntime,
-    WorkflowRuntimeStore,
+    RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRunState,
+    WorkflowRuntime, WorkflowRuntimeStore,
 };
 use serde_json::{json, Value};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn wait_for_terminal_workflow_state(
+    store: &SqliteWorkflowRuntimeStore,
+    workflow_id: &WorkflowId,
+    run_id: &RunId,
+) -> WorkflowRunState {
+    let mut last = None;
+    for _ in 0..50 {
+        last = store.load_state(workflow_id, run_id).unwrap();
+        if last
+            .as_ref()
+            .is_some_and(|state| state.status.is_terminal())
+        {
+            return last.unwrap();
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    last.expect("workflow state should be persisted by background worker")
+}
 
 #[test]
 fn document_commands_read_tree_and_round_trip_content() {
@@ -262,6 +282,51 @@ fn run_workflow_executes_document_nodes_with_real_document_service() {
     .unwrap();
 
     assert_eq!(run.status, "succeeded");
+}
+
+#[test]
+fn run_workflow_command_starts_background_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "async-run".to_owned(),
+            name: "Async Run".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-main".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Start".to_owned()),
+                data: json!({
+                    "work_dir": "main"
+                }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let run = run_workflow(
+        &state,
+        "async-run".to_owned(),
+        Some("start-main".to_owned()),
+    )
+    .unwrap();
+
+    assert_eq!(run.status, "queued");
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let run_id = RunId::from(run.run_id);
+    let state = wait_for_terminal_workflow_state(&store, &WorkflowId::from("async-run"), &run_id);
+
+    assert_eq!(state.status, RunStatus::Succeeded);
+    assert!(state.nodes.contains_key(&NodeId::from("start-main")));
 }
 
 #[test]
@@ -1182,7 +1247,7 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
         stream.write_all(response.as_bytes()).unwrap();
     });
 
-    let secrets = MemorySecretStore::default();
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
     save_provider_settings_impl(
         temp.path(),
         ProviderSettingsUpdate {
@@ -1206,15 +1271,16 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
     .unwrap();
     save_provider_key_impl(
         temp.path(),
-        &secrets,
+        secrets.as_ref(),
         "local_chat".to_owned(),
         "local-key".to_owned(),
     )
     .unwrap();
 
-    let response = project_ai_chat_impl(
-        temp.path(),
-        &secrets,
+    let app_state = tempfile::tempdir().unwrap();
+    let state = AriadneAppState::new(temp.path(), app_state.path(), secrets);
+    let response = project_ai_chat(
+        &state,
         ProjectAiRequest {
             message: "启动草稿工具".to_owned(),
             chat_history: Vec::new(),
@@ -1227,16 +1293,12 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
     server.join().unwrap();
 
     let workflow_run = response.workflow_run.unwrap();
-    assert_eq!(workflow_run.status, "succeeded");
+    assert_eq!(workflow_run.status, "queued");
     assert_eq!(response.answer, "ui.project_ai.workflow_tool_started");
     let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
-    let state = store
-        .load_state(
-            &WorkflowId::from("tool-flow"),
-            &RunId::from(workflow_run.run_id),
-        )
-        .unwrap()
-        .unwrap();
+    let run_id = RunId::from(workflow_run.run_id);
+    let state = wait_for_terminal_workflow_state(&store, &WorkflowId::from("tool-flow"), &run_id);
+    assert_eq!(state.status, RunStatus::Succeeded);
     assert!(state.nodes.contains_key(&NodeId::from("start-draft")));
 }
 
