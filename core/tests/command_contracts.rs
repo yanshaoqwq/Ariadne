@@ -13,18 +13,19 @@ use ariadne::commands::{
     get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
     get_provider_config_impl, get_rag_settings_impl, get_template_repository_settings_impl,
     get_workflow_settings_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
-    pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl, resolve_confirmation_impl,
-    resolve_project_references, run_workflow, run_workflow_impl, save_app_settings_impl,
-    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
-    save_node_preset_settings_impl, save_permissions_settings_impl, save_provider_key_impl,
-    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings_impl,
-    save_workflow_graph_impl, save_workflow_settings_impl, update_budget_config_impl,
-    validate_display_name_language_pack, AppSettings, AriadneAppState, AutomationSettings,
-    CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
-    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, NodePresetSettings,
-    PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest,
-    ProviderSettingsUpdate, RagSettings, ResolveConfirmationRequest, TemplateRepositorySettings,
-    WorkflowGraphData, WorkflowSettings,
+    pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl, query_run_logs,
+    resolve_confirmation_impl, resolve_project_references, restore_to_new_branch, run_workflow,
+    run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
+    save_document_content_impl, save_git_settings_impl, save_node_preset_settings_impl,
+    save_permissions_settings_impl, save_provider_key_impl, save_provider_settings_impl,
+    save_rag_settings_impl, save_template_repository_settings_impl, save_workflow_graph_impl,
+    save_workflow_settings_impl, update_budget_config_impl, validate_display_name_language_pack,
+    AppSettings, AriadneAppState, AutomationSettings, CanvasEdge, CanvasNode,
+    ConfirmationAutoModePolicy, ConfirmationDecision, ConfirmationNormalPolicy,
+    ConfirmationPolicySetting, GitSettings, NodePresetSettings, PermissionsSettings,
+    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate, RagSettings,
+    ResolveConfirmationRequest, RunLogQuery, TemplateRepositorySettings, WorkflowGraphData,
+    WorkflowSettings,
 };
 use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
 use ariadne::contracts::{
@@ -1382,6 +1383,48 @@ fn git_repository_status_reports_branch_head_and_worktree_diff() {
     assert!(status.dirty);
     assert!(status.diff_line_count > 0);
     assert!(status.diff_preview.contains("changed"));
+}
+
+#[test]
+fn git_restore_command_records_rebuild_followup_log() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    run_git(temp.path(), ["config", "user.name", "Ariadne Test"]);
+    run_git(
+        temp.path(),
+        ["config", "user.email", "ariadne@example.test"],
+    );
+    std::fs::write(temp.path().join("documents").join("chapter.md"), "base").unwrap();
+    let checkpoint = create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let report = restore_to_new_branch(
+        &state,
+        checkpoint.commit_id.clone(),
+        "restore/base".to_owned(),
+    )
+    .unwrap();
+    let logs = query_run_logs(
+        &state,
+        Some(RunLogQuery {
+            query: Some("Git restore".to_owned()),
+            ..RunLogQuery::default()
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(report.new_branch, "restore/base");
+    assert!(report.index_rebuild_required);
+    assert!(report.runtime_rebind_required);
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].level, ariadne::frontend::UiRunLogLevel::Warning);
+    assert_eq!(logs[0].metadata["source"], "git_restore");
+    assert_eq!(logs[0].metadata["new_branch"], "restore/base");
 }
 
 #[test]

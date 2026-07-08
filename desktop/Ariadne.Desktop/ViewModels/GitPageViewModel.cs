@@ -262,7 +262,11 @@ public sealed class GitPageViewModel : ViewModelBase
                 return;
             }
             var report = await _backend.RestoreToNewBranchAsync(commit.CommitId, branch).ConfigureAwait(true);
-            StatusText = report.NewBranch;
+            StatusText = _displayNames.Format("ui.git.restore_done", new Dictionary<string, string>
+            {
+                ["branch"] = report.NewBranch,
+                ["followup"] = RestoreFollowUpText(report),
+            });
             RestoreBranchName = string.Empty;
             await RefreshAsync().ConfigureAwait(true);
             await _reloadProjectData().ConfigureAwait(true);
@@ -276,6 +280,17 @@ public sealed class GitPageViewModel : ViewModelBase
     private void ViewDetails(GitHistoryItemViewModel? commit)
     {
         StatusText = commit?.Summary ?? NoSelectionText;
+    }
+
+    private string RestoreFollowUpText(RestoreReport report)
+    {
+        return (report.IndexRebuildRequired, report.RuntimeRebindRequired) switch
+        {
+            (true, true) => _displayNames.Text("ui.git.restore_followup.index_runtime"),
+            (true, false) => _displayNames.Text("ui.git.restore_followup.index"),
+            (false, true) => _displayNames.Text("ui.git.restore_followup.runtime"),
+            _ => _displayNames.Text("ui.git.restore_followup.none"),
+        };
     }
 
     private void ApplyRepositoryStatus(GitRepositoryStatus status)

@@ -1625,9 +1625,11 @@ pub fn restore_to_new_branch(
     new_branch: String,
 ) -> CommandResult<RestoreReport> {
     let project_root = project_root_from_state(&state, None)?;
-    GitService::new(project_root)
+    let report = GitService::new(&project_root)
         .restore_to_new_branch(&commit_id, &new_branch)
-        .map_err(error_to_string)
+        .map_err(error_to_string)?;
+    record_git_restore_log(&project_root, &report);
+    Ok(report)
 }
 
 pub fn get_provider_config(state: &AriadneAppState) -> CommandResult<ProviderConfigStatus> {
@@ -2800,6 +2802,37 @@ pub fn create_checkpoint_impl(project_root: &Path, message: String) -> CommandRe
     GitService::new(project_root)
         .create_archive_point_with_policy(&name, Some(&name), &policy)
         .map_err(error_to_string)
+}
+
+fn record_git_restore_log(project_root: &Path, report: &RestoreReport) {
+    let message = format!(
+        "Git restore checked out branch {} from {}; index_rebuild_required={}, runtime_rebind_required={}",
+        report.new_branch,
+        report.base_commit,
+        report.index_rebuild_required,
+        report.runtime_rebind_required
+    );
+    let entry = UiRunLogEntry {
+        log_id: format!("git-restore-{}", report.base_commit),
+        timestamp_ms: 0,
+        kind: UiRunLogKind::Diagnostic,
+        level: UiRunLogLevel::Warning,
+        message,
+        workflow_id: None,
+        run_id: None,
+        node_id: None,
+        unread: true,
+        metadata: json!({
+            "source": "git_restore",
+            "new_branch": report.new_branch,
+            "base_commit": report.base_commit,
+            "index_rebuild_required": report.index_rebuild_required,
+            "runtime_rebind_required": report.runtime_rebind_required,
+        }),
+    };
+    if let Err(error) = UiRunLogStore::default_for_project(project_root).append(entry) {
+        eprintln!("[ariadne] failed to record git restore log: {error}");
+    }
 }
 
 fn git_stage_policy_from_config(config: &GitConfig) -> GitStagePolicy {
