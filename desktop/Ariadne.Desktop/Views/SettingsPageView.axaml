@@ -330,7 +330,13 @@
             <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ThemeLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding ThemeOptions}" SelectedItem="{Binding Theme, Mode=TwoWay}" />
+                <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding ThemeOptions}" SelectedItem="{Binding SelectedThemeOption, Mode=TwoWay}">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:ThemeOption}">
+                      <TextBlock Text="{Binding Label}" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding GitAutoColorLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding GitAutoColor, Mode=TwoWay}" />
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding GitManualColorLabel}" Classes="secondary" VerticalAlignment="Center" />

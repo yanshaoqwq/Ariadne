@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Ariadne.Desktop;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -203,6 +204,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
 
+        ThemeApplication.Apply(status.Preferences.Theme);
         await EnterProjectAsync(status.CurrentProject, createPage: false).ConfigureAwait(true);
         await RefreshSidebarBadgesAsync(status.Badges).ConfigureAwait(true);
     }

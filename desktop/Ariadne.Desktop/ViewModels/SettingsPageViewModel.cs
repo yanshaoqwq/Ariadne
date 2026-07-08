@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Ariadne.Desktop;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -215,7 +216,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             "open_ai", "anthropic", "gemini", "open_ai_compatible", "local", "other",
         };
 
-        ThemeOptions = new ObservableCollection<string> { "system", "light", "dark" };
+        ThemeOptions = new ObservableCollection<ThemeOption>
+        {
+            new("system", displayNames.Text("ui.settings.personalization.theme.system")),
+            new("light", displayNames.Text("ui.settings.personalization.theme.light")),
+            new("dark", displayNames.Text("ui.settings.personalization.theme.dark")),
+        };
         ConfirmationPolicies = new ObservableCollection<ConfirmationPolicyViewModel>();
         NodePresets = new ObservableCollection<NodeTypePresetViewModel>();
         AvailableModels = new ObservableCollection<ModelOptionViewModel>();
@@ -312,7 +318,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool IsSectionDiagnosticsSelected => IsSectionSelected("diagnostics");
     public ObservableCollection<LanguageOption> LanguageOptions { get; }
     public ObservableCollection<string> ProviderTypeOptions { get; }
-    public ObservableCollection<string> ThemeOptions { get; }
+    public ObservableCollection<ThemeOption> ThemeOptions { get; }
     public ObservableCollection<ConfirmationPolicyViewModel> ConfirmationPolicies { get; }
     public ObservableCollection<NodeTypePresetViewModel> NodePresets { get; }
     public ObservableCollection<ModelOptionViewModel> AvailableModels { get; }
@@ -482,7 +488,28 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ReadableRootsText { get => _readableRootsText; set => SetProperty(ref _readableRootsText, value); }
     public string WritableRootsText { get => _writableRootsText; set => SetProperty(ref _writableRootsText, value); }
 
-    public string Theme { get => _theme; set => SetProperty(ref _theme, value); }
+    public string Theme
+    {
+        get => _theme;
+        set
+        {
+            if (SetProperty(ref _theme, value))
+            {
+                OnPropertyChanged(nameof(SelectedThemeOption));
+            }
+        }
+    }
+    public ThemeOption? SelectedThemeOption
+    {
+        get => ThemeOptions.FirstOrDefault(option => option.Code == Theme);
+        set
+        {
+            if (value is not null)
+            {
+                Theme = value.Code;
+            }
+        }
+    }
     public string GitAutoColor { get => _gitAutoColor; set => SetProperty(ref _gitAutoColor, value); }
     public string GitManualColor { get => _gitManualColor; set => SetProperty(ref _gitManualColor, value); }
     public bool ProjectPanelVisible { get => _projectPanelVisible; set => SetProperty(ref _projectPanelVisible, value); }
@@ -951,6 +978,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 _uiPreferences?.PanelStates ?? new Dictionary<string, bool>(),
                 OnboardingSeen);
             await _backend.SaveUiPreferencesAsync(preferences).ConfigureAwait(true);
+            ThemeApplication.Apply(preferences.Theme);
             _uiPreferences = preferences;
         });
     }
@@ -971,6 +999,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 _uiPreferences?.PanelStates ?? new Dictionary<string, bool>(),
                 OnboardingSeen);
             await _backend.SaveUiPreferencesAsync(preferences).ConfigureAwait(true);
+            ThemeApplication.Apply(preferences.Theme);
             _uiPreferences = preferences;
             StatusText = _displayNames.Text("ui.common.configured");
             if (wasDirty)
@@ -1351,6 +1380,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             };
         }
 
+        foreach (var option in ThemeOptions)
+        {
+            option.Label = option.Code switch
+            {
+                "system" => _displayNames.Text("ui.settings.personalization.theme.system"),
+                "light" => _displayNames.Text("ui.settings.personalization.theme.light"),
+                "dark" => _displayNames.Text("ui.settings.personalization.theme.dark"),
+                _ => option.Label,
+            };
+        }
+
         foreach (var tab in Tabs)
         {
             tab.Title = tab.Id switch
@@ -1480,6 +1520,20 @@ public sealed class LanguageOption : ViewModelBase
     private string _label;
 
     public LanguageOption(string code, string label)
+    {
+        Code = code;
+        _label = label;
+    }
+
+    public string Code { get; }
+    public string Label { get => _label; set => SetProperty(ref _label, value); }
+}
+
+public sealed class ThemeOption : ViewModelBase
+{
+    private string _label;
+
+    public ThemeOption(string code, string label)
     {
         Code = code;
         _label = label;

@@ -15,6 +15,9 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+sha2 = "0.10"
 tantivy = "0.22"
 thiserror = "1"
 wasmi = "0.40"

@@ -1,4 +1,6 @@
 use std::io::{self, BufRead};
+use std::thread;
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -82,11 +84,55 @@ pub fn run_single_call(method: &str, params_json: Option<&str>) -> CommandResult
     ))
 }
 
+pub fn run_watch_workflow_events(
+    workflow_id: &str,
+    run_id: &str,
+    after_sequence: u64,
+    limit: Option<usize>,
+    interval_ms: u64,
+) -> CommandResult<()> {
+    if workflow_id.trim().is_empty() {
+        return Err("workflow_id cannot be empty".to_owned());
+    }
+    if run_id.trim().is_empty() {
+        return Err("run_id cannot be empty".to_owned());
+    }
+    let state = AriadneAppState::default_for_process();
+    let mut next_sequence = after_sequence;
+    let interval = Duration::from_millis(interval_ms.max(50));
+    loop {
+        let result = commands::get_workflow_events(
+            &state,
+            workflow_id.to_owned(),
+            run_id.to_owned(),
+            Some(next_sequence),
+            limit,
+        )?;
+        let terminal = workflow_status_is_terminal(&result.status);
+        if !result.events.is_empty() || terminal {
+            next_sequence = result.next_sequence;
+            println!(
+                "{}",
+                serde_json::to_string(&IpcResponse::ok(&result))
+                    .map_err(|error| error.to_string())?
+            );
+        }
+        if terminal {
+            return Ok(());
+        }
+        thread::sleep(interval);
+    }
+}
+
 pub fn parse_call_params(params_json: Option<&str>) -> CommandResult<Value> {
     let Some(params_json) = params_json.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(Value::Null);
     };
     serde_json::from_str(params_json).map_err(|error| format!("invalid ipc params JSON: {error}"))
+}
+
+fn workflow_status_is_terminal(status: &str) -> bool {
+    matches!(status, "stopped" | "succeeded" | "failed")
 }
 
 fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResult<Value> {
