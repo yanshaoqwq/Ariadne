@@ -29,6 +29,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _backendStatus = displayNames.Text("ui.status.unavailable");
         _budgetStatusText = displayNames.Text("ui.common.none");
         ProjectMenuItems = new ObservableCollection<ProjectMenuItemViewModel>();
+        ToggleSidebarCommand = new RelayCommand(() => SidebarExpanded = !SidebarExpanded);
 
         // 上组：创作主流程
         PrimaryNavigationItems = new ObservableCollection<NavigationItemViewModel>
@@ -132,8 +133,16 @@ public sealed class MainWindowViewModel : ViewModelBase
     public bool SidebarExpanded
     {
         get => _sidebarExpanded;
-        set => SetProperty(ref _sidebarExpanded, value);
+        set
+        {
+            if (SetProperty(ref _sidebarExpanded, value))
+            {
+                OnPropertyChanged(nameof(SidebarWidth));
+            }
+        }
     }
+
+    public double SidebarWidth => SidebarExpanded ? 204 : 44;
 
     public object CurrentPage
     {
@@ -141,7 +150,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         private set => SetProperty(ref _currentPage, value);
     }
 
-    public RelayCommand ToggleSidebarCommand => new(() => SidebarExpanded = !SidebarExpanded);
+    public RelayCommand ToggleSidebarCommand { get; }
 
     public RelayCommand OpenVersionCommand => new(() => _ = ShowVersionAsync());
 

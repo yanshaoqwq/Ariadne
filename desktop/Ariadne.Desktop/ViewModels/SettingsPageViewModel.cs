@@ -202,14 +202,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _displayNames = displayNames;
         _backend = backend;
         _openTemplateMarket = openTemplateMarket;
-        _selectedLanguage = displayNames.CurrentLanguage;
+        _selectedLanguage = NormalizeAvailableLanguage(displayNames.CurrentLanguage);
         _statusText = displayNames.Text("ui.common.loading");
 
         LanguageOptions = new ObservableCollection<LanguageOption>
         {
             new("zh", displayNames.Text("ui.settings.misc.language.zh")),
-            new("en", displayNames.Text("ui.settings.misc.language.en")),
-            new("ja", displayNames.Text("ui.settings.misc.language.ja")),
         };
 
         ProviderTypeOptions = new ObservableCollection<string>
@@ -505,11 +503,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         get => _selectedLanguage;
         set
         {
-            if (SetProperty(ref _selectedLanguage, value))
+            var language = NormalizeAvailableLanguage(value);
+            if (SetProperty(ref _selectedLanguage, language))
             {
-                _displayNames.SwitchLanguage(value);
+                _displayNames.SwitchLanguage(language);
                 RefreshLocalizedText();
-                _ = PersistLanguageAsync(value);
+                _ = PersistLanguageAsync(language);
             }
         }
     }
@@ -518,7 +517,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void ApplySavedLanguage(string locale)
     {
-        var language = DisplayNameService.NormalizeLanguageCode(locale);
+        var language = NormalizeAvailableLanguage(locale);
         if (_displayNames.CurrentLanguage != language)
         {
             _displayNames.SwitchLanguage(language);
@@ -526,6 +525,16 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         RefreshLocalizedText();
         _selectedLanguage = language;
         OnPropertyChanged(nameof(SelectedLanguage));
+        if (!string.Equals(locale, language, StringComparison.OrdinalIgnoreCase))
+        {
+            _ = PersistLanguageAsync(language);
+        }
+    }
+
+    private static string NormalizeAvailableLanguage(string? language)
+    {
+        var normalized = DisplayNameService.NormalizeLanguageCode(language);
+        return normalized == "zh" ? normalized : "zh";
     }
 
     private void SelectTab(SettingsTabViewModel tab)
@@ -1339,8 +1348,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             option.Label = option.Code switch
             {
                 "zh" => _displayNames.Text("ui.settings.misc.language.zh"),
-                "en" => _displayNames.Text("ui.settings.misc.language.en"),
-                "ja" => _displayNames.Text("ui.settings.misc.language.ja"),
                 _ => option.Label,
             };
         }
@@ -1543,7 +1550,7 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
         _label = label;
         _markDirty = markDirty;
         _normalAllowByDefault = normalPolicy == "allow_by_default";
-        _autoModeAutoApproval = string.IsNullOrWhiteSpace(autoModePolicy) || autoModePolicy == "auto_approval";
+        _autoModeAutoApproval = autoModePolicy == "auto_approval";
     }
 
     public string Kind { get; }

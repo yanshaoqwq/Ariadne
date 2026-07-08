@@ -85,6 +85,12 @@ public interface IAriadneBackendClient
 
     Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default);
 
+    Task<ProjectAiResponse> ProjectAiChatAsync(
+        string message,
+        IReadOnlyList<ProjectAiChatMessage> chatHistory,
+        string? workflowIdToRun = null,
+        CancellationToken cancellationToken = default);
+
     Task<string> ReadProjectMemoryAsync(CancellationToken cancellationToken = default);
 
     Task<string> AppendProjectMemoryAsync(string content, CancellationToken cancellationToken = default);

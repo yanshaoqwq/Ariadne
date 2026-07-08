@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
+using Avalonia.Interactivity;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -9,6 +10,8 @@ namespace Ariadne.Desktop.Views;
 public partial class WorksPageView : UserControl
 {
     private WorksPageViewModel? _attachedViewModel;
+    private TextBox? _activeBlockEditor;
+    private DocumentBlockViewModel? _activeBlock;
 
     public WorksPageView()
     {
@@ -17,7 +20,7 @@ public partial class WorksPageView : UserControl
         AttachEditorActions();
     }
 
-    private void OnDocumentEditorKeyDown(object? sender, KeyEventArgs e)
+    private void OnDocumentBlockEditorKeyDown(object? sender, KeyEventArgs e)
     {
         var hasCommandModifier = e.KeyModifiers.HasFlag(KeyModifiers.Control)
                                  || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
@@ -28,6 +31,12 @@ public partial class WorksPageView : UserControl
 
         viewModel.QuickAiCommand.Execute(null);
         e.Handled = true;
+    }
+
+    private void OnDocumentBlockEditorGotFocus(object? sender, RoutedEventArgs e)
+    {
+        _activeBlockEditor = sender as TextBox;
+        _activeBlock = _activeBlockEditor?.DataContext as DocumentBlockViewModel;
     }
 
     private void AttachEditorActions()
@@ -48,9 +57,12 @@ public partial class WorksPageView : UserControl
         viewModel.RequestEditorCopy = () => _ = CopySelectionAsync();
         viewModel.RequestEditorSelectAll = () =>
         {
-            DocumentEditor.SelectionStart = 0;
-            DocumentEditor.SelectionEnd = DocumentEditor.Text?.Length ?? 0;
-            DocumentEditor.Focus();
+            if (_activeBlockEditor is not null)
+            {
+                _activeBlockEditor.SelectionStart = 0;
+                _activeBlockEditor.SelectionEnd = _activeBlockEditor.Text?.Length ?? 0;
+                _activeBlockEditor.Focus();
+            }
         };
         viewModel.RequestEditorSelection = CurrentEditorSelection;
         _attachedViewModel = viewModel;
@@ -71,17 +83,25 @@ public partial class WorksPageView : UserControl
 
     private EditorTextSelection CurrentEditorSelection()
     {
-        var start = Math.Min(DocumentEditor.SelectionStart, DocumentEditor.SelectionEnd);
-        var end = Math.Max(DocumentEditor.SelectionStart, DocumentEditor.SelectionEnd);
-        return new EditorTextSelection(start, end, DocumentEditor.SelectedText ?? string.Empty);
+        if (DataContext is WorksPageViewModel viewModel
+            && _activeBlockEditor is not null
+            && _activeBlock is not null)
+        {
+            var start = Math.Min(_activeBlockEditor.SelectionStart, _activeBlockEditor.SelectionEnd);
+            var end = Math.Max(_activeBlockEditor.SelectionStart, _activeBlockEditor.SelectionEnd);
+            return viewModel.SelectionForBlock(_activeBlock, start, end, _activeBlockEditor.SelectedText ?? string.Empty);
+        }
+        return new EditorTextSelection(0, 0, string.Empty);
     }
 
     private async Task CopySelectionAsync()
     {
-        var selectedText = DocumentEditor.SelectedText;
+        var selectedText = _activeBlockEditor?.SelectedText;
         if (string.IsNullOrEmpty(selectedText))
         {
-            selectedText = DocumentEditor.Text ?? string.Empty;
+            selectedText = DataContext is WorksPageViewModel viewModel
+                ? viewModel.DocumentContent
+                : string.Empty;
         }
         var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
         if (clipboard is not null)

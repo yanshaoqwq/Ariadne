@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Avalonia.Media;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -28,6 +29,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _confirmationReason = string.Empty;
     private string _annotationTitle = string.Empty;
     private IReadOnlyList<CanvasEdge> _edges = Array.Empty<CanvasEdge>();
+    private readonly List<ProjectAiChatMessage> _projectAiHistory = new();
     private CanvasNode? _clipboardNode;
     private WorkflowNodeViewModel? _selectedNode;
     private ConfirmationItemViewModel? _selectedConfirmation;
@@ -330,6 +332,37 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool HasCurrentRun() => !string.IsNullOrWhiteSpace(CurrentRunId);
     private bool HasProjectAiMessage() => !string.IsNullOrWhiteSpace(ProjectAiMessage);
     private bool CanResolveConfirmation() => SelectedConfirmation is not null && HasCurrentRun();
+
+    public void CreateDataEdge(string sourceNodeId, string targetNodeId)
+    {
+        if (string.Equals(sourceNodeId, targetNodeId, StringComparison.Ordinal))
+        {
+            return;
+        }
+        if (Edges.Any(edge => edge.Source == sourceNodeId
+                              && edge.Target == targetNodeId
+                              && string.Equals(edge.Kind, "data", StringComparison.OrdinalIgnoreCase)))
+        {
+            StatusText = EdgeDetailsText;
+            return;
+        }
+        var edge = new CanvasEdge(
+            $"edge-{Guid.NewGuid():N}",
+            sourceNodeId,
+            targetNodeId,
+            "output",
+            "input",
+            "data",
+            null,
+            new Dictionary<string, object?>());
+        var viewModel = new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge, RefreshDirtyState);
+        Edges.Add(viewModel);
+        _edges = Edges.Select(item => item.ToCanvasEdge()).ToArray();
+        SelectEdge(viewModel);
+        RefreshDirtyState();
+        OnPropertyChanged(nameof(EdgeCountText));
+        StatusText = EdgeDetailsText;
+    }
 
     public string CtxAddNodeText => _displayNames.Text("ui.workspace.context.add_node");
     public string CtxAddStartText => _displayNames.Text("ui.workspace.context.add_start");
@@ -715,8 +748,15 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
             var result = await _backend.ProjectAiChatAsync(
                 ProjectAiMessage,
+                _projectAiHistory,
                 ProjectAiMessage.Contains("/run", StringComparison.OrdinalIgnoreCase) ? DefaultWorkflowId : null).ConfigureAwait(true);
             ProjectAiAnswer = result.Answer;
+            _projectAiHistory.Clear();
+            foreach (var message in result.ChatHistory)
+            {
+                _projectAiHistory.Add(message);
+            }
+            ProjectAiMessage = string.Empty;
             StatusText = result.WorkflowRun?.Status ?? _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
@@ -1384,6 +1424,31 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
     public bool IsCommunication => string.Equals(Kind, "communication", StringComparison.OrdinalIgnoreCase);
+    public Geometry EdgePath { get; private set; } = new PathGeometry();
+
+    public void UpdateEdgePath(double sourceX, double sourceY, double targetX, double targetY)
+    {
+        const double nodeWidth = 202.0;
+        const double portOffsetY = 38.0;
+        var startX = sourceX + nodeWidth;
+        var startY = sourceY + portOffsetY;
+        var endX = targetX;
+        var endY = targetY + portOffsetY;
+        var controlOffset = Math.Max(44.0, Math.Abs(endX - startX) * 0.5);
+        var geometry = new PathGeometry();
+        var figure = new PathFigure { StartPoint = new Avalonia.Point(startX, startY) };
+        figure.Segments ??= new PathSegments();
+        figure.Segments.Add(new BezierSegment
+        {
+            Point1 = new Avalonia.Point(startX + controlOffset, startY),
+            Point2 = new Avalonia.Point(endX - controlOffset, endY),
+            Point3 = new Avalonia.Point(endX, endY),
+        });
+        geometry.Figures ??= new PathFigures();
+        geometry.Figures.Add(figure);
+        EdgePath = geometry;
+        OnPropertyChanged(nameof(EdgePath));
+    }
 
     protected override void OnPropertyChanged(string? propertyName = null)
     {

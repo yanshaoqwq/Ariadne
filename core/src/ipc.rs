@@ -192,6 +192,14 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
                 params.start_node_id,
             )?)
         }
+        "start_workflow" => {
+            let params: RunWorkflowParams = params(request.params)?;
+            ok(commands::start_workflow(
+                state,
+                params.workflow_id,
+                params.start_node_id,
+            )?)
+        }
         "pause_workflow" => {
             let params: RunControlParams = params(request.params)?;
             ok(commands::pause_workflow(

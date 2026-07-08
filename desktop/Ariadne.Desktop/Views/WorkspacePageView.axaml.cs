@@ -37,6 +37,10 @@ public partial class WorkspacePageView : UserControl
     private double _nodeDragOriginX;
     private double _nodeDragOriginY;
 
+    // ---- 端口拖线 ----
+    private bool _edgeDragging;
+    private WorkflowNodeViewModel? _edgeSourceNode;
+
     private bool _layoutInitialized;
     private WorkspacePageViewModel? _attachedViewModel;
 
@@ -58,6 +62,7 @@ public partial class WorkspacePageView : UserControl
         PositionBottomPill();
         PositionRightPill();
         SyncNodeContainerPositions();
+        SyncEdgePositions();
     }
 
     private void AttachViewActions()
@@ -66,6 +71,7 @@ public partial class WorkspacePageView : UserControl
         {
             _attachedViewModel.RequestFitView = null;
             _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
+            _attachedViewModel.Edges.CollectionChanged -= OnEdgesCollectionChanged;
             foreach (var node in _attachedViewModel.Nodes)
             {
                 node.PropertyChanged -= OnNodePropertyChanged;
@@ -77,12 +83,14 @@ public partial class WorkspacePageView : UserControl
         {
             viewModel.RequestFitView = FitViewToNodes;
             viewModel.Nodes.CollectionChanged += OnNodesCollectionChanged;
+            viewModel.Edges.CollectionChanged += OnEdgesCollectionChanged;
             foreach (var node in viewModel.Nodes)
             {
                 node.PropertyChanged += OnNodePropertyChanged;
             }
             _attachedViewModel = viewModel;
             ScheduleNodeContainerSync();
+            ScheduleEdgeSync();
         }
     }
 
@@ -92,6 +100,7 @@ public partial class WorkspacePageView : UserControl
         {
             _attachedViewModel.RequestFitView = null;
             _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
+            _attachedViewModel.Edges.CollectionChanged -= OnEdgesCollectionChanged;
             foreach (var node in _attachedViewModel.Nodes)
             {
                 node.PropertyChanged -= OnNodePropertyChanged;
@@ -119,6 +128,12 @@ public partial class WorkspacePageView : UserControl
             }
         }
         ScheduleNodeContainerSync();
+        ScheduleEdgeSync();
+    }
+
+    private void OnEdgesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        ScheduleEdgeSync();
     }
 
     private void OnNodePropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -126,12 +141,18 @@ public partial class WorkspacePageView : UserControl
         if (e.PropertyName is nameof(WorkflowNodeViewModel.X) or nameof(WorkflowNodeViewModel.Y))
         {
             ScheduleNodeContainerSync();
+            ScheduleEdgeSync();
         }
     }
 
     private void ScheduleNodeContainerSync()
     {
         Dispatcher.UIThread.Post(SyncNodeContainerPositions, DispatcherPriority.Background);
+    }
+
+    private void ScheduleEdgeSync()
+    {
+        Dispatcher.UIThread.Post(SyncEdgePositions, DispatcherPriority.Background);
     }
 
     // ===================== 收起/展开下栏（库底部 Pill 点击） =====================
@@ -327,6 +348,7 @@ public partial class WorkspacePageView : UserControl
         node.X = Clamp(newX, 0, Math.Max(0, CanvasOverlay.Bounds.Width - 202));
         node.Y = Clamp(newY, 0, Math.Max(0, CanvasOverlay.Bounds.Height - 150));
         SyncNodeContainerPositions();
+        SyncEdgePositions();
         e.Handled = true;
     }
 
@@ -349,6 +371,66 @@ public partial class WorkspacePageView : UserControl
         {
             node.SelectCommand.Execute(null);
         }
+    }
+
+    public void OnOutputPortPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (FindNodeDataContext(sender as Control) is not { } node
+            || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        _edgeDragging = true;
+        _edgeSourceNode = node;
+        node.SelectCommand.Execute(null);
+        e.Pointer.Capture((IInputElement?)sender);
+        e.Handled = true;
+    }
+
+    public void OnOutputPortPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (_edgeDragging)
+        {
+            e.Handled = true;
+        }
+    }
+
+    public void OnOutputPortPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (!_edgeDragging || _edgeSourceNode is null || DataContext is not WorkspacePageViewModel viewModel)
+        {
+            _edgeDragging = false;
+            _edgeSourceNode = null;
+            e.Pointer.Capture(null);
+            return;
+        }
+
+        var target = FindNodeAt(e.GetPosition(CanvasOverlay));
+        if (target is not null && target != _edgeSourceNode)
+        {
+            viewModel.CreateDataEdge(_edgeSourceNode.Id, target.Id);
+            SyncEdgePositions();
+        }
+
+        _edgeDragging = false;
+        _edgeSourceNode = null;
+        e.Pointer.Capture(null);
+        e.Handled = true;
+    }
+
+    private WorkflowNodeViewModel? FindNodeAt(Point canvasPosition)
+    {
+        if (DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return null;
+        }
+
+        return viewModel.Nodes.LastOrDefault(node =>
+            canvasPosition.X >= node.X
+            && canvasPosition.X <= node.X + 202
+            && canvasPosition.Y >= node.Y
+            && canvasPosition.Y <= node.Y + 150);
     }
 
     private static WorkflowNodeViewModel? FindNodeDataContext(Control? control)
@@ -392,7 +474,33 @@ public partial class WorkspacePageView : UserControl
 
         transform.X = Math.Max(0, 48 - minX);
         transform.Y = Math.Max(0, 48 - minY);
+        if (EdgesItemsControl?.RenderTransform is not TranslateTransform edgeTransform)
+        {
+            edgeTransform = new TranslateTransform();
+            EdgesItemsControl!.RenderTransform = edgeTransform;
+        }
+        edgeTransform.X = transform.X;
+        edgeTransform.Y = transform.Y;
         SyncNodeContainerPositions();
+        SyncEdgePositions();
+    }
+
+    private void SyncEdgePositions()
+    {
+        if (DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return;
+        }
+
+        var nodes = viewModel.Nodes.ToDictionary(node => node.Id, node => node);
+        foreach (var edge in viewModel.Edges)
+        {
+            if (nodes.TryGetValue(edge.Source, out var source)
+                && nodes.TryGetValue(edge.Target, out var target))
+            {
+                edge.UpdateEdgePath(source.X, source.Y, target.X, target.Y);
+            }
+        }
     }
 
     private static void SyncNodeContainerPositions(Control control)

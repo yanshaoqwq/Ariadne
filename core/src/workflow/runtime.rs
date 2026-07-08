@@ -647,6 +647,23 @@ impl WorkflowRuntime {
         persist_if_needed(store, &self.state)?;
 
         loop {
+            refresh_external_control(store, &mut self.state)?;
+            if self.state.control == RunControl::Stop {
+                self.stop("stop requested during run");
+                persist_if_needed(store, &self.state)?;
+                return Ok(self.state.status);
+            }
+            if self.state.control == RunControl::Pause {
+                self.pause(
+                    self.state
+                        .pause_reason
+                        .clone()
+                        .unwrap_or_else(|| "pause requested during run".to_owned()),
+                );
+                persist_if_needed(store, &self.state)?;
+                return Ok(self.state.status);
+            }
+
             // 待确认项是运行时硬暂停点。确认项没有解决前，下游节点不能依赖
             // pending 输出继续执行，否则会把未审批 patch 或意见传给后续节点。
             if self.state.has_pending_confirmations() {
@@ -692,8 +709,19 @@ impl WorkflowRuntime {
 
                 // Stop 可能在同一轮循环中由前一个节点设置。每个节点启动前都检查，
                 // 确保 Stop 不会继续推进下游。
+                refresh_external_control(store, &mut self.state)?;
                 if self.state.control == RunControl::Stop {
                     self.stop("stop requested during run");
+                    persist_if_needed(store, &self.state)?;
+                    return Ok(self.state.status);
+                }
+                if self.state.control == RunControl::Pause {
+                    self.pause(
+                        self.state
+                            .pause_reason
+                            .clone()
+                            .unwrap_or_else(|| "pause requested during run".to_owned()),
+                    );
                     persist_if_needed(store, &self.state)?;
                     return Ok(self.state.status);
                 }
@@ -915,9 +943,9 @@ impl WorkflowRuntime {
                 node_id.as_str()
             )));
         }
-        // 清理该节点控制下游的既有快照，使其在下一次 run 时以注入正文为输入重跑。
+        // 清理该节点 control/data 下游的既有快照，使其在下一次 run 时以注入正文为输入重跑。
         let mut closure = Vec::new();
-        collect_control_closure(workflow, node_id, &mut closure);
+        collect_downstream_closure(workflow, node_id, &mut closure);
         for downstream in &closure {
             if downstream != node_id {
                 self.state.nodes.remove(downstream);
@@ -1225,6 +1253,13 @@ impl WorkflowRuntime {
                 .insert(confirmation.confirmation_id.clone(), confirmation);
         }
 
+        let attempts = self
+            .state
+            .nodes
+            .get(&node_id)
+            .map(|node| node.execution_attempts)
+            .unwrap_or(1);
+
         self.state.nodes.insert(
             node_id.clone(),
             WorkflowNodeRuntimeState {
@@ -1240,7 +1275,7 @@ impl WorkflowRuntime {
                 metadata: output.metadata,
                 error: None,
                 error_state: None,
-                execution_attempts: previous_attempts(&self.state, &node_id),
+                execution_attempts: attempts,
             },
         );
     }
@@ -1581,7 +1616,7 @@ impl WorkflowRuntime {
             return Ok(());
         }
 
-        // 触发重跑时必须清理目标及其 control 下游快照。否则下游节点会因为
+        // 触发重跑时必须清理目标及其 control/data 下游快照。否则下游节点会因为
         // 旧状态是 Succeeded 而被幂等跳过，读到上一轮结果。
         *self
             .state
@@ -1597,6 +1632,7 @@ impl WorkflowRuntime {
                 "reason": loop_control.reason,
             }),
         );
+        let mut all_affected = Vec::new();
         for target in rerun_nodes {
             if !workflow.nodes.iter().any(|node| node.id == target) {
                 return Err(CoreError::validation(format!(
@@ -1605,17 +1641,15 @@ impl WorkflowRuntime {
                     target.as_str()
                 )));
             }
-            let mut affected = Vec::new();
-            collect_control_closure(workflow, &target, &mut affected);
-            for affected_node in &affected {
-                self.state.nodes.remove(affected_node);
-            }
-            // 重置涉及被清理节点的 communication 边状态
-            reset_communication_edges_for_nodes(&mut self.state, &affected, workflow);
+            collect_downstream_closure(workflow, &target, &mut all_affected);
             if !self.state.rerun_queue.contains(&target) {
                 self.state.rerun_queue.push(target);
             }
         }
+        for affected_node in &all_affected {
+            self.state.nodes.remove(affected_node);
+        }
+        reset_communication_edges_for_nodes(&mut self.state, &all_affected, workflow);
         Ok(())
     }
 
@@ -1679,6 +1713,30 @@ fn persist_if_needed(
 ) -> CoreResult<()> {
     if let Some(store) = store {
         store.save_state(state)?;
+    }
+    Ok(())
+}
+
+fn refresh_external_control(
+    store: Option<&dyn WorkflowRuntimeStore>,
+    state: &mut WorkflowRunState,
+) -> CoreResult<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let Some(latest) = store.load_state(&state.workflow_id, &state.run_id)? else {
+        return Ok(());
+    };
+    match latest.control {
+        RunControl::Stop => {
+            state.control = RunControl::Stop;
+            state.stop_reason = latest.stop_reason;
+        }
+        RunControl::Pause => {
+            state.control = RunControl::Pause;
+            state.pause_reason = latest.pause_reason;
+        }
+        RunControl::Continue => {}
     }
     Ok(())
 }
@@ -1831,7 +1889,7 @@ fn ready_nodes(workflow: &WorkflowDefinition, state: &WorkflowRunState) -> Vec<N
         if retry_backoff_ready(state, &node.id)
             && (pending_communication
                 || (!succeeded
-                    && control_dependencies_satisfied(workflow, state, &node.id)
+                    && dependencies_satisfied(workflow, state, &node.id)
                     && communication_start_ready(workflow, state, &node.id)))
         {
             ready.push(node.id.clone());
@@ -1915,8 +1973,8 @@ fn should_pause_for_breakpoint(
     true
 }
 
-/// 控制边依赖全部满足后节点才可运行。
-fn control_dependencies_satisfied(
+/// control/data 边依赖全部满足后节点才可运行。
+fn dependencies_satisfied(
     workflow: &WorkflowDefinition,
     state: &WorkflowRunState,
     node_id: &NodeId,
@@ -1924,7 +1982,8 @@ fn control_dependencies_satisfied(
     workflow
         .edges
         .iter()
-        .filter(|edge| edge.kind == WorkflowEdgeKind::Control && edge.to.node_id == *node_id)
+        .filter(|edge| edge.to.node_id == *node_id)
+        .filter(|edge| matches!(edge.kind, WorkflowEdgeKind::Control | WorkflowEdgeKind::Data))
         .all(|edge| {
             // Loop 回边是显式循环触发器，不应阻塞首轮运行。首轮时 Loop 节点还
             // 没有状态，因此把未完成的 Loop 回边视为已满足。
@@ -1946,8 +2005,8 @@ fn is_loop_back_edge(workflow: &WorkflowDefinition, edge: &Edge) -> bool {
         .any(|node| node.id == edge.from.node_id && node.type_name == "loop")
 }
 
-/// 收集从某个节点出发的 control 下游闭包。
-fn collect_control_closure(
+/// 收集从某个节点出发的 control/data 下游闭包。
+fn collect_downstream_closure(
     workflow: &WorkflowDefinition,
     node_id: &NodeId,
     affected: &mut Vec<NodeId>,
@@ -1959,9 +2018,10 @@ fn collect_control_closure(
     for edge in workflow
         .edges
         .iter()
-        .filter(|edge| edge.kind == WorkflowEdgeKind::Control && edge.from.node_id == *node_id)
+        .filter(|edge| edge.from.node_id == *node_id)
+        .filter(|edge| matches!(edge.kind, WorkflowEdgeKind::Control | WorkflowEdgeKind::Data))
     {
-        collect_control_closure(workflow, &edge.to.node_id, affected);
+        collect_downstream_closure(workflow, &edge.to.node_id, affected);
     }
 }
 
@@ -2183,12 +2243,22 @@ fn reset_communication_edges_for_nodes(
             continue;
         }
         if let Some(comm) = state.communication_edges.get_mut(&edge.id) {
+            let initiator = edge
+                .communication
+                .as_ref()
+                .map(|config| config.initiator_for_edge(edge).clone())
+                .unwrap_or_else(|| comm.initiator_node_id.clone());
+            comm.initiator_node_id = initiator.clone();
+            comm.next_sender_node_id = initiator;
             comm.completed = false;
             comm.completed_reason = None;
             comm.pause_reason = None;
             comm.message_count = 0;
+            comm.last_message_hash = None;
             comm.messages.clear();
-            // 保留 initiator_node_id 和 max_message_count，它们由边定义决定
+            if let Some(config) = edge.communication.as_ref() {
+                comm.max_message_count = config.max_communication_count;
+            }
         }
     }
 }

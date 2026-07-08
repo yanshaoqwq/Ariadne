@@ -4,11 +4,17 @@ using System.Text.Json;
 
 namespace Ariadne.Desktop.Backend;
 
-public sealed class JsonLineBackendClient : IAriadneBackendClient
+public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
 {
     private readonly string? _backendCommand;
     private readonly string _appStateRoot;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly SemaphoreSlim _ipcLock = new(1, 1);
+    private readonly StringBuilder _stderrBuffer = new();
+    private Process? _backendProcess;
+    private StreamWriter? _backendInput;
+    private StreamReader? _backendOutput;
+    private Task? _stderrPump;
     private string? _projectRoot;
 
     private JsonLineBackendClient(string? backendCommand)
@@ -205,7 +211,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
 
     public Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<WorkflowRunStarted>("run_workflow", new { workflow_id = workflowId, start_node_id = startNodeId }, cancellationToken);
+        return InvokeRequiredAsync<WorkflowRunStarted>("start_workflow", new { workflow_id = workflowId, start_node_id = startNodeId }, cancellationToken);
     }
 
     public Task<WorkflowRunStarted> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
@@ -230,12 +236,21 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
 
     public Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default)
     {
+        return ProjectAiChatAsync(message, Array.Empty<ProjectAiChatMessage>(), workflowIdToRun, cancellationToken);
+    }
+
+    public Task<ProjectAiResponse> ProjectAiChatAsync(
+        string message,
+        IReadOnlyList<ProjectAiChatMessage> chatHistory,
+        string? workflowIdToRun = null,
+        CancellationToken cancellationToken = default)
+    {
         return InvokeRequiredAsync<ProjectAiResponse>("project_ai_chat", new
         {
             request = new
             {
                 message,
-                chat_history = Array.Empty<object>(),
+                chat_history = chatHistory,
                 references = Array.Empty<string>(),
                 workflow_id_to_run = workflowIdToRun,
                 append_memory = (string?)null,
@@ -482,49 +497,14 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         {
             return default;
         }
-
-        var startInfo = new ProcessStartInfo
+        try
         {
-            FileName = ResolveCommandFileName(_backendCommand),
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            StandardInputEncoding = Encoding.UTF8,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
-        ApplyProjectEnvironment(startInfo);
-        foreach (var argument in ResolveCommandArguments(_backendCommand))
-        {
-            startInfo.ArgumentList.Add(argument);
+            return await SendRequestAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
         }
-
-        using var process = Process.Start(startInfo);
-        if (process is null)
+        catch
         {
             return default;
         }
-
-        var request = JsonSerializer.Serialize(new { method, @params = parameters ?? new { } }, _jsonOptions);
-        await process.StandardInput.WriteLineAsync(request.AsMemory(), cancellationToken).ConfigureAwait(false);
-        process.StandardInput.Close();
-
-        var output = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-
-        if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
-        {
-            return default;
-        }
-
-        var result = JsonSerializer.Deserialize<BackendResult<T>>(output, _jsonOptions);
-        if (result?.Ok != true)
-        {
-            return default;
-        }
-
-        return result.Data;
     }
 
     private async Task<IReadOnlyList<T>> InvokeRequiredListAsync<T>(
@@ -545,52 +525,10 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         {
             throw new InvalidOperationException("backend ipc command not found");
         }
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = ResolveCommandFileName(_backendCommand),
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            StandardInputEncoding = Encoding.UTF8,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
-        ApplyProjectEnvironment(startInfo);
-        foreach (var argument in ResolveCommandArguments(_backendCommand))
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        using var process = Process.Start(startInfo);
-        if (process is null)
-        {
-            throw new InvalidOperationException("failed to start backend ipc process");
-        }
-
-        var request = JsonSerializer.Serialize(new { method, @params = parameters ?? new { } }, _jsonOptions);
-        await process.StandardInput.WriteLineAsync(request.AsMemory(), cancellationToken).ConfigureAwait(false);
-        process.StandardInput.Close();
-
-        var output = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-        var stderr = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-
-        if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
-        {
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr) ? "backend ipc returned no response" : stderr.Trim());
-        }
-
-        var result = JsonSerializer.Deserialize<BackendResult<T>>(output, _jsonOptions)
-            ?? throw new InvalidOperationException("backend ipc returned invalid json");
-        if (!result.Ok)
-        {
-            throw new InvalidOperationException(result.Error ?? "backend command failed");
-        }
-        return result.Data is null
+        var data = await SendRequestAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
+        return data is null
             ? throw new InvalidOperationException("backend command returned empty data")
-            : result.Data;
+            : data;
     }
 
     private async Task InvokeCommandAsync(
@@ -598,6 +536,70 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
         object? parameters,
         CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(_backendCommand))
+        {
+            throw new InvalidOperationException("backend ipc command not found");
+        }
+        await SendRequestAsync<object>(method, parameters, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<T?> SendRequestAsync<T>(
+        string method,
+        object? parameters,
+        CancellationToken cancellationToken)
+    {
+        await _ipcLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            EnsureBackendProcess();
+            if (_backendInput is null || _backendOutput is null)
+            {
+                throw new InvalidOperationException("backend ipc process is not connected");
+            }
+
+            var request = JsonSerializer.Serialize(new { method, @params = parameters ?? new { } }, _jsonOptions);
+            await _backendInput.WriteLineAsync(request.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await _backendInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+            var output = await _backendOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(output))
+            {
+                ResetBackendProcess();
+                var stderr = CurrentBackendStderr();
+                throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr)
+                    ? "backend ipc returned no response"
+                    : stderr);
+            }
+
+            var result = JsonSerializer.Deserialize<BackendResult<T>>(output, _jsonOptions)
+                ?? throw new InvalidOperationException("backend ipc returned invalid json");
+            if (!result.Ok)
+            {
+                throw new InvalidOperationException(result.Error ?? "backend command failed");
+            }
+            return result.Data;
+        }
+        catch
+        {
+            if (_backendProcess?.HasExited == true)
+            {
+                ResetBackendProcess();
+            }
+            throw;
+        }
+        finally
+        {
+            _ipcLock.Release();
+        }
+    }
+
+    private void EnsureBackendProcess()
+    {
+        if (_backendProcess is { HasExited: false } && _backendInput is not null && _backendOutput is not null)
+        {
+            return;
+        }
+        ResetBackendProcess();
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
             throw new InvalidOperationException("backend ipc command not found");
@@ -620,31 +622,68 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient
             startInfo.ArgumentList.Add(argument);
         }
 
-        using var process = Process.Start(startInfo);
-        if (process is null)
+        _backendProcess = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("failed to start backend ipc process");
+        _backendInput = _backendProcess.StandardInput;
+        _backendOutput = _backendProcess.StandardOutput;
+        _stderrBuffer.Clear();
+        _stderrPump = Task.Run(async () =>
         {
-            throw new InvalidOperationException("failed to start backend ipc process");
-        }
+            try
+            {
+                while (_backendProcess is { HasExited: false }
+                       && await _backendProcess.StandardError.ReadLineAsync().ConfigureAwait(false) is { } line)
+                {
+                    lock (_stderrBuffer)
+                    {
+                        _stderrBuffer.AppendLine(line);
+                    }
+                }
+            }
+            catch
+            {
+                // stderr is diagnostic only; request/response errors are handled by stdout.
+            }
+        });
+    }
 
-        var request = JsonSerializer.Serialize(new { method, @params = parameters ?? new { } }, _jsonOptions);
-        await process.StandardInput.WriteLineAsync(request.AsMemory(), cancellationToken).ConfigureAwait(false);
-        process.StandardInput.Close();
-
-        var output = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-        var stderr = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-
-        if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
+    private string CurrentBackendStderr()
+    {
+        lock (_stderrBuffer)
         {
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr) ? "backend ipc returned no response" : stderr.Trim());
+            return _stderrBuffer.ToString().Trim();
         }
+    }
 
-        var result = JsonSerializer.Deserialize<BackendResult<object>>(output, _jsonOptions)
-            ?? throw new InvalidOperationException("backend ipc returned invalid json");
-        if (!result.Ok)
+    private void ResetBackendProcess()
+    {
+        try
         {
-            throw new InvalidOperationException(result.Error ?? "backend command failed");
+            _backendInput?.Dispose();
+            _backendOutput?.Dispose();
+            if (_backendProcess is { HasExited: false })
+            {
+                _backendProcess.Kill(entireProcessTree: true);
+            }
+            _backendProcess?.Dispose();
         }
+        catch
+        {
+            // Best-effort cleanup before reconnecting.
+        }
+        finally
+        {
+            _backendInput = null;
+            _backendOutput = null;
+            _backendProcess = null;
+            _stderrPump = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        ResetBackendProcess();
+        _ipcLock.Dispose();
     }
 
     private async Task<T> InvokeAndRememberProjectAsync<T>(

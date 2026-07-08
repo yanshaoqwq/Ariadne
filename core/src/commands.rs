@@ -246,7 +246,7 @@ pub enum ConfirmationAutoModePolicy {
 
 impl Default for ConfirmationAutoModePolicy {
     fn default() -> Self {
-        Self::AutoApproval
+        Self::AllowByDefault
     }
 }
 
@@ -765,7 +765,7 @@ pub fn run_workflow(
     state: &AriadneAppState,
     workflow_id: String,
     start_node_id: Option<String>,
-) -> CommandResult<String> {
+) -> CommandResult<WorkflowRunStarted> {
     let project_root = project_root_from_state(&state, None)?;
     let response = run_workflow_impl(
         &project_root,
@@ -776,7 +776,40 @@ pub fn run_workflow(
             initial_inputs: BTreeMap::new(),
         },
     )?;
-    Ok(response.run_id)
+    Ok(response)
+}
+
+pub fn start_workflow(
+    state: &AriadneAppState,
+    workflow_id: String,
+    start_node_id: Option<String>,
+) -> CommandResult<WorkflowRunStarted> {
+    let project_root = project_root_from_state(state, None)?;
+    validate_existing_project_root(&project_root)?;
+    let run_id = new_run_id()?;
+    let run_id_text = run_id.as_str().to_owned();
+    let request = RunWorkflowRequest {
+        workflow_id,
+        start_node_id,
+        initial_inputs: BTreeMap::new(),
+    };
+    let secrets = Arc::clone(&state.secret_store);
+    let worker_root = project_root.clone();
+    let worker_run_id = run_id.clone();
+    std::thread::Builder::new()
+        .name(format!("ariadne-workflow-{}", run_id.as_str()))
+        .spawn(move || {
+            if let Err(error) =
+                run_workflow_impl_with_run_id(&worker_root, secrets.as_ref(), request, worker_run_id)
+            {
+                eprintln!("[ariadne] workflow worker failed: {error}");
+            }
+        })
+        .map_err(error_to_string)?;
+    Ok(WorkflowRunStarted {
+        run_id: run_id_text,
+        status: "queued".to_owned(),
+    })
 }
 
 pub fn pause_workflow(
@@ -1438,6 +1471,15 @@ pub fn run_workflow_impl(
     secrets: &dyn SecretStore,
     request: RunWorkflowRequest,
 ) -> CommandResult<WorkflowRunStarted> {
+    run_workflow_impl_with_run_id(project_root, secrets, request, new_run_id()?)
+}
+
+fn run_workflow_impl_with_run_id(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    request: RunWorkflowRequest,
+    run_id: RunId,
+) -> CommandResult<WorkflowRunStarted> {
     validate_existing_project_root(project_root)?;
     let start_node_id = request.start_node_id.clone();
     let workflow = load_workflow_definition(project_root, Some(request.workflow_id))?;
@@ -1455,11 +1497,6 @@ pub fn run_workflow_impl(
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
     std::fs::create_dir_all(document_root.join("documents")).map_err(error_to_string)?;
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
-    let run_id = RunId::from(format!(
-        "run-{}-{:04x}",
-        now_timestamp_ms()?,
-        simple_random_u16()
-    ));
     let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).map_err(error_to_string)?;
     let documents = document_service_with_artifacts(
         &document_root,
@@ -2817,9 +2854,13 @@ fn policies_from_legacy_policy(
             ConfirmationNormalPolicy::AllowByDefault,
             ConfirmationAutoModePolicy::AutoApproval,
         ),
+        "manual" => (
+            ConfirmationNormalPolicy::ManualReview,
+            ConfirmationAutoModePolicy::AllowByDefault,
+        ),
         _ => (
             ConfirmationNormalPolicy::ManualReview,
-            ConfirmationAutoModePolicy::AutoApproval,
+            ConfirmationAutoModePolicy::AllowByDefault,
         ),
     }
 }
@@ -3662,6 +3703,14 @@ fn now_timestamp_ms() -> CommandResult<u128> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .map_err(error_to_string)
+}
+
+fn new_run_id() -> CommandResult<RunId> {
+    Ok(RunId::from(format!(
+        "run-{}-{:04x}",
+        now_timestamp_ms()?,
+        simple_random_u16()
+    )))
 }
 
 fn error_to_string(error: impl std::fmt::Display) -> String {

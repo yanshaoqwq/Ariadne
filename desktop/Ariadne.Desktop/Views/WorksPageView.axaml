@@ -41,9 +41,9 @@
         </Grid>
       </Border>
 
-      <!-- 正文阅读区：默认为排版阅读，修改模式才进入编辑器 -->
-      <ScrollViewer Background="{DynamicResource Ariadne.EditorBackground}">
-        <ScrollViewer.ContextMenu>
+      <!-- 正文阅读/编辑区：按块虚拟化渲染，避免整章 TextBox 常驻。 -->
+      <Grid Background="{DynamicResource Ariadne.EditorBackground}">
+        <Grid.ContextMenu>
           <ContextMenu Classes="ariadne">
             <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopyCommand}" />
             <MenuItem Header="{Binding CtxSelectAllText}" Command="{Binding SelectAllCommand}" />
@@ -53,7 +53,7 @@
             <Separator />
             <MenuItem Header="{Binding CtxToggleEditText}" Command="{Binding ToggleEditCommand}" />
           </ContextMenu>
-        </ScrollViewer.ContextMenu>
+        </Grid.ContextMenu>
         <Grid MaxWidth="1180" Margin="40,30,40,44" HorizontalAlignment="Stretch" RowDefinitions="Auto,*" RowSpacing="18">
           <Border Grid.Row="0"
                   Classes="document-header"
@@ -69,22 +69,59 @@
                   Classes="document-surface"
                   Padding="64,52">
             <Grid RowDefinitions="*,Auto" RowSpacing="24" MinHeight="640">
-              <SelectableTextBlock Grid.Row="0"
-                                   Text="{Binding DocumentBodyText}"
-                                   Classes="reading"
-                                   IsVisible="{Binding !IsEditMode}" />
-              <TextBox Grid.Row="0"
-                       Text="{Binding DocumentContent, Mode=TwoWay}"
-                       x:Name="DocumentEditor"
-                       Classes="document-editor"
-                       IsVisible="{Binding IsEditMode}"
-                       KeyDown="OnDocumentEditorKeyDown"
-                       AcceptsReturn="True"
-                       TextWrapping="Wrap"
-                       MinHeight="620"
-                       BorderThickness="0"
+              <TextBlock Grid.Row="0"
+                         Text="{Binding DocumentBodyText}"
+                         Classes="reading"
+                         IsVisible="{Binding !HasDocumentBlocks}"
+                         HorizontalAlignment="Center"
+                         VerticalAlignment="Center" />
+              <ListBox Grid.Row="0"
+                       ItemsSource="{Binding DocumentBlocks}"
+                       IsVisible="{Binding !IsEditMode}"
                        Background="Transparent"
-                       PlaceholderText="{Binding QuickAiHint}" />
+                       BorderThickness="0"
+                       SelectionMode="Single">
+                <ListBox.ItemsPanel>
+                  <ItemsPanelTemplate>
+                    <VirtualizingStackPanel />
+                  </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                  <DataTemplate DataType="{x:Type vm:DocumentBlockViewModel}">
+                    <SelectableTextBlock Text="{Binding Text}"
+                                         Classes="reading"
+                                         Margin="0,0,0,18" />
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <ListBox x:Name="DocumentEditor"
+                       Grid.Row="0"
+                       ItemsSource="{Binding DocumentBlocks}"
+                       IsVisible="{Binding IsEditMode}"
+                       Background="Transparent"
+                       BorderThickness="0"
+                       SelectionMode="Single">
+                <ListBox.ItemsPanel>
+                  <ItemsPanelTemplate>
+                    <VirtualizingStackPanel />
+                  </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                  <DataTemplate DataType="{x:Type vm:DocumentBlockViewModel}">
+                    <TextBox Text="{Binding Text, Mode=TwoWay}"
+                             Classes="document-editor"
+                             KeyDown="OnDocumentBlockEditorKeyDown"
+                             GotFocus="OnDocumentBlockEditorGotFocus"
+                             AcceptsReturn="True"
+                             TextWrapping="Wrap"
+                             MinHeight="96"
+                             BorderThickness="0"
+                             Background="Transparent"
+                             Margin="0,0,0,18"
+                             PlaceholderText="{Binding $parent[UserControl].DataContext.QuickAiHint}" />
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
               <Border Grid.Row="1" Classes="soft-panel" Padding="16" IsVisible="{Binding IsEditMode}">
                 <StackPanel Spacing="12">
                   <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
@@ -100,7 +137,7 @@
             </Grid>
           </Border>
         </Grid>
-      </ScrollViewer>
+      </Grid>
     </DockPanel>
 
     <!-- ============ 右：导航树 / 项目 AI（右上标签切换，可收起） ============ -->

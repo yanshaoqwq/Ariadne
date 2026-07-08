@@ -158,7 +158,7 @@
         <!-- 左侧栏 -->
         <Border
             Grid.Column="0"
-            Width="204"
+            Width="{Binding SidebarWidth}"
             Background="{DynamicResource Ariadne.BackgroundSurface}"
             BorderBrush="{DynamicResource Ariadne.BorderMuted}"
             BorderThickness="0,0,1,0">
@@ -262,19 +262,18 @@
             Grid.Column="1"
             Content="{Binding CurrentPage}" />
       </Grid>
+      <!-- ================= 全局弹窗遮罩层 ================= -->
+      <Border x:Name="DialogScrim"
+              Grid.Row="1"
+              Background="#66000000"
+              IsVisible="{Binding Dialog.IsOpen}"
+              PointerPressed="OnDialogScrimPressed">
+        <ContentControl Content="{Binding Dialog.ActiveDialog}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Margin="40" />
+      </Border>
     </Grid>
-
-    <!-- ================= 全局弹窗遮罩层 ================= -->
-    <!-- 半透明 scrim 覆盖整个客户区（含标题栏）；点击遮罩=取消。 -->
-    <Border x:Name="DialogScrim"
-            Background="#66000000"
-            IsVisible="{Binding Dialog.IsOpen}"
-            PointerPressed="OnDialogScrimPressed">
-      <ContentControl Content="{Binding Dialog.ActiveDialog}"
-                      HorizontalAlignment="Center"
-                      VerticalAlignment="Center"
-                      Margin="40" />
-    </Border>
     </Panel>
   </Border>
 </Window>

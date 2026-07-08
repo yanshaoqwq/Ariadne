@@ -25,6 +25,26 @@
           </ContextMenu>
         </Canvas.ContextMenu>
 
+        <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
+          <ItemsControl.RenderTransform>
+            <TranslateTransform />
+          </ItemsControl.RenderTransform>
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <Canvas />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="{x:Type vm:WorkflowEdgeViewModel}">
+              <Path Stroke="{DynamicResource Ariadne.EdgeData}"
+                    StrokeThickness="1.6"
+                    Opacity="0.78"
+                    Fill="Transparent"
+                    Data="{Binding EdgePath}" />
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
         <StackPanel x:Name="TopToolbar" Canvas.Top="12" Canvas.Right="16" Orientation="Horizontal" Spacing="4">
           <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" Command="{Binding ImportCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
@@ -67,8 +87,17 @@
                           PointerPressed="OnNodePointerPressed"
                           PointerMoved="OnNodePointerMoved"
                           PointerReleased="OnNodePointerReleased">
-                    <Grid ColumnDefinitions="Auto,*,Auto">
-                      <Button Grid.Column="0" Width="26" Height="26" Padding="0"
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto">
+                      <Ellipse Grid.Column="0"
+                               Width="10"
+                               Height="10"
+                               Fill="{DynamicResource Ariadne.BackgroundSurface}"
+                               Stroke="{DynamicResource Ariadne.AccentPrimary}"
+                               StrokeThickness="1.4"
+                               VerticalAlignment="Center"
+                               ToolTip.Tip="{Binding $parent[UserControl].DataContext.TargetAliasText}" />
+                      <Button Grid.Column="1" Width="26" Height="26" Padding="0"
+                              Margin="8,0,0,0"
                               HorizontalContentAlignment="Center"
                               VerticalContentAlignment="Center"
                               Background="{DynamicResource Ariadne.AccentLight}"
@@ -82,16 +111,24 @@
                               Fill="{DynamicResource Ariadne.AccentPrimary}"
                               Data="M9,6 L18,12 L9,18 Z" />
                       </Button>
-                      <TextBlock Grid.Column="1" Text="{Binding Label}"
+                      <TextBlock Grid.Column="2" Text="{Binding Label}"
                                  FontWeight="SemiBold" FontSize="12" Margin="8,0,4,0"
                                  Foreground="{DynamicResource Ariadne.AccentPrimary}"
                                  VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                      <Path Grid.Column="2" Width="12" Height="12" Stretch="Uniform"
-                            VerticalAlignment="Center"
-                            Fill="Transparent"
-                            Stroke="{DynamicResource Ariadne.AccentPrimary}"
-                            StrokeThickness="1.5"
-                            Data="M6,4 L18,12 L6,20 Z" />
+                      <Border Grid.Column="3"
+                              Width="18"
+                              Height="18"
+                              CornerRadius="9"
+                              Background="{DynamicResource Ariadne.BackgroundSurface}"
+                              BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
+                              BorderThickness="1.4"
+                              Cursor="Cross"
+                              ToolTip.Tip="{Binding $parent[UserControl].DataContext.SourceAliasText}"
+                              PointerPressed="OnOutputPortPointerPressed"
+                              PointerMoved="OnOutputPortPointerMoved"
+                              PointerReleased="OnOutputPortPointerReleased">
+                        <Ellipse Width="6" Height="6" Fill="{DynamicResource Ariadne.AccentPrimary}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                      </Border>
                     </Grid>
                   </Border>
                   <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />

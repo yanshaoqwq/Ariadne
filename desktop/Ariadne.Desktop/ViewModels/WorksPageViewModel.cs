@@ -29,6 +29,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _savedSnapshot = string.Empty;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
+    private bool _suppressDocumentBlockChanges;
+    private bool _documentDirty;
+    private int _documentCharacterCount;
+    private int _nextDocumentBlockId;
     private bool _isEditMode;
     private TextRange? _pendingQuickEditRange;
 
@@ -39,6 +43,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _projectAiAnswer = displayNames.Text("ui.works.project_ai.empty");
         _documentTitle = displayNames.Text("ui.works.no_document_selected");
         WorksTreeNodes = new ObservableCollection<WorksTreeItemViewModel>();
+        DocumentBlocks = new ObservableCollection<DocumentBlockViewModel>();
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
@@ -139,6 +144,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public ObservableCollection<WorksTreeItemViewModel> WorksTreeNodes { get; }
 
+    public ObservableCollection<DocumentBlockViewModel> DocumentBlocks { get; }
+    public bool HasDocumentBlocks => DocumentBlocks.Count > 0;
+
     public ObservableCollection<ExportFormatOption> ExportFormats { get; }
 
     public bool IsWorksTreeEmpty => WorksTreeNodes.Count == 0;
@@ -151,20 +159,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public string DocumentContent
     {
-        get => _documentContent;
-        set
-        {
-            if (SetProperty(ref _documentContent, value))
-            {
-                OnPropertyChanged(nameof(DocumentBodyText));
-                OnPropertyChanged(nameof(CharacterCountText));
-                QuickAiCommand.NotifyCanExecuteChanged();
-                if (!_suppressDirtyTracking)
-                {
-                    ClearPendingQuickEdit();
-                }
-            }
-        }
+        get => AssembleDocumentContent();
+        set => ReplaceDocumentContent(value ?? string.Empty);
     }
 
     public bool HasUnsavedChanges
@@ -264,15 +260,15 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public string CurrentDocumentText => DocumentTitle;
 
-    public string DocumentBodyText => string.IsNullOrWhiteSpace(DocumentContent)
+    public string DocumentBodyText => _documentCharacterCount == 0
         ? (string.IsNullOrWhiteSpace(_currentDocumentId)
             ? NoDocumentText
             : _displayNames.Text("ui.works.empty_document"))
-        : DocumentContent;
+        : AssembleDocumentContent();
 
     public string CharacterCountText => _displayNames.Format("ui.works.characters_count", new Dictionary<string, string>
     {
-        ["count"] = DocumentContent.Length.ToString(),
+        ["count"] = _documentCharacterCount.ToString(),
     });
 
     public string EmptyIndexText => _displayNames.Text("ui.works.empty_index");
@@ -315,7 +311,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool CanGenerateQuickEdit()
     {
         return HasCurrentDocument
-               && !string.IsNullOrWhiteSpace(DocumentContent)
+               && _documentCharacterCount > 0
                && !string.IsNullOrWhiteSpace(QuickEditInstruction);
     }
 
@@ -343,6 +339,139 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _pendingQuickEditRange = null;
         QuickEditDiff = string.Empty;
         ApplyQuickEditCommand.NotifyCanExecuteChanged();
+    }
+
+    private void ReplaceDocumentContent(string content)
+    {
+        _suppressDocumentBlockChanges = true;
+        try
+        {
+            _documentContent = content;
+            _documentCharacterCount = content.Length;
+            DocumentBlocks.Clear();
+            var index = 0;
+            foreach (var block in SplitDocumentBlocks(content))
+            {
+                DocumentBlocks.Add(new DocumentBlockViewModel(
+                    $"block-{++_nextDocumentBlockId}",
+                    index++,
+                    block,
+                    OnDocumentBlockTextChanged));
+            }
+        }
+        finally
+        {
+            _suppressDocumentBlockChanges = false;
+        }
+
+        OnPropertyChanged(nameof(DocumentContent));
+        OnPropertyChanged(nameof(DocumentBodyText));
+        OnPropertyChanged(nameof(CharacterCountText));
+        OnPropertyChanged(nameof(HasDocumentBlocks));
+        QuickAiCommand.NotifyCanExecuteChanged();
+        if (!_suppressDirtyTracking)
+        {
+            ClearPendingQuickEdit();
+        }
+    }
+
+    private void OnDocumentBlockTextChanged(DocumentBlockViewModel block, string oldText, string newText)
+    {
+        if (_suppressDocumentBlockChanges)
+        {
+            return;
+        }
+
+        _documentCharacterCount += newText.Length - oldText.Length;
+        _documentContent = string.Empty;
+        OnPropertyChanged(nameof(DocumentContent));
+        OnPropertyChanged(nameof(DocumentBodyText));
+        OnPropertyChanged(nameof(CharacterCountText));
+        QuickAiCommand.NotifyCanExecuteChanged();
+        if (!_suppressDirtyTracking)
+        {
+            ClearPendingQuickEdit();
+            MarkDocumentDirty();
+        }
+    }
+
+    private void MarkDocumentDirty()
+    {
+        _documentDirty = true;
+        HasUnsavedChanges = true;
+    }
+
+    private string AssembleDocumentContent()
+    {
+        if (DocumentBlocks.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(_documentCharacterCount);
+        foreach (var block in DocumentBlocks.OrderBy(block => block.Index))
+        {
+            builder.Append(block.Text);
+        }
+        _documentContent = builder.ToString();
+        return _documentContent;
+    }
+
+    public EditorTextSelection SelectionForBlock(DocumentBlockViewModel block, int localStart, int localEnd, string selectedText)
+    {
+        var start = Math.Clamp(Math.Min(localStart, localEnd), 0, block.Text.Length);
+        var end = Math.Clamp(Math.Max(localStart, localEnd), 0, block.Text.Length);
+        var prefixLength = 0;
+        foreach (var item in DocumentBlocks.OrderBy(item => item.Index))
+        {
+            if (ReferenceEquals(item, block))
+            {
+                break;
+            }
+            prefixLength += item.Text.Length;
+        }
+        return new EditorTextSelection(prefixLength + start, prefixLength + end, selectedText);
+    }
+
+    private static IEnumerable<string> SplitDocumentBlocks(string content)
+    {
+        const int targetBlockSize = 4_000;
+        const int hardBlockSize = 6_000;
+        if (string.IsNullOrEmpty(content))
+        {
+            yield break;
+        }
+
+        var start = 0;
+        while (start < content.Length)
+        {
+            var remaining = content.Length - start;
+            if (remaining <= hardBlockSize)
+            {
+                yield return content[start..];
+                yield break;
+            }
+
+            var limit = Math.Min(content.Length, start + hardBlockSize);
+            var preferredStart = Math.Min(content.Length, start + targetBlockSize);
+            var split = content.LastIndexOf("\n\n", limit - 1, limit - start, StringComparison.Ordinal);
+            if (split < preferredStart)
+            {
+                split = content.LastIndexOf('\n', limit - 1, limit - start);
+            }
+            if (split < preferredStart)
+            {
+                split = start + targetBlockSize;
+            }
+            else
+            {
+                split += content[split] == '\n' ? 1 : 2;
+            }
+
+            split = Math.Clamp(split, start + 1, content.Length);
+            yield return content[start..split];
+            start = split;
+        }
     }
 
     private async Task InitializeAsync()
@@ -440,7 +569,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 StatusText = NoDocumentText;
                 return;
             }
-            await _backend.SaveDocumentContentAsync(_currentDocumentId, DocumentContent).ConfigureAwait(true);
+            await _backend.SaveDocumentContentAsync(_currentDocumentId, AssembleDocumentContent()).ConfigureAwait(true);
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.save");
         }
@@ -494,7 +623,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             return;
         }
         IsEditMode = true;
-        DocumentContent += Environment.NewLine + "@planning/outline.md";
+        DocumentContent = AssembleDocumentContent() + Environment.NewLine + "@planning/outline.md";
         StatusText = OutlineText;
     }
 
@@ -515,15 +644,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                                && !string.IsNullOrWhiteSpace(currentSelection.Text);
             var selectedText = hasSelection && selection is not null
                 ? selection.Text
-                : DocumentContent;
+                : AssembleDocumentContent();
             if (string.IsNullOrWhiteSpace(selectedText) || string.IsNullOrWhiteSpace(QuickEditInstruction))
             {
                 StatusText = QuickAiHint;
                 return;
             }
+            var documentContent = AssembleDocumentContent();
             _pendingQuickEditRange = hasSelection && selection is not null
-                ? Utf8Range(DocumentContent, selection.Start, selection.End)
-                : Utf8Range(DocumentContent, 0, DocumentContent.Length);
+                ? Utf8Range(documentContent, selection.Start, selection.End)
+                : Utf8Range(documentContent, 0, documentContent.Length);
             var result = await _backend.QuickEditAsync(new QuickEditRequest(
                 selectedText,
                 QuickEditInstruction,
@@ -555,11 +685,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
+            var documentContent = AssembleDocumentContent();
             await _backend.ApplyQuickEditAsync(
                 _currentDocumentId,
                 null,
-                DocumentContent,
-                _pendingQuickEditRange ?? Utf8Range(DocumentContent, 0, DocumentContent.Length),
+                documentContent,
+                _pendingQuickEditRange ?? Utf8Range(documentContent, 0, documentContent.Length),
                 _pendingQuickEdit).ConfigureAwait(true);
             _suppressDirtyTracking = true;
             try
@@ -608,8 +739,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void CaptureSnapshot()
     {
-        _savedSnapshot = DocumentContent;
-        RefreshDirtyState();
+        _savedSnapshot = AssembleDocumentContent();
+        _documentDirty = false;
+        HasUnsavedChanges = false;
     }
 
     private void RestoreSnapshot()
@@ -619,6 +751,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             DocumentContent = _savedSnapshot;
             ClearPendingQuickEdit();
+            _documentDirty = false;
             RefreshDirtyState();
         }
         finally
@@ -632,7 +765,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         HasUnsavedChanges = HasUnsavedDocumentChanges;
     }
 
-    private bool HasUnsavedDocumentChanges => DocumentContent != _savedSnapshot;
+    private bool HasUnsavedDocumentChanges => _documentDirty || AssembleDocumentContent() != _savedSnapshot;
 
     protected override void OnPropertyChanged(string? propertyName = null)
     {
@@ -640,7 +773,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         if (!_suppressDirtyTracking
             && propertyName is nameof(DocumentContent))
         {
-            RefreshDirtyState();
+            MarkDocumentDirty();
         }
     }
 
@@ -702,6 +835,44 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 public sealed record ExportFormatOption(string Value, string Label);
 
 public sealed record EditorTextSelection(int Start, int End, string Text);
+
+public sealed class DocumentBlockViewModel : ViewModelBase
+{
+    private readonly Action<DocumentBlockViewModel, string, string> _textChanged;
+    private string _text;
+
+    public DocumentBlockViewModel(
+        string id,
+        int index,
+        string text,
+        Action<DocumentBlockViewModel, string, string> textChanged)
+    {
+        Id = id;
+        Index = index;
+        _text = text;
+        _textChanged = textChanged;
+    }
+
+    public string Id { get; }
+    public int Index { get; }
+
+    public string Text
+    {
+        get => _text;
+        set
+        {
+            if (value == _text)
+            {
+                return;
+            }
+            var oldText = _text;
+            if (SetProperty(ref _text, value))
+            {
+                _textChanged(this, oldText, value);
+            }
+        }
+    }
+}
 
 public sealed class WorksTreeItemViewModel
 {
