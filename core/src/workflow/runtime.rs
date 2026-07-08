@@ -862,9 +862,7 @@ impl WorkflowRuntime {
                 .confirmations
                 .get(confirmation_id)
                 .ok_or_else(|| {
-                    CoreError::validation(format!(
-                        "confirmation item not found: {confirmation_id}"
-                    ))
+                    CoreError::validation(format!("confirmation item not found: {confirmation_id}"))
                 })?;
             item.node_id.clone()
         };
@@ -1611,8 +1609,6 @@ impl WorkflowRuntime {
             collect_control_closure(workflow, &target, &mut affected);
             for affected_node in &affected {
                 self.state.nodes.remove(affected_node);
-                // 重置被清理节点关联的 loop 迭代计数
-                self.state.loop_iterations.remove(affected_node);
             }
             // 重置涉及被清理节点的 communication 边状态
             reset_communication_edges_for_nodes(&mut self.state, &affected, workflow);
@@ -2177,15 +2173,13 @@ fn reset_communication_edges_for_nodes(
     affected_nodes: &[NodeId],
     workflow: &WorkflowDefinition,
 ) {
-    let affected_set: std::collections::HashSet<&NodeId> = affected_nodes.iter().collect();
+    let affected_set: HashSet<&NodeId> = affected_nodes.iter().collect();
     for edge in &workflow.edges {
         if edge.kind != WorkflowEdgeKind::Communication {
             continue;
         }
         // 仅当边的两端节点至少有一个在 affected 集合中时才重置
-        if !affected_set.contains(&edge.from.node_id)
-            && !affected_set.contains(&edge.to.node_id)
-        {
+        if !affected_set.contains(&edge.from.node_id) && !affected_set.contains(&edge.to.node_id) {
             continue;
         }
         if let Some(comm) = state.communication_edges.get_mut(&edge.id) {

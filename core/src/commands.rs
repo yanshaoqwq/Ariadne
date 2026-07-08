@@ -188,6 +188,8 @@ pub struct RunWorkflowRequest {
     pub workflow_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub initial_inputs: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -526,6 +528,7 @@ struct ProjectWorkflowTool {
     display_name: String,
     workflow_id: String,
     start_node_id: String,
+    input_schema: Value,
 }
 
 pub fn list_recent_projects(state: &AriadneAppState) -> CommandResult<Vec<RecentProjectEntry>> {
@@ -770,6 +773,7 @@ pub fn run_workflow(
         RunWorkflowRequest {
             workflow_id,
             start_node_id,
+            initial_inputs: BTreeMap::new(),
         },
     )?;
     Ok(response.run_id)
@@ -1437,11 +1441,17 @@ pub fn run_workflow_impl(
     validate_existing_project_root(project_root)?;
     let start_node_id = request.start_node_id.clone();
     let workflow = load_workflow_definition(project_root, Some(request.workflow_id))?;
-    let workflow = if let Some(start_node_id) = start_node_id.as_deref() {
+    let mut workflow = if let Some(start_node_id) = start_node_id.as_deref() {
         workflow_branch_from_start(&workflow, &NodeId::from(start_node_id))?
     } else {
         workflow
     };
+    if !request.initial_inputs.is_empty() {
+        let Some(start_node_id) = start_node_id.as_deref() else {
+            return Err("initial_inputs require start_node_id".to_owned());
+        };
+        inject_start_node_initial_inputs(&mut workflow, start_node_id, request.initial_inputs)?;
+    }
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
     std::fs::create_dir_all(document_root.join("documents")).map_err(error_to_string)?;
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
@@ -1522,6 +1532,32 @@ pub fn run_workflow_impl(
         run_id: run_id.as_str().to_owned(),
         status: run_status_label(status).to_owned(),
     })
+}
+
+fn inject_start_node_initial_inputs(
+    workflow: &mut WorkflowDefinition,
+    start_node_id: &str,
+    initial_inputs: BTreeMap<String, Value>,
+) -> CommandResult<()> {
+    let start_node = workflow
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == NodeId::from(start_node_id))
+        .ok_or_else(|| format!("start node not found: {start_node_id}"))?;
+    if start_node.type_name != "start" {
+        return Err(format!(
+            "initial_inputs target must be a start node, got {} ({})",
+            start_node.id.as_str(),
+            start_node.type_name
+        ));
+    }
+    let mut config = start_node.config.as_object().cloned().unwrap_or_default();
+    config.insert(
+        "initial_inputs".to_owned(),
+        Value::Object(initial_inputs.into_iter().collect()),
+    );
+    start_node.config = Value::Object(config);
+    Ok(())
 }
 
 fn workflow_requires_llm_provider(workflow: &WorkflowDefinition) -> bool {
@@ -1684,8 +1720,11 @@ pub fn update_budget_config_impl(
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     // 0.0 表示无限制（映射为 None），避免 exceeds(Some(0.0), positive) 阻断所有调用
-    config.auto_mode.preauthorized_budget_usd =
-        if preauthorized_usd > 0.0 { Some(preauthorized_usd) } else { None };
+    config.auto_mode.preauthorized_budget_usd = if preauthorized_usd > 0.0 {
+        Some(preauthorized_usd)
+    } else {
+        None
+    };
     config_store.save(&config).map_err(error_to_string)?;
     write_budget_config(project_root, &BudgetConfigFile { budget_usd })
 }
@@ -2078,6 +2117,7 @@ pub fn project_ai_chat_impl(
             RunWorkflowRequest {
                 workflow_id,
                 start_node_id: None,
+                initial_inputs: BTreeMap::new(),
             },
         )?)
     } else {
@@ -2090,7 +2130,7 @@ pub fn project_ai_chat_impl(
     };
 
     let answer = if request.message.trim().is_empty() {
-        "Processed project memory or workflow request.".to_owned()
+        "已处理项目记忆或工作流请求。".to_owned()
     } else {
         let (answer, tool_workflow_run) = project_ai_answer(
             project_root,
@@ -2164,27 +2204,26 @@ fn project_ai_answer(
             &crate::contracts::CancellationToken::new(),
         )
         .map_err(error_to_string)?;
-    let tool_workflow_run = report
-        .response
-        .tool_calls
-        .iter()
-        .find_map(|call| {
+    let tool_workflow_run = if let Some((tool, arguments)) =
+        report.response.tool_calls.iter().find_map(|call| {
             workflow_tools
                 .iter()
                 .find(|tool| tool.tool_name == call.name)
                 .cloned()
-        })
-        .map(|tool| {
-            run_workflow_impl(
-                project_root,
-                secrets,
-                RunWorkflowRequest {
-                    workflow_id: tool.workflow_id,
-                    start_node_id: Some(tool.start_node_id),
-                },
-            )
-        })
-        .transpose()?;
+                .map(|tool| (tool, call.arguments.clone()))
+        }) {
+        Some(run_workflow_impl(
+            project_root,
+            secrets,
+            RunWorkflowRequest {
+                workflow_id: tool.workflow_id,
+                start_node_id: Some(tool.start_node_id),
+                initial_inputs: workflow_tool_initial_inputs(arguments)?,
+            },
+        )?)
+    } else {
+        None
+    };
     let text = message_text(report.response.message.content);
     let answer = if text.trim().is_empty() && tool_workflow_run.is_some() {
         "ui.project_ai.workflow_tool_started".to_owned()
@@ -2285,7 +2324,7 @@ fn project_ai_workflow_tools(project_root: &Path) -> CommandResult<Vec<ProjectWo
                 .trim_matches('_')
                 .to_owned();
             }
-            if !tool_control_enabled(&tool_controls, "project_ai", &tool_name) {
+            if !project_ai_workflow_tool_enabled(&tool_controls, &tool_name) {
                 continue;
             }
             tools.push(ProjectWorkflowTool {
@@ -2293,6 +2332,7 @@ fn project_ai_workflow_tools(project_root: &Path) -> CommandResult<Vec<ProjectWo
                 display_name,
                 workflow_id: workflow.id.as_str().to_owned(),
                 start_node_id: start_node.id.as_str().to_owned(),
+                input_schema: start_node_tool_input_schema(start_node),
             });
         }
     }
@@ -2308,6 +2348,18 @@ fn tool_control_enabled(
         .get(scope)
         .and_then(|scope_controls| scope_controls.get(tool).copied())
         .unwrap_or(false) // 未显式配置的工具默认禁用，需在 default_permission_tool_controls 中注册
+}
+
+fn project_ai_workflow_tool_enabled(
+    controls: &BTreeMap<String, BTreeMap<String, bool>>,
+    tool_name: &str,
+) -> bool {
+    controls
+        .get("project_ai")
+        .and_then(|scope_controls| scope_controls.get(tool_name).copied())
+        .unwrap_or_else(|| {
+            tool_control_enabled(controls, "project_ai", "project-ai-workflow-tools")
+        })
 }
 
 fn workflow_json_paths(root: &Path) -> CommandResult<Vec<PathBuf>> {
@@ -2340,6 +2392,45 @@ fn start_node_tool_display_name(node: &crate::contracts::NodeInstance) -> String
         .or(node.label.as_deref())
         .unwrap_or_else(|| node.id.as_str())
         .to_owned()
+}
+
+fn start_node_tool_input_schema(node: &crate::contracts::NodeInstance) -> Value {
+    node.config
+        .get("tool_input_schema")
+        .or_else(|| node.config.get("input_schema"))
+        .filter(|schema| schema.as_object().is_some())
+        .cloned()
+        .unwrap_or_else(empty_tool_input_schema)
+}
+
+fn empty_tool_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    })
+}
+
+fn workflow_tool_initial_inputs(arguments: Value) -> CommandResult<BTreeMap<String, Value>> {
+    match arguments {
+        Value::Object(map) => Ok(map.into_iter().collect()),
+        Value::Null => Ok(BTreeMap::new()),
+        other => Err(format!(
+            "workflow tool arguments must be a JSON object, got {}",
+            json_value_kind(&other)
+        )),
+    }
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 fn sanitize_tool_name(value: &str) -> String {
@@ -2378,11 +2469,7 @@ fn project_ai_tool_definitions(workflow_tools: &[ProjectWorkflowTool]) -> Vec<To
                 "Start Ariadne workflow '{}' from start node '{}'.",
                 tool.display_name, tool.start_node_id
             ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
+            input_schema: tool.input_schema.clone(),
         })
         .collect()
 }
@@ -2920,7 +3007,9 @@ fn template_client(request: TemplateRepositoryRequest) -> CommandResult<Template
         .base_url
         .unwrap_or_else(|| DEFAULT_TEMPLATE_REPOSITORY_URL.to_owned());
     if base_url.trim().is_empty() {
-        return Err("template repository is not configured; please set a base URL in settings".to_owned());
+        return Err(
+            "template repository is not configured; please set a base URL in settings".to_owned(),
+        );
     }
     validate_template_url(&base_url)?;
     TemplateRepositoryClient::new(base_url).map_err(error_to_string)

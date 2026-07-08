@@ -62,18 +62,22 @@ impl WorkflowNodeExecutor for BuiltinWorkflowNodeExecutor<'_> {
         // Module 11 只内置控制语义节点；LLM、Document、Search、写作节点都
         // 通过 external 适配器接入，避免 runtime 直接依赖具体服务。
         match request.type_name.as_str() {
-            "start" => Ok(WorkflowNodeExecutionOutput {
-                metadata: json!({
-                    "name": request.config.get("name").cloned().unwrap_or(Value::Null),
-                    "work_dir": request.config.get("work_dir").cloned().unwrap_or(Value::Null),
-                    "expose_as_tool": request
-                        .config
-                        .get("expose_as_tool")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                }),
-                ..WorkflowNodeExecutionOutput::default()
-            }),
+            "start" => {
+                let outputs = start_node_initial_outputs(&request.config);
+                Ok(WorkflowNodeExecutionOutput {
+                    outputs,
+                    metadata: json!({
+                        "name": request.config.get("name").cloned().unwrap_or(Value::Null),
+                        "work_dir": request.config.get("work_dir").cloned().unwrap_or(Value::Null),
+                        "expose_as_tool": request
+                            .config
+                            .get("expose_as_tool")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    }),
+                    ..WorkflowNodeExecutionOutput::default()
+                })
+            }
             "condition" | "eval" => execute_condition(request),
             "loop" => execute_loop(request),
             "approval" => execute_approval(request),
@@ -87,6 +91,19 @@ impl WorkflowNodeExecutor for BuiltinWorkflowNodeExecutor<'_> {
             _ => self.external.execute_external(request),
         }
     }
+}
+
+fn start_node_initial_outputs(config: &Value) -> PortMap {
+    let mut outputs = PortMap::new();
+    let Some(inputs) = config.get("initial_inputs").and_then(Value::as_object) else {
+        return outputs;
+    };
+    for (key, value) in inputs {
+        if !key.trim().is_empty() {
+            outputs.insert(key.clone(), PortValue::inline(value.clone()));
+        }
+    }
+    outputs
 }
 
 /// Condition/Eval 节点配置。

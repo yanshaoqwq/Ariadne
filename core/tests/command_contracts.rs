@@ -255,6 +255,7 @@ fn run_workflow_executes_document_nodes_with_real_document_service() {
         ariadne::commands::RunWorkflowRequest {
             workflow_id: "doc-flow".to_owned(),
             start_node_id: None,
+            initial_inputs: std::collections::BTreeMap::new(),
         },
     )
     .unwrap();
@@ -351,6 +352,7 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
         ariadne::commands::RunWorkflowRequest {
             workflow_id: "multi-start".to_owned(),
             start_node_id: Some("start-main".to_owned()),
+            initial_inputs: std::collections::BTreeMap::new(),
         },
     )
     .unwrap();
@@ -360,6 +362,7 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
         ariadne::commands::RunWorkflowRequest {
             workflow_id: "multi-start".to_owned(),
             start_node_id: Some("start-extra".to_owned()),
+            initial_inputs: std::collections::BTreeMap::new(),
         },
     )
     .unwrap();
@@ -397,6 +400,94 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
 }
 
 #[test]
+fn run_workflow_from_start_node_injects_tool_arguments_as_outputs() {
+    let temp = tempfile::tempdir().unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "tool-start".to_owned(),
+            name: "Tool Start".to_owned(),
+            nodes: vec![
+                CanvasNode {
+                    id: "start-main".to_owned(),
+                    r#type: "start".to_owned(),
+                    label: Some("Start Main".to_owned()),
+                    data: json!({
+                        "expose_as_tool": true,
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "topic": { "type": "string" }
+                            },
+                            "required": ["topic"],
+                            "additionalProperties": false
+                        }
+                    }),
+                    position: Value::Null,
+                },
+                CanvasNode {
+                    id: "check-topic".to_owned(),
+                    r#type: "condition".to_owned(),
+                    label: None,
+                    data: json!({
+                        "input_alias": "topic",
+                        "operator": "equals",
+                        "expected": "长夜行"
+                    }),
+                    position: Value::Null,
+                },
+            ],
+            edges: vec![
+                CanvasEdge {
+                    id: "start-to-check".to_owned(),
+                    source: "start-main".to_owned(),
+                    target: "check-topic".to_owned(),
+                    source_handle: "exec_out".to_owned(),
+                    target_handle: "exec_in".to_owned(),
+                    kind: WorkflowEdgeKind::Control,
+                    label: None,
+                    data: Value::Null,
+                },
+                CanvasEdge {
+                    id: "topic-to-check".to_owned(),
+                    source: "start-main".to_owned(),
+                    target: "check-topic".to_owned(),
+                    source_handle: "topic".to_owned(),
+                    target_handle: "input".to_owned(),
+                    kind: WorkflowEdgeKind::Data,
+                    label: Some("topic".to_owned()),
+                    data: Value::Null,
+                },
+            ],
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+
+    let mut initial_inputs = BTreeMap::new();
+    initial_inputs.insert("topic".to_owned(), json!("长夜行"));
+    let run = run_workflow_impl(
+        temp.path(),
+        &MemorySecretStore::default(),
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "tool-start".to_owned(),
+            start_node_id: Some("start-main".to_owned()),
+            initial_inputs,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(run.status, "succeeded");
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let state = store
+        .load_state(&WorkflowId::from("tool-start"), &RunId::from(run.run_id))
+        .unwrap()
+        .unwrap();
+    let check = state.nodes.get(&NodeId::from("check-topic")).unwrap();
+    assert_eq!(check.outputs.get("passed"), Some(&PortValue::inline(true)));
+}
+
+#[test]
 fn run_workflow_start_node_id_must_reference_start_node() {
     let temp = tempfile::tempdir().unwrap();
     save_workflow_graph_impl(
@@ -423,6 +514,7 @@ fn run_workflow_start_node_id_must_reference_start_node() {
         ariadne::commands::RunWorkflowRequest {
             workflow_id: "bad-start".to_owned(),
             start_node_id: Some("read".to_owned()),
+            initial_inputs: std::collections::BTreeMap::new(),
         },
     )
     .unwrap_err();
@@ -461,6 +553,7 @@ fn run_workflow_llm_node_requires_configured_provider_instead_of_noop() {
         ariadne::commands::RunWorkflowRequest {
             workflow_id: "llm-flow".to_owned(),
             start_node_id: None,
+            initial_inputs: std::collections::BTreeMap::new(),
         },
     )
     .unwrap_err();
