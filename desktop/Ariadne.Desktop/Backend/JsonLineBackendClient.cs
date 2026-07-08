@@ -214,19 +214,19 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<WorkflowRunStarted>("start_workflow", new { workflow_id = workflowId, start_node_id = startNodeId }, cancellationToken);
     }
 
-    public Task<WorkflowRunStarted> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
+    public Task<WorkflowActionResult> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<WorkflowRunStarted>("pause_workflow", new { workflow_id = workflowId, run_id = runId, reason }, cancellationToken);
+        return InvokeRequiredAsync<WorkflowActionResult>("pause_workflow", new { workflow_id = workflowId, run_id = runId, reason }, cancellationToken);
     }
 
-    public Task<WorkflowRunStarted> StopWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
+    public Task<WorkflowActionResult> StopWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<WorkflowRunStarted>("stop_workflow", new { workflow_id = workflowId, run_id = runId, reason }, cancellationToken);
+        return InvokeRequiredAsync<WorkflowActionResult>("stop_workflow", new { workflow_id = workflowId, run_id = runId, reason }, cancellationToken);
     }
 
-    public Task<WorkflowRunStarted> ResumeWorkflowAsync(string workflowId, string runId, CancellationToken cancellationToken = default)
+    public Task<WorkflowActionResult> ResumeWorkflowAsync(string workflowId, string runId, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<WorkflowRunStarted>("resume_workflow", new { workflow_id = workflowId, run_id = runId }, cancellationToken);
+        return InvokeRequiredAsync<WorkflowActionResult>("resume_workflow", new { workflow_id = workflowId, run_id = runId }, cancellationToken);
     }
 
     public Task<WorkflowRunState> GetWorkflowRunStateAsync(string workflowId, string runId, CancellationToken cancellationToken = default)
@@ -440,9 +440,9 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<ConfirmationLogEntry>("get_confirmation", new { confirmation_id = confirmationId }, cancellationToken);
     }
 
-    public Task<ConfirmationLogEntry> ResolveConfirmationAsync(string workflowId, string runId, string confirmationId, string decision, string? reviewReason = null, CancellationToken cancellationToken = default)
+    public Task<ResolveConfirmationResult> ResolveConfirmationAsync(string workflowId, string runId, string confirmationId, string decision, string? reviewReason = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<ConfirmationLogEntry>("resolve_confirmation", new
+        return InvokeRequiredAsync<ResolveConfirmationResult>("resolve_confirmation", new
         {
             request = new
             {

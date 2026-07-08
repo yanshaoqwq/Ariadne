@@ -75,11 +75,11 @@ public interface IAriadneBackendClient
 
     Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default);
 
-    Task<WorkflowRunStarted> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default);
+    Task<WorkflowActionResult> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default);
 
-    Task<WorkflowRunStarted> StopWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default);
+    Task<WorkflowActionResult> StopWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default);
 
-    Task<WorkflowRunStarted> ResumeWorkflowAsync(string workflowId, string runId, CancellationToken cancellationToken = default);
+    Task<WorkflowActionResult> ResumeWorkflowAsync(string workflowId, string runId, CancellationToken cancellationToken = default);
 
     Task<WorkflowRunState> GetWorkflowRunStateAsync(string workflowId, string runId, CancellationToken cancellationToken = default);
 
@@ -151,7 +151,7 @@ public interface IAriadneBackendClient
 
     Task<ConfirmationLogEntry> GetConfirmationAsync(string confirmationId, CancellationToken cancellationToken = default);
 
-    Task<ConfirmationLogEntry> ResolveConfirmationAsync(string workflowId, string runId, string confirmationId, string decision, string? reviewReason = null, CancellationToken cancellationToken = default);
+    Task<ResolveConfirmationResult> ResolveConfirmationAsync(string workflowId, string runId, string confirmationId, string decision, string? reviewReason = null, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<UiRunLogEntry>> QueryRunLogsAsync(string? level = null, string? query = null, CancellationToken cancellationToken = default);
 

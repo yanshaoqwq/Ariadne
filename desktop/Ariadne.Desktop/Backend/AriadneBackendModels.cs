@@ -206,6 +206,11 @@ public sealed record WorkflowRunStarted(
     [property: JsonPropertyName("run_id")] string RunId,
     [property: JsonPropertyName("status")] string Status);
 
+public sealed record WorkflowActionResult(
+    [property: JsonPropertyName("workflow_id")] string WorkflowId,
+    [property: JsonPropertyName("run_id")] string RunId,
+    [property: JsonPropertyName("status")] string Status);
+
 public sealed record WorkflowRunState(
     [property: JsonPropertyName("workflow_id")] string WorkflowId,
     [property: JsonPropertyName("run_id")] string RunId,
@@ -396,6 +401,11 @@ public sealed record ConfirmationLogEntry(
     [property: JsonPropertyName("handling_method")] string HandlingMethod,
     [property: JsonPropertyName("summary")] string Summary,
     [property: JsonPropertyName("diff")] string Diff);
+
+public sealed record ResolveConfirmationResult(
+    [property: JsonPropertyName("workflow")] WorkflowActionResult Workflow,
+    [property: JsonPropertyName("confirmation")] ConfirmationLogEntry Confirmation,
+    [property: JsonPropertyName("badges")] SidebarBadgeCounts Badges);
 
 public sealed record DiagnosticItem(
     [property: JsonPropertyName("component")] string Component,

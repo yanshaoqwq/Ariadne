@@ -865,7 +865,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         await RunControlAsync((workflowId, runId) => _backend.ResumeWorkflowAsync(workflowId, runId));
     }
 
-    private async Task RunControlAsync(Func<string, string, Task<WorkflowRunStarted>> action)
+    private async Task RunControlAsync(Func<string, string, Task<WorkflowActionResult>> action)
     {
         if (string.IsNullOrWhiteSpace(CurrentRunId))
         {
@@ -875,6 +875,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             var result = await action(DefaultWorkflowId, CurrentRunId).ConfigureAwait(true);
+            CurrentRunId = result.RunId;
             StatusText = result.Status;
             StartWorkflowEventPolling(result.RunId);
         }
@@ -1175,7 +1176,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 SelectedConfirmation.ConfirmationId,
                 decision,
                 string.IsNullOrWhiteSpace(ConfirmationReason) ? null : ConfirmationReason).ConfigureAwait(true);
-            StatusText = result.State;
+            CurrentRunId = result.Workflow.RunId;
+            StatusText = result.Workflow.Status;
+            StartWorkflowEventPolling(result.Workflow.RunId);
             await LoadConfirmationsAsync().ConfigureAwait(true);
         }
         catch (Exception ex)

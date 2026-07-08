@@ -4,7 +4,10 @@ use serde_json::{json, Value};
 
 use crate::config::AutoModeConfig;
 use crate::contracts::{CancellationToken, CoreError, CoreResult, RunControl};
-use crate::costs::{evaluate_budget, BudgetUsage, CostLedger, CostQuery, TokenUsage};
+use crate::costs::{
+    estimate_token_cost, evaluate_budget, BudgetUsage, CostLedger, CostQuery, TokenPricing,
+    TokenUsage,
+};
 use crate::llm::models::{
     tool_result_message, LlmAuditEvent, LlmAuditKind, LlmCallMode, LlmRunReport, LlmRunRequest,
     LlmServiceConfig, LlmStreamEvent, ToolExecutionContext, ToolExecutor,
@@ -35,6 +38,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
         let started_at = Instant::now();
         let mut audit_log = Vec::new();
         audit_log.push(started_event(&request, LlmCallMode::Basic));
+        self.check_estimated_budget(&request)?;
 
         let response = self.call_provider(provider, &request, None, false)?;
         self.check_after_provider_response(&request, &response, started_at, cancellation)?;
@@ -65,6 +69,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
         for round in 0..=request.config.max_tool_rounds {
             cancellation.check()?;
             check_timeout(started_at, request.config.timeout_ms)?;
+            self.check_estimated_budget(&request)?;
 
             let response = self.call_provider(provider, &request, None, false)?;
             self.check_after_provider_response(&request, &response, started_at, cancellation)?;
@@ -127,6 +132,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
             provider_id: request.config.provider_id.clone(),
             model_id: request.config.model_id.clone(),
         }];
+        self.check_estimated_budget(&request)?;
 
         let response = self.call_provider(provider, &request, None, true)?;
         if let Err(error) =
@@ -180,6 +186,21 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
         Ok(())
     }
 
+    fn check_estimated_budget(&self, request: &LlmRunRequest) -> CoreResult<()> {
+        let Some(estimated_usd) = estimate_request_cost_usd(request)? else {
+            return Ok(());
+        };
+        let now_ms = unix_timestamp_ms()?;
+        let day_start_ms = start_of_utc_day_ms(now_ms);
+        let month_start_ms = start_of_utc_month_ms(now_ms);
+        self.check_budget_usage(
+            request,
+            estimated_usd,
+            self.spent_in_window(request, Some(day_start_ms))?,
+            self.spent_in_window(request, Some(month_start_ms))?,
+        )
+    }
+
     /// 按 Module 2 预算策略决定是否暂停或继续。
     ///
     /// ProviderExecutor 已经把本次调用写进账本，因此这里查出来的累计值包含本次；
@@ -193,13 +214,28 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
         let spent_today_after = self.spent_in_window(request, Some(day_start_ms))?;
         let spent_month_after = self.spent_in_window(request, Some(month_start_ms))?;
 
+        self.check_budget_usage(
+            request,
+            requested_usd,
+            spent_before_current(spent_today_after, requested_usd)?,
+            spent_before_current(spent_month_after, requested_usd)?,
+        )
+    }
+
+    fn check_budget_usage(
+        &self,
+        request: &LlmRunRequest,
+        requested_usd: f64,
+        spent_today_before: f64,
+        spent_month_before: f64,
+    ) -> CoreResult<()> {
         let decision = evaluate_budget(
             &request.config.budget_limits,
             &self.auto_mode,
             BudgetUsage {
                 requested_usd,
-                spent_today_usd: spent_before_current(spent_today_after, requested_usd)?,
-                spent_this_month_usd: spent_before_current(spent_month_after, requested_usd)?,
+                spent_today_usd: spent_today_before,
+                spent_this_month_usd: spent_month_before,
             },
         );
 
@@ -221,11 +257,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
     /// 聚合指定时间窗口起点之后的累计成本。有 run_id 时限定到当前 run，
     /// 没有 run_id 时按全局账本累计——绝不能短路返回 0，否则本次已入账的费用
     /// 会让 spent_before_current 反推出负数并误报会计错误。
-    fn spent_in_window(
-        &self,
-        request: &LlmRunRequest,
-        start_ms: Option<u64>,
-    ) -> CoreResult<f64> {
+    fn spent_in_window(&self, request: &LlmRunRequest, start_ms: Option<u64>) -> CoreResult<f64> {
         self.ledger.total_cost(&CostQuery {
             start_ms,
             run_id: request.run_id.clone(),
@@ -249,6 +281,49 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
     }
 }
 
+fn estimate_request_cost_usd(request: &LlmRunRequest) -> CoreResult<Option<f64>> {
+    let (Some(input_price), Some(output_price)) = (
+        request.config.input_cost_per_million_tokens,
+        request.config.output_cost_per_million_tokens,
+    ) else {
+        return Ok(None);
+    };
+    let prompt_tokens = estimate_prompt_tokens(&request.messages);
+    let output_tokens = request.config.max_output_tokens.unwrap_or(4096) as u64;
+    estimate_token_cost(
+        TokenUsage {
+            input_tokens: prompt_tokens,
+            output_tokens,
+        },
+        TokenPricing {
+            input_cost_per_million_tokens: input_price,
+            output_cost_per_million_tokens: output_price,
+        },
+    )
+    .map(Some)
+}
+
+fn estimate_prompt_tokens(messages: &[crate::providers::LlmMessage]) -> u64 {
+    let chars = messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .map(content_part_char_len)
+        .sum::<usize>();
+    u64::try_from(chars.div_ceil(4)).unwrap_or(u64::MAX).max(1)
+}
+
+fn content_part_char_len(part: &ContentPart) -> usize {
+    match part {
+        ContentPart::Text { text } => text.chars().count(),
+        ContentPart::Json { value } | ContentPart::ToolResult { value, .. } => {
+            value.to_string().chars().count()
+        }
+        ContentPart::ToolUse {
+            name, arguments, ..
+        } => name.chars().count() + arguments.to_string().chars().count(),
+    }
+}
+
 /// 校验 LLM 服务配置，避免无边界循环。
 fn validate_config(config: &LlmServiceConfig) -> CoreResult<()> {
     if config.provider_id.trim().is_empty() {
@@ -264,6 +339,24 @@ fn validate_config(config: &LlmServiceConfig) -> CoreResult<()> {
     }
     if config.max_tool_rounds > 32 {
         return Err(CoreError::validation("max_tool_rounds cannot exceed 32"));
+    }
+    for (field, value) in [
+        (
+            "input_cost_per_million_tokens",
+            config.input_cost_per_million_tokens,
+        ),
+        (
+            "output_cost_per_million_tokens",
+            config.output_cost_per_million_tokens,
+        ),
+    ] {
+        if let Some(value) = value {
+            if !value.is_finite() || value < 0.0 {
+                return Err(CoreError::validation(format!(
+                    "{field} must be finite and non-negative"
+                )));
+            }
+        }
     }
 
     Ok(())

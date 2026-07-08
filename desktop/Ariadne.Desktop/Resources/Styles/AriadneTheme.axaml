@@ -15,27 +15,25 @@
 
         <!-- ========================= 浅色（清昼，默认强调=青绿） ========================= -->
         <ResourceDictionary x:Key="Light">
-          <!-- 背景层（默认纸色：米白，克制暖白，非米黄；米黄见 Paper 可选主题） -->
-          <Color x:Key="Ariadne.Color.WindowBase">#E9E7DF</Color>
-          <Color x:Key="Ariadne.Color.BackgroundMain">#F3F1EA</Color>
-          <Color x:Key="Ariadne.Color.BackgroundSurface">#FBFAF6</Color>
+          <!-- 背景层：中性 Win11 浅灰，避免整屏暖米色。 -->
+          <Color x:Key="Ariadne.Color.WindowBase">#EFF2F5</Color>
+          <Color x:Key="Ariadne.Color.BackgroundMain">#F6F8FA</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSurface">#FFFFFF</Color>
           <Color x:Key="Ariadne.Color.BackgroundElevated">#FFFFFF</Color>
-          <!-- 右键菜单背景：略带透明度模拟毛玻璃（93% 暖白 + teal 微量） -->
-          <Color x:Key="Ariadne.Color.MenuBackground">#EEF9F7F3</Color>
-          <Color x:Key="Ariadne.Color.BackgroundSubtle">#EFEDE4</Color>
-          <Color x:Key="Ariadne.Color.BackgroundHover">#1A160D0D</Color>
-          <Color x:Key="Ariadne.Color.BackgroundPressed">#1A160D1A</Color>
-          <Color x:Key="Ariadne.Color.BackgroundCode">#EEECE2</Color>
+          <Color x:Key="Ariadne.Color.MenuBackground">#F2FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSubtle">#EEF2F6</Color>
+          <Color x:Key="Ariadne.Color.BackgroundHover">#14000000</Color>
+          <Color x:Key="Ariadne.Color.BackgroundPressed">#1F000000</Color>
+          <Color x:Key="Ariadne.Color.BackgroundCode">#F0F3F6</Color>
           <!-- 文字 -->
           <Color x:Key="Ariadne.Color.TextHeading">#15181B</Color>
           <Color x:Key="Ariadne.Color.TextPrimary">#1B1F22</Color>
           <Color x:Key="Ariadne.Color.TextSecondary">#5B6469</Color>
           <Color x:Key="Ariadne.Color.TextSubtle">#8A9398</Color>
           <Color x:Key="Ariadne.Color.TextOnAccent">#FFFFFF</Color>
-          <!-- 边界（暖调，配合纸色） -->
-          <Color x:Key="Ariadne.Color.BorderDefault">#E0D8C8</Color>
-          <Color x:Key="Ariadne.Color.BorderMuted">#EAE3D5</Color>
-          <Color x:Key="Ariadne.Color.BorderStrong">#C9BFA9</Color>
+          <Color x:Key="Ariadne.Color.BorderDefault">#D8DEE6</Color>
+          <Color x:Key="Ariadne.Color.BorderMuted">#E5EAF0</Color>
+          <Color x:Key="Ariadne.Color.BorderStrong">#B8C2CC</Color>
           <Color x:Key="Ariadne.Color.BorderCard">#14140A00</Color>
           <Color x:Key="Ariadne.Color.FocusRing">#2E726B</Color>
           <!-- 强调（青绿） -->
@@ -62,17 +60,16 @@
           <Color x:Key="Ariadne.Color.GitCurrent">#2E726B</Color>
           <Color x:Key="Ariadne.Color.GitBranch">#6366F1</Color>
           <Color x:Key="Ariadne.Color.GitFolded">#B9C0BB</Color>
-          <!-- 画布（暖纸调） -->
-          <Color x:Key="Ariadne.Color.CanvasBackground">#F1EBDD</Color>
-          <Color x:Key="Ariadne.Color.CanvasGrid">#DED5C3</Color>
-          <Color x:Key="Ariadne.Color.NodeBackground">#FDFCF7</Color>
-          <Color x:Key="Ariadne.Color.NodeBorder">#D8CFBB</Color>
+          <Color x:Key="Ariadne.Color.CanvasBackground">#F2F6F8</Color>
+          <Color x:Key="Ariadne.Color.CanvasGrid">#D7E0E8</Color>
+          <Color x:Key="Ariadne.Color.NodeBackground">#FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.NodeBorder">#C9D3DD</Color>
           <Color x:Key="Ariadne.Color.NodeSelected">#2E726B</Color>
           <Color x:Key="Ariadne.Color.EdgeData">#2E726B</Color>
           <Color x:Key="Ariadne.Color.EdgeControl">#8C8366</Color>
           <Color x:Key="Ariadne.Color.EdgeCommunication">#7C3AED</Color>
           <!-- 编辑 / diff -->
-          <Color x:Key="Ariadne.Color.EditorBackground">#FBF7EE</Color>
+          <Color x:Key="Ariadne.Color.EditorBackground">#FAFBFC</Color>
           <Color x:Key="Ariadne.Color.EditorSelection">#2E2E726B</Color>
           <Color x:Key="Ariadne.Color.DiffAddBackground">#24059669</Color>
           <Color x:Key="Ariadne.Color.DiffRemoveBackground">#1FDC2626</Color>
@@ -450,10 +447,10 @@
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
   </Style>
   <Style Selector="Border.settings-section">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="CornerRadius" Value="0" />
   </Style>
 
   <!-- ============================ 按钮 ============================ -->

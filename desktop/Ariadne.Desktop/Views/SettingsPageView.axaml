@@ -114,7 +114,21 @@
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProviderStatusLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding ProviderStatus}" Classes="caption" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding ProviderIdLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding ProviderId, Mode=TwoWay}" />
+                <StackPanel Grid.Row="1" Grid.Column="1" Spacing="8">
+                  <ComboBox ItemsSource="{Binding ProviderOptions}"
+                            SelectedItem="{Binding SelectedProviderOption, Mode=TwoWay}"
+                            HorizontalAlignment="Stretch">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate DataType="{x:Type vm:ProviderOptionViewModel}">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                          <TextBlock Grid.Column="0" Text="{Binding DisplayTitle}" TextWrapping="Wrap" />
+                          <TextBlock Grid.Column="1" Text="{Binding KeyStatus}" Classes="caption" />
+                        </Grid>
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                  <TextBox Text="{Binding ProviderId, Mode=TwoWay}" />
+                </StackPanel>
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding ProviderTypeLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding ProviderTypeOptions}" SelectedItem="{Binding ProviderType, Mode=TwoWay}" />
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding ProviderDisplayNameLabel}" Classes="secondary" VerticalAlignment="Center" />

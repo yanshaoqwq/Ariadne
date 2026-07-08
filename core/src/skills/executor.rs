@@ -141,6 +141,9 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
                                 timeout_ms: manifest.limits.timeout_ms,
                                 max_total_tokens: None,
                                 budget_limits: self.context.budget_limits.clone(),
+                                input_cost_per_million_tokens: None,
+                                output_cost_per_million_tokens: None,
+                                max_output_tokens: None,
                             },
                             messages: vec![LlmMessage::user(render_prompt(
                                 &config.prompt_template,

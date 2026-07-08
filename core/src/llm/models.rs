@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::ModelConfig;
 use crate::contracts::{NodeId, RunControl, RunId, WorkflowId};
 use crate::costs::{BudgetLimits, TokenUsage};
 use crate::providers::{
@@ -26,6 +27,12 @@ pub struct LlmServiceConfig {
     pub max_total_tokens: Option<u64>,
     #[serde(default)]
     pub budget_limits: BudgetLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cost_per_million_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_cost_per_million_tokens: Option<f64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 impl LlmServiceConfig {
@@ -38,7 +45,16 @@ impl LlmServiceConfig {
             timeout_ms: 120_000,
             max_total_tokens: None,
             budget_limits: BudgetLimits::default(),
+            input_cost_per_million_tokens: None,
+            output_cost_per_million_tokens: None,
+            max_output_tokens: None,
         }
+    }
+
+    pub fn with_model_config(mut self, model: &ModelConfig) -> Self {
+        self.input_cost_per_million_tokens = model.input_cost_per_million_tokens;
+        self.output_cost_per_million_tokens = model.output_cost_per_million_tokens;
+        self
     }
 }
 
@@ -68,7 +84,7 @@ impl LlmRunRequest {
             messages: self.messages.clone(),
             tools: self.tools.clone(),
             temperature: None,
-            max_output_tokens: None,
+            max_output_tokens: self.config.max_output_tokens,
             stream,
             metadata: self.metadata.clone(),
         }

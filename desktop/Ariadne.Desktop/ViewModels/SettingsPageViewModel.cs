@@ -145,6 +145,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _manualModelsVisible;
     private string _providerStatus = string.Empty;
     private ProviderConfigStatus? _providerConfig;
+    private ProviderOptionViewModel? _selectedProviderOption;
 
     private string _defaultModelId = "gpt-4.1-mini";
     private string _defaultTimeoutMs = "300000";
@@ -224,6 +225,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         };
         ConfirmationPolicies = new ObservableCollection<ConfirmationPolicyViewModel>();
         NodePresets = new ObservableCollection<NodeTypePresetViewModel>();
+        ProviderOptions = new ObservableCollection<ProviderOptionViewModel>();
         AvailableModels = new ObservableCollection<ModelOptionViewModel>();
         ToolControlGroups = new ObservableCollection<ToolControlGroupViewModel>();
         SectionIndexItems = new ObservableCollection<SettingsSectionIndexItemViewModel>();
@@ -321,6 +323,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<ThemeOption> ThemeOptions { get; }
     public ObservableCollection<ConfirmationPolicyViewModel> ConfirmationPolicies { get; }
     public ObservableCollection<NodeTypePresetViewModel> NodePresets { get; }
+    public ObservableCollection<ProviderOptionViewModel> ProviderOptions { get; }
     public ObservableCollection<ModelOptionViewModel> AvailableModels { get; }
     public ObservableCollection<ToolControlGroupViewModel> ToolControlGroups { get; }
     public ObservableCollection<SettingsSectionIndexItemViewModel> SectionIndexItems { get; }
@@ -464,6 +467,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string EmbeddingModelId { get => _embeddingModelId; set => SetProperty(ref _embeddingModelId, value); }
     public bool ManualModelsVisible { get => _manualModelsVisible; set => SetProperty(ref _manualModelsVisible, value); }
     public string ProviderStatus { get => _providerStatus; set => SetProperty(ref _providerStatus, value); }
+    public ProviderOptionViewModel? SelectedProviderOption
+    {
+        get => _selectedProviderOption;
+        set
+        {
+            if (SetProperty(ref _selectedProviderOption, value) && value is not null)
+            {
+                SelectProviderForEditing(value.ProviderId);
+            }
+        }
+    }
 
     public string DefaultModelId { get => _defaultModelId; set => SetProperty(ref _defaultModelId, value); }
     public string DefaultTimeoutMs { get => _defaultTimeoutMs; set => SetProperty(ref _defaultTimeoutMs, value); }
@@ -787,25 +801,23 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             _providerConfig = await _backend.GetProviderConfigAsync().ConfigureAwait(true);
+            ProviderOptions.Clear();
+            foreach (var provider in _providerConfig.Providers)
+            {
+                ProviderOptions.Add(new ProviderOptionViewModel(
+                    provider.Provider,
+                    provider.DisplayName,
+                    provider.HasKey
+                        ? _displayNames.Text("ui.common.configured")
+                        : _displayNames.Text("ui.common.not_configured")));
+            }
             var selected = _providerConfig.Providers.FirstOrDefault(p => p.Provider == ProviderId)
                 ?? _providerConfig.Providers.FirstOrDefault();
             if (selected is not null)
             {
-                ProviderId = selected.Provider;
-                ProviderType = selected.ProviderType;
-                ProviderDisplayName = selected.DisplayName;
-                ProviderBaseUrl = selected.BaseUrl ?? string.Empty;
-                ProviderEnabled = selected.Enabled;
-                MakeDefaultLlm = _providerConfig.DefaultLlmProviderId == selected.Provider;
-                MakeDefaultEmbedding = _providerConfig.DefaultEmbeddingProviderId == selected.Provider;
-                MakeDefaultReranker = _providerConfig.DefaultRerankerProviderId == selected.Provider;
-                ModelsText = string.Join(Environment.NewLine, selected.Models.Select(ModelLine));
-                EmbeddingModelId = selected.Models.FirstOrDefault(IsEmbeddingModel)?.ModelId ?? string.Empty;
-                AvailableModels.Clear();
-                foreach (var model in selected.Models)
-                {
-                    AvailableModels.Add(new ModelOptionViewModel(model.ModelId, model.Capability));
-                }
+                ApplyProviderForEditing(selected);
+                _selectedProviderOption = ProviderOptions.FirstOrDefault(option => option.ProviderId == selected.Provider);
+                OnPropertyChanged(nameof(SelectedProviderOption));
             }
             ProviderStatus = _providerConfig.Providers.Count == 0
                 ? _displayNames.Text("ui.settings.models.no_provider_status")
@@ -814,6 +826,55 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         catch (Exception ex)
         {
             ProviderStatus = ex.Message;
+        }
+    }
+
+    private void SelectProviderForEditing(string providerId)
+    {
+        var selected = _providerConfig?.Providers.FirstOrDefault(p => p.Provider == providerId);
+        if (selected is null)
+        {
+            return;
+        }
+
+        var wasDirty = HasUnsavedChanges;
+        var wasSuppressing = _suppressDirtyTracking;
+        _suppressDirtyTracking = true;
+        try
+        {
+            ApplyProviderForEditing(selected);
+        }
+        finally
+        {
+            _suppressDirtyTracking = wasSuppressing;
+        }
+        if (wasDirty)
+        {
+            HasUnsavedChanges = true;
+        }
+        else
+        {
+            CaptureSnapshot();
+        }
+    }
+
+    private void ApplyProviderForEditing(ProviderKeyStatus selected)
+    {
+        ProviderId = selected.Provider;
+        ProviderType = selected.ProviderType;
+        ProviderDisplayName = selected.DisplayName;
+        ProviderBaseUrl = selected.BaseUrl ?? string.Empty;
+        ProviderEnabled = selected.Enabled;
+        MakeDefaultLlm = _providerConfig?.DefaultLlmProviderId == selected.Provider;
+        MakeDefaultEmbedding = _providerConfig?.DefaultEmbeddingProviderId == selected.Provider;
+        MakeDefaultReranker = _providerConfig?.DefaultRerankerProviderId == selected.Provider;
+        ApiKey = string.Empty;
+        ModelsText = string.Join(Environment.NewLine, selected.Models.Select(ModelLine));
+        EmbeddingModelId = selected.Models.FirstOrDefault(IsEmbeddingModel)?.ModelId ?? string.Empty;
+        AvailableModels.Clear();
+        foreach (var model in selected.Models)
+        {
+            AvailableModels.Add(new ModelOptionViewModel(model.ModelId, model.Capability));
         }
     }
 

@@ -40,6 +40,10 @@ impl ScriptedLlmProvider {
             .iter()
             .any(|request| request.stream)
     }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
 }
 
 impl Provider for ScriptedLlmProvider {
@@ -299,6 +303,37 @@ fn llm_service_pauses_for_high_cost_confirmation() {
         .unwrap_err();
 
     assert!(matches!(error, CoreError::Paused { .. }));
+}
+
+/// 验证配置了模型价格时，预算会在 provider 调用前预检。
+#[test]
+fn llm_service_preflights_budget_before_provider_call() {
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let service = LlmService::new(&ledger, AutoModeConfig::default());
+    let provider = ScriptedLlmProvider::new(vec![text_response(
+        "不应被调用",
+        Some(1.0),
+        TokenUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+        },
+    )]);
+    let mut request = run_request();
+    request.config.budget_limits = BudgetLimits {
+        single_call_usd: Some(0.01),
+        high_cost_confirmation_usd: None,
+        ..BudgetLimits::default()
+    };
+    request.config.input_cost_per_million_tokens = Some(0.0);
+    request.config.output_cost_per_million_tokens = Some(100.0);
+    request.config.max_output_tokens = Some(4096);
+
+    let error = service
+        .complete_basic(&provider, request, &CancellationToken::new())
+        .unwrap_err();
+
+    assert!(matches!(error, CoreError::Paused { .. }));
+    assert_eq!(provider.request_count(), 0);
 }
 
 /// 验证流式入口会用 stream=true 调用 provider，并生成前端可消费事件。

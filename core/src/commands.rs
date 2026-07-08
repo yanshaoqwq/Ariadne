@@ -1455,11 +1455,11 @@ fn provider_config_diagnostic_items(
         }),
     }
 
-    match select_llm_provider(providers).and_then(|provider| select_llm_model_id(&provider)) {
-        Ok(model_id) => items.push(DiagnosticItem {
+    match select_llm_provider(providers).and_then(|provider| select_llm_model(&provider)) {
+        Ok(model) => items.push(DiagnosticItem {
             component: "providers.llm.default".to_owned(),
             status: DiagnosticStatus::Healthy,
-            reason: Some(format!("default LLM model: {model_id}")),
+            reason: Some(format!("default LLM model: {}", model.model_id)),
         }),
         Err(reason) => items.push(DiagnosticItem {
             component: "providers.llm.default".to_owned(),
@@ -3494,7 +3494,7 @@ fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<
         .load_or_create()
         .map_err(error_to_string)?;
     let provider_config = select_llm_provider(&project_config.providers)?;
-    let model_id = select_llm_model_id(&provider_config)?;
+    let model_config = select_llm_model(&provider_config)?;
     let api_key = provider_config
         .api_key
         .as_ref()
@@ -3510,7 +3510,8 @@ fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<
         .map_err(error_to_string)?;
     Ok(CommandLlmRuntime {
         provider,
-        config: LlmServiceConfig::new(provider_config.provider_id, model_id),
+        config: LlmServiceConfig::new(provider_config.provider_id, model_config.model_id.clone())
+            .with_model_config(&model_config),
         auto_mode: project_config.auto_mode,
     })
 }
@@ -3541,13 +3542,13 @@ fn select_llm_provider(
         .ok_or_else(|| "no enabled LLM provider is configured".to_owned())
 }
 
-fn select_llm_model_id(provider: &ProviderConfig) -> CommandResult<String> {
+fn select_llm_model(provider: &ProviderConfig) -> CommandResult<ModelConfig> {
     provider
         .models
         .iter()
         .find(|model| model.capability == ProviderCapability::Llm)
         .or_else(|| provider.models.first())
-        .map(|model| model.model_id.clone())
+        .cloned()
         .ok_or_else(|| {
             format!(
                 "provider {} has no model configured for LLM calls",

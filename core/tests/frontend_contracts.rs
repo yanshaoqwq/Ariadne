@@ -314,6 +314,9 @@ fn quick_edit_generates_result_and_patch() {
             timeout_ms: 1_000,
             max_total_tokens: None,
             budget_limits: BudgetLimits::default(),
+            input_cost_per_million_tokens: None,
+            output_cost_per_million_tokens: None,
+            max_output_tokens: None,
         },
     );
 
