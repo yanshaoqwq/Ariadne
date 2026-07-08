@@ -28,7 +28,6 @@
                   <Border.ContextMenu>
                     <ContextMenu Classes="ariadne">
                       <MenuItem Header="{Binding ViewDetailsText}" Command="{Binding ViewDetailsCommand}" />
-                      <MenuItem Header="{Binding CreateCheckpointText}" Command="{Binding CreateCheckpointCommand}" />
                       <Separator />
                       <MenuItem Header="{Binding RestoreText}" Command="{Binding RestoreCommand}" />
                       <MenuItem Header="{Binding CopyIdText}" Command="{Binding CopyIdCommand}" />

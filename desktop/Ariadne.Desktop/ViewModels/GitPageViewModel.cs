@@ -22,9 +22,9 @@ public sealed class GitPageViewModel : ViewModelBase
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync());
         CreateCheckpointCommand = new RelayCommand(() => _ = CreateCheckpointAsync());
-        ViewDetailsCommand = new RelayCommand(() => ViewDetails(SelectedCommit));
-        RestoreCommand = new RelayCommand(() => _ = RestoreSelectedAsync());
-        CopyIdCommand = new RelayCommand(() => _ = CopyCommitIdAsync(SelectedCommit));
+        ViewDetailsCommand = new RelayCommand(() => ViewDetails(SelectedCommit), () => HasSelection);
+        RestoreCommand = new RelayCommand(() => _ = RestoreSelectedAsync(), () => HasSelection);
+        CopyIdCommand = new RelayCommand(() => _ = CopyCommitIdAsync(SelectedCommit), () => HasSelection);
         _ = RefreshAsync();
     }
 
@@ -55,6 +55,9 @@ public sealed class GitPageViewModel : ViewModelBase
                 OnPropertyChanged(nameof(SelectedKind));
                 OnPropertyChanged(nameof(SelectedParents));
                 OnPropertyChanged(nameof(HasSelection));
+                ViewDetailsCommand.NotifyCanExecuteChanged();
+                RestoreCommand.NotifyCanExecuteChanged();
+                CopyIdCommand.NotifyCanExecuteChanged();
             }
         }
     }
@@ -85,7 +88,6 @@ public sealed class GitPageViewModel : ViewModelBase
     public string ManualKindText => _displayNames.Text("ui.git.kind.manual");
     public string AutoKindText => _displayNames.Text("ui.git.kind.auto");
     public string BranchRefsLabel => _displayNames.Text("ui.git.refs");
-    public string CtxCreateCheckpointText => _displayNames.Text("ui.git.context.create_checkpoint");
     public string CtxViewDetailsText => _displayNames.Text("ui.git.context.view_details");
     public string CtxRestoreText => _displayNames.Text("ui.git.context.restore");
     public string CtxCopyIdText => _displayNames.Text("ui.git.context.copy_id");
@@ -105,12 +107,10 @@ public sealed class GitPageViewModel : ViewModelBase
                     node.Refs,
                     KindText(node.Summary),
                     CtxViewDetailsText,
-                    CtxCreateCheckpointText,
                     CtxRestoreText,
                     CtxCopyIdText,
                     SelectCommit,
                     ViewDetails,
-                    CreateCheckpointFromItemAsync,
                     RestoreCommitAsync,
                     CopyCommitIdAsync));
             }
@@ -147,12 +147,10 @@ public sealed class GitPageViewModel : ViewModelBase
                         _ => _displayNames.Text("ui.common.none"),
                     },
                     CtxViewDetailsText,
-                    CtxCreateCheckpointText,
                     CtxRestoreText,
                     CtxCopyIdText,
                     SelectCommit,
                     ViewDetails,
-                    CreateCheckpointFromItemAsync,
                     RestoreCommitAsync,
                     CopyCommitIdAsync));
             }
@@ -202,6 +200,10 @@ public sealed class GitPageViewModel : ViewModelBase
             var branch = string.IsNullOrWhiteSpace(RestoreBranchName)
                 ? $"restore-{commit.ShortCommitId}"
                 : RestoreBranchName;
+            if (!await ConfirmRestoreAsync(commit, branch).ConfigureAwait(true))
+            {
+                return;
+            }
             var report = await _backend.RestoreToNewBranchAsync(commit.CommitId, branch).ConfigureAwait(true);
             StatusText = report.NewBranch;
             RestoreBranchName = string.Empty;
@@ -211,11 +213,6 @@ public sealed class GitPageViewModel : ViewModelBase
         {
             StatusText = ex.Message;
         }
-    }
-
-    private async Task CreateCheckpointFromItemAsync(GitHistoryItemViewModel _)
-    {
-        await CreateCheckpointAsync().ConfigureAwait(true);
     }
 
     private void ViewDetails(GitHistoryItemViewModel? commit)
@@ -262,6 +259,27 @@ public sealed class GitPageViewModel : ViewModelBase
         }
         return _displayNames.Text("ui.common.none");
     }
+
+    private async Task<bool> ConfirmRestoreAsync(GitHistoryItemViewModel commit, string branch)
+    {
+        var message = _displayNames.Format("ui.dialog.git.restore.message", new Dictionary<string, string>
+        {
+            ["commit"] = commit.ShortCommitId,
+            ["branch"] = branch,
+        });
+        var dialog = new ConfirmDialogViewModel(
+            _displayNames.Text("ui.dialog.git.restore.title"),
+            message,
+            new[]
+            {
+                new DialogButton(_displayNames.Text("ui.dialog.git.restore.confirm"), DialogButtonVariant.Danger, 0),
+                new DialogButton(_displayNames.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
+            })
+        {
+            CancelResultIndex = 1,
+        };
+        return await DialogService.Current.ConfirmAsync(dialog).ConfigureAwait(true) == 0;
+    }
 }
 
 public sealed class GitHistoryItemViewModel : ViewModelBase
@@ -275,12 +293,10 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         IReadOnlyList<string> refs,
         string kindText,
         string viewDetailsText,
-        string createCheckpointText,
         string restoreText,
         string copyIdText,
         Action<GitHistoryItemViewModel> select,
         Action<GitHistoryItemViewModel> viewDetails,
-        Func<GitHistoryItemViewModel, Task> createCheckpoint,
         Func<GitHistoryItemViewModel, Task> restore,
         Func<GitHistoryItemViewModel, Task> copyId)
     {
@@ -290,7 +306,6 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         Refs = refs;
         KindText = kindText;
         ViewDetailsText = viewDetailsText;
-        CreateCheckpointText = createCheckpointText;
         RestoreText = restoreText;
         CopyIdText = copyIdText;
         SelectCommand = new RelayCommand(() => select(this));
@@ -298,11 +313,6 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         {
             select(this);
             viewDetails(this);
-        });
-        CreateCheckpointCommand = new RelayCommand(() =>
-        {
-            select(this);
-            _ = createCheckpoint(this);
         });
         RestoreCommand = new RelayCommand(() =>
         {
@@ -324,12 +334,10 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
     public string KindText { get; }
     public string RefsText => Refs.Count == 0 ? string.Empty : string.Join(", ", Refs);
     public string ViewDetailsText { get; }
-    public string CreateCheckpointText { get; }
     public string RestoreText { get; }
     public string CopyIdText { get; }
     public RelayCommand SelectCommand { get; }
     public RelayCommand ViewDetailsCommand { get; }
-    public RelayCommand CreateCheckpointCommand { get; }
     public RelayCommand RestoreCommand { get; }
     public RelayCommand CopyIdCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }

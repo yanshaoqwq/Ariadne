@@ -40,14 +40,15 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _backend = backend;
         _projectAiAnswer = displayNames.Text("ui.works.project_ai.empty");
         _documentTitle = displayNames.Text("ui.works.no_document_selected");
+        WorksTreeNodes = new ObservableCollection<WorksTreeItemViewModel>();
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
         OpenImportPanelCommand = new RelayCommand(OpenImportPanel);
         ToggleImportPanelCommand = new RelayCommand(() => IsImportPanelOpen = !IsImportPanelOpen);
-        ImportCommand = new RelayCommand(() => _ = ImportChapterAsync());
-        ExportCommand = new RelayCommand(() => _ = ExportAsync());
-        SaveCommand = new RelayCommand(() => _ = SaveAsync());
+        ImportCommand = new RelayCommand(() => _ = ImportChapterAsync(), CanImportChapter);
+        ExportCommand = new RelayCommand(() => _ = ExportAsync(), () => WorksTreeNodes.Count > 0);
+        SaveCommand = new RelayCommand(() => _ = SaveAsync(), () => HasCurrentDocument);
         ReadModeCommand = new RelayCommand(() => IsEditMode = false);
         EditModeCommand = new RelayCommand(() => IsEditMode = true);
         CopyCommand = new RelayCommand(() => RequestEditorCopy?.Invoke());
@@ -56,13 +57,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             IsEditMode = true;
             _ = QuickEditAsync();
-        });
-        InsertOutlineCommand = new RelayCommand(InsertOutlineReference);
+        }, CanGenerateQuickEdit);
+        InsertOutlineCommand = new RelayCommand(InsertOutlineReference, () => HasCurrentDocument);
         ToggleEditCommand = new RelayCommand(() => IsEditMode = !IsEditMode);
-        SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync());
-        ApplyQuickEditCommand = new RelayCommand(() => _ = ApplyQuickEditAsync());
+        SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync(), CanSendProjectAi);
+        ApplyQuickEditCommand = new RelayCommand(() => _ = ApplyQuickEditAsync(), () => _pendingQuickEdit is not null);
         SaveProjectMemoryCommand = new RelayCommand(() => _ = SaveProjectMemoryAsync());
-        WorksTreeNodes = new ObservableCollection<WorksTreeItemViewModel>();
         ExportFormats = new ObservableCollection<ExportFormatOption>
         {
             new("markdown", displayNames.Text("ui.works.export_format.markdown")),
@@ -163,6 +163,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 OnPropertyChanged(nameof(DocumentBodyText));
                 OnPropertyChanged(nameof(CharacterCountText));
+                QuickAiCommand.NotifyCanExecuteChanged();
+                if (!_suppressDirtyTracking)
+                {
+                    ClearPendingQuickEdit();
+                }
             }
         }
     }
@@ -173,6 +178,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         private set => SetProperty(ref _hasUnsavedChanges, value);
     }
 
+    public bool HasCurrentDocument => !string.IsNullOrWhiteSpace(_currentDocumentId);
+
     public string StatusText
     {
         get => _statusText;
@@ -182,7 +189,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ProjectAiMessage
     {
         get => _projectAiMessage;
-        set => SetProperty(ref _projectAiMessage, value);
+        set
+        {
+            if (SetProperty(ref _projectAiMessage, value))
+            {
+                SendProjectAiCommand.NotifyCanExecuteChanged();
+            }
+        }
     }
 
     public string ProjectAiAnswer
@@ -200,7 +213,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string QuickEditInstruction
     {
         get => _quickEditInstruction;
-        set => SetProperty(ref _quickEditInstruction, value);
+        set
+        {
+            if (SetProperty(ref _quickEditInstruction, value))
+            {
+                ClearPendingQuickEdit();
+                QuickAiCommand.NotifyCanExecuteChanged();
+            }
+        }
     }
 
     public string QuickEditDiff
@@ -227,11 +247,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
-    public string ImportChapterId { get => _importChapterId; set => SetProperty(ref _importChapterId, value); }
-    public string ImportChapterTitle { get => _importChapterTitle; set => SetProperty(ref _importChapterTitle, value); }
-    public string ImportOrder { get => _importOrder; set => SetProperty(ref _importOrder, value); }
-    public string ImportSourcePath { get => _importSourcePath; set => SetProperty(ref _importSourcePath, value); }
-    public string ImportTargetPath { get => _importTargetPath; set => SetProperty(ref _importTargetPath, value); }
+    public string ImportChapterId { get => _importChapterId; set { if (SetProperty(ref _importChapterId, value)) ImportCommand.NotifyCanExecuteChanged(); } }
+    public string ImportChapterTitle { get => _importChapterTitle; set { if (SetProperty(ref _importChapterTitle, value)) ImportCommand.NotifyCanExecuteChanged(); } }
+    public string ImportOrder { get => _importOrder; set { if (SetProperty(ref _importOrder, value)) ImportCommand.NotifyCanExecuteChanged(); } }
+    public string ImportSourcePath { get => _importSourcePath; set { if (SetProperty(ref _importSourcePath, value)) ImportCommand.NotifyCanExecuteChanged(); } }
+    public string ImportTargetPath { get => _importTargetPath; set { if (SetProperty(ref _importTargetPath, value)) ImportCommand.NotifyCanExecuteChanged(); } }
 
     public string SidebarTitle => _displayNames.Text("ui.works.sidebar.title");
 
@@ -297,6 +317,48 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string CtxInsertOutlineText => _displayNames.Text("ui.works.context.insert_outline");
     public string CtxToggleEditText => _displayNames.Text("ui.works.context.toggle_edit");
 
+    private bool CanImportChapter()
+    {
+        return !string.IsNullOrWhiteSpace(ImportChapterId)
+               && !string.IsNullOrWhiteSpace(ImportChapterTitle)
+               && long.TryParse(ImportOrder, out _)
+               && !string.IsNullOrWhiteSpace(ImportSourcePath)
+               && !string.IsNullOrWhiteSpace(ImportTargetPath);
+    }
+
+    private bool CanGenerateQuickEdit()
+    {
+        return HasCurrentDocument
+               && !string.IsNullOrWhiteSpace(DocumentContent)
+               && !string.IsNullOrWhiteSpace(QuickEditInstruction);
+    }
+
+    private bool CanSendProjectAi()
+    {
+        return !string.IsNullOrWhiteSpace(ProjectAiMessage);
+    }
+
+    private void OnCurrentDocumentChanged()
+    {
+        OnPropertyChanged(nameof(HasCurrentDocument));
+        SaveCommand.NotifyCanExecuteChanged();
+        InsertOutlineCommand.NotifyCanExecuteChanged();
+        QuickAiCommand.NotifyCanExecuteChanged();
+    }
+
+    private void ClearPendingQuickEdit()
+    {
+        if (_pendingQuickEdit is null && _pendingQuickEditRange is null && string.IsNullOrEmpty(QuickEditDiff))
+        {
+            return;
+        }
+
+        _pendingQuickEdit = null;
+        _pendingQuickEditRange = null;
+        QuickEditDiff = string.Empty;
+        ApplyQuickEditCommand.NotifyCanExecuteChanged();
+    }
+
     private async Task InitializeAsync()
     {
         await LoadWorksTreeAsync().ConfigureAwait(true);
@@ -322,6 +384,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         finally
         {
             OnPropertyChanged(nameof(IsWorksTreeEmpty));
+            ExportCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -345,6 +408,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 DocumentContent = await _backend.GetDocumentContentByPathAsync(item.Path).ConfigureAwait(true);
                 _currentDocumentId = nextDocumentId;
+                OnCurrentDocumentChanged();
+                ClearPendingQuickEdit();
                 DocumentTitle = item.Title;
                 OnPropertyChanged(nameof(DocumentBodyText));
             }
@@ -421,6 +486,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(ProjectAiMessage))
+            {
+                StatusText = ProjectAiPlaceholder;
+                return;
+            }
             var result = await _backend.ProjectAiChatAsync(ProjectAiMessage).ConfigureAwait(true);
             ProjectAiAnswer = result.Answer;
             StatusText = _displayNames.Text("ui.common.configured");
@@ -474,6 +544,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 QuickEditInstruction,
                 string.IsNullOrWhiteSpace(_currentDocumentId) ? null : _currentDocumentId)).ConfigureAwait(true);
             _pendingQuickEdit = result;
+            ApplyQuickEditCommand.NotifyCanExecuteChanged();
             QuickEditDiff = result.Diff;
             StatusText = QuickEditDiffText;
         }
@@ -517,6 +588,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             CaptureSnapshot();
             _pendingQuickEdit = null;
             _pendingQuickEditRange = null;
+            ApplyQuickEditCommand.NotifyCanExecuteChanged();
             StatusText = _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
@@ -607,6 +679,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             DocumentContent = _savedSnapshot;
+            ClearPendingQuickEdit();
             RefreshDirtyState();
         }
         finally
