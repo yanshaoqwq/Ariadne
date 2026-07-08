@@ -139,6 +139,9 @@ impl OpenAiCompatibleLlmProvider {
             ProviderProtocol::Anthropic => request
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01"),
+            // ⚠️ Gemini API 要求将 key 作为 URL query parameter 传递，
+            // 这意味着 API Key 可能被记录在服务器访问日志、代理日志等中。
+            // 建议通过反向代理中转，或在网络层面限制日志记录。
             ProviderProtocol::Gemini => request.query(&[("key", api_key)]),
         }
     }

@@ -116,8 +116,9 @@ impl SystemKeychainSecretStore {
 #[cfg(feature = "system-keychain")]
 impl Default for SystemKeychainSecretStore {
     /// 使用项目默认 service 名称创建系统 keychain 存储。
+    /// 旧版使用 "literature-agent"，迁移时需尝试读取旧 service 名下的密钥。
     fn default() -> Self {
-        Self::new("literature-agent")
+        Self::new("ariadne")
     }
 }
 

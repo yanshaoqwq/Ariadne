@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -923,8 +923,14 @@ impl WorkflowRuntime {
         for downstream in &closure {
             if downstream != node_id {
                 self.state.nodes.remove(downstream);
+                // 重置被清理节点关联的 loop 迭代计数，否则已耗尽 max_iterations
+                // 的 loop 节点在恢复后会立即再次暂停。
+                self.state.loop_iterations.remove(downstream);
             }
         }
+        // 重置涉及被清理节点的 communication 边状态，否则上一轮 completed=true
+        // 会导致重跑后 communication 被跳过，返修循环静默失效。
+        reset_communication_edges_for_nodes(&mut self.state, &closure, workflow);
         // 把外部得到的正文注入为该节点输出，置成功，避免重跑注入源节点本身。
         let attempts = previous_attempts(&self.state, node_id);
         let mut metadata = serde_json::Map::new();
@@ -1603,9 +1609,13 @@ impl WorkflowRuntime {
             }
             let mut affected = Vec::new();
             collect_control_closure(workflow, &target, &mut affected);
-            for affected_node in affected {
-                self.state.nodes.remove(&affected_node);
+            for affected_node in &affected {
+                self.state.nodes.remove(affected_node);
+                // 重置被清理节点关联的 loop 迭代计数
+                self.state.loop_iterations.remove(affected_node);
             }
+            // 重置涉及被清理节点的 communication 边状态
+            reset_communication_edges_for_nodes(&mut self.state, &affected, workflow);
             if !self.state.rerun_queue.contains(&target) {
                 self.state.rerun_queue.push(target);
             }
@@ -2014,6 +2024,12 @@ fn collect_data_inputs(
         .filter(|edge| edge.kind == WorkflowEdgeKind::Data && edge.to.node_id == *node_id)
     {
         let Some(alias) = &edge.alias else {
+            // 数据边缺少 alias 时静默跳过，但记录警告便于排错
+            eprintln!(
+                "[ariadne] warning: data edge {} to node {} has no alias; input will be skipped",
+                edge.id.as_str(),
+                node_id.as_str()
+            );
             continue;
         };
         let Some(source) = state.nodes.get(&edge.from.node_id) else {
@@ -2148,6 +2164,38 @@ fn record_reference_check(
                 field_name
             ),
         });
+    }
+}
+
+/// 重置涉及指定节点集合的 communication 边运行状态，使返修循环能正确重新触发。
+///
+/// Loop 重跑和路径 A 注入时，被清理节点的 communication 边可能仍保留上一轮的
+/// `completed = true`、旧消息列表和 `message_count`，导致重跑后
+/// `advance_communication` 跳过通信。此函数将这些边重置为初始状态。
+fn reset_communication_edges_for_nodes(
+    state: &mut WorkflowRunState,
+    affected_nodes: &[NodeId],
+    workflow: &WorkflowDefinition,
+) {
+    let affected_set: std::collections::HashSet<&NodeId> = affected_nodes.iter().collect();
+    for edge in &workflow.edges {
+        if edge.kind != WorkflowEdgeKind::Communication {
+            continue;
+        }
+        // 仅当边的两端节点至少有一个在 affected 集合中时才重置
+        if !affected_set.contains(&edge.from.node_id)
+            && !affected_set.contains(&edge.to.node_id)
+        {
+            continue;
+        }
+        if let Some(comm) = state.communication_edges.get_mut(&edge.id) {
+            comm.completed = false;
+            comm.completed_reason = None;
+            comm.pause_reason = None;
+            comm.message_count = 0;
+            comm.messages.clear();
+            // 保留 initiator_node_id 和 max_message_count，它们由边定义决定
+        }
     }
 }
 

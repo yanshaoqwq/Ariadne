@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -68,7 +68,7 @@ const CHAPTER_INDEX_FILE: &str = "chapter_index.json";
 const UI_NODE_PRESETS_FILE: &str = "ui_node_presets.json";
 const TEMPLATE_REPOSITORY_SETTINGS_FILE: &str = "template_repository_settings.json";
 const CONFIRMATION_POLICY_SETTINGS_FILE: &str = "confirmation_policy_settings.json";
-const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = "https://templates.ariadne.local";
+const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = "";
 
 /// 桌面前端共享状态。project_root 可由 Avalonia IPC 显式设置，也可用环境变量/当前目录兜底。
 #[derive(Clone)]
@@ -273,7 +273,7 @@ impl Default for NodePresetSettings {
             presets: default_node_type_presets(),
             default_model_id: default_node_preset_model_id(),
             default_timeout_ms: default_node_preset_timeout_ms(),
-            default_budget_usd: 0.0,
+            default_budget_usd: 1.0,
         }
     }
 }
@@ -1434,6 +1434,7 @@ pub fn run_workflow_impl(
     secrets: &dyn SecretStore,
     request: RunWorkflowRequest,
 ) -> CommandResult<WorkflowRunStarted> {
+    validate_existing_project_root(project_root)?;
     let start_node_id = request.start_node_id.clone();
     let workflow = load_workflow_definition(project_root, Some(request.workflow_id))?;
     let workflow = if let Some(start_node_id) = start_node_id.as_deref() {
@@ -1444,7 +1445,11 @@ pub fn run_workflow_impl(
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
     std::fs::create_dir_all(document_root.join("documents")).map_err(error_to_string)?;
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
-    let run_id = RunId::from(format!("run-{}", now_timestamp_ms()?));
+    let run_id = RunId::from(format!(
+        "run-{}-{:04x}",
+        now_timestamp_ms()?,
+        simple_random_u16()
+    ));
     let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).map_err(error_to_string)?;
     let documents = document_service_with_artifacts(
         &document_root,
@@ -1657,6 +1662,7 @@ pub fn save_template_repository_settings_impl(
     if settings.base_url.trim().is_empty() {
         return Err("template repository base_url cannot be empty".to_owned());
     }
+    validate_template_url(&settings.base_url)?;
     let path = template_repository_settings_path(project_root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(error_to_string)?;
@@ -1677,7 +1683,9 @@ pub fn update_budget_config_impl(
     validate_money("preauthorized_usd", preauthorized_usd)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
-    config.auto_mode.preauthorized_budget_usd = Some(preauthorized_usd);
+    // 0.0 表示无限制（映射为 None），避免 exceeds(Some(0.0), positive) 阻断所有调用
+    config.auto_mode.preauthorized_budget_usd =
+        if preauthorized_usd > 0.0 { Some(preauthorized_usd) } else { None };
     config_store.save(&config).map_err(error_to_string)?;
     write_budget_config(project_root, &BudgetConfigFile { budget_usd })
 }
@@ -2082,7 +2090,7 @@ pub fn project_ai_chat_impl(
     };
 
     let answer = if request.message.trim().is_empty() {
-        "已处理项目记忆或工作流请求。".to_owned()
+        "Processed project memory or workflow request.".to_owned()
     } else {
         let (answer, tool_workflow_run) = project_ai_answer(
             project_root,
@@ -2206,7 +2214,7 @@ fn project_ai_llm_messages(
         LlmMessage {
             role: LlmRole::System,
             content: vec![ContentPart::text(
-                "你是 Ariadne 项目空间 AI。只能基于项目记忆、显式引用、聊天历史和用户消息回答；不要假造未提供的项目事实。",
+                "You are the Ariadne Project AI. Only answer based on project memory, explicit references, chat history, and user messages; do not fabricate project facts not provided.",
             )],
             name: None,
             tool_call_id: None,
@@ -2299,7 +2307,7 @@ fn tool_control_enabled(
     controls
         .get(scope)
         .and_then(|scope_controls| scope_controls.get(tool).copied())
-        .unwrap_or(true)
+        .unwrap_or(false) // 未显式配置的工具默认禁用，需在 default_permission_tool_controls 中注册
 }
 
 fn workflow_json_paths(root: &Path) -> CommandResult<Vec<PathBuf>> {
@@ -2627,32 +2635,36 @@ fn default_node_preset_timeout_ms() -> u64 {
 }
 
 fn default_node_type_presets() -> Vec<NodeTypePreset> {
+    // 非推理节点（start/document/search/condition/loop/approval/export）无需 LLM 预算；
+    // 推理节点（llm/writer/outliner 等）设 1.0 USD 单次上限，防止失控调用。
+    let llm_budget = 1.0;
+    let no_budget = 0.0;
     [
-        ("start", "ui.workspace.start_node.title"),
-        ("llm", "ui.node.llm"),
-        ("document", "ui.node.document"),
-        ("search", "ui.node.search"),
-        ("condition", "ui.node.condition"),
-        ("loop", "ui.node.loop"),
-        ("approval", "ui.node.approval"),
-        ("export", "ui.node.export"),
-        ("outliner", "agent.outliner"),
-        ("designer", "agent.designer"),
-        ("planner", "agent.planner"),
-        ("detail", "agent.detail"),
-        ("writer", "agent.writer"),
-        ("critic", "agent.critic"),
-        ("prudent", "agent.prudent"),
-        ("polisher", "agent.polisher"),
-        ("summarizer", "agent.summarizer"),
+        ("start", "ui.workspace.start_node.title", no_budget),
+        ("llm", "ui.node.llm", llm_budget),
+        ("document", "ui.node.document", no_budget),
+        ("search", "ui.node.search", no_budget),
+        ("condition", "ui.node.condition", no_budget),
+        ("loop", "ui.node.loop", no_budget),
+        ("approval", "ui.node.approval", no_budget),
+        ("export", "ui.node.export", no_budget),
+        ("outliner", "agent.outliner", llm_budget),
+        ("designer", "agent.designer", llm_budget),
+        ("planner", "agent.planner", llm_budget),
+        ("detail", "agent.detail", llm_budget),
+        ("writer", "agent.writer", llm_budget),
+        ("critic", "agent.critic", llm_budget),
+        ("prudent", "agent.prudent", llm_budget),
+        ("polisher", "agent.polisher", llm_budget),
+        ("summarizer", "agent.summarizer", llm_budget),
     ]
     .into_iter()
-    .map(|(node_type, display_name_key)| NodeTypePreset {
+    .map(|(node_type, display_name_key, budget_usd)| NodeTypePreset {
         node_type: node_type.to_owned(),
         display_name_key: display_name_key.to_owned(),
         model_id: default_node_preset_model_id(),
         timeout_ms: default_node_preset_timeout_ms(),
-        budget_usd: 0.0,
+        budget_usd,
     })
     .collect()
 }
@@ -2710,6 +2722,14 @@ fn policies_from_legacy_policy(
             ConfirmationNormalPolicy::ManualReview,
             ConfirmationAutoModePolicy::AutoApproval,
         ),
+        "manual_skip" => (
+            ConfirmationNormalPolicy::ManualReview,
+            ConfirmationAutoModePolicy::AllowByDefault,
+        ),
+        "auto_approve" => (
+            ConfirmationNormalPolicy::AllowByDefault,
+            ConfirmationAutoModePolicy::AutoApproval,
+        ),
         _ => (
             ConfirmationNormalPolicy::ManualReview,
             ConfirmationAutoModePolicy::AutoApproval,
@@ -2725,8 +2745,15 @@ fn legacy_policy_from_dual_policy(
         (ConfirmationNormalPolicy::AllowByDefault, ConfirmationAutoModePolicy::AllowByDefault) => {
             "auto_skip".to_owned()
         }
-        (_, ConfirmationAutoModePolicy::AllowByDefault) => "auto_skip".to_owned(),
-        (_, ConfirmationAutoModePolicy::AutoApproval) => "auto_audit".to_owned(),
+        (ConfirmationNormalPolicy::ManualReview, ConfirmationAutoModePolicy::AutoApproval) => {
+            "auto_audit".to_owned()
+        }
+        (ConfirmationNormalPolicy::ManualReview, ConfirmationAutoModePolicy::AllowByDefault) => {
+            "manual_skip".to_owned()
+        }
+        (ConfirmationNormalPolicy::AllowByDefault, ConfirmationAutoModePolicy::AutoApproval) => {
+            "auto_approve".to_owned()
+        }
     }
 }
 
@@ -2791,6 +2818,18 @@ fn approval_policy_from_ui(policy: &str) -> CommandResult<ApprovalPolicy> {
             require_human_on_conflict: false,
         }),
         "auto_audit" => Ok(ApprovalPolicy {
+            allow_auto_approval: true,
+            approval_prompt_id: Some("default-review".to_owned()),
+            require_human_on_conflict: true,
+        }),
+        // manual_skip: 普通模式手动审批，Auto Mode 自动放行
+        "manual_skip" => Ok(ApprovalPolicy {
+            allow_auto_approval: true,
+            approval_prompt_id: None,
+            require_human_on_conflict: false,
+        }),
+        // auto_approve: 普通模式默认放行，Auto Mode 自动审批（含审查）
+        "auto_approve" => Ok(ApprovalPolicy {
             allow_auto_approval: true,
             approval_prompt_id: Some("default-review".to_owned()),
             require_human_on_conflict: true,
@@ -2877,12 +2916,26 @@ fn run_status_label(status: crate::contracts::RunStatus) -> &'static str {
 }
 
 fn template_client(request: TemplateRepositoryRequest) -> CommandResult<TemplateRepositoryClient> {
-    TemplateRepositoryClient::new(
-        request
-            .base_url
-            .unwrap_or_else(|| DEFAULT_TEMPLATE_REPOSITORY_URL.to_owned()),
-    )
-    .map_err(error_to_string)
+    let base_url = request
+        .base_url
+        .unwrap_or_else(|| DEFAULT_TEMPLATE_REPOSITORY_URL.to_owned());
+    if base_url.trim().is_empty() {
+        return Err("template repository is not configured; please set a base URL in settings".to_owned());
+    }
+    validate_template_url(&base_url)?;
+    TemplateRepositoryClient::new(base_url).map_err(error_to_string)
+}
+
+fn validate_template_url(url: &str) -> CommandResult<()> {
+    let trimmed = url.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Ok(())
+    } else {
+        let scheme = trimmed.split("://").next().unwrap_or(trimmed);
+        Err(format!(
+            "template URL must use http or https, got '{scheme}'"
+        ))
+    }
 }
 
 struct CommandLlmRuntime {
@@ -3344,6 +3397,23 @@ fn validate_project_root(project_root: &Path) -> CommandResult<()> {
     Ok(())
 }
 
+fn validate_existing_project_root(project_root: &Path) -> CommandResult<()> {
+    validate_project_root(project_root)?;
+    if !project_root.exists() {
+        return Err(format!(
+            "project root does not exist: {}",
+            project_root.display()
+        ));
+    }
+    if !project_root.is_dir() {
+        return Err(format!(
+            "project root is not a directory: {}",
+            project_root.display()
+        ));
+    }
+    Ok(())
+}
+
 fn validate_money(field: &str, value: f64) -> CommandResult<()> {
     if value.is_finite() && value >= 0.0 {
         Ok(())
@@ -3443,19 +3513,21 @@ fn reachable_nodes_from_start(
     workflow: &WorkflowDefinition,
     start_node_id: &NodeId,
 ) -> Vec<NodeId> {
+    let mut reachable_set = HashSet::new();
     let mut reachable = Vec::new();
     let mut stack = vec![start_node_id.clone()];
     while let Some(node_id) = stack.pop() {
-        if reachable.contains(&node_id) {
+        if reachable_set.contains(&node_id) {
             continue;
         }
+        reachable_set.insert(node_id.clone());
         reachable.push(node_id.clone());
         for edge in workflow
             .edges
             .iter()
             .filter(|edge| edge.from.node_id == node_id)
         {
-            if !reachable.contains(&edge.to.node_id) {
+            if !reachable_set.contains(&edge.to.node_id) {
                 stack.push(edge.to.node_id.clone());
             }
         }
@@ -3505,4 +3577,24 @@ fn now_timestamp_ms() -> CommandResult<u128> {
 
 fn error_to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+/// 生成一个简单的随机 u16，用于 run_id 后缀防止碰撞。
+/// 不依赖 rand crate，直接从操作系统获取随机字节。
+fn simple_random_u16() -> u16 {
+    use std::fs::File;
+    use std::io::Read;
+    let mut buf = [0u8; 2];
+    if File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .is_ok()
+    {
+        u16::from_ne_bytes(buf)
+    } else {
+        // fallback: 用高精度时间戳低 16 位
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u16)
+            .unwrap_or(0)
+    }
 }
