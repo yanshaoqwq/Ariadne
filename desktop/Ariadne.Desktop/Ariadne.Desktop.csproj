@@ -17,7 +17,6 @@
 
   <ItemGroup>
     <None Include="..\..\core\resources\display_name.json" Link="Resources\display_name.json" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\core\resources\display_name.en.json" Link="Resources\display_name.en.json" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\core\resources\display_name.ja.json" Link="Resources\display_name.ja.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\core\resources\display_name.*.json" Link="Resources\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

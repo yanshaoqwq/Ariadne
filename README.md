@@ -113,4 +113,4 @@ Ariadne 会在离开有未保存更改的页面前提醒保存、丢弃或取消
 
 ## 显示语言
 
-当前正式界面语言为中文。英文和日文资源仍在准备中，完成前不会在设置中作为可选语言展示。
+当前正式界面语言以中文为基底。设置页会自动发现 `core/resources/display_name.*.json` 覆盖文件；英文和日文目前是预览入口，未补齐的键会回退到中文。需要正式适配某种语言时，可复制 `core/resources/display_name.json` 为 `core/resources/display_name.<语言代码>.json` 并翻译同名键。

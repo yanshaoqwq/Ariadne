@@ -7,34 +7,38 @@ namespace Ariadne.Desktop.Localization;
 /// - 中文 display_name.json 为基底（永远加载）。
 /// - display_name.{lang}.json 为覆盖层：匹配 key 覆盖中文，缺失 key 回退中文。
 /// - 首次加载自动按 CultureInfo.CurrentUICulture 选语言；可在运行时调用 SwitchLanguage 切换。
-/// - 当前版本提供 zh（中文基底）、en（英语覆盖）、ja（日语覆盖）三种语言入口。
+/// - 语言入口按 Resources/display_name.*.json 自动发现；新增覆盖文件即可出现在设置页。
 public sealed class DisplayNameService
 {
-    // 已知支持的语言代码（和文件名后缀对应）
-    public static readonly IReadOnlyList<string> SupportedLanguages = new[] { "zh", "en", "ja" };
-
     private readonly IReadOnlyDictionary<string, string> _base;
     private IReadOnlyDictionary<string, string> _overlay;
     private readonly string _resourceDir;
+    private readonly HashSet<string> _availableLanguageSet;
 
     private DisplayNameService(
         IReadOnlyDictionary<string, string> baseNames,
         IReadOnlyDictionary<string, string> overlay,
-        string resourceDir)
+        string resourceDir,
+        IReadOnlyList<string> availableLanguages)
     {
         _base = baseNames;
         _overlay = overlay;
         _resourceDir = resourceDir;
+        AvailableLanguages = availableLanguages;
+        _availableLanguageSet = new HashSet<string>(availableLanguages, StringComparer.OrdinalIgnoreCase);
     }
 
     public static DisplayNameService Current { get; private set; } = new(
         new Dictionary<string, string>(),
         new Dictionary<string, string>(),
-        string.Empty);
+        string.Empty,
+        new[] { "zh" });
 
     public event EventHandler? LanguageChanged;
 
-    /// 当前语言代码（zh / en / ja）。
+    public IReadOnlyList<string> AvailableLanguages { get; }
+
+    /// 当前语言代码。
     public string CurrentLanguage { get; private set; } = "zh";
 
     public static void Initialize(DisplayNameService service)
@@ -47,11 +51,17 @@ public sealed class DisplayNameService
     {
         var resourceDir = FindResourceDir();
         var baseNames = LoadJson(Path.Combine(resourceDir, "display_name.json"));
+        var availableLanguages = DiscoverLanguages(resourceDir);
+        var bootstrap = new DisplayNameService(
+            baseNames,
+            new Dictionary<string, string>(),
+            resourceDir,
+            availableLanguages);
 
-        var systemLang = NormalizeLanguageCode(DetectSystemLanguage());
+        var systemLang = bootstrap.NormalizeAvailableLanguage(DetectSystemLanguage());
         var overlay = LoadOverlay(resourceDir, systemLang);
 
-        var service = new DisplayNameService(baseNames, overlay, resourceDir)
+        var service = new DisplayNameService(baseNames, overlay, resourceDir, availableLanguages)
         {
             CurrentLanguage = systemLang,
         };
@@ -61,32 +71,49 @@ public sealed class DisplayNameService
     /// 运行时切换语言（保存后调用此方法）。
     public void SwitchLanguage(string langCode)
     {
-        var lang = NormalizeLanguageCode(langCode);
+        var lang = NormalizeAvailableLanguage(langCode);
         _overlay = LoadOverlay(_resourceDir, lang);
         CurrentLanguage = lang;
         LanguageChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    public static string NormalizeLanguageCode(string? langCode)
+    public string NormalizeAvailableLanguage(string? langCode)
     {
-        var lang = (langCode ?? string.Empty).Trim().ToLowerInvariant();
-        if (SupportedLanguages.Contains(lang))
+        var lang = NormalizeLanguageCode(langCode);
+        if (_availableLanguageSet.Contains(lang))
         {
             return lang;
         }
-        if (lang.StartsWith("zh", StringComparison.Ordinal))
+
+        var primary = lang.Split('-', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
+        if (string.Equals(primary, "jp", StringComparison.OrdinalIgnoreCase))
+        {
+            primary = "ja";
+        }
+        if (_availableLanguageSet.Contains(primary))
+        {
+            return primary;
+        }
+
+        return "zh";
+    }
+
+    public static string NormalizeLanguageCode(string? langCode)
+    {
+        var lang = (langCode ?? string.Empty).Trim().Replace('_', '-').ToLowerInvariant();
+        if (string.IsNullOrEmpty(lang))
         {
             return "zh";
         }
-        if (lang.StartsWith("en", StringComparison.Ordinal))
-        {
-            return "en";
-        }
-        if (lang.StartsWith("ja", StringComparison.Ordinal) || lang.StartsWith("jp", StringComparison.Ordinal))
+        if (lang == "jp" || lang.StartsWith("jp-", StringComparison.Ordinal))
         {
             return "ja";
         }
-        return "zh";
+        if (lang.StartsWith("zh-", StringComparison.Ordinal))
+        {
+            return "zh";
+        }
+        return lang;
     }
 
     /// 查找 key 对应的文案：优先叠加层，缺则回退中文基底，再缺则返回 [key] 以便自查。
@@ -99,6 +126,24 @@ public sealed class DisplayNameService
         return _base.TryGetValue(key, out var baseValue) ? baseValue : $"[{key}]";
     }
 
+    public string LanguageLabel(string langCode)
+    {
+        var lang = NormalizeAvailableLanguage(langCode);
+        if (TryGetText($"ui.settings.misc.language.{lang}", out var configuredLabel))
+        {
+            return configuredLabel;
+        }
+
+        try
+        {
+            return CultureInfo.GetCultureInfo(lang).NativeName;
+        }
+        catch (CultureNotFoundException)
+        {
+            return lang.ToUpperInvariant();
+        }
+    }
+
     public string Format(string key, IReadOnlyDictionary<string, string> variables)
     {
         var value = Text(key);
@@ -107,6 +152,23 @@ public sealed class DisplayNameService
             value = value.Replace("{" + name + "}", replacement, StringComparison.Ordinal);
         }
         return value;
+    }
+
+    private bool TryGetText(string key, out string value)
+    {
+        if (_overlay.TryGetValue(key, out var overlayValue) && !string.IsNullOrEmpty(overlayValue))
+        {
+            value = overlayValue;
+            return true;
+        }
+        if (_base.TryGetValue(key, out var baseValue) && !string.IsNullOrEmpty(baseValue))
+        {
+            value = baseValue;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
     }
 
     // ————————————————————————————————————————————————
@@ -163,17 +225,44 @@ public sealed class DisplayNameService
         return LoadJson(path);
     }
 
-    /// 按系统语言自动匹配支持的语言代码：zh/en/ja，其余回退 zh。
+    private static IReadOnlyList<string> DiscoverLanguages(string dir)
+    {
+        var codes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "zh" };
+        if (!Directory.Exists(dir))
+        {
+            return new[] { "zh" };
+        }
+
+        foreach (var path in Directory.EnumerateFiles(dir, "display_name.*.json"))
+        {
+            var fileName = Path.GetFileName(path);
+            const string prefix = "display_name.";
+            const string suffix = ".json";
+            if (!fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                || !fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var rawCode = fileName[prefix.Length..^suffix.Length];
+            var code = NormalizeLanguageCode(rawCode);
+            if (!string.IsNullOrWhiteSpace(code))
+            {
+                codes.Add(code);
+            }
+        }
+
+        return new[] { "zh" }
+            .Concat(codes.Where(code => !string.Equals(code, "zh", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(code => code, StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    /// 按系统语言返回语言代码，最终是否可用由 NormalizeAvailableLanguage 决定。
     private static string DetectSystemLanguage()
     {
         var culture = CultureInfo.CurrentUICulture;
         var iso = culture.TwoLetterISOLanguageName.ToLowerInvariant();
-        return iso switch
-        {
-            "zh" => "zh",
-            "en" => "en",
-            "ja" => "ja",
-            _ => "zh",
-        };
+        return NormalizeLanguageCode(iso);
     }
 }
