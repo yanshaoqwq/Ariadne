@@ -14,6 +14,13 @@ public sealed class GitPageViewModel : ViewModelBase
     private string _checkpointMessage = string.Empty;
     private string _restoreBranchName = string.Empty;
     private string _statusText = string.Empty;
+    private string _repositoryStatusText = string.Empty;
+    private string _currentBranchText = string.Empty;
+    private string _headText = string.Empty;
+    private string _dirtyStateText = string.Empty;
+    private string _repositoryReasonText = string.Empty;
+    private string _diffSummaryText = string.Empty;
+    private string _diffPreviewText = string.Empty;
     private GitHistoryItemViewModel? _selectedCommit;
 
     public GitPageViewModel(
@@ -50,6 +57,15 @@ public sealed class GitPageViewModel : ViewModelBase
     public string CheckpointMessage { get => _checkpointMessage; set => SetProperty(ref _checkpointMessage, value); }
     public string RestoreBranchName { get => _restoreBranchName; set => SetProperty(ref _restoreBranchName, value); }
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
+    public string RepositoryStatusText { get => _repositoryStatusText; private set => SetProperty(ref _repositoryStatusText, value); }
+    public string CurrentBranchText { get => _currentBranchText; private set => SetProperty(ref _currentBranchText, value); }
+    public string HeadText { get => _headText; private set => SetProperty(ref _headText, value); }
+    public string DirtyStateText { get => _dirtyStateText; private set => SetProperty(ref _dirtyStateText, value); }
+    public string RepositoryReasonText { get => _repositoryReasonText; private set => SetProperty(ref _repositoryReasonText, value); }
+    public string DiffSummaryText { get => _diffSummaryText; private set => SetProperty(ref _diffSummaryText, value); }
+    public string DiffPreviewText { get => _diffPreviewText; private set => SetProperty(ref _diffPreviewText, value); }
+    public bool HasRepositoryReason => !string.IsNullOrWhiteSpace(RepositoryReasonText);
+    public bool HasDiffPreview => !string.IsNullOrWhiteSpace(DiffPreviewText);
 
     public GitHistoryItemViewModel? SelectedCommit
     {
@@ -96,6 +112,13 @@ public sealed class GitPageViewModel : ViewModelBase
     public string ManualKindText => _displayNames.Text("ui.git.kind.manual");
     public string AutoKindText => _displayNames.Text("ui.git.kind.auto");
     public string BranchRefsLabel => _displayNames.Text("ui.git.refs");
+    public string RepositoryStatusLabel => _displayNames.Text("ui.git.repository_status");
+    public string CurrentBranchLabel => _displayNames.Text("ui.git.current_branch");
+    public string HeadLabel => _displayNames.Text("ui.git.head");
+    public string DirtyStateLabel => _displayNames.Text("ui.git.dirty_state");
+    public string RepositoryReasonLabel => _displayNames.Text("ui.git.reason");
+    public string DiffSummaryLabel => _displayNames.Text("ui.git.diff_summary");
+    public string DiffPreviewLabel => _displayNames.Text("ui.git.diff_preview");
     public string CtxViewDetailsText => _displayNames.Text("ui.git.context.view_details");
     public string CtxRestoreText => _displayNames.Text("ui.git.context.restore");
     public string CtxCopyIdText => _displayNames.Text("ui.git.context.copy_id");
@@ -104,6 +127,7 @@ public sealed class GitPageViewModel : ViewModelBase
     {
         try
         {
+            await RefreshRepositoryStatusAsync().ConfigureAwait(true);
             var graph = await _backend.GetGitBranchGraphAsync().ConfigureAwait(true);
             Commits.Clear();
             foreach (var node in graph)
@@ -135,10 +159,31 @@ public sealed class GitPageViewModel : ViewModelBase
         }
     }
 
+    private async Task RefreshRepositoryStatusAsync()
+    {
+        try
+        {
+            var status = await _backend.GetGitRepositoryStatusAsync().ConfigureAwait(true);
+            ApplyRepositoryStatus(status);
+        }
+        catch (Exception ex)
+        {
+            RepositoryStatusText = ex.Message;
+            CurrentBranchText = _displayNames.Text("ui.common.none");
+            HeadText = _displayNames.Text("ui.common.none");
+            DirtyStateText = _displayNames.Text("ui.common.none");
+            RepositoryReasonText = string.Empty;
+            DiffSummaryText = _displayNames.Text("ui.common.none");
+            DiffPreviewText = string.Empty;
+            NotifyRepositoryVisibility();
+        }
+    }
+
     private async Task RefreshHistoryFallbackAsync()
     {
         try
         {
+            await RefreshRepositoryStatusAsync().ConfigureAwait(true);
             var history = await _backend.GetGitHistoryAsync().ConfigureAwait(true);
             Commits.Clear();
             foreach (var commit in history)
@@ -231,6 +276,39 @@ public sealed class GitPageViewModel : ViewModelBase
     private void ViewDetails(GitHistoryItemViewModel? commit)
     {
         StatusText = commit?.Summary ?? NoSelectionText;
+    }
+
+    private void ApplyRepositoryStatus(GitRepositoryStatus status)
+    {
+        RepositoryStatusText = status.Status switch
+        {
+            "healthy" => _displayNames.Text("ui.git.status.healthy"),
+            "degraded" => _displayNames.Text("ui.git.status.degraded"),
+            "not_repository" => _displayNames.Text("ui.git.status.not_repository"),
+            "unavailable" => _displayNames.Text("ui.git.status.unavailable"),
+            _ => status.Status,
+        };
+        CurrentBranchText = string.IsNullOrWhiteSpace(status.Branch) ? _displayNames.Text("ui.common.none") : status.Branch;
+        HeadText = string.IsNullOrWhiteSpace(status.Head) ? _displayNames.Text("ui.common.none") : ShortHash(status.Head);
+        DirtyStateText = status.Dirty ? _displayNames.Text("ui.git.dirty") : _displayNames.Text("ui.git.clean");
+        RepositoryReasonText = status.Reason ?? string.Empty;
+        DiffSummaryText = _displayNames.Format("ui.git.diff_lines", new Dictionary<string, string>
+        {
+            ["count"] = status.DiffLineCount.ToString(),
+        });
+        DiffPreviewText = status.DiffPreview;
+        NotifyRepositoryVisibility();
+    }
+
+    private void NotifyRepositoryVisibility()
+    {
+        OnPropertyChanged(nameof(HasRepositoryReason));
+        OnPropertyChanged(nameof(HasDiffPreview));
+    }
+
+    private static string ShortHash(string value)
+    {
+        return value.Length <= 12 ? value : value[..12];
     }
 
     private async Task CopyCommitIdAsync(GitHistoryItemViewModel? commit)

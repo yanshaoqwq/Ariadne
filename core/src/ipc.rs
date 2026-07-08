@@ -435,6 +435,7 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             ok(commands::resume_from_node(state, params.request)?)
         }
         "get_git_history" => ok(commands::get_git_history(state)?),
+        "get_git_repository_status" => ok(commands::get_git_repository_status(state)?),
         "get_git_branch_graph" => {
             let params: LimitParams = params(request.params)?;
             ok(commands::get_git_branch_graph(state, params.limit)?)

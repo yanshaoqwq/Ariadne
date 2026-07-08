@@ -29,6 +29,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private string _quickEditDiff = string.Empty;
     private string _exportFormat = "markdown";
     private string _currentDocumentId = string.Empty;
+    private string _currentDocumentPath = string.Empty;
     private string? _currentDocumentVersion;
     private string _documentTitle;
     private string _importChapterId = string.Empty;
@@ -205,7 +206,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public bool HasUnsavedChanges
     {
         get => _hasUnsavedChanges;
-        private set => SetProperty(ref _hasUnsavedChanges, value);
+        private set
+        {
+            if (SetProperty(ref _hasUnsavedChanges, value))
+            {
+                OnPropertyChanged(nameof(DocumentInfoText));
+            }
+        }
     }
 
     public bool HasCurrentDocument => !string.IsNullOrWhiteSpace(_currentDocumentId);
@@ -299,6 +306,18 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public string CurrentDocumentText => DocumentTitle;
 
+    public string DocumentInfoText => string.IsNullOrWhiteSpace(_currentDocumentId)
+        ? NoDocumentText
+        : _displayNames.Format("ui.works.document_info", new Dictionary<string, string>
+        {
+            ["path"] = string.IsNullOrWhiteSpace(_currentDocumentPath) ? _currentDocumentId : _currentDocumentPath,
+            ["version"] = ShortValue(_currentDocumentVersion),
+            ["blocks"] = DocumentBlocks.Count.ToString(),
+            ["state"] = HasUnsavedChanges
+                ? _displayNames.Text("ui.works.save_state.unsaved")
+                : _displayNames.Text("ui.works.save_state.saved"),
+        });
+
     public string DocumentBodyText => string.IsNullOrWhiteSpace(_currentDocumentId)
         ? NoDocumentText
         : _displayNames.Text("ui.works.empty_document");
@@ -360,6 +379,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private void OnCurrentDocumentChanged()
     {
         OnPropertyChanged(nameof(HasCurrentDocument));
+        OnPropertyChanged(nameof(DocumentInfoText));
         SaveCommand.NotifyCanExecuteChanged();
         InsertOutlineCommand.NotifyCanExecuteChanged();
         QuickAiCommand.NotifyCanExecuteChanged();
@@ -401,6 +421,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         OnPropertyChanged(nameof(DocumentBodyText));
         OnPropertyChanged(nameof(CharacterCountText));
         OnPropertyChanged(nameof(HasDocumentBlocks));
+        OnPropertyChanged(nameof(DocumentInfoText));
         QuickAiCommand.NotifyCanExecuteChanged();
         if (!_suppressDirtyTracking)
         {
@@ -418,6 +439,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         _documentCharacterCount += newText.Length - oldText.Length;
         _documentContentCacheValid = false;
         OnPropertyChanged(nameof(CharacterCountText));
+        OnPropertyChanged(nameof(DocumentInfoText));
         QuickAiCommand.NotifyCanExecuteChanged();
         if (!_suppressDirtyTracking)
         {
@@ -472,6 +494,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             _suppressDocumentBlockChanges = false;
         }
         OnPropertyChanged(nameof(HasDocumentBlocks));
+        OnPropertyChanged(nameof(DocumentInfoText));
     }
 
     private void RebuildDocumentBlocks(string content)
@@ -486,6 +509,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 block,
                 OnDocumentBlockTextChanged));
         }
+        OnPropertyChanged(nameof(DocumentInfoText));
     }
 
     public EditorTextSelection SelectionForBlock(DocumentBlockViewModel block, int localStart, int localEnd, string selectedText)
@@ -592,6 +616,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 var document = await _backend.GetDocumentContentDetailsByPathAsync(item.Path).ConfigureAwait(true);
                 DocumentContent = document.Content;
                 _currentDocumentId = nextDocumentId;
+                _currentDocumentPath = document.Metadata.Path;
                 _currentDocumentVersion = document.Metadata.Version;
                 OnCurrentDocumentChanged();
                 ClearPendingQuickEdit();
@@ -644,7 +669,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 _currentDocumentId,
                 AssembleDocumentContent(),
                 _currentDocumentVersion).ConfigureAwait(true);
+            _currentDocumentPath = report.Metadata.Path;
             _currentDocumentVersion = report.Metadata.Version;
+            OnPropertyChanged(nameof(DocumentInfoText));
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.save");
         }
@@ -783,6 +810,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             {
                 var document = await _backend.GetDocumentContentDetailsAsync(_currentDocumentId).ConfigureAwait(true);
                 DocumentContent = document.Content;
+                _currentDocumentPath = document.Metadata.Path;
                 _currentDocumentVersion = document.Metadata.Version;
             }
             finally
@@ -791,6 +819,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             }
             if (report.Metadata is not null)
             {
+                _currentDocumentPath = report.Metadata.Path;
                 _currentDocumentVersion = report.Metadata.Version;
             }
             CaptureSnapshot();
@@ -843,6 +872,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             _suppressDirtyTracking = true;
             var document = await _backend.GetDocumentContentDetailsAsync(_currentDocumentId).ConfigureAwait(true);
             DocumentContent = document.Content;
+            _currentDocumentPath = document.Metadata.Path;
             _currentDocumentVersion = document.Metadata.Version;
             DocumentTitle = Path.GetFileNameWithoutExtension(document.Metadata.Path);
             ClearPendingQuickEdit();
@@ -850,6 +880,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         catch (Exception ex)
         {
             _currentDocumentId = string.Empty;
+            _currentDocumentPath = string.Empty;
             _currentDocumentVersion = null;
             DocumentContent = string.Empty;
             DocumentTitle = NoDocumentText;
@@ -892,6 +923,15 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     }
 
     private bool HasUnsavedDocumentChanges => _documentDirty || AssembleDocumentContent() != _savedSnapshot;
+
+    private static string ShortValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "-";
+        }
+        return value.Length <= 12 ? value : value[..12];
+    }
 
     protected override void OnPropertyChanged(string? propertyName = null)
     {
@@ -1016,5 +1056,6 @@ public sealed class WorksTreeItemViewModel
     public string Path { get; }
     public string Indent { get; }
     public string DisplayTitle => $"{Indent}{Title}";
+    public string DisplayPath => Path.Replace('\\', '/');
     public RelayCommand OpenCommand { get; }
 }

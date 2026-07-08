@@ -145,6 +145,8 @@ public interface IAriadneBackendClient
 
     Task<IReadOnlyList<GitCommitSummary>> GetGitHistoryAsync(CancellationToken cancellationToken = default);
 
+    Task<GitRepositoryStatus> GetGitRepositoryStatusAsync(CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<BranchGraphNode>> GetGitBranchGraphAsync(int limit = 200, CancellationToken cancellationToken = default);
 
     Task<RestoreReport> RestoreToNewBranchAsync(string commitId, string newBranch, CancellationToken cancellationToken = default);

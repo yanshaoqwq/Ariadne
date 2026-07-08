@@ -380,6 +380,15 @@ public sealed record GitCommitSummary(
     [property: JsonPropertyName("summary")] string Summary,
     [property: JsonPropertyName("checkpoint_kind")] string? CheckpointKind);
 
+public sealed record GitRepositoryStatus(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("branch")] string? Branch,
+    [property: JsonPropertyName("head")] string? Head,
+    [property: JsonPropertyName("dirty")] bool Dirty,
+    [property: JsonPropertyName("reason")] string? Reason,
+    [property: JsonPropertyName("diff_line_count")] int DiffLineCount,
+    [property: JsonPropertyName("diff_preview")] string DiffPreview);
+
 public sealed record BranchGraphNode(
     [property: JsonPropertyName("commit_id")] string CommitId,
     [property: JsonPropertyName("parents")] IReadOnlyList<string> Parents,

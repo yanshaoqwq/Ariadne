@@ -9,21 +9,22 @@ use ariadne::commands::{
     create_checkpoint_impl, fetch_provider_models, fetch_provider_models_impl,
     get_app_settings_impl, get_automation_settings_impl, get_backend_diagnostics,
     get_budget_status_impl, get_display_name_language_pack_template, get_document_content_impl,
-    get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
-    get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
-    get_rag_settings_impl, get_template_repository_settings_impl, get_workflow_settings_impl,
-    list_workflow_graphs_impl, load_workflow_graph_impl, pack_workflow_selection_impl,
-    project_ai_chat, project_ai_chat_impl, resolve_confirmation_impl, resolve_project_references,
-    run_workflow, run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
-    save_document_content_impl, save_git_settings_impl, save_node_preset_settings_impl,
-    save_permissions_settings_impl, save_provider_key_impl, save_provider_settings_impl,
-    save_rag_settings_impl, save_template_repository_settings_impl, save_workflow_graph_impl,
-    save_workflow_settings_impl, update_budget_config_impl, validate_display_name_language_pack,
-    AppSettings, AriadneAppState, AutomationSettings, CanvasEdge, CanvasNode,
-    ConfirmationAutoModePolicy, ConfirmationDecision, ConfirmationNormalPolicy,
-    ConfirmationPolicySetting, GitSettings, NodePresetSettings, PermissionsSettings,
-    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate, RagSettings,
-    ResolveConfirmationRequest, TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
+    get_document_tree_impl, get_git_history_impl, get_git_repository_status_impl,
+    get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
+    get_provider_config_impl, get_rag_settings_impl, get_template_repository_settings_impl,
+    get_workflow_settings_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
+    pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl, resolve_confirmation_impl,
+    resolve_project_references, run_workflow, run_workflow_impl, save_app_settings_impl,
+    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
+    save_node_preset_settings_impl, save_permissions_settings_impl, save_provider_key_impl,
+    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings_impl,
+    save_workflow_graph_impl, save_workflow_settings_impl, update_budget_config_impl,
+    validate_display_name_language_pack, AppSettings, AriadneAppState, AutomationSettings,
+    CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
+    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, NodePresetSettings,
+    PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest,
+    ProviderSettingsUpdate, RagSettings, ResolveConfirmationRequest, TemplateRepositorySettings,
+    WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
 use ariadne::contracts::{
@@ -1358,6 +1359,29 @@ fn git_commands_create_checkpoint_and_return_history() {
 
     assert_eq!(checkpoint.message, "章节完成");
     assert_eq!(history[0].summary, "章节完成");
+}
+
+#[test]
+fn git_repository_status_reports_branch_head_and_worktree_diff() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    run_git(temp.path(), ["config", "user.name", "Ariadne Test"]);
+    run_git(
+        temp.path(),
+        ["config", "user.email", "ariadne@example.test"],
+    );
+    let document = temp.path().join("documents").join("chapter.md");
+    std::fs::write(&document, "draft").unwrap();
+    create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
+    std::fs::write(&document, "changed").unwrap();
+
+    let status = get_git_repository_status_impl(temp.path()).unwrap();
+
+    assert_eq!(status.status, ariadne::git::GitHealthStatus::Healthy);
+    assert!(status.head.is_some());
+    assert!(status.dirty);
+    assert!(status.diff_line_count > 0);
+    assert!(status.diff_preview.contains("changed"));
 }
 
 #[test]

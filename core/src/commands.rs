@@ -42,7 +42,8 @@ use crate::frontend::{
     WorksTreeNode,
 };
 use crate::git::{
-    ArchivePoint, BranchGraphNode, GitCommitSummary, GitService, GitStagePolicy, RestoreReport,
+    ArchivePoint, BranchGraphNode, GitCommitSummary, GitHealthStatus, GitService, GitStagePolicy,
+    RestoreReport,
 };
 use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
 use crate::providers::{
@@ -361,6 +362,17 @@ pub struct WorkflowSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitSettings {
     pub git: GitConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitRepositoryStatus {
+    pub status: GitHealthStatus,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub dirty: bool,
+    pub reason: Option<String>,
+    pub diff_line_count: usize,
+    pub diff_preview: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1587,6 +1599,11 @@ pub fn get_git_history(state: &AriadneAppState) -> CommandResult<Vec<GitCommitSu
     get_git_history_impl(&project_root)
 }
 
+pub fn get_git_repository_status(state: &AriadneAppState) -> CommandResult<GitRepositoryStatus> {
+    let project_root = project_root_from_state(&state, None)?;
+    get_git_repository_status_impl(&project_root)
+}
+
 pub fn get_git_branch_graph(
     state: &AriadneAppState,
     limit: Option<usize>,
@@ -2749,6 +2766,24 @@ pub fn get_git_history_impl(project_root: &Path) -> CommandResult<Vec<GitCommitS
     GitService::new(project_root)
         .recent_commits(100)
         .map_err(error_to_string)
+}
+
+pub fn get_git_repository_status_impl(project_root: &Path) -> CommandResult<GitRepositoryStatus> {
+    validate_project_root(project_root)?;
+    let service = GitService::new(project_root);
+    let health = service.health_check();
+    let diff = service.diff().unwrap_or_default();
+    let diff_line_count = diff.lines().count();
+    let diff_preview = diff.chars().take(4000).collect();
+    Ok(GitRepositoryStatus {
+        status: health.status,
+        branch: health.branch,
+        head: health.head,
+        dirty: health.dirty || diff_line_count > 0,
+        reason: health.reason,
+        diff_line_count,
+        diff_preview,
+    })
 }
 
 pub fn create_checkpoint_impl(project_root: &Path, message: String) -> CommandResult<ArchivePoint> {

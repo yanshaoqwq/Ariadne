@@ -421,6 +421,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredListAsync<GitCommitSummary>("get_git_history", null, cancellationToken);
     }
 
+    public Task<GitRepositoryStatus> GetGitRepositoryStatusAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<GitRepositoryStatus>("get_git_repository_status", null, cancellationToken);
+    }
+
     public Task<IReadOnlyList<BranchGraphNode>> GetGitBranchGraphAsync(int limit = 200, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredListAsync<BranchGraphNode>("get_git_branch_graph", new { limit }, cancellationToken);

@@ -276,3 +276,30 @@ fn ipc_lists_saved_workflow_graphs_for_desktop_selector() {
     assert_eq!(summaries[0]["node_count"], 1);
     assert_eq!(summaries[0]["edge_count"], 0);
 }
+
+#[test]
+fn ipc_reports_git_repository_status_for_desktop_details() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_git_repository_status".to_owned(),
+            params: Value::Null,
+        },
+    );
+
+    assert!(response.ok, "{:?}", response.error);
+    let data = response
+        .data
+        .expect("ipc response should include git repository status");
+    assert_eq!(data["status"], "not_repository");
+    assert_eq!(data["dirty"], false);
+    assert_eq!(data["diff_line_count"], 0);
+}

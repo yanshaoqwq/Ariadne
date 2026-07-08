@@ -87,6 +87,34 @@
           <ScrollViewer>
             <StackPanel Margin="20,0,20,20" Spacing="16">
               <StackPanel Spacing="8">
+                <TextBlock Text="{Binding RepositoryStatusLabel}" Classes="subtitle" />
+                <Grid ColumnDefinitions="88,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="6">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding RepositoryStatusLabel}" Classes="subtle" />
+                  <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding RepositoryStatusText}" TextWrapping="Wrap" />
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding CurrentBranchLabel}" Classes="subtle" />
+                  <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CurrentBranchText}" Classes="mono" TextWrapping="Wrap" />
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding HeadLabel}" Classes="subtle" />
+                  <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding HeadText}" Classes="mono" TextWrapping="Wrap" />
+                  <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding DirtyStateLabel}" Classes="subtle" />
+                  <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding DirtyStateText}" TextWrapping="Wrap" />
+                  <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding DiffSummaryLabel}" Classes="subtle" />
+                  <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding DiffSummaryText}" TextWrapping="Wrap" />
+                </Grid>
+                <StackPanel Spacing="3" IsVisible="{Binding HasRepositoryReason}">
+                  <TextBlock Text="{Binding RepositoryReasonLabel}" Classes="subtle" />
+                  <TextBlock Text="{Binding RepositoryReasonText}" TextWrapping="Wrap" />
+                </StackPanel>
+                <StackPanel Spacing="3" IsVisible="{Binding HasDiffPreview}">
+                  <TextBlock Text="{Binding DiffPreviewLabel}" Classes="subtle" />
+                  <Border Classes="layer" Padding="8">
+                    <TextBlock Text="{Binding DiffPreviewText}" Classes="mono" TextWrapping="Wrap" MaxHeight="220" />
+                  </Border>
+                </StackPanel>
+              </StackPanel>
+
+              <Separator />
+
+              <StackPanel Spacing="8">
                 <TextBlock Text="{Binding CreateCheckpointText}" Classes="subtitle" />
                 <TextBox Text="{Binding CheckpointMessage, Mode=TwoWay}" PlaceholderText="{Binding CheckpointPlaceholder}" />
                 <Button Classes="primary" HorizontalAlignment="Stretch" Content="{Binding CreateCheckpointText}" Command="{Binding CreateCheckpointCommand}" />
