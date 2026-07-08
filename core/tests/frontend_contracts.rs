@@ -258,6 +258,42 @@ fn template_repository_client_uses_search_detail_and_download_endpoints() {
 }
 
 #[test]
+fn template_repository_client_rejects_oversized_streaming_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.write_all(&vec![b' '; 4 * 1024 * 1024 + 1]).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let client =
+        TemplateRepositoryClient::new(format!("http://127.0.0.1:{}", addr.port())).unwrap();
+    let error = client.search("basic", &[], 0).unwrap_err().to_string();
+
+    server.join().unwrap();
+    assert!(error.contains("template_repository_response"));
+    assert!(error.contains("response exceeds"));
+}
+
+#[test]
 fn downloaded_template_manifest_installs_into_workflows_loader_path() {
     let temp = tempfile::tempdir().unwrap();
     let workflows_root = temp.path().join("workflows");

@@ -1,4 +1,5 @@
-use std::net::IpAddr;
+use std::io::Read;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -422,27 +423,40 @@ fn validate_http_endpoint(endpoint: &HttpEndpoint) -> CoreResult<()> {
         ));
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
-        match ip {
-            IpAddr::V4(ip)
-                if ip.is_loopback()
-                    || ip.is_private()
-                    || ip.is_link_local()
-                    || ip.is_broadcast()
-                    || ip.is_unspecified() =>
-            {
+        if ip_is_private_or_local(ip) {
+            return Err(CoreError::validation(
+                "http skill host cannot target private or local addresses",
+            ));
+        }
+    }
+    if let Ok(addresses) = (host.as_str(), endpoint.port).to_socket_addrs() {
+        for address in addresses {
+            if ip_is_private_or_local(address.ip()) {
                 return Err(CoreError::validation(
                     "http skill host cannot target private or local addresses",
                 ));
             }
-            IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() => {
-                return Err(CoreError::validation(
-                    "http skill host cannot target private or local addresses",
-                ));
-            }
-            _ => {}
         }
     }
     Ok(())
+}
+
+fn ip_is_private_or_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+    }
 }
 
 fn default_port_for_scheme(scheme: &str) -> CoreResult<u16> {
@@ -474,8 +488,10 @@ fn parse_http_response(
             reason: format!("response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"),
         });
     }
-    let bytes = response
-        .bytes()
+    let mut limited = response.take(MAX_HTTP_RESPONSE_BYTES.saturating_add(1));
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
         .map_err(|error| http_external(format!("failed to read HTTP response: {error}")))?;
     if bytes.len() as u64 > MAX_HTTP_RESPONSE_BYTES {
         return Err(CoreError::ResourceLimitExceeded {

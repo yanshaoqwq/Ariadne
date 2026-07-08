@@ -594,6 +594,51 @@ fn native_http_backend_executes_against_local_http_server() {
     assert_eq!(output.logs, vec!["http backend completed".to_owned()]);
 }
 
+/// 验证真实 HTTP 后端对未声明 Content-Length 的超大响应也会流式截断。
+#[test]
+fn native_http_backend_rejects_oversized_streaming_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.write_all(&vec![b' '; 4 * 1024 * 1024 + 1]).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let backend = NativeHttpSkillBackend;
+    let config = HttpSkillConfig {
+        host: format!("http://127.0.0.1:{}", addr.port()),
+        method: "GET".to_owned(),
+        path: "/large".to_owned(),
+    };
+
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
+    let result = backend.execute(&config, &inputs(), 1_000);
+    std::env::remove_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL");
+    server.join().unwrap();
+
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("http_skill_response"));
+    assert!(error.contains("response exceeds"));
+}
+
 /// 默认拒绝 HTTP Skill 访问本机/内网地址，避免 SSRF。
 #[test]
 fn native_http_backend_rejects_local_addresses_by_default() {

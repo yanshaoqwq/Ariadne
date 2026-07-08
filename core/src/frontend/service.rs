@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +23,8 @@ use crate::providers::{ContentPart, LlmMessage, LlmProvider};
 use crate::rag::{FindRequest, FindScope, MemoryWritingKnowledgeBase};
 use crate::skills::{WorkflowManifest, WORKFLOW_MANIFEST_FILE};
 use crate::workflow::{RuntimeConfirmationState, WorkflowRunState};
+
+const MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 最近项目和项目初始化状态，默认落在 `.runtime/recent_projects.json`。
 #[derive(Debug, Clone)]
@@ -2102,7 +2105,28 @@ fn parse_success_json<T: serde::de::DeserializeOwned>(
             response.status()
         )));
     }
-    response.json::<T>().map_err(template_repo_error)
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES)
+    {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "template_repository_response".to_owned(),
+            reason: format!("response exceeds {MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES} bytes"),
+        });
+    }
+
+    let mut limited = response.take(MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES.saturating_add(1));
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(template_repo_error)?;
+    if bytes.len() as u64 > MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "template_repository_response".to_owned(),
+            reason: format!("response exceeds {MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES} bytes"),
+        });
+    }
+    serde_json::from_slice::<T>(&bytes).map_err(template_repo_error)
 }
 
 fn validate_non_empty(field: &str, value: &str) -> CoreResult<()> {
