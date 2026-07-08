@@ -72,13 +72,13 @@
 
           <StackPanel IsVisible="{Binding IsGeneralSelected}" Spacing="18">
             <TextBlock Text="{Binding GeneralTitle}" Classes="title" />
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionProjectSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid ColumnDefinitions="180,*" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProjectNameLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ProjectName, Mode=TwoWay}" />
               </Grid>
             </Border>
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionDirectoriesSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding DocumentsDir, Mode=TwoWay}" />
@@ -90,6 +90,17 @@
                 <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ExportsDir, Mode=TwoWay}" />
               </Grid>
             </Border>
+            <Border Classes="settings-section" Padding="22">
+              <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="10" ColumnSpacing="18">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProjectMemoryLabel}" Classes="secondary" VerticalAlignment="Top" />
+                <TextBox Grid.Row="0" Grid.Column="1"
+                         Text="{Binding ProjectMemory, Mode=TwoWay}"
+                         PlaceholderText="{Binding ProjectMemoryPlaceholder}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         MinHeight="150" />
+              </Grid>
+            </Border>
             <Button Classes="primary" Content="{Binding SaveGeneralText}" HorizontalAlignment="Right" Command="{Binding SaveGeneralCommand}" />
           </StackPanel>
 
@@ -98,8 +109,8 @@
               <TextBlock Grid.Column="0" Text="{Binding ModelsTitle}" Classes="title" />
               <Button Grid.Column="1" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshModelsCommand}" />
             </Grid>
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionProviderSelected}">
-              <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+            <Border Classes="settings-section" Padding="22">
+              <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProviderStatusLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding ProviderStatus}" Classes="caption" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding ProviderIdLabel}" Classes="secondary" VerticalAlignment="Center" />
@@ -116,10 +127,15 @@
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultEmbedding, Mode=TwoWay}" Content="{Binding MakeDefaultEmbeddingText}" />
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultReranker, Mode=TwoWay}" Content="{Binding MakeDefaultRerankerText}" />
                 </WrapPanel>
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="{Binding ApiKeyLabel}" Classes="secondary" VerticalAlignment="Center" />
+                <Grid Grid.Row="6" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                  <TextBox Grid.Column="0" Text="{Binding ApiKey, Mode=TwoWay}" PlaceholderText="{Binding ApiKeyPlaceholder}" PasswordChar="*" />
+                  <Button Grid.Column="1" Classes="secondary" Content="{Binding SaveKeyText}" Command="{Binding SaveProviderKeyCommand}" />
+                </Grid>
               </Grid>
             </Border>
 
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionAvailableModelsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="12">
                 <TextBlock Text="{Binding AvailableModelsText}" Classes="subtitle" />
                 <ItemsControl ItemsSource="{Binding AvailableModels}">
@@ -137,7 +153,7 @@
               </StackPanel>
             </Border>
 
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionEmbeddingSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding EmbeddingModelLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding EmbeddingModelId, Mode=TwoWay}" PlaceholderText="{Binding EmbeddingModelPlaceholder}" />
@@ -145,7 +161,7 @@
               </Grid>
             </Border>
 
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionManualModelsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ModelsTextLabel}" Classes="secondary" VerticalAlignment="Top" />
                 <ToggleSwitch Grid.Row="0" Grid.Column="1" IsChecked="{Binding ManualModelsVisible, Mode=TwoWay}" OnContent="" OffContent="" Content="{Binding ManualModelsText}" />
@@ -153,21 +169,12 @@
               </Grid>
             </Border>
 
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionSecretSelected}">
-              <Grid RowDefinitions="Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ApiKeyLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <Grid Grid.Row="0" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                  <TextBox Grid.Column="0" Text="{Binding ApiKey, Mode=TwoWay}" PlaceholderText="{Binding ApiKeyPlaceholder}" PasswordChar="*" />
-                  <Button Grid.Column="1" Classes="secondary" Content="{Binding SaveKeyText}" Command="{Binding SaveProviderKeyCommand}" />
-                </Grid>
-              </Grid>
-            </Border>
             <Button Classes="primary" Content="{Binding SaveModelText}" HorizontalAlignment="Right" Command="{Binding SaveModelCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsPresetsSelected}" Spacing="18">
             <TextBlock Text="{Binding PresetsTitle}" Classes="title" />
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionNodePresetsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="12">
                 <Grid ColumnDefinitions="1.2*,2*,130,120" ColumnSpacing="12">
                   <TextBlock Grid.Column="0" Text="{Binding PresetNodeTypeLabel}" Classes="caption" />
@@ -191,7 +198,7 @@
               </StackPanel>
             </Border>
 
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionDefaultsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DefaultModelLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding DefaultModelId, Mode=TwoWay}" />
@@ -203,7 +210,7 @@
               </Grid>
             </Border>
 
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionTemplatesSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding TemplateRepositoryLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding TemplateRepositoryBaseUrl, Mode=TwoWay}" />
@@ -217,7 +224,7 @@
 
           <StackPanel IsVisible="{Binding IsAutomationSelected}" Spacing="18">
             <TextBlock Text="{Binding AutomationTitle}" Classes="title" />
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionBudgetSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding BudgetLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding BudgetUsd, Mode=TwoWay}" />
@@ -228,7 +235,7 @@
               </Grid>
             </Border>
 
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionConfirmationsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="12">
                 <Grid ColumnDefinitions="*,180,180" ColumnSpacing="12">
                   <TextBlock Grid.Column="1" Text="{Binding NormalModeLabel}" Classes="caption" />
@@ -248,7 +255,7 @@
               </StackPanel>
             </Border>
 
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionRuntimeSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding WorkflowDefaultTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding WorkflowDefaultTimeoutMs, Mode=TwoWay}" />
@@ -266,7 +273,7 @@
 
           <StackPanel IsVisible="{Binding IsPermissionsSelected}" Spacing="18">
             <TextBlock Text="{Binding PermissionsTitle}" Classes="title" />
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionCapabilitiesSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="12">
                 <WrapPanel>
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowNetwork, Mode=TwoWay}" Content="{Binding AllowNetworkText}" />
@@ -277,7 +284,7 @@
                 </WrapPanel>
               </StackPanel>
             </Border>
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionToolControlsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
                 <TextBlock Text="{Binding ToolControlsLabel}" Classes="subtitle" />
                 <ItemsControl ItemsSource="{Binding ToolControlGroups}">
@@ -303,7 +310,7 @@
                 </ItemsControl>
               </StackPanel>
             </Border>
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionPathsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
                 <StackPanel Grid.Column="0" Spacing="8">
                   <TextBlock Text="{Binding ReadableRootsLabel}" Classes="secondary" />
@@ -320,7 +327,7 @@
 
           <StackPanel IsVisible="{Binding IsPersonalizationSelected}" Spacing="18">
             <TextBlock Text="{Binding PersonalizationTitle}" Classes="title" />
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionThemeSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ThemeLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding ThemeOptions}" SelectedItem="{Binding Theme, Mode=TwoWay}" />
@@ -330,7 +337,7 @@
                 <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding GitManualColor, Mode=TwoWay}" />
               </Grid>
             </Border>
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionWorkspaceSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <CheckBox Grid.Row="0" Grid.Column="1" IsChecked="{Binding ProjectPanelVisible, Mode=TwoWay}" Content="{Binding ProjectPanelVisibleText}" />
                 <CheckBox Grid.Row="1" Grid.Column="1" IsChecked="{Binding OnboardingSeen, Mode=TwoWay}" Content="{Binding OnboardingSeenText}" />
@@ -341,7 +348,7 @@
 
           <StackPanel IsVisible="{Binding IsMiscSelected}" Spacing="18">
             <TextBlock Text="{Binding MiscTitle}" Classes="title" />
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionRetrievalSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
                 <CheckBox Grid.Row="0" Grid.Column="1" IsChecked="{Binding RerankerEnabled, Mode=TwoWay}" Content="{Binding RerankerEnabledText}" />
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding ChunkSizeLabel}" Classes="secondary" VerticalAlignment="Center" />
@@ -350,7 +357,7 @@
                 <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding ChunkOverlapChars, Mode=TwoWay}" />
               </Grid>
             </Border>
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionGitSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
                 <TextBlock Text="{Binding GitLabel}" Classes="subtitle" />
                 <WrapPanel>
@@ -363,7 +370,7 @@
                 <TextBox Text="{Binding IgnoredPathsText, Mode=TwoWay}" PlaceholderText="{Binding IgnoredPathsPlaceholder}" AcceptsReturn="True" MinHeight="120" />
               </StackPanel>
             </Border>
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionLanguageSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid ColumnDefinitions="180,*,Auto" RowDefinitions="Auto,Auto" RowSpacing="10" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding LanguageLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding LanguageOptions}" SelectedValue="{Binding SelectedLanguage, Mode=TwoWay}" SelectedValueBinding="{Binding Code}">
@@ -377,7 +384,7 @@
                 <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding LanguageDescText}" Classes="caption" TextWrapping="Wrap" />
               </Grid>
             </Border>
-            <Border Classes="card" Padding="22" IsVisible="{Binding IsSectionDiagnosticsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <Grid ColumnDefinitions="180,*" RowDefinitions="Auto" ColumnSpacing="18">
                 <TextBlock Grid.Column="0" Text="{Binding DiagnosticsLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBlock Grid.Column="1" Text="{Binding DiagnosticsStatusText}" Classes="caption" TextWrapping="Wrap" />

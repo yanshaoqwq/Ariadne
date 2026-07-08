@@ -410,6 +410,49 @@
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
   </Style>
+  <Style Selector="Border.accent-panel">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+  </Style>
+  <Style Selector="Border.soft-panel">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+  </Style>
+  <Style Selector="Border.panel-section">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+  </Style>
+  <Style Selector="Border.node-mark">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+  </Style>
+  <Style Selector="Border.node-mark Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <Style Selector="Border.document-header">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+  </Style>
+  <Style Selector="Border.document-surface">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+  </Style>
+  <Style Selector="Border.settings-section">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+  </Style>
 
   <!-- ============================ 按钮 ============================ -->
   <Style Selector="Button">
@@ -611,6 +654,13 @@
     <Setter Property="Padding" Value="0" />
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="TextBox.detail-editor">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Mono}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="LineHeight" Value="18" />
   </Style>
 
   <Style Selector="ComboBox">

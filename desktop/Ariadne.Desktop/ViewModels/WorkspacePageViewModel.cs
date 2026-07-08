@@ -15,6 +15,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private readonly IAriadneBackendClient _backend;
     private bool _isRightPanelOpen = true;
     private bool _isLibraryOpen = true;
+    private bool _isExecutionPanel;
     private bool _isProjectAiTab = true;
     private string _statusText = string.Empty;
     private bool _hasUnsavedChanges;
@@ -38,6 +39,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         _backend = backend;
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ToggleLibraryCommand = new RelayCommand(() => IsLibraryOpen = !IsLibraryOpen);
+        ShowNodeLibraryCommand = new RelayCommand(() => IsExecutionPanel = false);
+        ShowExecutionCommand = new RelayCommand(() => IsExecutionPanel = true);
         ShowProjectAiCommand = new RelayCommand(() => IsProjectAiTab = true);
         ShowNodeDetailsCommand = new RelayCommand(() => IsProjectAiTab = false);
         ImportCommand = new RelayCommand(() => _ = LoadWorkflowWithUnsavedCheckAsync());
@@ -46,7 +49,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         AddContextNodeCommand = new RelayCommand(() => AddNode("llm"));
         AddStartNodeCommand = new RelayCommand(() => AddNode("start"));
         DeleteSelectedNodeCommand = new RelayCommand(() => _ = DeleteSelectedNodeAsync(), () => HasSelectedNode);
-        RunSelectedNodeCommand = new RelayCommand(() => _ = RunSelectedNodeAsync(), () => HasSelectedNode);
+        RunSelectedNodeCommand = new RelayCommand(() => _ = RunSelectedNodeAsync(), () => IsSelectedStartNode);
         PauseWorkflowCommand = new RelayCommand(() => _ = PauseWorkflowAsync(), HasCurrentRun);
         StopWorkflowCommand = new RelayCommand(() => _ = StopWorkflowAsync(), HasCurrentRun);
         ResumeWorkflowCommand = new RelayCommand(() => _ = ResumeWorkflowAsync(), HasCurrentRun);
@@ -67,6 +70,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         _projectAiAnswer = displayNames.Text("ui.workspace.project_ai.empty");
 
         Nodes = new ObservableCollection<WorkflowNodeViewModel>();
+        StartNodes = new ObservableCollection<WorkflowNodeViewModel>();
         Confirmations = new ObservableCollection<ConfirmationItemViewModel>();
         Edges = new ObservableCollection<WorkflowEdgeViewModel>();
         EntryNodes = new ObservableCollection<NodeLibraryItemViewModel>
@@ -107,6 +111,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ImportText => _displayNames.Text("ui.workspace.import");
     public string ExportText => _displayNames.Text("ui.workspace.export");
     public string RunText => _displayNames.Text("ui.workspace.run");
+    public string RunFromStartText => _displayNames.Text("ui.workspace.run_from_start");
+    public string CurrentRunText => _displayNames.Text("ui.workspace.current_run");
+    public string CurrentRunValueText => string.IsNullOrWhiteSpace(CurrentRunId) ? _displayNames.Text("ui.common.none") : CurrentRunId;
+    public string NoStartNodesText => _displayNames.Text("ui.workspace.no_start_nodes");
+    public string SelectStartNodeText => _displayNames.Text("ui.workspace.select_start_node");
     public string NodeLibraryText => _displayNames.Text("ui.workspace.node_library");
     public string ExecutionText => _displayNames.Text("ui.workspace.execution");
     public string WritingAgentsText => _displayNames.Text("ui.workspace.writing_agents");
@@ -164,6 +173,22 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand ToggleRightPanelCommand { get; }
     public bool IsLibraryOpen { get => _isLibraryOpen; set => SetProperty(ref _isLibraryOpen, value); }
     public RelayCommand ToggleLibraryCommand { get; }
+
+    public bool IsExecutionPanel
+    {
+        get => _isExecutionPanel;
+        set
+        {
+            if (SetProperty(ref _isExecutionPanel, value))
+            {
+                OnPropertyChanged(nameof(IsNodeLibraryPanel));
+            }
+        }
+    }
+
+    public bool IsNodeLibraryPanel => !IsExecutionPanel;
+    public RelayCommand ShowNodeLibraryCommand { get; }
+    public RelayCommand ShowExecutionCommand { get; }
 
     public bool IsProjectAiTab
     {
@@ -226,6 +251,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             if (SetProperty(ref _currentRunId, value))
             {
+                OnPropertyChanged(nameof(CurrentRunValueText));
                 NotifyRunCommandStates();
             }
         }
@@ -240,6 +266,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 
     public ObservableCollection<WorkflowNodeViewModel> Nodes { get; }
+    public ObservableCollection<WorkflowNodeViewModel> StartNodes { get; }
     public ObservableCollection<NodeLibraryItemViewModel> EntryNodes { get; }
     public ObservableCollection<NodeLibraryItemViewModel> WritingAgents { get; }
     public ObservableCollection<NodeLibraryItemViewModel> UtilityNodes { get; }
@@ -254,6 +281,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             if (SetProperty(ref _selectedNode, value))
             {
                 OnPropertyChanged(nameof(HasSelectedNode));
+                OnPropertyChanged(nameof(IsSelectedStartNode));
                 OnPropertyChanged(nameof(SelectedNodeTitle));
                 NotifyNodeCommandStates();
             }
@@ -261,6 +289,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 
     public bool HasSelectedNode => SelectedNode is not null;
+    public bool IsSelectedStartNode => SelectedNode?.IsStartNode == true;
+    public bool HasStartNodes => StartNodes.Count > 0;
 
     public ConfirmationItemViewModel? SelectedConfirmation
     {
@@ -269,10 +299,13 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             if (SetProperty(ref _selectedConfirmation, value))
             {
+                OnPropertyChanged(nameof(HasSelectedConfirmation));
                 NotifyConfirmationCommandStates();
             }
         }
     }
+
+    public bool HasSelectedConfirmation => SelectedConfirmation is not null;
 
     public WorkflowEdgeViewModel? SelectedEdge
     {
@@ -340,6 +373,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             RefreshDirtyState);
         AttachNodeCommands(node);
         Nodes.Add(node);
+        RefreshStartNodes();
         SelectNode(node);
         if (capture)
         {
@@ -427,6 +461,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         SelectedNode = null;
         SelectedEdge = null;
         OnPropertyChanged(nameof(EdgeCountText));
+        RefreshStartNodes();
         RefreshDirtyState();
     }
 
@@ -494,6 +529,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         };
         var node = CreateNodeFromCanvas(pasted);
         Nodes.Add(node);
+        RefreshStartNodes();
         SelectNode(node);
         RefreshDirtyState();
         StatusText = _displayNames.Format("ui.workspace.pasted_selection", new Dictionary<string, string>
@@ -580,6 +616,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         if (SelectedNode is not null)
         {
+            if (!SelectedNode.IsStartNode)
+            {
+                StatusText = SelectStartNodeText;
+                return;
+            }
             await RunNodeAsync(SelectedNode).ConfigureAwait(true);
         }
     }
@@ -783,9 +824,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             var entries = await _backend.ListConfirmationsAsync().ConfigureAwait(true);
             Confirmations.Clear();
+            SelectedConfirmation = null;
             foreach (var entry in entries)
             {
                 Confirmations.Add(new ConfirmationItemViewModel(entry, SelectConfirmation));
+            }
+            if (Confirmations.Count > 0 && SelectedConfirmation is null)
+            {
+                SelectConfirmation(Confirmations[0]);
             }
             StatusText = Confirmations.Count == 0 ? ConfirmationsEmptyText : $"{Confirmations.Count}";
         }
@@ -934,6 +980,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 AddNode("start", capture: false);
             }
+            RefreshStartNodes();
             _nextNodeNumber = Math.Max(_nextNodeNumber, Nodes.Count + 1);
         }
         finally
@@ -1091,6 +1138,16 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             StatusText = ex.Message;
         }
+    }
+
+    private void RefreshStartNodes()
+    {
+        StartNodes.Clear();
+        foreach (var node in Nodes.Where(node => node.IsStartNode))
+        {
+            StartNodes.Add(node);
+        }
+        OnPropertyChanged(nameof(HasStartNodes));
     }
 }
 

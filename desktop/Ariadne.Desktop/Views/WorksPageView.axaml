@@ -42,7 +42,7 @@
       </Border>
 
       <!-- 正文阅读区：默认为排版阅读，修改模式才进入编辑器 -->
-      <ScrollViewer Background="{DynamicResource Ariadne.BackgroundMain}">
+      <ScrollViewer Background="{DynamicResource Ariadne.EditorBackground}">
         <ScrollViewer.ContextMenu>
           <ContextMenu Classes="ariadne">
             <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopyCommand}" />
@@ -54,54 +54,50 @@
             <MenuItem Header="{Binding CtxToggleEditText}" Command="{Binding ToggleEditCommand}" />
           </ContextMenu>
         </ScrollViewer.ContextMenu>
-        <Grid MaxWidth="840" Margin="0,32" HorizontalAlignment="Center" RowDefinitions="Auto,Auto" RowSpacing="14">
+        <Grid MaxWidth="1180" Margin="40,30,40,44" HorizontalAlignment="Stretch" RowDefinitions="Auto,*" RowSpacing="18">
           <Border Grid.Row="0"
-                  Background="{DynamicResource Ariadne.BackgroundSurface}"
-                  BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                  BorderThickness="1"
-                  CornerRadius="{DynamicResource Ariadne.Radius.Large}"
-                  Padding="32,22">
-            <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" RowSpacing="8" ColumnSpacing="16">
+                  Classes="document-header"
+                  Padding="28,18">
+            <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" RowSpacing="8" ColumnSpacing="18">
               <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentTitle}" Classes="title" TextWrapping="Wrap" />
               <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CharacterCountText}" Classes="caption" VerticalAlignment="Center" />
-              <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding StatusText}" Classes="caption" TextWrapping="Wrap" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Text="{Binding StatusText}" Classes="caption" TextWrapping="Wrap" />
             </Grid>
           </Border>
 
           <Border Grid.Row="1"
-                  Background="{DynamicResource Ariadne.BackgroundSurface}"
-                  BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                  BorderThickness="1"
-                  CornerRadius="{DynamicResource Ariadne.Radius.Large}"
-                  Padding="56,50">
-          <StackPanel Spacing="22">
-            <SelectableTextBlock Text="{Binding DocumentBodyText}"
-                                 Classes="reading"
-                                 IsVisible="{Binding !IsEditMode}" />
-            <TextBox Text="{Binding DocumentContent, Mode=TwoWay}"
-                     x:Name="DocumentEditor"
-                     Classes="document-editor"
-                     IsVisible="{Binding IsEditMode}"
-                     KeyDown="OnDocumentEditorKeyDown"
-                     AcceptsReturn="True"
-                     TextWrapping="Wrap"
-                     MinHeight="520"
-                     BorderThickness="0"
-                     Background="Transparent"
-                     PlaceholderText="{Binding QuickAiHint}" />
-            <Border Classes="layer" Padding="14" IsVisible="{Binding IsEditMode}">
-              <StackPanel Spacing="10">
-                <TextBlock Text="{Binding QuickEditTitle}" Classes="subtitle" />
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                  <TextBox Grid.Column="0" Text="{Binding QuickEditInstruction, Mode=TwoWay}" PlaceholderText="{Binding QuickEditPlaceholder}" />
-                  <Button Grid.Column="1" Classes="secondary" Content="{Binding QuickEditGenerateText}" Command="{Binding QuickAiCommand}" />
-                </Grid>
-                <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption" />
-                <TextBox Text="{Binding QuickEditDiff}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" IsReadOnly="True" />
-                <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding QuickEditApplyText}" Command="{Binding ApplyQuickEditCommand}" />
-              </StackPanel>
-            </Border>
-          </StackPanel>
+                  Classes="document-surface"
+                  Padding="64,52">
+            <Grid RowDefinitions="*,Auto" RowSpacing="24" MinHeight="640">
+              <SelectableTextBlock Grid.Row="0"
+                                   Text="{Binding DocumentBodyText}"
+                                   Classes="reading"
+                                   IsVisible="{Binding !IsEditMode}" />
+              <TextBox Grid.Row="0"
+                       Text="{Binding DocumentContent, Mode=TwoWay}"
+                       x:Name="DocumentEditor"
+                       Classes="document-editor"
+                       IsVisible="{Binding IsEditMode}"
+                       KeyDown="OnDocumentEditorKeyDown"
+                       AcceptsReturn="True"
+                       TextWrapping="Wrap"
+                       MinHeight="620"
+                       BorderThickness="0"
+                       Background="Transparent"
+                       PlaceholderText="{Binding QuickAiHint}" />
+              <Border Grid.Row="1" Classes="soft-panel" Padding="16" IsVisible="{Binding IsEditMode}">
+                <StackPanel Spacing="12">
+                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                    <TextBlock Grid.Column="0" Text="{Binding QuickEditTitle}" Classes="subtitle" VerticalAlignment="Center" />
+                    <Button Grid.Column="1" Classes="secondary" Content="{Binding QuickEditGenerateText}" Command="{Binding QuickAiCommand}" />
+                  </Grid>
+                  <TextBox Text="{Binding QuickEditInstruction, Mode=TwoWay}" PlaceholderText="{Binding QuickEditPlaceholder}" />
+                  <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption" />
+                  <TextBox Text="{Binding QuickEditDiff}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="110" IsReadOnly="True" />
+                  <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding QuickEditApplyText}" Command="{Binding ApplyQuickEditCommand}" />
+                </StackPanel>
+              </Border>
+            </Grid>
           </Border>
         </Grid>
       </ScrollViewer>
@@ -202,14 +198,6 @@
             <ScrollViewer Margin="12,8">
               <StackPanel Spacing="12">
                 <TextBlock Text="{Binding ProjectAiAnswer}" Classes="subtle" TextWrapping="Wrap" />
-                <Separator />
-                <TextBlock Text="{Binding ProjectMemoryText}" Classes="subtitle" />
-                <TextBox Text="{Binding ProjectMemory, Mode=TwoWay}"
-                         PlaceholderText="{Binding ProjectMemoryPlaceholder}"
-                         AcceptsReturn="True"
-                         TextWrapping="Wrap"
-                         MinHeight="140" />
-                <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding SaveProjectMemoryText}" Command="{Binding SaveProjectMemoryCommand}" />
               </StackPanel>
             </ScrollViewer>
           </DockPanel>

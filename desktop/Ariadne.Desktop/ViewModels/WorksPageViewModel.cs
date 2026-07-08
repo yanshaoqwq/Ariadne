@@ -16,7 +16,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _statusText = string.Empty;
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
-    private string _projectMemory = string.Empty;
     private string _quickEditInstruction = string.Empty;
     private string _quickEditDiff = string.Empty;
     private string _exportFormat = "markdown";
@@ -28,7 +27,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _importSourcePath = string.Empty;
     private string _importTargetPath = string.Empty;
     private string _savedSnapshot = string.Empty;
-    private string _savedProjectMemorySnapshot = string.Empty;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
     private bool _isEditMode;
@@ -62,7 +60,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         ToggleEditCommand = new RelayCommand(() => IsEditMode = !IsEditMode);
         SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync(), CanSendProjectAi);
         ApplyQuickEditCommand = new RelayCommand(() => _ = ApplyQuickEditAsync(), () => _pendingQuickEdit is not null);
-        SaveProjectMemoryCommand = new RelayCommand(() => _ = SaveProjectMemoryAsync());
         ExportFormats = new ObservableCollection<ExportFormatOption>
         {
             new("markdown", displayNames.Text("ui.works.export_format.markdown")),
@@ -136,8 +133,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand SendProjectAiCommand { get; }
 
     public RelayCommand ApplyQuickEditCommand { get; }
-
-    public RelayCommand SaveProjectMemoryCommand { get; }
     public Action? RequestEditorCopy { get; set; }
     public Action? RequestEditorSelectAll { get; set; }
     public Func<EditorTextSelection>? RequestEditorSelection { get; set; }
@@ -202,12 +197,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         get => _projectAiAnswer;
         set => SetProperty(ref _projectAiAnswer, value);
-    }
-
-    public string ProjectMemory
-    {
-        get => _projectMemory;
-        set => SetProperty(ref _projectMemory, value);
     }
 
     public string QuickEditInstruction
@@ -301,9 +290,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ImportTargetPathText => _displayNames.Text("ui.works.import.target_path");
     public string ImportSourcePlaceholder => _displayNames.Text("ui.works.import.source_placeholder");
     public string ImportTargetPlaceholder => _displayNames.Text("ui.works.import.target_placeholder");
-    public string ProjectMemoryText => _displayNames.Text("ui.works.project_memory");
-    public string ProjectMemoryPlaceholder => _displayNames.Text("ui.works.project_memory.placeholder");
-    public string SaveProjectMemoryText => _displayNames.Text("ui.works.save_project_memory");
     public string QuickEditTitle => _displayNames.Text("ui.works.quick_edit.title");
     public string QuickEditPlaceholder => _displayNames.Text("ui.works.quick_edit.placeholder");
     public string QuickEditGenerateText => _displayNames.Text("ui.works.quick_edit.generate");
@@ -362,7 +348,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private async Task InitializeAsync()
     {
         await LoadWorksTreeAsync().ConfigureAwait(true);
-        await LoadProjectMemoryAsync().ConfigureAwait(true);
     }
 
     private async Task LoadWorksTreeAsync()
@@ -597,41 +582,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
-    private async Task LoadProjectMemoryAsync()
-    {
-        try
-        {
-            _suppressDirtyTracking = true;
-            try
-            {
-                ProjectMemory = await _backend.ReadProjectMemoryAsync().ConfigureAwait(true);
-            }
-            finally
-            {
-                _suppressDirtyTracking = false;
-            }
-            CaptureProjectMemorySnapshot();
-        }
-        catch (Exception ex)
-        {
-            StatusText = ex.Message;
-        }
-    }
-
-    private async Task SaveProjectMemoryAsync()
-    {
-        try
-        {
-            await _backend.WriteProjectMemoryAsync(ProjectMemory).ConfigureAwait(true);
-            CaptureProjectMemorySnapshot();
-            StatusText = _displayNames.Text("ui.common.save");
-        }
-        catch (Exception ex)
-        {
-            StatusText = ex.Message;
-        }
-    }
-
     public async Task<bool> ConfirmLeaveIfNeededAsync()
     {
         if (!HasUnsavedChanges)
@@ -647,14 +597,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 {
                     await SaveAsync().ConfigureAwait(true);
                 }
-                if (HasUnsavedProjectMemoryChanges)
-                {
-                    await SaveProjectMemoryAsync().ConfigureAwait(true);
-                }
                 return !HasUnsavedChanges;
             case UnsavedLeaveChoice.Discard:
                 RestoreSnapshot();
-                RestoreProjectMemorySnapshot();
                 return true;
             default:
                 return false;
@@ -664,12 +609,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private void CaptureSnapshot()
     {
         _savedSnapshot = DocumentContent;
-        RefreshDirtyState();
-    }
-
-    private void CaptureProjectMemorySnapshot()
-    {
-        _savedProjectMemorySnapshot = ProjectMemory;
         RefreshDirtyState();
     }
 
@@ -688,34 +627,18 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
-    private void RestoreProjectMemorySnapshot()
-    {
-        _suppressDirtyTracking = true;
-        try
-        {
-            ProjectMemory = _savedProjectMemorySnapshot;
-            RefreshDirtyState();
-        }
-        finally
-        {
-            _suppressDirtyTracking = false;
-        }
-    }
-
     private void RefreshDirtyState()
     {
-        HasUnsavedChanges = HasUnsavedDocumentChanges || HasUnsavedProjectMemoryChanges;
+        HasUnsavedChanges = HasUnsavedDocumentChanges;
     }
 
     private bool HasUnsavedDocumentChanges => DocumentContent != _savedSnapshot;
-
-    private bool HasUnsavedProjectMemoryChanges => ProjectMemory != _savedProjectMemorySnapshot;
 
     protected override void OnPropertyChanged(string? propertyName = null)
     {
         base.OnPropertyChanged(propertyName);
         if (!_suppressDirtyTracking
-            && propertyName is nameof(DocumentContent) or nameof(ProjectMemory))
+            && propertyName is nameof(DocumentContent))
         {
             RefreshDirtyState();
         }

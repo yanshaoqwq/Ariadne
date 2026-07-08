@@ -8,7 +8,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 {
     private const char SnapshotSeparator = '\u001f';
     private const int SnapshotLocaleIndex = 1;
-    private const int SnapshotOnboardingSeenIndex = 44;
+    private const int SnapshotOnboardingSeenIndex = 45;
     private static readonly string[] LocalizedPropertyNames =
     {
         nameof(Title),
@@ -25,6 +25,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         nameof(WorkflowsDirLabel),
         nameof(SkillsDirLabel),
         nameof(ExportsDirLabel),
+        nameof(ProjectMemoryLabel),
+        nameof(ProjectMemoryPlaceholder),
         nameof(SaveGeneralText),
         nameof(ProviderIdLabel),
         nameof(ProviderTypeLabel),
@@ -126,6 +128,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _workflowsDir = string.Empty;
     private string _skillsDir = string.Empty;
     private string _exportsDir = string.Empty;
+    private string _projectMemory = string.Empty;
 
     private string _providerId = "openai";
     private string _providerType = "open_ai";
@@ -345,6 +348,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string WorkflowsDirLabel => _displayNames.Text("ui.settings.general.workflows_dir");
     public string SkillsDirLabel => _displayNames.Text("ui.settings.general.skills_dir");
     public string ExportsDirLabel => _displayNames.Text("ui.settings.general.exports_dir");
+    public string ProjectMemoryLabel => _displayNames.Text("ui.works.project_memory");
+    public string ProjectMemoryPlaceholder => _displayNames.Text("ui.works.project_memory.placeholder");
     public string SaveGeneralText => _displayNames.Text("ui.settings.general.save");
 
     public string ProviderIdLabel => _displayNames.Text("ui.settings.models.provider_id");
@@ -440,6 +445,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string WorkflowsDir { get => _workflowsDir; set => SetProperty(ref _workflowsDir, value); }
     public string SkillsDir { get => _skillsDir; set => SetProperty(ref _skillsDir, value); }
     public string ExportsDir { get => _exportsDir; set => SetProperty(ref _exportsDir, value); }
+    public string ProjectMemory { get => _projectMemory; set => SetProperty(ref _projectMemory, value); }
 
     public string ProviderId { get => _providerId; set => SetProperty(ref _providerId, value); }
     public string ProviderType { get => _providerType; set => SetProperty(ref _providerType, value); }
@@ -557,6 +563,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 ("project", "ui.settings.section.project"),
                 ("directories", "ui.settings.section.directories"),
+                ("project_memory", "ui.settings.section.project_memory"),
             },
             "models" => new[]
             {
@@ -564,7 +571,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 ("available", "ui.settings.section.available_models"),
                 ("embedding", "ui.settings.section.embedding"),
                 ("manual", "ui.settings.section.manual_fallback"),
-                ("secret", "ui.settings.section.secret"),
             },
             "presets" => new[]
             {
@@ -668,6 +674,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             WorkflowsDir = app.App.WorkflowsDir;
             SkillsDir = app.App.SkillsDir;
             ExportsDir = app.App.ExportsDir;
+            ProjectMemory = await _backend.ReadProjectMemoryAsync().ConfigureAwait(true);
 
             await LoadProviderConfigAsync().ConfigureAwait(true);
 
@@ -807,6 +814,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             await _backend.SaveAppSettingsAsync(new AppSettings(new AppConfig(
                 _schemaVersion, ProjectName, Locale, DocumentsDir, WorkflowsDir, SkillsDir, ExportsDir))).ConfigureAwait(true);
+            await _backend.WriteProjectMemoryAsync(ProjectMemory).ConfigureAwait(true);
         });
     }
 
@@ -1388,6 +1396,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             WorkflowsDir,
             SkillsDir,
             ExportsDir,
+            ProjectMemory,
             ProviderId,
             ProviderType,
             ProviderDisplayName,
@@ -1442,7 +1451,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         return propertyName is
             nameof(ProjectName) or nameof(Locale) or nameof(DocumentsDir) or nameof(WorkflowsDir)
-            or nameof(SkillsDir) or nameof(ExportsDir) or nameof(ProviderId) or nameof(ProviderType)
+            or nameof(SkillsDir) or nameof(ExportsDir) or nameof(ProjectMemory) or nameof(ProviderId) or nameof(ProviderType)
             or nameof(ProviderDisplayName) or nameof(ProviderBaseUrl) or nameof(ProviderEnabled)
             or nameof(MakeDefaultLlm) or nameof(MakeDefaultEmbedding) or nameof(MakeDefaultReranker)
             or nameof(ModelsText) or nameof(EmbeddingModelId) or nameof(ManualModelsVisible) or nameof(ApiKey) or nameof(DefaultModelId)

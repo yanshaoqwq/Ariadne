@@ -2,7 +2,10 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -62,13 +65,24 @@ public partial class WorkspacePageView : UserControl
         if (_attachedViewModel is not null && !ReferenceEquals(_attachedViewModel, DataContext))
         {
             _attachedViewModel.RequestFitView = null;
+            _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
+            foreach (var node in _attachedViewModel.Nodes)
+            {
+                node.PropertyChanged -= OnNodePropertyChanged;
+            }
             _attachedViewModel = null;
         }
 
         if (DataContext is WorkspacePageViewModel viewModel)
         {
             viewModel.RequestFitView = FitViewToNodes;
+            viewModel.Nodes.CollectionChanged += OnNodesCollectionChanged;
+            foreach (var node in viewModel.Nodes)
+            {
+                node.PropertyChanged += OnNodePropertyChanged;
+            }
             _attachedViewModel = viewModel;
+            ScheduleNodeContainerSync();
         }
     }
 
@@ -77,10 +91,47 @@ public partial class WorkspacePageView : UserControl
         if (_attachedViewModel is not null)
         {
             _attachedViewModel.RequestFitView = null;
+            _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
+            foreach (var node in _attachedViewModel.Nodes)
+            {
+                node.PropertyChanged -= OnNodePropertyChanged;
+            }
             _attachedViewModel = null;
         }
 
         base.OnDetachedFromVisualTree(e);
+    }
+
+    private void OnNodesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.OldItems is not null)
+        {
+            foreach (var item in e.OldItems.OfType<WorkflowNodeViewModel>())
+            {
+                item.PropertyChanged -= OnNodePropertyChanged;
+            }
+        }
+        if (e.NewItems is not null)
+        {
+            foreach (var item in e.NewItems.OfType<WorkflowNodeViewModel>())
+            {
+                item.PropertyChanged += OnNodePropertyChanged;
+            }
+        }
+        ScheduleNodeContainerSync();
+    }
+
+    private void OnNodePropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(WorkflowNodeViewModel.X) or nameof(WorkflowNodeViewModel.Y))
+        {
+            ScheduleNodeContainerSync();
+        }
+    }
+
+    private void ScheduleNodeContainerSync()
+    {
+        Dispatcher.UIThread.Post(SyncNodeContainerPositions, DispatcherPriority.Background);
     }
 
     // ===================== 收起/展开下栏（库底部 Pill 点击） =====================
