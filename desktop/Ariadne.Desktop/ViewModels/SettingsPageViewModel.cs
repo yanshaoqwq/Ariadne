@@ -907,8 +907,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 ConfirmationPolicies.Select(item => new ConfirmationPolicySetting(
                     item.Kind,
                     item.NormalPolicy,
-                    item.AutoModePolicy,
-                    string.Empty)).ToArray());
+                    item.AutoModePolicy)).ToArray());
             var budget = await _backend.UpdateBudgetConfigAsync(ParseDouble(BudgetUsd, 0), ParseDouble(PreauthorizedUsd, 0)).ConfigureAwait(true);
             await _backend.SetAutoModeAsync(AutoModeEnabled).ConfigureAwait(true);
             SpentText = $"${budget.SpentUsd:0.####}";

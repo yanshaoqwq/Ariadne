@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[cfg(not(feature = "system-keychain"))]
-use crate::config::MemorySecretStore;
+use crate::config::LocalFileSecretStore;
 #[cfg(feature = "system-keychain")]
 use crate::config::SystemKeychainSecretStore;
 use crate::config::{
@@ -220,8 +220,8 @@ pub struct ConfirmationPolicySetting {
     pub normal_policy: ConfirmationNormalPolicy,
     #[serde(default)]
     pub auto_mode_policy: ConfirmationAutoModePolicy,
-    #[serde(default)]
-    pub policy: String,
+    #[serde(default, rename = "policy", skip_serializing)]
+    pub legacy_policy: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,7 +555,7 @@ pub fn open_project(
     name: Option<String>,
 ) -> CommandResult<CurrentProjectStatus> {
     let project_root = PathBuf::from(project_root);
-    validate_project_root(&project_root)?;
+    validate_initialized_project_root(&project_root)?;
     state.set_project_root(project_root.clone())?;
     record_recent_project(state.app_state_root(), name, &project_root)?;
     current_project_status(&project_root)
@@ -582,7 +582,9 @@ pub fn get_sidebar_badges(state: &AriadneAppState) -> CommandResult<SidebarBadge
 }
 
 pub fn set_project_root(state: &AriadneAppState, project_root: String) -> CommandResult<()> {
-    state.set_project_root(PathBuf::from(project_root))
+    let project_root = PathBuf::from(project_root);
+    validate_initialized_project_root(&project_root)?;
+    state.set_project_root(project_root)
 }
 
 pub fn get_works_tree(state: &AriadneAppState) -> CommandResult<WorksTreeNode> {
@@ -851,12 +853,19 @@ pub fn resume_workflow(
     workflow_id: String,
     run_id: String,
 ) -> CommandResult<WorkflowActionResult> {
-    update_workflow_run_control(
-        &project_root_from_state(&state, None)?,
+    let project_root = project_root_from_state(&state, None)?;
+    let result = update_workflow_run_control(
+        &project_root,
         workflow_id,
         run_id,
         |runtime| runtime.resume(),
-    )
+    )?;
+    spawn_continue_if_queued(
+        &project_root,
+        Arc::clone(&state.secret_store),
+        &result,
+    )?;
+    Ok(result)
 }
 
 /// 路径 B：把交流后同意的 Prudent 输出改写进关联节点并置为通过，解除暂停继续运行。
@@ -864,14 +873,21 @@ pub fn override_confirmation_output(
     state: &AriadneAppState,
     request: OverrideConfirmationOutputRequest,
 ) -> CommandResult<WorkflowActionResult> {
-    update_workflow_run_control(
-        &project_root_from_state(&state, None)?,
+    let project_root = project_root_from_state(&state, None)?;
+    let result = update_workflow_run_control(
+        &project_root,
         request.workflow_id,
         request.run_id,
         |runtime| {
             runtime.override_confirmation_output(&request.confirmation_id, request.new_outputs)
         },
-    )
+    )?;
+    spawn_continue_if_queued(
+        &project_root,
+        Arc::clone(&state.secret_store),
+        &result,
+    )?;
+    Ok(result)
 }
 
 /// 路径 A：注入外部正文到指定节点并从其控制下游重跑，解除暂停继续运行。
@@ -882,7 +898,7 @@ pub fn resume_from_node(
     let project_root = project_root_from_state(&state, None)?;
     let workflow = load_workflow_definition(&project_root, Some(request.workflow_id.clone()))
         .map_err(error_to_string)?;
-    update_workflow_run_control(
+    let result = update_workflow_run_control(
         &project_root,
         request.workflow_id,
         request.run_id,
@@ -893,7 +909,13 @@ pub fn resume_from_node(
                 request.injected_outputs,
             )
         },
-    )
+    )?;
+    spawn_continue_if_queued(
+        &project_root,
+        Arc::clone(&state.secret_store),
+        &result,
+    )?;
+    Ok(result)
 }
 
 pub fn get_workflow_run_state(
@@ -1145,7 +1167,16 @@ pub fn resolve_confirmation(
     request: ResolveConfirmationRequest,
 ) -> CommandResult<ResolveConfirmationResult> {
     let project_root = project_root_from_state(&state, None)?;
-    resolve_confirmation_impl(&project_root, request)
+    let should_continue = request.decision == ConfirmationDecision::Approve;
+    let result = resolve_confirmation_impl(&project_root, request)?;
+    if should_continue {
+        spawn_continue_if_queued(
+            &project_root,
+            Arc::clone(&state.secret_store),
+            &result.workflow,
+        )?;
+    }
+    Ok(result)
 }
 
 pub fn get_git_history(state: &AriadneAppState) -> CommandResult<Vec<GitCommitSummary>> {
@@ -1378,7 +1409,9 @@ pub fn default_secret_store() -> Arc<dyn SecretStore> {
 
 #[cfg(not(feature = "system-keychain"))]
 pub fn default_secret_store() -> Arc<dyn SecretStore> {
-    Arc::new(MemorySecretStore::default())
+    Arc::new(LocalFileSecretStore::new(
+        default_app_state_root().join("secrets.json"),
+    ))
 }
 
 pub fn get_document_tree_impl(project_root: &Path) -> CommandResult<DocumentTreeNode> {
@@ -1495,11 +1528,84 @@ fn run_workflow_impl_with_run_id(
         inject_start_node_initial_inputs(&mut workflow, start_node_id, request.initial_inputs)?;
     }
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).map_err(error_to_string)?;
+    runtime.state.start_node_id = start_node_id.as_deref().map(NodeId::from);
+    let status = execute_workflow_runtime(project_root, &document_root, secrets, &workflow, &mut runtime)?;
+    Ok(WorkflowRunStarted {
+        run_id: run_id.as_str().to_owned(),
+        status: run_status_label(status).to_owned(),
+    })
+}
+
+fn continue_workflow_run_impl(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    workflow_id: String,
+    run_id: String,
+) -> CommandResult<WorkflowRunStarted> {
+    validate_existing_project_root(project_root)?;
+    let workflow_id_typed = WorkflowId::from(workflow_id.clone());
+    let run_id_typed = RunId::from(run_id.clone());
+    let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
+    let state = store
+        .load_state(&workflow_id_typed, &run_id_typed)
+        .map_err(error_to_string)?
+        .ok_or_else(|| format!("workflow run not found: {workflow_id}/{run_id}"))?;
+    if state.status.is_terminal() {
+        return Ok(WorkflowRunStarted {
+            run_id,
+            status: run_status_label(state.status).to_owned(),
+        });
+    }
+    let (workflow, start_node_id) =
+        workflow_for_run_state(project_root, &workflow_id_typed, &state)?;
+    let document_root =
+        workflow_document_root(project_root, &workflow, start_node_id.as_ref().map(NodeId::as_str))?;
+    let mut runtime = WorkflowRuntime::from_state(state);
+    let status = execute_workflow_runtime(project_root, &document_root, secrets, &workflow, &mut runtime)?;
+    Ok(WorkflowRunStarted {
+        run_id,
+        status: run_status_label(status).to_owned(),
+    })
+}
+
+fn workflow_for_run_state(
+    project_root: &Path,
+    workflow_id: &WorkflowId,
+    state: &crate::workflow::WorkflowRunState,
+) -> CommandResult<(WorkflowDefinition, Option<NodeId>)> {
+    let workflow = load_workflow_definition(project_root, Some(workflow_id.as_str().to_owned()))?;
+    if let Some(start_node_id) = &state.start_node_id {
+        let branch = workflow_branch_from_start(&workflow, start_node_id)?;
+        return Ok((branch, Some(start_node_id.clone())));
+    }
+
+    let executed_start_nodes = workflow
+        .nodes
+        .iter()
+        .filter(|node| node.type_name == "start" && state.nodes.contains_key(&node.id))
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    if executed_start_nodes.len() == 1 {
+        let start_node_id = executed_start_nodes[0].clone();
+        let branch = workflow_branch_from_start(&workflow, &start_node_id)?;
+        return Ok((branch, Some(start_node_id)));
+    }
+
+    Ok((workflow, None))
+}
+
+fn execute_workflow_runtime(
+    project_root: &Path,
+    document_root: &Path,
+    secrets: &dyn SecretStore,
+    workflow: &WorkflowDefinition,
+    runtime: &mut WorkflowRuntime,
+) -> CommandResult<crate::contracts::RunStatus> {
     std::fs::create_dir_all(document_root.join("documents")).map_err(error_to_string)?;
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
-    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).map_err(error_to_string)?;
     let documents = document_service_with_artifacts(
-        &document_root,
+        document_root,
         project_root.join(".runtime").join("artifacts"),
     );
     let ledger = Arc::new(SqliteCostLedger::open(project_root).map_err(error_to_string)?);
@@ -1548,7 +1654,7 @@ fn run_workflow_impl_with_run_id(
     }
     for type_name in ["document", "document_read"] {
         let documents = documents.clone();
-        let document_root = document_root.clone();
+        let document_root = document_root.to_path_buf();
         external
             .register_handler(
                 type_name,
@@ -1562,13 +1668,9 @@ fn run_workflow_impl_with_run_id(
     let mut executor =
         BuiltinWorkflowNodeExecutor::new(&mut external).with_export_sink(&mut export_sink);
     let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
-    let status = runtime
-        .run_persisted(&workflow, &mut executor, &store)
-        .map_err(error_to_string)?;
-    Ok(WorkflowRunStarted {
-        run_id: run_id.as_str().to_owned(),
-        status: run_status_label(status).to_owned(),
-    })
+    runtime
+        .run_persisted(workflow, &mut executor, &store)
+        .map_err(error_to_string)
 }
 
 fn inject_start_node_initial_inputs(
@@ -1810,7 +1912,10 @@ pub fn save_automation_settings_impl(
             ));
         }
         let normalized = normalize_confirmation_policy_setting(setting);
-        let policy = approval_policy_from_ui(&normalized.policy)?;
+        let policy = approval_policy_from_ui(&legacy_policy_from_dual_policy(
+            normalized.normal_policy,
+            normalized.auto_mode_policy,
+        ))?;
         let prompt = ensure_approval_prompt(
             &mut config.auto_mode.available_approval_prompts,
             &normalized.confirmation_kind,
@@ -2814,7 +2919,7 @@ fn confirmation_policy_settings_from_prompts(
                 confirmation_kind: kind.to_owned(),
                 normal_policy,
                 auto_mode_policy,
-                policy,
+                legacy_policy: policy,
             }
         })
         .collect()
@@ -2823,14 +2928,13 @@ fn confirmation_policy_settings_from_prompts(
 fn normalize_confirmation_policy_setting(
     mut setting: ConfirmationPolicySetting,
 ) -> ConfirmationPolicySetting {
-    if !setting.policy.trim().is_empty() {
-        let (normal_policy, auto_mode_policy) = policies_from_legacy_policy(&setting.policy);
+    if !setting.legacy_policy.trim().is_empty() {
+        let (normal_policy, auto_mode_policy) =
+            policies_from_legacy_policy(&setting.legacy_policy);
         setting.normal_policy = normal_policy;
         setting.auto_mode_policy = auto_mode_policy;
-    } else {
-        setting.policy =
-            legacy_policy_from_dual_policy(setting.normal_policy, setting.auto_mode_policy);
     }
+    setting.legacy_policy.clear();
     setting
 }
 
@@ -3029,6 +3133,41 @@ fn update_workflow_run_control(
         run_id,
         status: run_status_label(runtime.state.status).to_owned(),
     })
+}
+
+fn spawn_continue_if_queued(
+    project_root: &Path,
+    secrets: Arc<dyn SecretStore>,
+    result: &WorkflowActionResult,
+) -> CommandResult<()> {
+    if result.status != "queued" {
+        return Ok(());
+    }
+    spawn_continue_workflow_worker(
+        project_root.to_path_buf(),
+        secrets,
+        result.workflow_id.clone(),
+        result.run_id.clone(),
+    )
+}
+
+fn spawn_continue_workflow_worker(
+    project_root: PathBuf,
+    secrets: Arc<dyn SecretStore>,
+    workflow_id: String,
+    run_id: String,
+) -> CommandResult<()> {
+    std::thread::Builder::new()
+        .name(format!("ariadne-workflow-resume-{run_id}"))
+        .spawn(move || {
+            if let Err(error) =
+                continue_workflow_run_impl(&project_root, secrets.as_ref(), workflow_id, run_id)
+            {
+                eprintln!("[ariadne] workflow resume worker failed: {error}");
+            }
+        })
+        .map(|_| ())
+        .map_err(error_to_string)
 }
 
 fn run_status_label(status: crate::contracts::RunStatus) -> &'static str {
@@ -3364,24 +3503,49 @@ fn graph_to_workflow(graph: WorkflowGraphData) -> CommandResult<WorkflowDefiniti
                 } else {
                     None
                 };
+                let source_handle = edge.source_handle;
+                let target_handle = edge.target_handle;
+                let alias = if edge.kind == WorkflowEdgeKind::Data {
+                    edge.label
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|label| !label.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| Some(default_data_edge_alias(&target_handle)))
+                } else {
+                    edge.label
+                };
                 Ok(Edge {
                     id: EdgeId::from(edge.id),
                     kind: edge.kind,
                     from: PortEndpoint {
                         node_id: NodeId::from(edge.source),
-                        port_name: edge.source_handle,
+                        port_name: source_handle,
                     },
                     to: PortEndpoint {
                         node_id: NodeId::from(edge.target),
-                        port_name: edge.target_handle,
+                        port_name: target_handle,
                     },
-                    alias: edge.label,
+                    alias,
                     communication,
                 })
             })
             .collect::<CommandResult<Vec<_>>>()?,
         metadata: graph.metadata,
     })
+}
+
+fn default_data_edge_alias(target_handle: &str) -> String {
+    let trimmed = target_handle.trim();
+    let alias = trimmed
+        .strip_prefix("data-in-")
+        .or_else(|| trimmed.strip_prefix("in-"))
+        .unwrap_or(trimmed);
+    if alias.is_empty() || alias == "input" || alias == "in" {
+        "input".to_owned()
+    } else {
+        alias.to_owned()
+    }
 }
 
 fn parse_position(value: Value) -> Option<crate::contracts::CanvasPosition> {
@@ -3538,6 +3702,18 @@ fn validate_existing_project_root(project_root: &Path) -> CommandResult<()> {
     if !project_root.is_dir() {
         return Err(format!(
             "project root is not a directory: {}",
+            project_root.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_initialized_project_root(project_root: &Path) -> CommandResult<()> {
+    validate_existing_project_root(project_root)?;
+    let config_dir = project_root.join(".config");
+    if !config_dir.is_dir() {
+        return Err(format!(
+            "project root is not initialized: {}",
             project_root.display()
         ));
     }

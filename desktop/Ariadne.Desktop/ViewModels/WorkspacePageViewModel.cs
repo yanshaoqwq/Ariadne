@@ -29,6 +29,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _confirmationReason = string.Empty;
     private string _annotationTitle = string.Empty;
     private IReadOnlyList<CanvasEdge> _edges = Array.Empty<CanvasEdge>();
+    private readonly List<string> _undoSnapshots = new();
+    private readonly List<string> _redoSnapshots = new();
     private readonly List<ProjectAiChatMessage> _projectAiHistory = new();
     private CanvasNode? _clipboardNode;
     private WorkflowNodeViewModel? _selectedNode;
@@ -48,6 +50,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ImportCommand = new RelayCommand(() => _ = LoadWorkflowWithUnsavedCheckAsync());
         ExportCommand = new RelayCommand(() => _ = ExportWorkflowAsync());
         SaveCommand = new RelayCommand(() => _ = SaveWorkflowAsync());
+        UndoCommand = new RelayCommand(UndoCanvasChange, () => _undoSnapshots.Count > 0);
+        RedoCommand = new RelayCommand(RedoCanvasChange, () => _redoSnapshots.Count > 0);
         AddContextNodeCommand = new RelayCommand(() => AddNode("llm"));
         AddStartNodeCommand = new RelayCommand(() => AddNode("start"));
         DeleteSelectedNodeCommand = new RelayCommand(() => _ = DeleteSelectedNodeAsync(), () => HasSelectedNode);
@@ -112,6 +116,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SaveText => _displayNames.Text("ui.workspace.save");
     public string ImportText => _displayNames.Text("ui.workspace.import");
     public string ExportText => _displayNames.Text("ui.workspace.export");
+    public string UndoText => _displayNames.Text("ui.action.undo");
+    public string RedoText => _displayNames.Text("ui.action.redo");
     public string RunText => _displayNames.Text("ui.workspace.run");
     public string RunFromStartText => _displayNames.Text("ui.workspace.run_from_start");
     public string CurrentRunText => _displayNames.Text("ui.workspace.current_run");
@@ -214,6 +220,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand ImportCommand { get; }
     public RelayCommand ExportCommand { get; }
     public RelayCommand SaveCommand { get; }
+    public RelayCommand UndoCommand { get; }
+    public RelayCommand RedoCommand { get; }
     public RelayCommand AddContextNodeCommand { get; }
     public RelayCommand AddStartNodeCommand { get; }
     public RelayCommand DeleteSelectedNodeCommand { get; }
@@ -346,6 +354,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             StatusText = EdgeDetailsText;
             return;
         }
+        CaptureUndoSnapshot();
         var edge = new CanvasEdge(
             $"edge-{Guid.NewGuid():N}",
             sourceNodeId,
@@ -353,7 +362,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             "output",
             "input",
             "data",
-            null,
+            "input",
             new Dictionary<string, object?>());
         var viewModel = new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge, RefreshDirtyState);
         Edges.Add(viewModel);
@@ -397,8 +406,87 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         RejectConfirmationCommand.NotifyCanExecuteChanged();
     }
 
+    public void CaptureCanvasHistory()
+    {
+        CaptureUndoSnapshot();
+    }
+
+    private void CaptureUndoSnapshot()
+    {
+        if (_suppressSnapshotChecks)
+        {
+            return;
+        }
+        var snapshot = CurrentSnapshot();
+        if (_undoSnapshots.Count == 0 || _undoSnapshots[^1] != snapshot)
+        {
+            _undoSnapshots.Add(snapshot);
+            if (_undoSnapshots.Count > 100)
+            {
+                _undoSnapshots.RemoveAt(0);
+            }
+        }
+        _redoSnapshots.Clear();
+        NotifyHistoryCommands();
+    }
+
+    private void UndoCanvasChange()
+    {
+        if (_undoSnapshots.Count == 0)
+        {
+            return;
+        }
+        var current = CurrentSnapshot();
+        var previous = _undoSnapshots[^1];
+        _undoSnapshots.RemoveAt(_undoSnapshots.Count - 1);
+        if (_redoSnapshots.Count == 0 || _redoSnapshots[^1] != current)
+        {
+            _redoSnapshots.Add(current);
+        }
+        RestoreGraphSnapshot(previous);
+        NotifyHistoryCommands();
+    }
+
+    private void RedoCanvasChange()
+    {
+        if (_redoSnapshots.Count == 0)
+        {
+            return;
+        }
+        var current = CurrentSnapshot();
+        var next = _redoSnapshots[^1];
+        _redoSnapshots.RemoveAt(_redoSnapshots.Count - 1);
+        if (_undoSnapshots.Count == 0 || _undoSnapshots[^1] != current)
+        {
+            _undoSnapshots.Add(current);
+        }
+        RestoreGraphSnapshot(next);
+        NotifyHistoryCommands();
+    }
+
+    private void RestoreGraphSnapshot(string snapshot)
+    {
+        var graph = JsonSerializer.Deserialize<WorkflowGraphData>(snapshot, JsonOptions);
+        if (graph is null)
+        {
+            return;
+        }
+        ApplyGraph(graph);
+        RefreshDirtyState();
+    }
+
+    private void NotifyHistoryCommands()
+    {
+        UndoCommand.NotifyCanExecuteChanged();
+        RedoCommand.NotifyCanExecuteChanged();
+    }
+
     private void AddNode(string nodeType, bool capture = true)
     {
+        if (capture)
+        {
+            CaptureUndoSnapshot();
+        }
         var label = NodeLabel(nodeType);
         var node = new WorkflowNodeViewModel(
             id: NextNodeId(nodeType),
@@ -488,6 +576,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void DeleteNode(WorkflowNodeViewModel node)
     {
+        CaptureUndoSnapshot();
         Nodes.Remove(node);
         _edges = _edges
             .Where(edge => edge.Source != node.Id && edge.Target != node.Id)
@@ -539,6 +628,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         _clipboardNode = node.ToCanvasNode();
         PasteNodeCommand.NotifyCanExecuteChanged();
+        CaptureUndoSnapshot();
         DeleteNode(node);
         StatusText = _displayNames.Format("ui.workspace.cut_selection", new Dictionary<string, string>
         {
@@ -567,6 +657,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             Position = position,
         };
         var node = CreateNodeFromCanvas(pasted);
+        CaptureUndoSnapshot();
         Nodes.Add(node);
         RefreshStartNodes();
         SelectNode(node);
@@ -1040,6 +1131,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private void CaptureSnapshot()
     {
         _savedSnapshot = CurrentSnapshot();
+        _undoSnapshots.Clear();
+        _redoSnapshots.Clear();
+        NotifyHistoryCommands();
         HasUnsavedChanges = false;
     }
 
@@ -1178,6 +1272,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
+            CaptureUndoSnapshot();
             _edges = Edges.Select(edge => edge.ToCanvasEdge()).ToArray();
             RefreshDirtyState();
             StatusText = EdgeDetailsText;
@@ -1215,6 +1310,14 @@ public sealed class NodeLibraryItemViewModel
 
 public sealed class WorkflowNodeViewModel : ViewModelBase
 {
+    private static readonly IBrush IdleBrush = new SolidColorBrush(Color.Parse("#8B939D"));
+    private static readonly IBrush RunningBrush = new SolidColorBrush(Color.Parse("#2563EB"));
+    private static readonly IBrush PendingBrush = new SolidColorBrush(Color.Parse("#6B7280"));
+    private static readonly IBrush PausedBrush = new SolidColorBrush(Color.Parse("#D97706"));
+    private static readonly IBrush SucceededBrush = new SolidColorBrush(Color.Parse("#0F9D63"));
+    private static readonly IBrush FailedBrush = new SolidColorBrush(Color.Parse("#DC2626"));
+    private static readonly IBrush SelectedBrush = new SolidColorBrush(Color.Parse("#2E726B"));
+
     private readonly IAriadneBackendClient _backend;
     private readonly Action _markDirty;
     private string _name;
@@ -1270,10 +1373,33 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public string ModelId { get => _modelId; set => SetProperty(ref _modelId, value); }
     public string BudgetUsd { get => _budgetUsd; set => SetProperty(ref _budgetUsd, value); }
     public string TimeoutMs { get => _timeoutMs; set => SetProperty(ref _timeoutMs, value); }
-    public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
+    public string StatusText
+    {
+        get => _statusText;
+        set
+        {
+            if (SetProperty(ref _statusText, value))
+            {
+                OnPropertyChanged(nameof(StatusIndicatorBrush));
+                OnPropertyChanged(nameof(NodeBorderBrush));
+            }
+        }
+    }
     public double X { get => _x; set => SetProperty(ref _x, value); }
     public double Y { get => _y; set => SetProperty(ref _y, value); }
-    public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (SetProperty(ref _isSelected, value))
+            {
+                OnPropertyChanged(nameof(NodeBorderBrush));
+            }
+        }
+    }
+    public IBrush NodeBorderBrush => IsSelected ? SelectedBrush : StatusIndicatorBrush;
+    public IBrush StatusIndicatorBrush => BrushForStatus(StatusText);
 
     public Dictionary<string, object?> ToData()
     {
@@ -1345,6 +1471,44 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
             _markDirty();
         }
     }
+
+    private static IBrush BrushForStatus(string status)
+    {
+        var normalized = status.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return IdleBrush;
+        }
+        if (normalized.Contains("running") || normalized.Contains("运行"))
+        {
+            return RunningBrush;
+        }
+        if (normalized.Contains("queued") || normalized.Contains("pending") || normalized.Contains("排队"))
+        {
+            return PendingBrush;
+        }
+        if (normalized.Contains("paused") || normalized.Contains("暂停"))
+        {
+            return PausedBrush;
+        }
+        if (normalized.Contains("succeeded") || normalized.Contains("success") || normalized.Contains("成功"))
+        {
+            return SucceededBrush;
+        }
+        if (normalized.Contains("failed")
+            || normalized.Contains("error")
+            || normalized.Contains("exception")
+            || normalized.Contains("失败")
+            || normalized.Contains("错误"))
+        {
+            return FailedBrush;
+        }
+        if (normalized.Contains("stopped") || normalized.Contains("停止"))
+        {
+            return IdleBrush;
+        }
+        return IdleBrush;
+    }
 }
 
 public sealed class ConfirmationItemViewModel : ViewModelBase
@@ -1370,6 +1534,10 @@ public sealed class ConfirmationItemViewModel : ViewModelBase
 
 public sealed class WorkflowEdgeViewModel : ViewModelBase
 {
+    private static readonly IBrush DataBrush = new SolidColorBrush(Color.Parse("#2E726B"));
+    private static readonly IBrush ControlBrush = new SolidColorBrush(Color.Parse("#8B939D"));
+    private static readonly IBrush CommunicationBrush = new SolidColorBrush(Color.Parse("#7C3AED"));
+
     private readonly DisplayNameService _displayNames;
     private readonly Action _markDirty;
     private bool _isSelected;
@@ -1424,6 +1592,12 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
     public bool IsCommunication => string.Equals(Kind, "communication", StringComparison.OrdinalIgnoreCase);
+    public IBrush StrokeBrush => Kind.ToLowerInvariant() switch
+    {
+        "control" => ControlBrush,
+        "communication" => CommunicationBrush,
+        _ => DataBrush,
+    };
     public Geometry EdgePath { get; private set; } = new PathGeometry();
 
     public void UpdateEdgePath(double sourceX, double sourceY, double targetX, double targetY)

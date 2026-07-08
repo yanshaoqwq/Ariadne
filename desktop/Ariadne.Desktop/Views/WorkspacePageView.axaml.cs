@@ -47,6 +47,8 @@ public partial class WorkspacePageView : UserControl
     public WorkspacePageView()
     {
         InitializeComponent();
+        Focusable = true;
+        AddHandler(KeyDownEvent, OnWorkspaceKeyDown, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         DataContextChanged += (_, _) => AttachViewActions();
         LayoutUpdated += OnFirstLayout;
         AttachViewActions();
@@ -326,6 +328,10 @@ public partial class WorkspacePageView : UserControl
         }
 
         node.SelectCommand.Execute(null);
+        if (DataContext is WorkspacePageViewModel viewModel)
+        {
+            viewModel.CaptureCanvasHistory();
+        }
         _draggedNode = node;
         _nodeDragging = true;
         _nodeDragStart = e.GetPosition(CanvasOverlay);
@@ -333,6 +339,46 @@ public partial class WorkspacePageView : UserControl
         _nodeDragOriginY = node.Y;
         e.Pointer.Capture((IInputElement?)sender);
         e.Handled = true;
+    }
+
+    private void OnWorkspaceKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return;
+        }
+        var hasCommandModifier = e.KeyModifiers.HasFlag(KeyModifiers.Control)
+            || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+        if (!hasCommandModifier)
+        {
+            return;
+        }
+        if (e.Key == Key.Z && e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+        {
+            if (viewModel.RedoCommand.CanExecute(null))
+            {
+                viewModel.RedoCommand.Execute(null);
+                e.Handled = true;
+            }
+            return;
+        }
+        if (e.Key == Key.Z)
+        {
+            if (viewModel.UndoCommand.CanExecute(null))
+            {
+                viewModel.UndoCommand.Execute(null);
+                e.Handled = true;
+            }
+            return;
+        }
+        if (e.Key == Key.Y)
+        {
+            if (viewModel.RedoCommand.CanExecute(null))
+            {
+                viewModel.RedoCommand.Execute(null);
+                e.Handled = true;
+            }
+        }
     }
 
     public void OnNodePointerMoved(object? sender, PointerEventArgs e)

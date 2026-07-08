@@ -105,8 +105,7 @@ public sealed record AutomationSettings(
 public sealed record ConfirmationPolicySetting(
     [property: JsonPropertyName("confirmation_kind")] string ConfirmationKind,
     [property: JsonPropertyName("normal_policy")] string NormalPolicy,
-    [property: JsonPropertyName("auto_mode_policy")] string AutoModePolicy,
-    [property: JsonPropertyName("policy")] string Policy);
+    [property: JsonPropertyName("auto_mode_policy")] string AutoModePolicy);
 
 public sealed record PermissionsSettings(
     [property: JsonPropertyName("policy")] PermissionPolicy Policy,

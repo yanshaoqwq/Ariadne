@@ -23,6 +23,7 @@ impl SqliteFullTextStore {
     /// 打开磁盘 SQLite 全文索引。
     pub fn open(path: impl AsRef<Path>) -> CoreResult<Self> {
         let connection = Connection::open(path).map_err(sqlite_error)?;
+        configure_connection(&connection, true)?;
         let store = Self {
             connection: Mutex::new(connection),
         };
@@ -33,6 +34,7 @@ impl SqliteFullTextStore {
     /// 打开内存 SQLite 全文索引，主要用于契约测试。
     pub fn open_in_memory() -> CoreResult<Self> {
         let connection = Connection::open_in_memory().map_err(sqlite_error)?;
+        configure_connection(&connection, false)?;
         let store = Self {
             connection: Mutex::new(connection),
         };
@@ -356,6 +358,18 @@ fn clear_rebuild_reason(connection: &Connection) -> CoreResult<()> {
             [],
         )
         .map_err(sqlite_error)?;
+    Ok(())
+}
+
+fn configure_connection(connection: &Connection, persistent: bool) -> CoreResult<()> {
+    connection
+        .execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
+        .map_err(sqlite_error)?;
+    if persistent {
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .map_err(sqlite_error)?;
+    }
     Ok(())
 }
 

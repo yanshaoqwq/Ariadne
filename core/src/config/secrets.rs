@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -87,6 +88,94 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
+/// 无系统 keychain 时的本地文件 fallback。只用于用户本机 app state，严禁放进项目配置。
+#[derive(Debug, Clone)]
+pub struct LocalFileSecretStore {
+    path: PathBuf,
+    lock: Arc<RwLock<()>>,
+}
+
+impl LocalFileSecretStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            lock: Arc::new(RwLock::new(())),
+        }
+    }
+
+    fn read_values(&self) -> CoreResult<BTreeMap<String, String>> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(content) => serde_json::from_str(&content).map_err(CoreError::from),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(CoreError::External {
+                service: "local_secret_store".to_owned(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    fn write_values(&self, values: &BTreeMap<String, String>) -> CoreResult<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(io_secret_error)?;
+        }
+        std::fs::write(
+            &self.path,
+            serde_json::to_string_pretty(values).map_err(CoreError::from)?,
+        )
+        .map_err(io_secret_error)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
+                .map_err(io_secret_error)?;
+        }
+        Ok(())
+    }
+}
+
+impl SecretStore for LocalFileSecretStore {
+    fn set_secret(&self, key_id: &str, value: SecretValue) -> CoreResult<()> {
+        if key_id.trim().is_empty() {
+            return Err(CoreError::validation("key_id cannot be empty"));
+        }
+        let _guard = self
+            .lock
+            .write()
+            .map_err(|_| CoreError::validation("secret store lock poisoned"))?;
+        let mut values = self.read_values()?;
+        values.insert(key_id.to_owned(), value.expose_secret().to_owned());
+        self.write_values(&values)
+    }
+
+    fn get_secret(&self, key_id: &str) -> CoreResult<Option<SecretValue>> {
+        let _guard = self
+            .lock
+            .read()
+            .map_err(|_| CoreError::validation("secret store lock poisoned"))?;
+        Ok(self
+            .read_values()?
+            .remove(key_id)
+            .map(SecretValue::new))
+    }
+
+    fn delete_secret(&self, key_id: &str) -> CoreResult<()> {
+        let _guard = self
+            .lock
+            .write()
+            .map_err(|_| CoreError::validation("secret store lock poisoned"))?;
+        let mut values = self.read_values()?;
+        values.remove(key_id);
+        self.write_values(&values)
+    }
+}
+
+fn io_secret_error(error: std::io::Error) -> CoreError {
+    CoreError::External {
+        service: "local_secret_store".to_owned(),
+        message: error.to_string(),
+    }
+}
+
 #[cfg(feature = "system-keychain")]
 /// 系统 keychain 密钥存储。
 #[derive(Debug, Clone)]
@@ -170,6 +259,20 @@ mod tests {
             .unwrap();
 
         let secret = store.get_secret("openai-main").unwrap().unwrap();
+        assert_eq!(secret.expose_secret(), "sk-secret");
+    }
+
+    #[test]
+    fn local_file_secret_store_persists_between_instances() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secrets.json");
+        let store = LocalFileSecretStore::new(&path);
+        store
+            .set_secret("openai-main", SecretValue::new("sk-secret"))
+            .unwrap();
+
+        let reloaded = LocalFileSecretStore::new(&path);
+        let secret = reloaded.get_secret("openai-main").unwrap().unwrap();
         assert_eq!(secret.expose_secret(), "sk-secret");
     }
 }

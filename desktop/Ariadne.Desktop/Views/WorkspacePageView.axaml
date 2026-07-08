@@ -4,7 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:WorkspacePageViewModel">
-  <Grid Background="{DynamicResource Ariadne.BackgroundMain}" ColumnDefinitions="*,Auto">
+  <Grid Background="{DynamicResource Ariadne.BackgroundMain}" ColumnDefinitions="*,4,340">
 
     <Grid x:Name="WorkspaceGrid" Grid.Column="0" RowDefinitions="*,Auto,220">
       <Canvas x:Name="CanvasOverlay" Grid.Row="0"
@@ -14,6 +14,9 @@
           <ContextMenu Classes="ariadne">
             <MenuItem Header="{Binding CtxAddNodeText}" Command="{Binding AddContextNodeCommand}" />
             <MenuItem Header="{Binding CtxAddStartText}" Command="{Binding AddStartNodeCommand}" />
+            <Separator />
+            <MenuItem Header="{Binding UndoText}" Command="{Binding UndoCommand}" />
+            <MenuItem Header="{Binding RedoText}" Command="{Binding RedoCommand}" />
             <Separator />
             <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopySelectedNodeCommand}" />
             <MenuItem Header="{Binding CtxCutText}" Command="{Binding CutSelectedNodeCommand}" />
@@ -36,7 +39,7 @@
           </ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:WorkflowEdgeViewModel}">
-              <Path Stroke="{DynamicResource Ariadne.EdgeData}"
+              <Path Stroke="{Binding StrokeBrush}"
                     StrokeThickness="1.6"
                     Opacity="0.78"
                     Fill="Transparent"
@@ -46,6 +49,12 @@
         </ItemsControl>
 
         <StackPanel x:Name="TopToolbar" Canvas.Top="12" Canvas.Right="16" Orientation="Horizontal" Spacing="4">
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding UndoText}" Command="{Binding UndoCommand}">
+            <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Undo}" />
+          </Button>
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding RedoText}" Command="{Binding RedoCommand}">
+            <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Redo}" />
+          </Button>
           <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" Command="{Binding ImportCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
           </Button>
@@ -73,8 +82,8 @@
                       Canvas.Left="{Binding X}"
                       Canvas.Top="{Binding Y}"
                       Background="{DynamicResource Ariadne.NodeBackground}"
-                      BorderBrush="{DynamicResource Ariadne.NodeBorder}"
-                      BorderThickness="1.3"
+                      BorderBrush="{Binding NodeBorderBrush}"
+                      BorderThickness="1.8"
                       CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                       BoxShadow="{DynamicResource Ariadne.Shadow.Card}"
                       PointerPressed="OnNodeSelectPointerPressed">
@@ -147,7 +156,10 @@
                     <CheckBox IsChecked="{Binding ExposedAsTool, Mode=TwoWay}" Margin="0,2,0,0" IsVisible="{Binding IsStartNode}">
                       <TextBlock Text="{Binding $parent[UserControl].DataContext.ExposeToolLabel}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center" />
                     </CheckBox>
-                    <TextBlock Text="{Binding StatusText}" Classes="caption" TextWrapping="Wrap" />
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                      <Ellipse Grid.Column="0" Width="7" Height="7" Fill="{Binding StatusIndicatorBrush}" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1" Text="{Binding StatusText}" Classes="caption" TextWrapping="Wrap" />
+                    </Grid>
                   </StackPanel>
                 </DockPanel>
               </Border>
@@ -381,9 +393,14 @@
       </Border>
     </Grid>
 
-    <Panel Grid.Column="1">
+    <GridSplitter Grid.Column="1"
+                  Width="4"
+                  Background="{DynamicResource Ariadne.BorderMuted}"
+                  ResizeDirection="Columns"
+                  IsVisible="{Binding IsRightPanelOpen}" />
+
+    <Panel Grid.Column="2">
       <Border
-          Width="360"
           Background="{DynamicResource Ariadne.BackgroundSurface}"
           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
           BorderThickness="1,0,0,0"
@@ -534,10 +551,6 @@
                             <TextBox Text="{Binding SelectedEdge.ReverseTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76" />
                             <TextBlock Text="{Binding MaxCommunicationCountText}" Classes="caption" />
                             <TextBox Text="{Binding SelectedEdge.MaxCommunicationCount, Mode=TwoWay}" />
-                          </StackPanel>
-                          <StackPanel IsVisible="{Binding !SelectedEdge.IsCommunication}" Spacing="8">
-                            <TextBlock Text="{Binding EdgeDataText}" Classes="caption" />
-                            <TextBox Text="{Binding SelectedEdge.DataJson, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="96" />
                           </StackPanel>
                           <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding ApplyEdgeConfigText}" Command="{Binding SaveEdgeConfigCommand}" />
                         </StackPanel>

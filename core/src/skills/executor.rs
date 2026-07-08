@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,8 @@ use crate::skills::models::{
     WasmSkillConfig,
 };
 use crate::skills::sanitizer::sanitize_skill_logs;
+
+const MAX_HTTP_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// HTTP Skill 后端接口，真实网络实现后续可替换接入。
 pub trait HttpSkillBackend {
@@ -292,6 +295,7 @@ fn execute_native_http(
 ) -> CoreResult<SkillBackendOutput> {
     let started_at = Instant::now();
     let endpoint = HttpEndpoint::parse(&config.host, &config.path)?;
+    validate_http_endpoint(&endpoint)?;
     let method = config.method.to_ascii_uppercase();
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|_| CoreError::validation(format!("invalid HTTP method: {}", config.method)))?;
@@ -376,6 +380,11 @@ fn parse_authority(authority: &str, scheme: &str) -> CoreResult<(String, u16)> {
     if authority.is_empty() {
         return Err(CoreError::validation("http skill host cannot be empty"));
     }
+    if authority.contains('@') {
+        return Err(CoreError::validation(
+            "http skill host cannot contain userinfo",
+        ));
+    }
     let (host, port) = match authority.rsplit_once(':') {
         Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
             let parsed_port = port
@@ -389,6 +398,46 @@ fn parse_authority(authority: &str, scheme: &str) -> CoreResult<(String, u16)> {
         return Err(CoreError::validation("http skill host cannot be empty"));
     }
     Ok((host.to_owned(), port))
+}
+
+fn validate_http_endpoint(endpoint: &HttpEndpoint) -> CoreResult<()> {
+    let host = endpoint
+        .host
+        .trim()
+        .trim_matches(&['[', ']'][..])
+        .to_ascii_lowercase();
+    let allow_local = std::env::var_os("ARIADNE_ALLOW_LOCAL_HTTP_SKILL").is_some();
+    if allow_local {
+        return Ok(());
+    }
+    if matches!(host.as_str(), "localhost" | "0.0.0.0") {
+        return Err(CoreError::validation(
+            "http skill host cannot target local addresses",
+        ));
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(ip) if ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified() =>
+            {
+                return Err(CoreError::validation(
+                    "http skill host cannot target private or local addresses",
+                ));
+            }
+            IpAddr::V6(ip)
+                if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() =>
+            {
+                return Err(CoreError::validation(
+                    "http skill host cannot target private or local addresses",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn default_port_for_scheme(scheme: &str) -> CoreResult<u16> {
@@ -411,8 +460,25 @@ fn parse_http_response(
             "HTTP backend returned status {status}"
         )));
     }
-    let value = response
-        .json::<Value>()
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_HTTP_RESPONSE_BYTES)
+    {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "http_skill_response".to_owned(),
+            reason: format!("response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"),
+        });
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|error| http_external(format!("failed to read HTTP response: {error}")))?;
+    if bytes.len() as u64 > MAX_HTTP_RESPONSE_BYTES {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "http_skill_response".to_owned(),
+            reason: format!("response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"),
+        });
+    }
+    let value = serde_json::from_slice::<Value>(&bytes)
         .map_err(|error| http_external(format!("failed to parse HTTP JSON response: {error}")))?;
     let mut output = match serde_json::from_value::<SkillBackendOutput>(value.clone()) {
         Ok(output) if !output.outputs.is_empty() || !output.logs.is_empty() => output,

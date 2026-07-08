@@ -29,6 +29,7 @@ impl SqliteWorkflowRuntimeStore {
     pub fn open(project_root: impl AsRef<Path>) -> CoreResult<Self> {
         let db_path = project_root.as_ref().join(RUNTIME_DB_FILE);
         let connection = Connection::open(&db_path).map_err(sqlite_error)?;
+        configure_connection(&connection, true)?;
         let store = Self {
             db_path: Some(db_path),
             connection: Mutex::new(connection),
@@ -40,6 +41,7 @@ impl SqliteWorkflowRuntimeStore {
     /// 打开内存 runtime 存储，主要用于契约测试。
     pub fn open_in_memory() -> CoreResult<Self> {
         let connection = Connection::open_in_memory().map_err(sqlite_error)?;
+        configure_connection(&connection, false)?;
         let store = Self {
             db_path: None,
             connection: Mutex::new(connection),
@@ -203,6 +205,18 @@ fn run_status_name(status: RunStatus) -> &'static str {
         RunStatus::Succeeded => "succeeded",
         RunStatus::Failed => "failed",
     }
+}
+
+fn configure_connection(connection: &Connection, persistent: bool) -> CoreResult<()> {
+    connection
+        .execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
+        .map_err(sqlite_error)?;
+    if persistent {
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .map_err(sqlite_error)?;
+    }
+    Ok(())
 }
 
 /// 返回当前 Unix 毫秒时间戳，并转成 SQLite 友好的 i64。

@@ -13,11 +13,13 @@ public sealed class MainWindowViewModel : ViewModelBase
     private object _currentPage;
     private string _projectTitle;
     private string _backendStatus;
+    private string _notificationText = string.Empty;
     private string _budgetStatusText;
     private double _budgetUsageWidth;
     private bool _autoModeEnabled;
     private bool _suppressAutoModeSave;
     private bool _sidebarExpanded = true;
+    private readonly Dictionary<string, object> _pageCache = new();
 
     public MainWindowViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -77,6 +79,9 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string BudgetLabel => _displayNames.Text("ui.layout.budget");
 
     public string AutoModeLabel => _displayNames.Text("ui.settings.automation.auto_mode");
+    public string AutoModeStateText => AutoModeEnabled
+        ? _displayNames.Text("ui.common.enabled")
+        : _displayNames.Text("ui.common.disabled");
 
     public string ProjectMenuText => _displayNames.Text("ui.layout.switch_recent_projects");
 
@@ -102,8 +107,28 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string BackendStatus
     {
         get => _backendStatus;
-        set => SetProperty(ref _backendStatus, value);
+        set
+        {
+            if (SetProperty(ref _backendStatus, value))
+            {
+                OnPropertyChanged(nameof(HeaderStatusText));
+            }
+        }
     }
+
+    public string NotificationText
+    {
+        get => _notificationText;
+        set
+        {
+            if (SetProperty(ref _notificationText, value))
+            {
+                OnPropertyChanged(nameof(HeaderStatusText));
+            }
+        }
+    }
+
+    public string HeaderStatusText => string.IsNullOrWhiteSpace(NotificationText) ? BackendStatus : NotificationText;
 
     public string BudgetStatusText
     {
@@ -122,7 +147,12 @@ public sealed class MainWindowViewModel : ViewModelBase
         get => _autoModeEnabled;
         set
         {
-            if (!SetProperty(ref _autoModeEnabled, value) || _suppressAutoModeSave)
+            if (!SetProperty(ref _autoModeEnabled, value))
+            {
+                return;
+            }
+            OnPropertyChanged(nameof(AutoModeStateText));
+            if (_suppressAutoModeSave)
             {
                 return;
             }
@@ -191,7 +221,12 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             ["name"] = project.ProjectName,
         });
-        BackendStatus = ProjectTitle;
+        if (createPage)
+        {
+            _pageCache.Clear();
+        }
+        BackendStatus = _displayNames.Text("ui.status.healthy");
+        NotificationText = string.Empty;
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
         SelectNavigationItem(PrimaryNavigationItems[0], createPage);
     }
@@ -224,6 +259,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
         ProjectTitle = _displayNames.Text("ui.window.no_project_title");
         BackendStatus = _displayNames.Text("ui.status.unavailable");
+        NotificationText = string.Empty;
+        _pageCache.Clear();
         BudgetStatusText = _displayNames.Text("ui.common.none");
         BudgetUsageWidth = 0;
         _suppressAutoModeSave = true;
@@ -245,13 +282,13 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task ShowVersionAsync()
     {
-        BackendStatus = VersionText;
+        NotificationText = VersionText;
         await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateVersionDialog(_displayNames, VersionText)).ConfigureAwait(true);
     }
 
     private async Task ShowFeedbackAsync()
     {
-        BackendStatus = FeedbackText;
+        NotificationText = FeedbackText;
         await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateFeedbackDialog(_displayNames)).ConfigureAwait(true);
     }
 
@@ -275,12 +312,14 @@ public sealed class MainWindowViewModel : ViewModelBase
         OnPropertyChanged(nameof(CloseWindowText));
         OnPropertyChanged(nameof(BudgetLabel));
         OnPropertyChanged(nameof(AutoModeLabel));
+        OnPropertyChanged(nameof(AutoModeStateText));
         OnPropertyChanged(nameof(ProjectMenuText));
         OnPropertyChanged(nameof(CreateProjectText));
         OnPropertyChanged(nameof(OpenProjectText));
         OnPropertyChanged(nameof(LeaveProjectText));
         OnPropertyChanged(nameof(FeedbackText));
         OnPropertyChanged(nameof(VersionText));
+        OnPropertyChanged(nameof(HeaderStatusText));
         foreach (var item in AllNavigationItems())
         {
             item.Title = item.Id switch
@@ -298,7 +337,11 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private object CreatePage(string id, string key)
     {
-        return id switch
+        if (_pageCache.TryGetValue(id, out var cached))
+        {
+            return cached;
+        }
+        object page = id switch
         {
             "workspace" => new WorkspacePageViewModel(_displayNames, _backend),
             "works" => new WorksPageViewModel(_displayNames, _backend),
@@ -308,6 +351,8 @@ public sealed class MainWindowViewModel : ViewModelBase
             "settings" => new SettingsPageViewModel(_displayNames, _backend, () => OpenNavigationItemByIdAsync("templates")),
             _ => Welcome,
         };
+        _pageCache[id] = page;
+        return page;
     }
 
     private async Task OpenNavigationItemByIdAsync(string id)
@@ -416,7 +461,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            BackendStatus = ex.Message;
+            NotificationText = ex.Message;
             _suppressAutoModeSave = true;
             AutoModeEnabled = !enabled;
             _suppressAutoModeSave = false;
@@ -425,6 +470,15 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void ApplyBudgetStatus(BudgetStatus status)
     {
+        if (status.BudgetUsd <= 0)
+        {
+            BudgetUsageWidth = 0;
+            BudgetStatusText = _displayNames.Text("ui.layout.budget_unlimited");
+            _suppressAutoModeSave = true;
+            AutoModeEnabled = status.AutoModeEnabled;
+            _suppressAutoModeSave = false;
+            return;
+        }
         var total = status.BudgetUsd <= 0 ? 0 : Math.Clamp(status.SpentUsd / status.BudgetUsd, 0, 1);
         BudgetUsageWidth = total * 92;
         BudgetStatusText = _displayNames.Format("ui.layout.budget_status", new Dictionary<string, string>

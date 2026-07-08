@@ -11,7 +11,7 @@
 - `Ariadne.Desktop/Backend/**`：后端 IPC 客户端边界。
 - `Ariadne.Desktop/Localization/**`：`display_name.json` 绑定服务。
 
-所有显示文本必须来自 `src-tauri/resources/display_name.json`。
+所有显示文本必须来自 `core/resources/display_name.json`。
 
 ## 验证
 

@@ -559,6 +559,7 @@ fn native_http_backend_executes_against_local_http_server() {
         wasm_backend: None,
     });
 
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
     let output = executor
         .execute(
             &manifest,
@@ -569,6 +570,7 @@ fn native_http_backend_executes_against_local_http_server() {
             },
         )
         .unwrap();
+    std::env::remove_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL");
 
     let request = server.join().unwrap();
     assert!(request.starts_with("POST /run HTTP/1.1"));
@@ -578,6 +580,19 @@ fn native_http_backend_executes_against_local_http_server() {
         PortValue::inline(json!("native-ok"))
     );
     assert_eq!(output.logs, vec!["http backend completed".to_owned()]);
+}
+
+/// 默认拒绝 HTTP Skill 访问本机/内网地址，避免 SSRF。
+#[test]
+fn native_http_backend_rejects_local_addresses_by_default() {
+    let backend = NativeHttpSkillBackend;
+    let config = HttpSkillConfig {
+        host: "http://127.0.0.1:12345".to_owned(),
+        method: "POST".to_owned(),
+        path: "/run".to_owned(),
+    };
+
+    assert!(backend.execute(&config, &inputs(), 1_000).is_err());
 }
 
 /// 验证真实 WASM 后端按固定 ABI 执行并返回 SkillBackendOutput。

@@ -302,6 +302,8 @@
       <StreamGeometry x:Key="Ariadne.Icon.ChevronUp">M5,15 L12,8 L19,15</StreamGeometry>
       <!-- 保存（软盘） -->
       <StreamGeometry x:Key="Ariadne.Icon.Save">M5,4 L15,4 L19,8 L19,20 L5,20 Z M8,4 L8,9 L15,9 L15,4 M8,13 L16,13 M8,16 L16,16</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Undo">M9,7 L4,12 L9,17 M5,12 L15,12 C18,12 20,14 20,17</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Redo">M15,7 L20,12 L15,17 M19,12 L9,12 C6,12 4,14 4,17</StreamGeometry>
       <!-- 导入（向下入托盘） -->
       <StreamGeometry x:Key="Ariadne.Icon.Import">M12,3 L12,13 M8,9 L12,13 L16,9 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
       <!-- 导出（向上出托盘） -->

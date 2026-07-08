@@ -406,6 +406,17 @@ fn validate_edge_kind(edge: &Edge) -> CoreResult<()> {
             edge.id.as_str()
         )));
     }
+    if edge.kind == WorkflowEdgeKind::Data {
+        match edge.alias.as_deref().map(str::trim) {
+            Some(alias) if !alias.is_empty() => {}
+            _ => {
+                return Err(CoreError::validation(format!(
+                    "data edge {} requires a non-empty alias",
+                    edge.id.as_str()
+                )));
+            }
+        }
+    }
     if edge.kind == WorkflowEdgeKind::Communication {
         if edge.from.port_name != COMMUNICATION_PORT || edge.to.port_name != COMMUNICATION_PORT {
             return Err(CoreError::validation(format!(
@@ -803,6 +814,48 @@ mod tests {
                     communication: None,
                 },
             ],
+            metadata: Value::Null,
+        };
+
+        assert!(workflow.validate_topology().is_err());
+    }
+
+    /// 验证 data 边必须声明输入 alias，避免运行时输入静默丢失。
+    #[test]
+    fn workflow_rejects_data_edge_without_alias() {
+        let workflow = WorkflowDefinition {
+            id: WorkflowId::from("wf-1"),
+            name: "Test".to_owned(),
+            nodes: vec![
+                NodeInstance {
+                    id: NodeId::from("source"),
+                    type_name: "llm".to_owned(),
+                    label: None,
+                    config: Value::Null,
+                    position: None,
+                },
+                NodeInstance {
+                    id: NodeId::from("target"),
+                    type_name: "llm".to_owned(),
+                    label: None,
+                    config: Value::Null,
+                    position: None,
+                },
+            ],
+            edges: vec![Edge {
+                id: EdgeId::from("edge-1"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("source"),
+                    port_name: "out".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("target"),
+                    port_name: "in".to_owned(),
+                },
+                alias: None,
+                communication: None,
+            }],
             metadata: Value::Null,
         };
 

@@ -27,6 +27,7 @@ impl SqliteWritingKnowledgeStore {
     pub fn open(project_root: impl AsRef<Path>) -> CoreResult<Self> {
         let db_path = project_root.as_ref().join(METADATA_DB_FILE);
         let connection = Connection::open(&db_path).map_err(sqlite_error)?;
+        configure_connection(&connection, true)?;
         let store = Self {
             db_path: Some(db_path),
             connection: Mutex::new(connection),
@@ -38,6 +39,7 @@ impl SqliteWritingKnowledgeStore {
     /// 打开内存数据库，主要用于测试。
     pub fn open_in_memory() -> CoreResult<Self> {
         let connection = Connection::open_in_memory().map_err(sqlite_error)?;
+        configure_connection(&connection, false)?;
         let store = Self {
             db_path: None,
             connection: Mutex::new(connection),
@@ -827,6 +829,18 @@ fn parse_confirmation_state(s: &str) -> ConfirmationState {
 }
 
 // ── SQLite 工具函数 ──────────────────────────────────────────────────────────
+
+fn configure_connection(connection: &Connection, persistent: bool) -> CoreResult<()> {
+    connection
+        .execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
+        .map_err(sqlite_error)?;
+    if persistent {
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .map_err(sqlite_error)?;
+    }
+    Ok(())
+}
 
 fn sqlite_error(error: rusqlite::Error) -> CoreError {
     CoreError::External {

@@ -9,10 +9,13 @@
 set -euo pipefail
 
 PROJ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$PROJ_DIR/.." && pwd)"
 CSPROJ="$PROJ_DIR/Ariadne.Desktop"
 MODE="${1:-run}"
 
 build() {
+  echo "[build] cargo build ..."
+  cargo build --manifest-path "$ROOT_DIR/core/Cargo.toml" --bin ariadne-ipc
   echo "[build] dotnet build ..."
   dotnet build "$CSPROJ/Ariadne.Desktop.csproj" -v quiet --nologo --no-restore
 }

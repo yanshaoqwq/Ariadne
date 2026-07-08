@@ -376,6 +376,8 @@ pub struct WorkflowNodeRuntimeState {
 pub struct WorkflowRunState {
     pub workflow_id: WorkflowId,
     pub run_id: RunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_node_id: Option<NodeId>,
     pub status: RunStatus,
     #[serde(default = "default_run_control")]
     pub control: RunControl,
@@ -409,6 +411,7 @@ impl WorkflowRunState {
         Self {
             workflow_id,
             run_id,
+            start_node_id: None,
             status: RunStatus::Queued,
             control: RunControl::Continue,
             pause_reason: None,
