@@ -210,6 +210,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         LanguageOptions = new ObservableCollection<LanguageOption>
         {
             new("zh", displayNames.Text("ui.settings.misc.language.zh")),
+            new("en", displayNames.Text("ui.settings.misc.language.en")),
+            new("ja", displayNames.Text("ui.settings.misc.language.ja")),
         };
 
         ProviderTypeOptions = new ObservableCollection<string>
@@ -883,6 +885,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         IsLoading = true;
         try
         {
+            await SaveProviderConnectionAsync().ConfigureAwait(true);
             var result = await _backend.FetchProviderModelsAsync(ProviderId).ConfigureAwait(true);
             ProviderId = result.ProviderId;
             ModelsText = string.Join(Environment.NewLine, result.Models.Select(ModelLine));
@@ -893,6 +896,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 AvailableModels.Add(new ModelOptionViewModel(model.ModelId, model.Capability));
             }
+            await SaveProviderConnectionAsync().ConfigureAwait(true);
+            await LoadProviderConfigAsync().ConfigureAwait(true);
+            CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
@@ -919,24 +925,29 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         await RunWithStatusAsync(async () =>
         {
-            var update = new ProviderSettingsUpdate(
-                ProviderId,
-                ProviderType,
-                ProviderDisplayName,
-                ProviderEnabled,
-                string.IsNullOrWhiteSpace(ProviderBaseUrl) ? null : ProviderBaseUrl,
-                MergeEmbeddingModel(ParseModels(ModelsText), EmbeddingModelId),
-                MakeDefaultLlm,
-                MakeDefaultEmbedding,
-                MakeDefaultReranker);
-            await _backend.SaveProviderSettingsAsync(update).ConfigureAwait(true);
-            if (!string.IsNullOrWhiteSpace(ApiKey))
-            {
-                await _backend.SaveProviderKeyAsync(ProviderId, ApiKey).ConfigureAwait(true);
-                ApiKey = string.Empty;
-            }
+            await SaveProviderConnectionAsync().ConfigureAwait(true);
             await LoadProviderConfigAsync().ConfigureAwait(true);
         });
+    }
+
+    private async Task SaveProviderConnectionAsync()
+    {
+        var update = new ProviderSettingsUpdate(
+            ProviderId,
+            ProviderType,
+            ProviderDisplayName,
+            ProviderEnabled,
+            string.IsNullOrWhiteSpace(ProviderBaseUrl) ? null : ProviderBaseUrl,
+            MergeEmbeddingModel(ParseModels(ModelsText), EmbeddingModelId),
+            MakeDefaultLlm,
+            MakeDefaultEmbedding,
+            MakeDefaultReranker);
+        await _backend.SaveProviderSettingsAsync(update).ConfigureAwait(true);
+        if (!string.IsNullOrWhiteSpace(ApiKey))
+        {
+            await _backend.SaveProviderKeyAsync(ProviderId, ApiKey).ConfigureAwait(true);
+            ApiKey = string.Empty;
+        }
     }
 
     private async Task SaveProviderKeyAsync()
@@ -1437,6 +1448,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             option.Label = option.Code switch
             {
                 "zh" => _displayNames.Text("ui.settings.misc.language.zh"),
+                "en" => _displayNames.Text("ui.settings.misc.language.en"),
+                "ja" => _displayNames.Text("ui.settings.misc.language.ja"),
                 _ => option.Label,
             };
         }

@@ -6,22 +6,23 @@ use std::thread;
 use std::time::Duration;
 
 use ariadne::commands::{
-    create_checkpoint_impl, fetch_provider_models_impl, get_app_settings_impl,
-    get_automation_settings_impl, get_backend_diagnostics, get_budget_status_impl,
-    get_document_content_impl, get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
-    get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
-    get_rag_settings_impl, get_template_repository_settings_impl, get_workflow_settings_impl,
-    load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl,
-    resolve_confirmation_impl, resolve_project_references, run_workflow, run_workflow_impl,
-    save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
-    save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
-    save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
-    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
-    update_budget_config_impl, AppSettings, AriadneAppState, AutomationSettings, CanvasEdge,
-    CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision, ConfirmationNormalPolicy,
-    ConfirmationPolicySetting, GitSettings, NodePresetSettings, PermissionsSettings,
-    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate, RagSettings,
-    ResolveConfirmationRequest, TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
+    create_checkpoint_impl, fetch_provider_models, fetch_provider_models_impl,
+    get_app_settings_impl, get_automation_settings_impl, get_backend_diagnostics,
+    get_budget_status_impl, get_document_content_impl, get_document_tree_impl,
+    get_git_history_impl, get_git_settings_impl, get_node_preset_settings_impl,
+    get_permissions_settings_impl, get_provider_config_impl, get_rag_settings_impl,
+    get_template_repository_settings_impl, get_workflow_settings_impl, load_workflow_graph_impl,
+    pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl, resolve_confirmation_impl,
+    resolve_project_references, run_workflow, run_workflow_impl, save_app_settings_impl,
+    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
+    save_node_preset_settings_impl, save_permissions_settings_impl, save_provider_key_impl,
+    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings_impl,
+    save_workflow_graph_impl, save_workflow_settings_impl, update_budget_config_impl, AppSettings,
+    AriadneAppState, AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy,
+    ConfirmationDecision, ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings,
+    NodePresetSettings, PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole,
+    ProjectAiRequest, ProviderSettingsUpdate, RagSettings, ResolveConfirmationRequest,
+    TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
 use ariadne::contracts::{
@@ -771,6 +772,88 @@ fn provider_model_fetch_returns_configured_and_embedding_models() {
         .models
         .iter()
         .any(|model| model.model_id == "gpt-test" && model.capability == ProviderCapability::Llm));
+    assert!(models
+        .models
+        .iter()
+        .any(|model| model.model_id == "text-embedding-3-small"
+            && model.capability == ProviderCapability::Embedding));
+}
+
+#[test]
+fn provider_model_fetch_calls_remote_models_endpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 16384];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("GET /models "));
+        assert!(request.contains("authorization: Bearer local-key"));
+        let response_body = r#"{
+          "data": [
+            {"id": "chat-alpha"},
+            {"id": "text-embedding-3-small"}
+          ]
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "local_models".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Local Models".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            models: vec![ModelConfig {
+                model_id: "chat-alpha".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(8192),
+                input_cost_per_million_tokens: Some(0.25),
+                output_cost_per_million_tokens: Some(0.5),
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+        },
+    )
+    .unwrap();
+    save_provider_key_impl(
+        temp.path(),
+        secrets.as_ref(),
+        "local_models".to_owned(),
+        "local-key".to_owned(),
+    )
+    .unwrap();
+
+    let state = AriadneAppState::new(
+        temp.path().to_path_buf(),
+        temp.path().join("app-state"),
+        Arc::clone(&secrets),
+    );
+    let models = fetch_provider_models(&state, Some("local_models".to_owned())).unwrap();
+    server.join().unwrap();
+
+    assert_eq!(models.provider_id, "local_models");
+    let chat_model = models
+        .models
+        .iter()
+        .find(|model| model.model_id == "chat-alpha")
+        .unwrap();
+    assert_eq!(chat_model.capability, ProviderCapability::Llm);
+    assert_eq!(chat_model.max_context_tokens, Some(8192));
+    assert_eq!(chat_model.input_cost_per_million_tokens, Some(0.25));
     assert!(models
         .models
         .iter()

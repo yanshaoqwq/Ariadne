@@ -11,6 +11,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private const double MinRightPanelWidth = 280;
     private const double MaxRightPanelWidth = 520;
     private const double CollapsedRightPanelWidth = 24;
+    private const int TargetDocumentBlockSize = 4_000;
+    private const int HardDocumentBlockSize = 6_000;
+    private const int RebalanceDocumentBlockSize = HardDocumentBlockSize * 2;
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
@@ -295,11 +298,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public string CurrentDocumentText => DocumentTitle;
 
-    public string DocumentBodyText => _documentCharacterCount == 0
-        ? (string.IsNullOrWhiteSpace(_currentDocumentId)
-            ? NoDocumentText
-            : _displayNames.Text("ui.works.empty_document"))
-        : AssembleDocumentContent();
+    public string DocumentBodyText => string.IsNullOrWhiteSpace(_currentDocumentId)
+        ? NoDocumentText
+        : _displayNames.Text("ui.works.empty_document");
 
     public string CharacterCountText => _displayNames.Format("ui.works.characters_count", new Dictionary<string, string>
     {
@@ -387,16 +388,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             _documentContent = content;
             _documentCharacterCount = content.Length;
-            DocumentBlocks.Clear();
-            var index = 0;
-            foreach (var block in SplitDocumentBlocks(content))
-            {
-                DocumentBlocks.Add(new DocumentBlockViewModel(
-                    $"block-{++_nextDocumentBlockId}",
-                    index++,
-                    block,
-                    OnDocumentBlockTextChanged));
-            }
+            RebuildDocumentBlocks(content);
         }
         finally
         {
@@ -432,6 +424,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             ClearPendingQuickEdit();
             MarkDocumentDirty();
         }
+        if (newText.Length > RebalanceDocumentBlockSize)
+        {
+            RebalanceDocumentBlocks();
+        }
     }
 
     private void MarkDocumentDirty()
@@ -456,6 +452,34 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         return _documentContent;
     }
 
+    private void RebalanceDocumentBlocks()
+    {
+        _suppressDocumentBlockChanges = true;
+        try
+        {
+            RebuildDocumentBlocks(AssembleDocumentContent());
+        }
+        finally
+        {
+            _suppressDocumentBlockChanges = false;
+        }
+        OnPropertyChanged(nameof(HasDocumentBlocks));
+    }
+
+    private void RebuildDocumentBlocks(string content)
+    {
+        DocumentBlocks.Clear();
+        var index = 0;
+        foreach (var block in SplitDocumentBlocks(content))
+        {
+            DocumentBlocks.Add(new DocumentBlockViewModel(
+                $"block-{++_nextDocumentBlockId}",
+                index++,
+                block,
+                OnDocumentBlockTextChanged));
+        }
+    }
+
     public EditorTextSelection SelectionForBlock(DocumentBlockViewModel block, int localStart, int localEnd, string selectedText)
     {
         var start = Math.Clamp(Math.Min(localStart, localEnd), 0, block.Text.Length);
@@ -474,8 +498,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private static IEnumerable<string> SplitDocumentBlocks(string content)
     {
-        const int targetBlockSize = 4_000;
-        const int hardBlockSize = 6_000;
         if (string.IsNullOrEmpty(content))
         {
             yield break;
@@ -485,14 +507,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         while (start < content.Length)
         {
             var remaining = content.Length - start;
-            if (remaining <= hardBlockSize)
+            if (remaining <= HardDocumentBlockSize)
             {
                 yield return content[start..];
                 yield break;
             }
 
-            var limit = Math.Min(content.Length, start + hardBlockSize);
-            var preferredStart = Math.Min(content.Length, start + targetBlockSize);
+            var limit = Math.Min(content.Length, start + HardDocumentBlockSize);
+            var preferredStart = Math.Min(content.Length, start + TargetDocumentBlockSize);
             var split = content.LastIndexOf("\n\n", limit - 1, limit - start, StringComparison.Ordinal);
             if (split < preferredStart)
             {
@@ -500,7 +522,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
             if (split < preferredStart)
             {
-                split = start + targetBlockSize;
+                split = start + TargetDocumentBlockSize;
             }
             else
             {

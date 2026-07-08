@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -43,7 +45,7 @@ use crate::git::{
 };
 use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
 use crate::providers::{
-    ContentPart, LlmMessage, LlmRole, OpenAiCompatibleLlmProvider, ToolDefinition,
+    ContentPart, LlmMessage, LlmRole, OpenAiCompatibleLlmProvider, ProviderProtocol, ToolDefinition,
 };
 use crate::workflow::{
     execute_document_read_node_with_root, execute_llm_node, execute_summarizer_node,
@@ -69,6 +71,7 @@ const UI_NODE_PRESETS_FILE: &str = "ui_node_presets.json";
 const TEMPLATE_REPOSITORY_SETTINGS_FILE: &str = "template_repository_settings.json";
 const CONFIRMATION_POLICY_SETTINGS_FILE: &str = "confirmation_policy_settings.json";
 const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = "";
+const PROVIDER_MODEL_FETCH_TIMEOUT_SECS: u64 = 30;
 
 /// 桌面前端共享状态。project_root 可由 Avalonia IPC 显式设置，也可用环境变量/当前目录兜底。
 #[derive(Clone)]
@@ -1118,7 +1121,29 @@ pub fn fetch_provider_models(
     provider_id: Option<String>,
 ) -> CommandResult<ProviderModelsResult> {
     let project_root = project_root_from_state(&state, None)?;
-    fetch_provider_models_impl(&project_root, provider_id)
+    fetch_provider_models_with_secrets_impl(&project_root, state.secret_store.as_ref(), provider_id)
+}
+
+pub fn fetch_provider_models_with_secrets_impl(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    provider_id: Option<String>,
+) -> CommandResult<ProviderModelsResult> {
+    validate_project_root(project_root)?;
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let selected = select_provider_for_model_fetch(&config.providers, provider_id)?.clone();
+    let protocol = match ProviderProtocol::from_provider_type(&selected.provider_type) {
+        Ok(protocol) => protocol,
+        Err(_) => return configured_provider_models_result(&selected),
+    };
+    let api_key = provider_api_key(project_root, secrets, &selected)?;
+    let fetched = fetch_remote_provider_models(&selected, protocol, api_key)?;
+    Ok(ProviderModelsResult {
+        provider_id: selected.provider_id,
+        models: merge_remote_model_metadata(fetched, &selected.models),
+    })
 }
 
 pub fn fetch_provider_models_impl(
@@ -1129,39 +1154,13 @@ pub fn fetch_provider_models_impl(
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
-    let requested = provider_id.as_deref().map(normalize_provider).transpose()?;
-    let selected = requested
-        .as_ref()
-        .and_then(|id| {
-            config
-                .providers
-                .providers
-                .iter()
-                .find(|provider| provider.provider_id == *id)
-        })
-        .or_else(|| {
-            config
-                .providers
-                .default_llm_provider_id
-                .as_ref()
-                .and_then(|id| {
-                    config
-                        .providers
-                        .providers
-                        .iter()
-                        .find(|provider| provider.provider_id == *id)
-                })
-        })
-        .or_else(|| {
-            config
-                .providers
-                .providers
-                .iter()
-                .find(|provider| provider.enabled)
-        })
-        .or_else(|| config.providers.providers.first())
-        .ok_or_else(|| "no provider configured".to_owned())?;
+    let selected = select_provider_for_model_fetch(&config.providers, provider_id)?;
+    configured_provider_models_result(selected)
+}
 
+fn configured_provider_models_result(
+    selected: &ProviderConfig,
+) -> CommandResult<ProviderModelsResult> {
     let mut models = selected.models.clone();
     if models.is_empty() {
         models.push(default_llm_model_for_provider(&selected.provider_id));
@@ -1179,6 +1178,261 @@ pub fn fetch_provider_models_impl(
         provider_id: selected.provider_id.clone(),
         models,
     })
+}
+
+fn select_provider_for_model_fetch<'a>(
+    providers: &'a crate::config::ProvidersConfig,
+    provider_id: Option<String>,
+) -> CommandResult<&'a ProviderConfig> {
+    let requested = provider_id.as_deref().map(normalize_provider).transpose()?;
+    if let Some(id) = requested {
+        return providers
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == id)
+            .ok_or_else(|| format!("provider is not configured: {id}"));
+    }
+    providers
+        .default_llm_provider_id
+        .as_ref()
+        .and_then(|id| {
+            providers
+                .providers
+                .iter()
+                .find(|provider| provider.provider_id == *id)
+        })
+        .or_else(|| providers.providers.iter().find(|provider| provider.enabled))
+        .or_else(|| providers.providers.first())
+        .ok_or_else(|| "no provider configured".to_owned())
+}
+
+fn provider_api_key(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    provider: &ProviderConfig,
+) -> CommandResult<Option<String>> {
+    let key_id = provider
+        .api_key
+        .as_ref()
+        .map(|secret| secret.key_id.clone())
+        .unwrap_or_else(|| provider_key_id(project_root, &provider.provider_id));
+    secrets
+        .get_secret(&key_id)
+        .map_err(error_to_string)
+        .map(|secret| {
+            secret
+                .map(|value| value.expose_secret().trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn fetch_remote_provider_models(
+    provider: &ProviderConfig,
+    protocol: ProviderProtocol,
+    api_key: Option<String>,
+) -> CommandResult<Vec<ModelConfig>> {
+    if provider_requires_api_key(&provider.provider_type) && api_key.is_none() {
+        return Err(format!(
+            "provider {} requires an API key before fetching models",
+            provider.provider_id
+        ));
+    }
+
+    let base_url = crate::providers::resolve_base_url(provider)
+        .map_err(error_to_string)?
+        .trim_end_matches('/')
+        .to_owned();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(PROVIDER_MODEL_FETCH_TIMEOUT_SECS))
+        .build()
+        .map_err(error_to_string)?;
+    let request = match protocol {
+        ProviderProtocol::OpenAi => client.get(format!("{base_url}/models")),
+        ProviderProtocol::Anthropic => client
+            .get(format!("{base_url}/models"))
+            .header("anthropic-version", "2023-06-01"),
+        ProviderProtocol::Gemini => client.get(format!("{base_url}/models")),
+    };
+    let request = match (protocol, api_key.as_deref()) {
+        (ProviderProtocol::OpenAi, Some(key)) => request.bearer_auth(key),
+        (ProviderProtocol::Anthropic, Some(key)) => request.header("x-api-key", key),
+        (ProviderProtocol::Gemini, Some(key)) => request.query(&[("key", key)]),
+        _ => request,
+    };
+    let response = request.send().map_err(|error| {
+        format!(
+            "failed to fetch models from provider {}: {error}",
+            provider.provider_id
+        )
+    })?;
+    let status = response.status();
+    let text = response.text().map_err(|error| {
+        format!(
+            "failed to read model list from provider {}: {error}",
+            provider.provider_id
+        )
+    })?;
+    if !status.is_success() {
+        return Err(format!(
+            "provider {} model list request failed with HTTP {}: {}",
+            provider.provider_id,
+            status.as_u16(),
+            truncate_provider_error(&text)
+        ));
+    }
+    let raw: Value = serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "provider {} returned invalid model list JSON: {error}",
+            provider.provider_id
+        )
+    })?;
+    parse_remote_provider_models(protocol, &raw)
+}
+
+fn provider_requires_api_key(provider_type: &ProviderType) -> bool {
+    matches!(
+        provider_type,
+        ProviderType::OpenAi | ProviderType::Anthropic | ProviderType::Gemini
+    )
+}
+
+fn parse_remote_provider_models(
+    protocol: ProviderProtocol,
+    raw: &Value,
+) -> CommandResult<Vec<ModelConfig>> {
+    match protocol {
+        ProviderProtocol::OpenAi | ProviderProtocol::Anthropic => parse_openai_style_models(raw),
+        ProviderProtocol::Gemini => parse_gemini_models(raw),
+    }
+}
+
+fn parse_openai_style_models(raw: &Value) -> CommandResult<Vec<ModelConfig>> {
+    let data = raw
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "provider model list response must contain data[]".to_owned())?;
+    let mut models = Vec::new();
+    for item in data {
+        if let Some(model_id) = item.get("id").and_then(Value::as_str) {
+            models.push(remote_model_config(
+                model_id,
+                infer_text_model_capability(model_id),
+            ));
+        }
+    }
+    deduplicate_remote_models(models)
+}
+
+fn parse_gemini_models(raw: &Value) -> CommandResult<Vec<ModelConfig>> {
+    let data = raw
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "gemini model list response must contain models[]".to_owned())?;
+    let mut models = Vec::new();
+    for item in data {
+        let Some(raw_name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let model_id = raw_name.strip_prefix("models/").unwrap_or(raw_name);
+        let methods = item
+            .get("supportedGenerationMethods")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        let capability = if methods
+            .iter()
+            .any(|method| method.eq_ignore_ascii_case("embedContent"))
+            || infer_text_model_capability(model_id) == ProviderCapability::Embedding
+        {
+            ProviderCapability::Embedding
+        } else {
+            ProviderCapability::Llm
+        };
+        models.push(remote_model_config(model_id, capability));
+    }
+    deduplicate_remote_models(models)
+}
+
+fn remote_model_config(model_id: &str, capability: ProviderCapability) -> ModelConfig {
+    ModelConfig {
+        model_id: model_id.trim().to_owned(),
+        capability,
+        max_context_tokens: None,
+        input_cost_per_million_tokens: None,
+        output_cost_per_million_tokens: None,
+    }
+}
+
+fn infer_text_model_capability(model_id: &str) -> ProviderCapability {
+    let lower = model_id.to_ascii_lowercase();
+    if lower.contains("embed") || lower.contains("embedding") || lower.contains("rerank") {
+        if lower.contains("rerank") {
+            ProviderCapability::Reranker
+        } else {
+            ProviderCapability::Embedding
+        }
+    } else {
+        ProviderCapability::Llm
+    }
+}
+
+fn deduplicate_remote_models(models: Vec<ModelConfig>) -> CommandResult<Vec<ModelConfig>> {
+    let mut seen = HashSet::new();
+    let mut deduplicated = Vec::new();
+    for model in models {
+        if model.model_id.trim().is_empty() || !seen.insert(model.model_id.clone()) {
+            continue;
+        }
+        deduplicated.push(model);
+    }
+    if deduplicated.is_empty() {
+        Err("provider returned no usable models".to_owned())
+    } else {
+        Ok(deduplicated)
+    }
+}
+
+fn merge_remote_model_metadata(
+    remote_models: Vec<ModelConfig>,
+    configured_models: &[ModelConfig],
+) -> Vec<ModelConfig> {
+    let mut configured_by_id = BTreeMap::new();
+    for model in configured_models {
+        configured_by_id.insert(model.model_id.as_str(), model);
+    }
+
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    for remote_model in remote_models {
+        if !seen.insert(remote_model.model_id.clone()) {
+            continue;
+        }
+        if let Some(configured) = configured_by_id.get(remote_model.model_id.as_str()) {
+            let mut model = (*configured).clone();
+            model.capability = remote_model.capability;
+            merged.push(model);
+        } else {
+            merged.push(remote_model);
+        }
+    }
+    for configured in configured_models {
+        if seen.insert(configured.model_id.clone()) {
+            merged.push(configured.clone());
+        }
+    }
+    merged
+}
+
+fn truncate_provider_error(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const LIMIT: usize = 400;
+    if compact.chars().count() <= LIMIT {
+        compact
+    } else {
+        format!("{}...", compact.chars().take(LIMIT).collect::<String>())
+    }
 }
 
 pub fn list_confirmations(state: &AriadneAppState) -> CommandResult<Vec<ConfirmationLogEntry>> {
