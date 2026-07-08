@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -11,6 +12,8 @@ use crate::providers::{
     ContentPart, LlmMessage, LlmProvider, LlmRequest, LlmResponse, LlmRole, Provider,
     ProviderCallContext, ProviderHealth, ProviderProtocol, ToolCall,
 };
+
+const MAX_PROVIDER_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// HTTP LLM provider；按 ProviderType 分派 OpenAI/Anthropic/Gemini 请求格式。
 #[derive(Debug, Clone)]
@@ -80,7 +83,7 @@ impl LlmProvider for OpenAiCompatibleLlmProvider {
         let status = response.status();
         // 先取原始文本再解析：错误响应体可能不是 JSON（如网关返回 HTML），
         // 若先 .json() 会用解码错误掩盖真实的 4xx/5xx 状态码。
-        let body = response.text().map_err(http_provider_error)?;
+        let body = read_provider_response_body(response)?;
         if !status.is_success() {
             return Err(CoreError::External {
                 service: context.provider_id.clone(),
@@ -684,6 +687,31 @@ fn response_cost_usd(
             .find(|model| model.model_id == response_model_id)
             .and_then(|model| estimate_model_config_cost(model, usage).ok())
     })
+}
+
+fn read_provider_response_body(response: reqwest::blocking::Response) -> CoreResult<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES)
+    {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "provider_response".to_owned(),
+            reason: format!("response exceeds {MAX_PROVIDER_RESPONSE_BYTES} bytes"),
+        });
+    }
+
+    let mut limited = response.take(MAX_PROVIDER_RESPONSE_BYTES.saturating_add(1));
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(http_provider_error)?;
+    if bytes.len() as u64 > MAX_PROVIDER_RESPONSE_BYTES {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "provider_response".to_owned(),
+            reason: format!("response exceeds {MAX_PROVIDER_RESPONSE_BYTES} bytes"),
+        });
+    }
+    String::from_utf8(bytes).map_err(http_provider_error)
 }
 
 fn http_provider_error(message: impl std::fmt::Display) -> CoreError {

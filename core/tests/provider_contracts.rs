@@ -207,6 +207,63 @@ fn openai_compatible_http_provider_posts_chat_completions() {
 }
 
 #[test]
+fn openai_compatible_http_provider_rejects_oversized_streaming_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /chat/completions "));
+        let response_header =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
+        stream.write_all(response_header.as_bytes()).unwrap();
+        stream.write_all(&vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
+    });
+
+    let provider = OpenAiCompatibleLlmProvider::new(
+        ProviderConfig {
+            provider_id: "local".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Local".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            api_key: None,
+            models: vec![ModelConfig {
+                model_id: "test-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+        },
+        None,
+    )
+    .unwrap();
+
+    let error = provider
+        .complete(
+            &ProviderCallContext::new("local"),
+            LlmRequest {
+                model_id: "test-model".to_owned(),
+                messages: vec![LlmMessage::user("改写这段")],
+                tools: Vec::new(),
+                temperature: None,
+                max_output_tokens: None,
+                stream: false,
+                metadata: Value::Null,
+            },
+        )
+        .unwrap_err();
+    server.join().unwrap();
+
+    let error_text = format!("{error:?}");
+    assert!(error_text.contains("provider_response"));
+    assert!(error_text.contains("response exceeds"));
+}
+
+#[test]
 fn openai_http_provider_uses_chat_completions_and_bearer_auth() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());

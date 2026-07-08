@@ -913,6 +913,59 @@ fn provider_model_fetch_calls_remote_models_endpoint() {
 }
 
 #[test]
+fn provider_model_fetch_rejects_oversized_streaming_response() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 16384];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("GET /models "));
+        let response_header =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
+        stream.write_all(response_header.as_bytes()).unwrap();
+        stream.write_all(&vec![b' '; 4 * 1024 * 1024 + 1]).unwrap();
+    });
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "local_models".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Local Models".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            models: vec![ModelConfig {
+                model_id: "chat-alpha".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(8192),
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+        },
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path().to_path_buf(),
+        temp.path().join("app-state"),
+        Arc::clone(&secrets),
+    );
+
+    let error = fetch_provider_models(&state, Some("local_models".to_owned())).unwrap_err();
+    server.join().unwrap();
+
+    assert!(error.contains("model list response exceeds"));
+}
+
+#[test]
 fn provider_settings_reject_non_http_base_url() {
     let temp = tempfile::tempdir().unwrap();
     let error = save_provider_settings_impl(

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -72,6 +73,7 @@ const TEMPLATE_REPOSITORY_SETTINGS_FILE: &str = "template_repository_settings.js
 const CONFIRMATION_POLICY_SETTINGS_FILE: &str = "confirmation_policy_settings.json";
 const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = "";
 const PROVIDER_MODEL_FETCH_TIMEOUT_SECS: u64 = 30;
+const MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 桌面前端共享状态。project_root 可由 Avalonia IPC 显式设置，也可用环境变量/当前目录兜底。
 #[derive(Clone)]
@@ -1340,12 +1342,7 @@ fn fetch_remote_provider_models(
         )
     })?;
     let status = response.status();
-    let text = response.text().map_err(|error| {
-        format!(
-            "failed to read model list from provider {}: {error}",
-            provider.provider_id
-        )
-    })?;
+    let text = read_provider_model_response_text(response, &provider.provider_id)?;
     if !status.is_success() {
         return Err(format!(
             "provider {} model list request failed with HTTP {}: {}",
@@ -1361,6 +1358,34 @@ fn fetch_remote_provider_models(
         )
     })?;
     parse_remote_provider_models(protocol, &raw)
+}
+
+fn read_provider_model_response_text(
+    response: reqwest::blocking::Response,
+    provider_id: &str,
+) -> CommandResult<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES)
+    {
+        return Err(format!(
+            "provider {provider_id} model list response exceeds {MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES} bytes"
+        ));
+    }
+
+    let mut limited = response.take(MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES.saturating_add(1));
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes).map_err(|error| {
+        format!("failed to read model list from provider {provider_id}: {error}")
+    })?;
+    if bytes.len() as u64 > MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES {
+        return Err(format!(
+            "provider {provider_id} model list response exceeds {MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES} bytes"
+        ));
+    }
+
+    String::from_utf8(bytes)
+        .map_err(|error| format!("provider {provider_id} returned non-UTF-8 model list: {error}"))
 }
 
 fn provider_requires_api_key(provider_type: &ProviderType) -> bool {
