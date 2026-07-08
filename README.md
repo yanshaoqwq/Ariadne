@@ -113,4 +113,4 @@ Ariadne 会在离开有未保存更改的页面前提醒保存、丢弃或取消
 
 ## 显示语言
 
-当前正式界面语言以中文为基底。设置页会自动发现 `core/resources/display_name.*.json` 覆盖文件；英文和日文目前是预览入口，未补齐的键会回退到中文。需要正式适配某种语言时，可复制 `core/resources/display_name.json` 为 `core/resources/display_name.<语言代码>.json` 并翻译同名键。
+当前正式界面语言以中文为基底。需要适配新语言时，可复制 `core/resources/display_name.json` 为 `core/resources/display_name.<语言代码>.json`，交给 AI 或翻译工具翻译同名键；桌面端会自动发现包含实际文案键的覆盖文件，缺失键回退中文。外部 agent 也可通过 IPC 调用 `get_display_name_language_pack_template` 导出翻译模板，并用 `validate_display_name_language_pack` 检查缺失、空值和多余 key。

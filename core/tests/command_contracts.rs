@@ -8,21 +8,22 @@ use std::time::Duration;
 use ariadne::commands::{
     create_checkpoint_impl, fetch_provider_models, fetch_provider_models_impl,
     get_app_settings_impl, get_automation_settings_impl, get_backend_diagnostics,
-    get_budget_status_impl, get_document_content_impl, get_document_tree_impl,
-    get_git_history_impl, get_git_settings_impl, get_node_preset_settings_impl,
-    get_permissions_settings_impl, get_provider_config_impl, get_rag_settings_impl,
-    get_template_repository_settings_impl, get_workflow_settings_impl, load_workflow_graph_impl,
-    pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl, resolve_confirmation_impl,
-    resolve_project_references, run_workflow, run_workflow_impl, save_app_settings_impl,
-    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
-    save_node_preset_settings_impl, save_permissions_settings_impl, save_provider_key_impl,
-    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings_impl,
-    save_workflow_graph_impl, save_workflow_settings_impl, update_budget_config_impl, AppSettings,
-    AriadneAppState, AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy,
-    ConfirmationDecision, ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings,
-    NodePresetSettings, PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole,
-    ProjectAiRequest, ProviderSettingsUpdate, RagSettings, ResolveConfirmationRequest,
-    TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
+    get_budget_status_impl, get_display_name_language_pack_template, get_document_content_impl,
+    get_document_tree_impl, get_git_history_impl, get_git_settings_impl,
+    get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
+    get_rag_settings_impl, get_template_repository_settings_impl, get_workflow_settings_impl,
+    load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl,
+    resolve_confirmation_impl, resolve_project_references, run_workflow, run_workflow_impl,
+    save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
+    save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
+    save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
+    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
+    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
+    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
+    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, NodePresetSettings,
+    PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest,
+    ProviderSettingsUpdate, RagSettings, ResolveConfirmationRequest, TemplateRepositorySettings,
+    WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
 use ariadne::contracts::{
@@ -128,6 +129,46 @@ fn command_impls_reject_missing_project_root_without_creating_it() {
     let error = get_app_settings_impl(&missing).unwrap_err();
     assert!(error.contains("project root does not exist"));
     assert!(!missing.exists());
+}
+
+#[test]
+fn display_name_language_pack_template_supports_arbitrary_language_codes() {
+    let template = get_display_name_language_pack_template(Some("ZH_Hant".to_owned())).unwrap();
+
+    assert_eq!(template.target_language, "zh-hant");
+    assert_eq!(template.base_language, "zh");
+    assert_eq!(template.fallback_language, "zh");
+    assert_eq!(template.output_file_name, "display_name.zh-hant.json");
+    assert_eq!(template.source_file_name, "display_name.json");
+    assert!(template.entries.contains_key("ui.settings.misc.language"));
+    assert!(template
+        .instructions
+        .iter()
+        .any(|item| item.contains("Keep every JSON key unchanged")));
+}
+
+#[test]
+fn display_name_language_pack_validation_reports_coverage() {
+    let template = get_display_name_language_pack_template(Some("fr".to_owned())).unwrap();
+    let mut keys = template.entries.keys().cloned();
+    let translated_key = keys.next().unwrap();
+    let empty_key = keys.next().unwrap();
+    let mut overlay = BTreeMap::new();
+    overlay.insert("_comment".to_owned(), "metadata is allowed".to_owned());
+    overlay.insert(translated_key.clone(), "traduit".to_owned());
+    overlay.insert(empty_key.clone(), "  ".to_owned());
+    overlay.insert("ui.unknown".to_owned(), "extra".to_owned());
+
+    let report = validate_display_name_language_pack(Some("FR".to_owned()), overlay).unwrap();
+
+    assert_eq!(report.target_language, "fr");
+    assert_eq!(report.output_file_name, "display_name.fr.json");
+    assert_eq!(report.total_keys, template.entries.len());
+    assert_eq!(report.translated_keys, 1);
+    assert!(report.empty_keys.contains(&empty_key));
+    assert!(report.extra_keys.contains(&"ui.unknown".to_owned()));
+    assert_eq!(report.missing_keys.len(), template.entries.len() - 2);
+    assert!(!report.complete);
 }
 
 #[test]

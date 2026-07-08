@@ -366,6 +366,29 @@ impl Default for TemplateRepositorySettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DisplayNameLanguagePackTemplate {
+    pub target_language: String,
+    pub base_language: String,
+    pub fallback_language: String,
+    pub output_file_name: String,
+    pub source_file_name: String,
+    pub instructions: Vec<String>,
+    pub entries: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayNameLanguagePackValidation {
+    pub target_language: String,
+    pub output_file_name: String,
+    pub total_keys: usize,
+    pub translated_keys: usize,
+    pub missing_keys: Vec<String>,
+    pub empty_keys: Vec<String>,
+    pub extra_keys: Vec<String>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfigStatus {
     pub has_openai_key: bool,
     pub has_anthropic_key: bool,
@@ -2330,6 +2353,98 @@ pub fn save_template_repository_settings_impl(
         serde_json::to_string_pretty(settings).map_err(error_to_string)?,
     )
     .map_err(error_to_string)
+}
+
+pub fn get_display_name_language_pack_template(
+    target_language: Option<String>,
+) -> CommandResult<DisplayNameLanguagePackTemplate> {
+    let target_language = normalize_language_pack_code(target_language.as_deref())?;
+    let entries = crate::rag::resources::load_display_name_resources().map_err(error_to_string)?;
+    Ok(DisplayNameLanguagePackTemplate {
+        target_language: target_language.clone(),
+        base_language: "zh".to_owned(),
+        fallback_language: "zh".to_owned(),
+        output_file_name: display_name_language_pack_file_name(&target_language),
+        source_file_name: "display_name.json".to_owned(),
+        instructions: vec![
+            "Translate every value from Simplified Chinese into the target UI language.".to_owned(),
+            "Keep every JSON key unchanged; do not add, remove, rename, or reorder keys unless the caller explicitly asks.".to_owned(),
+            "Keep placeholders such as {name}, {count}, {{input.xxx}}, paths, command names, and model/provider IDs unchanged.".to_owned(),
+            "Return valid UTF-8 JSON object content for the output file only.".to_owned(),
+        ],
+        entries,
+    })
+}
+
+pub fn validate_display_name_language_pack(
+    target_language: Option<String>,
+    overlay: BTreeMap<String, String>,
+) -> CommandResult<DisplayNameLanguagePackValidation> {
+    let target_language = normalize_language_pack_code(target_language.as_deref())?;
+    let base = crate::rag::resources::load_display_name_resources().map_err(error_to_string)?;
+
+    let mut missing_keys = Vec::new();
+    let mut empty_keys = Vec::new();
+    let mut translated_keys = 0usize;
+    for key in base.keys() {
+        match overlay.get(key) {
+            Some(value) if value.trim().is_empty() => empty_keys.push(key.clone()),
+            Some(_) => translated_keys += 1,
+            None => missing_keys.push(key.clone()),
+        }
+    }
+
+    let extra_keys = overlay
+        .keys()
+        .filter(|key| !key.starts_with('_') && !base.contains_key(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let complete = missing_keys.is_empty() && empty_keys.is_empty() && extra_keys.is_empty();
+
+    Ok(DisplayNameLanguagePackValidation {
+        target_language: target_language.clone(),
+        output_file_name: display_name_language_pack_file_name(&target_language),
+        total_keys: base.len(),
+        translated_keys,
+        missing_keys,
+        empty_keys,
+        extra_keys,
+        complete,
+    })
+}
+
+fn normalize_language_pack_code(lang_code: Option<&str>) -> CommandResult<String> {
+    let raw = lang_code.unwrap_or("en").trim().replace('_', "-");
+    let mut lang = raw.to_lowercase();
+    if lang.is_empty() {
+        lang = "en".to_owned();
+    }
+    if lang == "jp" || lang.starts_with("jp-") {
+        lang = lang.replacen("jp", "ja", 1);
+    }
+    validate_language_pack_code(&lang)?;
+    Ok(lang)
+}
+
+fn validate_language_pack_code(lang: &str) -> CommandResult<()> {
+    if lang == "." || lang == ".." || lang.starts_with('-') || lang.ends_with('-') {
+        return Err(format!("invalid language code: {lang}"));
+    }
+    if lang
+        .split('-')
+        .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_alphanumeric()))
+    {
+        return Err(format!("invalid language code: {lang}"));
+    }
+    Ok(())
+}
+
+fn display_name_language_pack_file_name(lang: &str) -> String {
+    if lang == "zh" {
+        "display_name.json".to_owned()
+    } else {
+        format!("display_name.{lang}.json")
+    }
 }
 
 pub fn update_budget_config_impl(

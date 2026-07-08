@@ -105,13 +105,13 @@ public sealed class DisplayNameService
         {
             return "zh";
         }
-        if (lang == "jp" || lang.StartsWith("jp-", StringComparison.Ordinal))
+        if (lang == "jp")
         {
             return "ja";
         }
-        if (lang.StartsWith("zh-", StringComparison.Ordinal))
+        if (lang.StartsWith("jp-", StringComparison.Ordinal))
         {
-            return "zh";
+            return "ja" + lang[2..];
         }
         return lang;
     }
@@ -246,16 +246,24 @@ public sealed class DisplayNameService
 
             var rawCode = fileName[prefix.Length..^suffix.Length];
             var code = NormalizeLanguageCode(rawCode);
-            if (!string.IsNullOrWhiteSpace(code))
+            if (!string.IsNullOrWhiteSpace(code) && HasDisplayNameEntries(path))
             {
                 codes.Add(code);
             }
         }
 
         return new[] { "zh" }
-            .Concat(codes.Where(code => !string.Equals(code, "zh", StringComparison.OrdinalIgnoreCase))
+            .Concat(codes
+                .Where(code => !string.Equals(code, "zh", StringComparison.OrdinalIgnoreCase))
                 .OrderBy(code => code, StringComparer.OrdinalIgnoreCase))
             .ToArray();
+    }
+
+    private static bool HasDisplayNameEntries(string path)
+    {
+        return LoadJson(path).Any(entry =>
+            !entry.Key.StartsWith('_')
+            && !string.IsNullOrWhiteSpace(entry.Value));
     }
 
     /// 按系统语言返回语言代码，最终是否可用由 NormalizeAvailableLanguage 决定。

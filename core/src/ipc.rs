@@ -365,6 +365,19 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
                 params.settings,
             )?)
         }
+        "get_display_name_language_pack_template" => {
+            let params: LanguagePackParams = params(request.params)?;
+            ok(commands::get_display_name_language_pack_template(
+                params.target_language,
+            )?)
+        }
+        "validate_display_name_language_pack" => {
+            let params: LanguagePackValidationParams = params(request.params)?;
+            ok(commands::validate_display_name_language_pack(
+                params.target_language,
+                params.overlay,
+            )?)
+        }
         "update_budget_config" => {
             let params: UpdateBudgetParams = params(request.params)?;
             ok(commands::update_budget_config(
@@ -576,6 +589,20 @@ struct RequestParam<T> {
 #[derive(Debug, Deserialize)]
 struct SettingsParam<T> {
     settings: T,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LanguagePackParams {
+    #[serde(default)]
+    target_language: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LanguagePackValidationParams {
+    #[serde(default)]
+    target_language: Option<String>,
+    #[serde(default)]
+    overlay: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
