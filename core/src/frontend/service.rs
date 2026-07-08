@@ -962,6 +962,7 @@ pub fn import_chapter_document(
         path: request.target_path.clone(),
         content: source.content,
         format: None,
+        base_version: None,
     })?;
     let entry = ChapterDocumentEntry {
         chapter_id: request.chapter_id,

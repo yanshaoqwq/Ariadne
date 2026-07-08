@@ -20,6 +20,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _quickEditDiff = string.Empty;
     private string _exportFormat = "markdown";
     private string _currentDocumentId = string.Empty;
+    private string? _currentDocumentVersion;
     private string _documentTitle;
     private string _importChapterId = string.Empty;
     private string _importChapterTitle = string.Empty;
@@ -35,6 +36,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private int _nextDocumentBlockId;
     private bool _isEditMode;
     private TextRange? _pendingQuickEditRange;
+    private string? _pendingQuickEditBaseVersion;
 
     public WorksPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -330,13 +332,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void ClearPendingQuickEdit()
     {
-        if (_pendingQuickEdit is null && _pendingQuickEditRange is null && string.IsNullOrEmpty(QuickEditDiff))
+        if (_pendingQuickEdit is null
+            && _pendingQuickEditRange is null
+            && _pendingQuickEditBaseVersion is null
+            && string.IsNullOrEmpty(QuickEditDiff))
         {
             return;
         }
 
         _pendingQuickEdit = null;
         _pendingQuickEditRange = null;
+        _pendingQuickEditBaseVersion = null;
         QuickEditDiff = string.Empty;
         ApplyQuickEditCommand.NotifyCanExecuteChanged();
     }
@@ -520,8 +526,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
             _suppressDirtyTracking = true;
             try
             {
-                DocumentContent = await _backend.GetDocumentContentByPathAsync(item.Path).ConfigureAwait(true);
+                var document = await _backend.GetDocumentContentDetailsByPathAsync(item.Path).ConfigureAwait(true);
+                DocumentContent = document.Content;
                 _currentDocumentId = nextDocumentId;
+                _currentDocumentVersion = document.Metadata.Version;
                 OnCurrentDocumentChanged();
                 ClearPendingQuickEdit();
                 DocumentTitle = item.Title;
@@ -569,7 +577,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 StatusText = NoDocumentText;
                 return;
             }
-            await _backend.SaveDocumentContentAsync(_currentDocumentId, AssembleDocumentContent()).ConfigureAwait(true);
+            var report = await _backend.SaveDocumentContentAsync(
+                _currentDocumentId,
+                AssembleDocumentContent(),
+                _currentDocumentVersion).ConfigureAwait(true);
+            _currentDocumentVersion = report.Metadata.Version;
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.save");
         }
@@ -659,6 +671,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 QuickEditInstruction,
                 string.IsNullOrWhiteSpace(_currentDocumentId) ? null : _currentDocumentId)).ConfigureAwait(true);
             _pendingQuickEdit = result;
+            _pendingQuickEditBaseVersion = _currentDocumentVersion;
             ApplyQuickEditCommand.NotifyCanExecuteChanged();
             QuickEditDiff = result.Diff;
             StatusText = QuickEditDiffText;
@@ -686,24 +699,31 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             var documentContent = AssembleDocumentContent();
-            await _backend.ApplyQuickEditAsync(
+            var report = await _backend.ApplyQuickEditAsync(
                 _currentDocumentId,
-                null,
+                _pendingQuickEditBaseVersion,
                 documentContent,
                 _pendingQuickEditRange ?? Utf8Range(documentContent, 0, documentContent.Length),
                 _pendingQuickEdit).ConfigureAwait(true);
             _suppressDirtyTracking = true;
             try
             {
-                DocumentContent = await _backend.GetDocumentContentAsync(_currentDocumentId).ConfigureAwait(true);
+                var document = await _backend.GetDocumentContentDetailsAsync(_currentDocumentId).ConfigureAwait(true);
+                DocumentContent = document.Content;
+                _currentDocumentVersion = document.Metadata.Version;
             }
             finally
             {
                 _suppressDirtyTracking = false;
             }
+            if (report.Metadata is not null)
+            {
+                _currentDocumentVersion = report.Metadata.Version;
+            }
             CaptureSnapshot();
             _pendingQuickEdit = null;
             _pendingQuickEditRange = null;
+            _pendingQuickEditBaseVersion = null;
             ApplyQuickEditCommand.NotifyCanExecuteChanged();
             StatusText = _displayNames.Text("ui.common.configured");
         }

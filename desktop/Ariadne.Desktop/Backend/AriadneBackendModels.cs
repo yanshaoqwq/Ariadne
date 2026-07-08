@@ -238,6 +238,22 @@ public sealed record DocumentTreeNode(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("children")] IReadOnlyList<DocumentTreeNode> Children);
 
+public sealed record DocumentMetadata(
+    [property: JsonPropertyName("document_id")] string DocumentId,
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("format")] string Format,
+    [property: JsonPropertyName("media_type")] string MediaType,
+    [property: JsonPropertyName("size_bytes")] long SizeBytes,
+    [property: JsonPropertyName("version")] string Version);
+
+public sealed record DocumentContentResult(
+    [property: JsonPropertyName("metadata")] DocumentMetadata Metadata,
+    [property: JsonPropertyName("content")] string Content);
+
+public sealed record DocumentWriteReport(
+    [property: JsonPropertyName("metadata")] DocumentMetadata Metadata,
+    [property: JsonPropertyName("index_invalidation")] object? IndexInvalidation);
+
 public sealed record ChapterImportRequest(
     [property: JsonPropertyName("chapter_id")] string ChapterId,
     [property: JsonPropertyName("title")] string Title,
@@ -272,7 +288,7 @@ public sealed record TextRange(
 
 public sealed record PatchApplyReport(
     [property: JsonPropertyName("preview")] object? Preview,
-    [property: JsonPropertyName("metadata")] object? Metadata,
+    [property: JsonPropertyName("metadata")] DocumentMetadata? Metadata,
     [property: JsonPropertyName("index_invalidation")] object? IndexInvalidation);
 
 public sealed record WorkflowGraphData(

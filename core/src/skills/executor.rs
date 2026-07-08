@@ -116,7 +116,10 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
             ));
         }
         manifest.validate()?;
-        crate::contracts::validate_required_ports(&manifest.schema.input_ports()?, &request.inputs)?;
+        crate::contracts::validate_required_ports(
+            &manifest.schema.input_ports()?,
+            &request.inputs,
+        )?;
         self.check_budget(manifest.estimated_cost_usd)?;
 
         let started_at = Instant::now();
@@ -417,19 +420,18 @@ fn validate_http_endpoint(endpoint: &HttpEndpoint) -> CoreResult<()> {
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
         match ip {
-            IpAddr::V4(ip) if ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_unspecified() =>
+            IpAddr::V4(ip)
+                if ip.is_loopback()
+                    || ip.is_private()
+                    || ip.is_link_local()
+                    || ip.is_broadcast()
+                    || ip.is_unspecified() =>
             {
                 return Err(CoreError::validation(
                     "http skill host cannot target private or local addresses",
                 ));
             }
-            IpAddr::V6(ip)
-                if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() =>
-            {
+            IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() => {
                 return Err(CoreError::validation(
                     "http skill host cannot target private or local addresses",
                 ));
@@ -520,7 +522,8 @@ fn execute_native_wasm(
     let engine = wasmi::Engine::new(&engine_config);
     let module = wasmi::Module::new(&engine, &mut &wasm[..])
         .map_err(|error| wasm_external(format!("failed to compile wasm module: {error}")))?;
-    let mut store = wasmi::Store::new(&engine, ());
+    let mut store = wasmi::Store::new(&engine, WasmStoreState::new(max_memory_bytes)?);
+    store.limiter(|state| &mut state.limits);
     store
         .set_fuel(wasm_fuel_for_timeout(timeout_ms))
         .map_err(|error| wasm_external(format!("failed to configure wasm fuel: {error}")))?;
@@ -609,7 +612,7 @@ fn parse_wasm_output(output_json: Vec<u8>, elapsed_ms: u64) -> CoreResult<SkillB
 
 fn enforce_wasm_memory_limit(
     memory: &wasmi::Memory,
-    store: &wasmi::Store<()>,
+    store: &wasmi::Store<WasmStoreState>,
     max_memory_bytes: Option<u64>,
 ) -> CoreResult<()> {
     if let Some(max_memory_bytes) = max_memory_bytes {
@@ -624,8 +627,30 @@ fn enforce_wasm_memory_limit(
     Ok(())
 }
 
-fn write_u32_le(
-    store: &mut wasmi::Store<()>,
+struct WasmStoreState {
+    limits: wasmi::StoreLimits,
+}
+
+impl WasmStoreState {
+    fn new(max_memory_bytes: Option<u64>) -> CoreResult<Self> {
+        let mut builder = wasmi::StoreLimitsBuilder::new()
+            .instances(1)
+            .memories(1)
+            .trap_on_grow_failure(true);
+        if let Some(max_memory_bytes) = max_memory_bytes {
+            let limit = usize::try_from(max_memory_bytes).map_err(|_| {
+                CoreError::validation("wasm max_memory_bytes exceeds platform usize")
+            })?;
+            builder = builder.memory_size(limit);
+        }
+        Ok(Self {
+            limits: builder.build(),
+        })
+    }
+}
+
+fn write_u32_le<T>(
+    store: &mut wasmi::Store<T>,
     memory: &wasmi::Memory,
     offset: usize,
     value: u32,
@@ -635,7 +660,11 @@ fn write_u32_le(
         .map_err(|error| wasm_external(format!("failed to write wasm memory: {error}")))
 }
 
-fn read_u32_le(store: &wasmi::Store<()>, memory: &wasmi::Memory, offset: usize) -> CoreResult<u32> {
+fn read_u32_le<T>(
+    store: &wasmi::Store<T>,
+    memory: &wasmi::Memory,
+    offset: usize,
+) -> CoreResult<u32> {
     let mut bytes = [0u8; 4];
     memory
         .read(store, offset, &mut bytes)

@@ -107,12 +107,21 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
                 params.path,
             )?)
         }
+        "get_document_content_details" => {
+            let params: DocumentContentParams = params(request.params)?;
+            ok(commands::get_document_content_details(
+                state,
+                params.document_id,
+                params.path,
+            )?)
+        }
         "save_document_content" => {
             let params: SaveDocumentContentParams = params(request.params)?;
-            ok(commands::save_document_content(
+            ok(commands::save_document_content_with_version(
                 state,
                 params.document_id,
                 params.content,
+                params.base_version,
             )?)
         }
         "import_chapter" => {
@@ -465,6 +474,8 @@ struct DocumentContentParams {
 struct SaveDocumentContentParams {
     document_id: String,
     content: String,
+    #[serde(default)]
+    base_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

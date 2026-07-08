@@ -21,8 +21,8 @@ use crate::contracts::{
 use crate::costs::{CostLedger, CostQuery, SqliteCostLedger};
 use crate::diagnostics::{BackendDiagnosticsReport, DiagnosticItem, DiagnosticStatus};
 use crate::documents::{
-    ChapterDocumentIndex, DocumentReadRequest, DocumentRepository, DocumentWriteRequest,
-    FileDocumentService,
+    ChapterDocumentIndex, DocumentContent, DocumentReadRequest, DocumentRepository,
+    DocumentWriteReport, DocumentWriteRequest, FileDocumentService,
 };
 use crate::frontend::{
     apply_node_detail_patch as apply_node_detail_patch_to_workflow, build_works_tree,
@@ -610,13 +610,31 @@ pub fn get_document_content(
     get_document_content_impl(&project_root, document_id, path)
 }
 
+pub fn get_document_content_details(
+    state: &AriadneAppState,
+    document_id: Option<String>,
+    path: Option<String>,
+) -> CommandResult<DocumentContent> {
+    let project_root = project_root_from_state(&state, None)?;
+    get_document_content_details_impl(&project_root, document_id, path)
+}
+
 pub fn save_document_content(
     state: &AriadneAppState,
     document_id: String,
     content: String,
-) -> CommandResult<()> {
+) -> CommandResult<DocumentWriteReport> {
+    save_document_content_with_version(state, document_id, content, None)
+}
+
+pub fn save_document_content_with_version(
+    state: &AriadneAppState,
+    document_id: String,
+    content: String,
+    base_version: Option<String>,
+) -> CommandResult<DocumentWriteReport> {
     let project_root = project_root_from_state(&state, None)?;
-    save_document_content_impl(&project_root, document_id, content)
+    save_document_content_report_impl(&project_root, document_id, content, base_version)
 }
 
 pub fn import_chapter(
@@ -795,9 +813,11 @@ pub fn start_workflow(
         start_node_id,
         initial_inputs: BTreeMap::new(),
     };
+    let worker_workflow_id = request.workflow_id.clone();
     let secrets = Arc::clone(&state.secret_store);
     let worker_root = project_root.clone();
     let worker_run_id = run_id.clone();
+    let worker_run_id_text = run_id_text.clone();
     std::thread::Builder::new()
         .name(format!("ariadne-workflow-{}", run_id.as_str()))
         .spawn(move || {
@@ -807,6 +827,13 @@ pub fn start_workflow(
                 request,
                 worker_run_id,
             ) {
+                record_workflow_worker_error(
+                    &worker_root,
+                    &worker_workflow_id,
+                    &worker_run_id_text,
+                    "workflow worker failed",
+                    &error,
+                );
                 eprintln!("[ariadne] workflow worker failed: {error}");
             }
         })
@@ -1518,6 +1545,15 @@ pub fn get_document_content_impl(
     document_id: Option<String>,
     path: Option<String>,
 ) -> CommandResult<String> {
+    get_document_content_details_impl(project_root, document_id, path)
+        .map(|document| document.content)
+}
+
+pub fn get_document_content_details_impl(
+    project_root: &Path,
+    document_id: Option<String>,
+    path: Option<String>,
+) -> CommandResult<DocumentContent> {
     let document_path = document_argument_path(project_root, document_id, path)?;
     let documents = document_service(project_root);
     documents
@@ -1525,7 +1561,6 @@ pub fn get_document_content_impl(
             path: document_path,
             format: None,
         })
-        .map(|document| document.content)
         .map_err(error_to_string)
 }
 
@@ -1534,6 +1569,15 @@ pub fn save_document_content_impl(
     document_id: String,
     content: String,
 ) -> CommandResult<()> {
+    save_document_content_report_impl(project_root, document_id, content, None).map(|_| ())
+}
+
+pub fn save_document_content_report_impl(
+    project_root: &Path,
+    document_id: String,
+    content: String,
+    base_version: Option<String>,
+) -> CommandResult<DocumentWriteReport> {
     let document_path = project_path(project_root, &document_id)?;
     let documents = document_service(project_root);
     documents
@@ -1541,8 +1585,8 @@ pub fn save_document_content_impl(
             path: document_path,
             content,
             format: None,
+            base_version,
         })
-        .map(|_| ())
         .map_err(error_to_string)
 }
 
@@ -3284,14 +3328,48 @@ fn spawn_continue_workflow_worker(
     std::thread::Builder::new()
         .name(format!("ariadne-workflow-resume-{run_id}"))
         .spawn(move || {
-            if let Err(error) =
-                continue_workflow_run_impl(&project_root, secrets.as_ref(), workflow_id, run_id)
-            {
+            if let Err(error) = continue_workflow_run_impl(
+                &project_root,
+                secrets.as_ref(),
+                workflow_id.clone(),
+                run_id.clone(),
+            ) {
+                record_workflow_worker_error(
+                    &project_root,
+                    &workflow_id,
+                    &run_id,
+                    "workflow resume worker failed",
+                    &error,
+                );
                 eprintln!("[ariadne] workflow resume worker failed: {error}");
             }
         })
         .map(|_| ())
         .map_err(error_to_string)
+}
+
+fn record_workflow_worker_error(
+    project_root: &Path,
+    workflow_id: &str,
+    run_id: &str,
+    context: &str,
+    error: &str,
+) {
+    let entry = UiRunLogEntry {
+        log_id: format!("{context}-{run_id}"),
+        timestamp_ms: 0,
+        kind: UiRunLogKind::Error,
+        level: UiRunLogLevel::Error,
+        message: format!("{context}: {error}"),
+        workflow_id: Some(WorkflowId::from(workflow_id.to_owned())),
+        run_id: Some(RunId::from(run_id.to_owned())),
+        node_id: None,
+        unread: true,
+        metadata: json!({ "source": "workflow_worker" }),
+    };
+    if let Err(log_error) = UiRunLogStore::default_for_project(project_root).append(entry) {
+        eprintln!("[ariadne] failed to record workflow worker error: {log_error}");
+    }
 }
 
 fn run_status_label(status: crate::contracts::RunStatus) -> &'static str {

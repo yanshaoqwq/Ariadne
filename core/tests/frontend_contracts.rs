@@ -378,6 +378,7 @@ fn quick_edit_patch_can_apply_through_document_service() {
             path: path.clone(),
             content: "原文\n".to_owned(),
             format: None,
+            base_version: None,
         })
         .unwrap();
     let result = ariadne::frontend::QuickEditResult {
@@ -432,6 +433,7 @@ fn project_reference_resolver_handles_confirmation_document_chapter_artifact_and
             path: doc_path.clone(),
             content: "正文".to_owned(),
             format: None,
+            base_version: None,
         })
         .unwrap();
     let doc = service
@@ -667,6 +669,7 @@ fn works_service_exports_epub_and_pdf_artifacts() {
             path: chapter_path.clone(),
             content: chapter_body,
             format: None,
+            base_version: None,
         })
         .unwrap();
     let index = ChapterDocumentIndex::new(

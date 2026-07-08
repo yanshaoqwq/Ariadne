@@ -353,9 +353,9 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
-    public Task SaveDocumentContentAsync(string documentId, string content, CancellationToken cancellationToken = default)
+    public Task<DocumentWriteReport> SaveDocumentContentAsync(string documentId, string content, string? baseVersion = null, CancellationToken cancellationToken = default)
     {
-        return InvokeCommandAsync("save_document_content", new { document_id = documentId, content }, cancellationToken);
+        return InvokeRequiredAsync<DocumentWriteReport>("save_document_content", new { document_id = documentId, content, base_version = baseVersion }, cancellationToken);
     }
 
     public Task<string> GetDocumentContentAsync(string documentId, CancellationToken cancellationToken = default)
@@ -366,6 +366,16 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     public Task<string> GetDocumentContentByPathAsync(string path, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<string>("get_document_content", new { path }, cancellationToken);
+    }
+
+    public Task<DocumentContentResult> GetDocumentContentDetailsAsync(string documentId, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<DocumentContentResult>("get_document_content_details", new { document_id = documentId }, cancellationToken);
+    }
+
+    public Task<DocumentContentResult> GetDocumentContentDetailsByPathAsync(string path, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<DocumentContentResult>("get_document_content_details", new { path }, cancellationToken);
     }
 
     public Task<QuickEditResult> QuickEditAsync(QuickEditRequest request, CancellationToken cancellationToken = default)

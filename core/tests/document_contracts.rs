@@ -57,6 +57,7 @@ fn document_service_reads_and_writes_supported_documents() {
             path: path.clone(),
             content: "# 第一章\n正文".to_owned(),
             format: None,
+            base_version: None,
         })
         .unwrap();
     let content = service
@@ -87,10 +88,51 @@ fn document_service_validates_json_documents() {
             path,
             content: "{not-json}".to_owned(),
             format: None,
+            base_version: None,
         })
         .unwrap_err();
 
     assert!(error.to_string().contains("json"));
+}
+
+/// 保存完整文档时，调用方携带旧版本必须被拒绝，避免覆盖外部更新。
+#[test]
+fn document_service_rejects_stale_full_document_save() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let service = test_service(temp_dir.path());
+    let path = temp_dir.path().join("chapter.md");
+
+    let original = service
+        .save_document(DocumentWriteRequest {
+            path: path.clone(),
+            content: "第一版".to_owned(),
+            format: None,
+            base_version: None,
+        })
+        .unwrap();
+    let old_version = original.metadata.version;
+
+    service
+        .save_document(DocumentWriteRequest {
+            path: path.clone(),
+            content: "第二版更长".to_owned(),
+            format: None,
+            base_version: Some(old_version.clone()),
+        })
+        .unwrap();
+
+    let error = service
+        .save_document(DocumentWriteRequest {
+            path,
+            content: "第三版".to_owned(),
+            format: None,
+            base_version: Some(old_version),
+        })
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("base_version does not match current document"));
 }
 
 /// 验证 patch 可以先预览、再写回，并联动 Git checkpoint。
@@ -153,6 +195,7 @@ fn document_service_rejects_parent_escape() {
             path: allowed.join("../outside.md"),
             content: "escape".to_owned(),
             format: None,
+            base_version: None,
         })
         .unwrap_err();
 
@@ -178,6 +221,7 @@ fn document_service_rejects_symlink_escape() {
             path: allowed.join("link").join("secret.txt"),
             content: "escape".to_owned(),
             format: None,
+            base_version: None,
         })
         .unwrap_err();
 

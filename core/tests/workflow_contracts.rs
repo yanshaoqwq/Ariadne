@@ -307,6 +307,57 @@ fn runtime_schedules_control_edges_and_passes_data_aliases() {
     assert!(executor.calls[1].inputs.contains_key("本章大纲"));
 }
 
+/// 验证 data 边缺失上游输出时不会静默跳过，而是记录节点失败事件。
+#[test]
+fn runtime_fails_target_when_data_edge_output_is_missing() {
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf"),
+        name: "Missing data output".to_owned(),
+        nodes: vec![node("planner", "planner"), node("writer", "writer")],
+        edges: vec![
+            Edge {
+                id: EdgeId::from("data-1"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("planner"),
+                    port_name: "outline".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("writer"),
+                    port_name: "prompt_input".to_owned(),
+                },
+                alias: Some("outline".to_owned()),
+                communication: None,
+            },
+            control_edge("control-1", "planner", "writer"),
+        ],
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+    let mut executor = ScriptedExecutor::default();
+    executor.push("planner", WorkflowNodeExecutionOutput::default());
+    executor.push("writer", WorkflowNodeExecutionOutput::default());
+
+    let status = runtime.run(&workflow, &mut executor).unwrap();
+
+    assert_eq!(status, RunStatus::Failed);
+    assert_eq!(executor.call_count("writer"), 0);
+    let writer = runtime
+        .state
+        .nodes
+        .get(&NodeId::from("writer"))
+        .expect("writer state should be recorded");
+    assert_eq!(writer.status, RunStatus::Failed);
+    assert!(writer
+        .error_state
+        .as_ref()
+        .is_some_and(|error| error.message.contains("has no output port outline")));
+    assert!(runtime
+        .events_for_node(&NodeId::from("writer"))
+        .iter()
+        .any(|event| event.event_type == WorkflowRuntimeEventType::NodeFailed));
+}
+
 /// 验证 communication 到达最大次数后暂停运行。
 #[test]
 fn runtime_pauses_when_communication_count_is_exhausted() {
@@ -1451,10 +1502,8 @@ mod prudent_rejection_contracts {
         let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
 
         // 模拟 prudent 节点已成功，生成一个被拒的确认项
-        use ariadne::workflow::{
-            RuntimeConfirmation, WorkflowNodeRuntimeState, WorkflowRunState,
-        };
         use ariadne::contracts::RunStatus;
+        use ariadne::workflow::{RuntimeConfirmation, WorkflowNodeRuntimeState, WorkflowRunState};
         runtime.state.nodes.insert(
             NodeId::from("writer"),
             WorkflowNodeRuntimeState {
@@ -1541,13 +1590,12 @@ mod prudent_rejection_contracts {
         // 节点输出被改写
         let node = runtime.state.nodes.get(&NodeId::from("prudent")).unwrap();
         let ctx = node.outputs.get("revision_context").unwrap();
-        assert!(matches!(ctx, PortValue::Inline { value } if value.as_str() == Some("交流后同意的返修目标")));
+        assert!(
+            matches!(ctx, PortValue::Inline { value } if value.as_str() == Some("交流后同意的返修目标"))
+        );
 
         // 暂停解除（无其他 pending 确认项）
-        assert_eq!(
-            runtime.state.status,
-            ariadne::contracts::RunStatus::Queued
-        );
+        assert_eq!(runtime.state.status, ariadne::contracts::RunStatus::Queued);
     }
 
     #[test]
@@ -1555,8 +1603,8 @@ mod prudent_rejection_contracts {
         let (mut runtime, workflow) = make_runtime_with_prudent_confirmation();
 
         // 模拟 summarizer 节点已有旧快照
-        use ariadne::workflow::WorkflowNodeRuntimeState;
         use ariadne::contracts::RunStatus;
+        use ariadne::workflow::WorkflowNodeRuntimeState;
         runtime.state.nodes.insert(
             NodeId::from("summarizer"),
             WorkflowNodeRuntimeState {
@@ -1595,7 +1643,10 @@ mod prudent_rejection_contracts {
 
         // prudent 和 summarizer 下游快照被清除
         assert!(!runtime.state.nodes.contains_key(&NodeId::from("prudent")));
-        assert!(!runtime.state.nodes.contains_key(&NodeId::from("summarizer")));
+        assert!(!runtime
+            .state
+            .nodes
+            .contains_key(&NodeId::from("summarizer")));
 
         // 暂停解除
         assert_eq!(runtime.state.status, ariadne::contracts::RunStatus::Queued);

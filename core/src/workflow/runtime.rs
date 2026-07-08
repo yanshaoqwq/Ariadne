@@ -740,13 +740,35 @@ impl WorkflowRuntime {
                     persist_if_needed(store, &self.state)?;
                     return Ok(self.state.status);
                 }
+                let inputs = match collect_data_inputs(workflow, &self.state, &node_id) {
+                    Ok(inputs) => inputs,
+                    Err(error) => {
+                        if self.record_node_error(node_id.clone(), error) {
+                            persist_if_needed(store, &self.state)?;
+                            continue;
+                        }
+                        self.state.status = if self
+                            .state
+                            .nodes
+                            .get(&node_id)
+                            .and_then(|node| node.error_state.as_ref())
+                            .is_some_and(|error| error.retryable)
+                        {
+                            RunStatus::Paused
+                        } else {
+                            RunStatus::Failed
+                        };
+                        persist_if_needed(store, &self.state)?;
+                        return Ok(self.state.status);
+                    }
+                };
                 let request = WorkflowNodeExecutionRequest {
                     workflow_id: workflow.id.clone(),
                     run_id: self.state.run_id.clone(),
                     node_id: node_id.clone(),
                     type_name: node_instance.type_name.clone(),
                     config: node_instance.config.clone(),
-                    inputs: collect_data_inputs(workflow, &self.state, &node_id)?,
+                    inputs,
                     communication_messages: collect_inbound_messages(&self.state, &node_id),
                     metadata: self
                         .state
@@ -1986,7 +2008,12 @@ fn dependencies_satisfied(
         .edges
         .iter()
         .filter(|edge| edge.to.node_id == *node_id)
-        .filter(|edge| matches!(edge.kind, WorkflowEdgeKind::Control | WorkflowEdgeKind::Data))
+        .filter(|edge| {
+            matches!(
+                edge.kind,
+                WorkflowEdgeKind::Control | WorkflowEdgeKind::Data
+            )
+        })
         .all(|edge| {
             // Loop 回边是显式循环触发器，不应阻塞首轮运行。首轮时 Loop 节点还
             // 没有状态，因此把未完成的 Loop 回边视为已满足。
@@ -2022,7 +2049,12 @@ fn collect_downstream_closure(
         .edges
         .iter()
         .filter(|edge| edge.from.node_id == *node_id)
-        .filter(|edge| matches!(edge.kind, WorkflowEdgeKind::Control | WorkflowEdgeKind::Data))
+        .filter(|edge| {
+            matches!(
+                edge.kind,
+                WorkflowEdgeKind::Control | WorkflowEdgeKind::Data
+            )
+        })
     {
         collect_downstream_closure(workflow, &edge.to.node_id, affected);
     }
@@ -2083,20 +2115,28 @@ fn collect_data_inputs(
         .filter(|edge| edge.kind == WorkflowEdgeKind::Data && edge.to.node_id == *node_id)
     {
         let Some(alias) = &edge.alias else {
-            // 数据边缺少 alias 时静默跳过，但记录警告便于排错
-            eprintln!(
-                "[ariadne] warning: data edge {} to node {} has no alias; input will be skipped",
+            return Err(CoreError::validation(format!(
+                "data edge {} to node {} requires a non-empty alias",
                 edge.id.as_str(),
                 node_id.as_str()
-            );
-            continue;
+            )));
         };
-        let Some(source) = state.nodes.get(&edge.from.node_id) else {
-            continue;
-        };
-        if let Some(value) = source.outputs.get(&edge.from.port_name) {
-            inputs.insert(alias.clone(), value.clone());
-        }
+        let source = state.nodes.get(&edge.from.node_id).ok_or_else(|| {
+            CoreError::validation(format!(
+                "data edge {} source node {} has no runtime state",
+                edge.id.as_str(),
+                edge.from.node_id.as_str()
+            ))
+        })?;
+        let value = source.outputs.get(&edge.from.port_name).ok_or_else(|| {
+            CoreError::validation(format!(
+                "data edge {} source node {} has no output port {}",
+                edge.id.as_str(),
+                edge.from.node_id.as_str(),
+                edge.from.port_name
+            ))
+        })?;
+        inputs.insert(alias.clone(), value.clone());
     }
     Ok(inputs)
 }

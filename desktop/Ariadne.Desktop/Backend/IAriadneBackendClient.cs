@@ -123,11 +123,15 @@ public interface IAriadneBackendClient
 
     Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string artifactId, string format = "markdown", CancellationToken cancellationToken = default);
 
-    Task SaveDocumentContentAsync(string documentId, string content, CancellationToken cancellationToken = default);
+    Task<DocumentWriteReport> SaveDocumentContentAsync(string documentId, string content, string? baseVersion = null, CancellationToken cancellationToken = default);
 
     Task<string> GetDocumentContentAsync(string documentId, CancellationToken cancellationToken = default);
 
     Task<string> GetDocumentContentByPathAsync(string path, CancellationToken cancellationToken = default);
+
+    Task<DocumentContentResult> GetDocumentContentDetailsAsync(string documentId, CancellationToken cancellationToken = default);
+
+    Task<DocumentContentResult> GetDocumentContentDetailsByPathAsync(string path, CancellationToken cancellationToken = default);
 
     Task<QuickEditResult> QuickEditAsync(QuickEditRequest request, CancellationToken cancellationToken = default);
 

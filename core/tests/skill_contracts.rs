@@ -476,8 +476,20 @@ fn http_skill_sanitizes_sensitive_logs() {
         )
         .unwrap();
 
-    assert_eq!(output.logs[0], "Authorization:[REDACTED]");
+    assert_eq!(output.logs[0], "Authorization: [REDACTED]");
     assert_eq!(sanitize_skill_log("API_KEY=abc123"), "API_KEY=[REDACTED]");
+    assert_eq!(
+        sanitize_skill_log(r#"payload {"api_key":"abc123","ok":true}"#),
+        r#"payload {"api_key":"[REDACTED]","ok":true}"#
+    );
+    assert_eq!(
+        sanitize_skill_log("url /v1?token=abc123&safe=true"),
+        "url /v1?token=[REDACTED]&safe=true"
+    );
+    assert_eq!(
+        sanitize_skill_log("bearer secret-token request_id=42"),
+        "bearer [REDACTED] request_id=42"
+    );
 }
 
 /// 验证标准库真实 HTTP 后端能发送 JSON 输入并解析 SkillBackendOutput。
@@ -712,6 +724,60 @@ fn native_wasm_backend_interrupts_infinite_loop_with_fuel() {
 
     assert!(error.to_string().contains("wasm_time"));
     assert!(error.to_string().contains("fuel exhausted"));
+}
+
+/// 验证 WASM 在 memory.grow 时受 Store limiter 约束，而不是运行结束后才检查。
+#[test]
+fn native_wasm_backend_blocks_memory_growth_beyond_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let wasm_path = temp.path().join("grow.wasm");
+    let wat = r#"
+    (module
+      (memory (export "memory") 1)
+      (func (export "run") (result i32)
+        (drop (memory.grow (i32.const 1)))
+        (i32.const 0))
+    )
+    "#;
+    std::fs::write(&wasm_path, wat::parse_str(wat).unwrap()).unwrap();
+
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let backend = NativeWasmSkillBackend;
+    let mut manifest = http_manifest();
+    manifest.executor = SkillExecutorConfig::Wasm(WasmSkillConfig {
+        module_path: wasm_path.to_string_lossy().into_owned(),
+        allow_network: false,
+        allowed_hosts: Vec::new(),
+    });
+    manifest.limits.max_memory_bytes = Some(64 * 1024);
+    let execution_policy = policy(false, false);
+    let auto_mode_config = AutoModeConfig::default();
+    let executor = SkillExecutor::new(SkillExecutionContext {
+        execution_policy: &execution_policy,
+        auto_mode_config: &auto_mode_config,
+        budget_limits: Default::default(),
+        ledger: &ledger,
+        llm_provider: None,
+        http_backend: None,
+        wasm_backend: Some(&backend),
+    });
+
+    let error = executor
+        .execute(
+            &manifest,
+            SkillRunRequest {
+                skill_id: "fetch-info".to_owned(),
+                inputs: inputs(),
+                metadata: Value::Null,
+            },
+        )
+        .unwrap_err();
+
+    let message = error.to_string();
+    assert!(
+        message.contains("wasm run failed") || message.contains("wasm_memory"),
+        "{message}"
+    );
 }
 
 /// 验证 WASM Skill 网络访问默认受权限拒绝。

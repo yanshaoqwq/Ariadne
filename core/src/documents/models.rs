@@ -73,6 +73,8 @@ pub struct DocumentWriteRequest {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<DocumentFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_version: Option<String>,
 }
 
 /// 文档写入后的索引失效通知。

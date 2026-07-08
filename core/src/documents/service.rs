@@ -169,6 +169,12 @@ impl DocumentRepository for FileDocumentService {
         self.ensure_write(&request.path)?;
         let format = resolve_format(&request.path, request.format)?;
         validate_content_format(&request.content, format)?;
+        validate_write_base_version(
+            self,
+            &request.path,
+            Some(format),
+            request.base_version.as_deref(),
+        )?;
         if let Some(parent) = request.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -246,6 +252,25 @@ fn validate_base_version(patch: &DocumentPatch, current_version: &str) -> CoreRe
                 "patch base_version does not match current document",
             ));
         }
+    }
+
+    Ok(())
+}
+
+fn validate_write_base_version(
+    documents: &FileDocumentService,
+    path: &Path,
+    format: Option<DocumentFormat>,
+    base_version: Option<&str>,
+) -> CoreResult<()> {
+    let Some(base_version) = base_version else {
+        return Ok(());
+    };
+    let current = documents.metadata_for_path(path, format)?;
+    if current.version != base_version {
+        return Err(CoreError::validation(
+            "document base_version does not match current document",
+        ));
     }
 
     Ok(())
