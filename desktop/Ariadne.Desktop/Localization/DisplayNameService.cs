@@ -177,22 +177,33 @@ public sealed class DisplayNameService
 
     private static string FindResourceDir()
     {
-        var candidates = new[]
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var root in CandidateResourceRoots())
         {
-            Path.Combine(AppContext.BaseDirectory, "Resources"),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "core", "resources")),
-            Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "core", "resources")),
-        };
-
-        foreach (var dir in candidates)
-        {
-            if (File.Exists(Path.Combine(dir, "display_name.json")))
+            foreach (var relativePath in new[] { "Resources", Path.Combine("core", "resources") })
             {
-                return dir;
+                var dir = Path.GetFullPath(Path.Combine(root, relativePath));
+                if (seen.Add(dir) && File.Exists(Path.Combine(dir, "display_name.json")))
+                {
+                    return dir;
+                }
             }
         }
 
         return string.Empty;
+    }
+
+    private static IEnumerable<string> CandidateResourceRoots()
+    {
+        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
+        {
+            var directory = new DirectoryInfo(Path.GetFullPath(start));
+            for (var depth = 0; directory is not null && depth < 8; depth++)
+            {
+                yield return directory.FullName;
+                directory = directory.Parent;
+            }
+        }
     }
 
     private static IReadOnlyDictionary<string, string> LoadJson(string path)
