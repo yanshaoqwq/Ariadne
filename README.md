@@ -113,6 +113,7 @@ ariadne-server --project /path/to/project --bind 127.0.0.1:4817 --token <token>
 - `POST /v1/workflows/{workflow_id}/runs`
 - `GET /v1/workflows/{workflow_id}/runs/{run_id}`
 - `GET /v1/workflows/{workflow_id}/runs/{run_id}/events?after_sequence=0&limit=50`
+- `GET /v1/runs/{run_id}/logs?level=error&q=关键词`
 - `POST /v1/workflows/{workflow_id}/runs/{run_id}/pause`
 - `POST /v1/workflows/{workflow_id}/runs/{run_id}/resume`
 - `POST /v1/workflows/{workflow_id}/runs/{run_id}/stop`

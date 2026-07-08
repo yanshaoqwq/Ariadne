@@ -461,6 +461,10 @@ pub struct RunLogQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<UiRunLogLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -1603,6 +1607,8 @@ pub fn query_run_logs(
         .query(UiRunLogFilter {
             kind: filter.kind,
             level: filter.level,
+            workflow_id: filter.workflow_id.map(WorkflowId::from),
+            run_id: filter.run_id.map(RunId::from),
             node_id: filter.node_id.map(NodeId::from),
             query: filter.query,
         })

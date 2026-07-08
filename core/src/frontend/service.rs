@@ -644,6 +644,8 @@ pub struct UiRunLogEntry {
 pub struct UiRunLogFilter {
     pub kind: Option<UiRunLogKind>,
     pub level: Option<UiRunLogLevel>,
+    pub workflow_id: Option<WorkflowId>,
+    pub run_id: Option<RunId>,
     pub node_id: Option<NodeId>,
     pub query: Option<String>,
 }
@@ -738,6 +740,20 @@ impl UiRunLogStore {
                 filter
                     .level
                     .map(|level| entry.level == level)
+                    .unwrap_or(true)
+            })
+            .filter(|entry| {
+                filter
+                    .workflow_id
+                    .as_ref()
+                    .map(|workflow_id| entry.workflow_id.as_ref() == Some(workflow_id))
+                    .unwrap_or(true)
+            })
+            .filter(|entry| {
+                filter
+                    .run_id
+                    .as_ref()
+                    .map(|run_id| entry.run_id.as_ref() == Some(run_id))
                     .unwrap_or(true)
             })
             .filter(|entry| {

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::commands::{self, AriadneAppState, RunWorkflowRequest, WorkflowRunStarted};
+use crate::commands::{self, AriadneAppState, RunLogQuery, RunWorkflowRequest, WorkflowRunStarted};
+use crate::frontend::{UiRunLogKind, UiRunLogLevel};
 
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
@@ -174,6 +175,17 @@ fn dispatch_rest_route(
                 .map(|events| json!(events))
                 .map_err(command_error)
         }
+        RestRoute::RunLogs {
+            workflow_id,
+            run_id,
+            query,
+        } => {
+            require_method(&request, "GET")?;
+            let query = run_log_query_from_rest(workflow_id, run_id, query)?;
+            commands::query_run_logs(state, Some(query))
+                .map(|items| json!({ "items": items }))
+                .map_err(command_error)
+        }
         RestRoute::RunControl {
             workflow_id,
             run_id,
@@ -213,6 +225,11 @@ enum RestRoute {
         run_id: String,
         query: BTreeMap<String, String>,
     },
+    RunLogs {
+        workflow_id: Option<String>,
+        run_id: String,
+        query: BTreeMap<String, String>,
+    },
     RunControl {
         workflow_id: String,
         run_id: String,
@@ -245,6 +262,21 @@ impl RestRoute {
             | ["v1", "projects", _, "workflows", workflow_id, "runs", run_id, "events"] => {
                 Ok(Self::RunEvents {
                     workflow_id: workflow_id.to_string(),
+                    run_id: run_id.to_string(),
+                    query,
+                })
+            }
+            ["v1", "runs", run_id, "logs"] | ["v1", "projects", _, "runs", run_id, "logs"] => {
+                Ok(Self::RunLogs {
+                    workflow_id: None,
+                    run_id: run_id.to_string(),
+                    query,
+                })
+            }
+            ["v1", "workflows", workflow_id, "runs", run_id, "logs"]
+            | ["v1", "projects", _, "workflows", workflow_id, "runs", run_id, "logs"] => {
+                Ok(Self::RunLogs {
+                    workflow_id: Some(workflow_id.to_string()),
                     run_id: run_id.to_string(),
                     query,
                 })
@@ -367,6 +399,35 @@ fn parse_usize(field: &str, value: &str) -> Result<usize, RestRouteError> {
     value
         .parse::<usize>()
         .map_err(|_| RestRouteError::new(400, format!("{field} must be an unsigned integer")))
+}
+
+fn run_log_query_from_rest(
+    workflow_id: Option<String>,
+    run_id: String,
+    query: BTreeMap<String, String>,
+) -> Result<RunLogQuery, RestRouteError> {
+    Ok(RunLogQuery {
+        kind: query
+            .get("kind")
+            .map(|value| parse_query_enum::<UiRunLogKind>("kind", value))
+            .transpose()?,
+        level: query
+            .get("level")
+            .map(|value| parse_query_enum::<UiRunLogLevel>("level", value))
+            .transpose()?,
+        workflow_id,
+        run_id: Some(run_id),
+        node_id: query.get("node_id").cloned(),
+        query: query.get("query").or_else(|| query.get("q")).cloned(),
+    })
+}
+
+fn parse_query_enum<T: for<'de> Deserialize<'de>>(
+    field: &str,
+    value: &str,
+) -> Result<T, RestRouteError> {
+    serde_json::from_value(json!(value))
+        .map_err(|_| RestRouteError::new(400, format!("invalid {field}: {value}")))
 }
 
 fn split_path_query(path: &str) -> (&str, BTreeMap<String, String>) {
@@ -532,11 +593,12 @@ mod tests {
     use serde_json::{json, Value};
 
     use crate::commands::{
-        save_permissions_settings_impl, save_workflow_graph_impl, AriadneAppState, CanvasNode,
-        PermissionsSettings, WorkflowGraphData,
+        append_run_log, save_permissions_settings_impl, save_workflow_graph_impl, AriadneAppState,
+        CanvasNode, PermissionsSettings, WorkflowGraphData,
     };
     use crate::config::MemorySecretStore;
-    use crate::contracts::PermissionPolicy;
+    use crate::contracts::{PermissionPolicy, RunId, WorkflowId};
+    use crate::frontend::{UiRunLogEntry, UiRunLogKind, UiRunLogLevel};
 
     use super::{handle_rest_request, RestRequest, RestServerConfig};
 
@@ -673,5 +735,67 @@ mod tests {
             body["data"]["tools"][0]["input_schema"]["properties"]["topic"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn run_logs_route_filters_by_run_and_query_params() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(temp.path()).unwrap();
+        append_run_log(
+            temp.path(),
+            UiRunLogEntry {
+                log_id: "log-a".to_owned(),
+                timestamp_ms: 1,
+                kind: UiRunLogKind::Error,
+                level: UiRunLogLevel::Error,
+                message: "writer failed".to_owned(),
+                workflow_id: Some(WorkflowId::from("wf")),
+                run_id: Some(RunId::from("run-a")),
+                node_id: None,
+                unread: false,
+                metadata: Value::Null,
+            },
+        )
+        .unwrap();
+        append_run_log(
+            temp.path(),
+            UiRunLogEntry {
+                log_id: "log-b".to_owned(),
+                timestamp_ms: 2,
+                kind: UiRunLogKind::Node,
+                level: UiRunLogLevel::Info,
+                message: "other run".to_owned(),
+                workflow_id: Some(WorkflowId::from("wf")),
+                run_id: Some(RunId::from("run-b")),
+                node_id: None,
+                unread: false,
+                metadata: Value::Null,
+            },
+        )
+        .unwrap();
+        let state = AriadneAppState::new(
+            temp.path().to_path_buf(),
+            temp.path().join(".app"),
+            Arc::new(MemorySecretStore::default()),
+        );
+        let mut headers = BTreeMap::new();
+        headers.insert("authorization".to_owned(), "Bearer test-token".to_owned());
+
+        let response = handle_rest_request(
+            &state,
+            &test_config(),
+            RestRequest {
+                method: "GET".to_owned(),
+                path: "/v1/projects/current/runs/run-a/logs?level=error&q=writer".to_owned(),
+                headers,
+                body: Vec::new(),
+            },
+        );
+        let body = json_body(response.clone());
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(body["data"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"]["items"][0]["log_id"], "log-a");
+        assert_eq!(body["data"]["items"][0]["run_id"], "run-a");
     }
 }
