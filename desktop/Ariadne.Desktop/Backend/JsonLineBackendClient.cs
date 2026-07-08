@@ -739,14 +739,44 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
 
     private static string? DiscoverBackendCommand()
     {
-        var candidates = new[]
+        var executableNames = OperatingSystem.IsWindows()
+            ? new[] { "ariadne-ipc.exe", "ariadne-ipc" }
+            : new[] { "ariadne-ipc" };
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var root in CandidateBackendRoots())
         {
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "core", "target", "debug", "ariadne-ipc")),
-            Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "core", "target", "debug", "ariadne-ipc")),
-            Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "debug", "ariadne-ipc")),
-        };
+            foreach (var executableName in executableNames)
+            {
+                foreach (var relativePath in new[]
+                         {
+                             Path.Combine("target", "debug", executableName),
+                             Path.Combine("core", "target", "debug", executableName),
+                         })
+                {
+                    var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
+                    if (seen.Add(candidate) && File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+        }
 
-        return candidates.FirstOrDefault(File.Exists);
+        return null;
+    }
+
+    private static IEnumerable<string> CandidateBackendRoots()
+    {
+        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
+        {
+            var directory = new DirectoryInfo(Path.GetFullPath(start));
+            for (var depth = 0; directory is not null && depth < 8; depth++)
+            {
+                yield return directory.FullName;
+                directory = directory.Parent;
+            }
+        }
+
     }
 
     private static string ResolveCommandFileName(string command)
