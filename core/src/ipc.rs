@@ -68,6 +68,27 @@ pub fn run_json_line_stdio() -> io::Result<()> {
     Ok(())
 }
 
+pub fn run_single_call(method: &str, params_json: Option<&str>) -> CommandResult<IpcResponse> {
+    if method.trim().is_empty() {
+        return Err("ipc method cannot be empty".to_owned());
+    }
+    let state = AriadneAppState::default_for_process();
+    Ok(handle_request(
+        &state,
+        IpcRequest {
+            method: method.to_owned(),
+            params: parse_call_params(params_json)?,
+        },
+    ))
+}
+
+pub fn parse_call_params(params_json: Option<&str>) -> CommandResult<Value> {
+    let Some(params_json) = params_json.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Value::Null);
+    };
+    serde_json::from_str(params_json).map_err(|error| format!("invalid ipc params JSON: {error}"))
+}
+
 fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResult<Value> {
     match request.method.as_str() {
         "list_recent_projects" => ok(commands::list_recent_projects(state)?),
