@@ -214,6 +214,20 @@ public sealed record WorkflowRunState(
     [property: JsonPropertyName("stop_reason")] string? StopReason,
     [property: JsonPropertyName("events")] IReadOnlyList<string> Events);
 
+public sealed record WorkflowRuntimeEvent(
+    [property: JsonPropertyName("sequence")] long Sequence,
+    [property: JsonPropertyName("event_type")] string EventType,
+    [property: JsonPropertyName("node_id")] string? NodeId,
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("metadata")] object? Metadata);
+
+public sealed record WorkflowEventsResult(
+    [property: JsonPropertyName("workflow_id")] string WorkflowId,
+    [property: JsonPropertyName("run_id")] string RunId,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("next_sequence")] long NextSequence,
+    [property: JsonPropertyName("events")] IReadOnlyList<WorkflowRuntimeEvent> Events);
+
 public sealed record ProjectAiResponse(
     [property: JsonPropertyName("answer")] string Answer,
     [property: JsonPropertyName("chat_history")] IReadOnlyList<ProjectAiChatMessage> ChatHistory,

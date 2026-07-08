@@ -264,6 +264,16 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
                 params.run_id,
             )?)
         }
+        "get_workflow_events" => {
+            let params: WorkflowEventsParams = params(request.params)?;
+            ok(commands::get_workflow_events(
+                state,
+                params.workflow_id,
+                params.run_id,
+                params.after_sequence,
+                params.limit,
+            )?)
+        }
         "get_budget_status" => ok(commands::get_budget_status(state)?),
         "get_app_settings" => ok(commands::get_app_settings(state)?),
         "save_app_settings" => {
@@ -588,6 +598,16 @@ struct RunWorkflowParams {
 struct RunIdentityParams {
     workflow_id: String,
     run_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowEventsParams {
+    workflow_id: String,
+    run_id: String,
+    #[serde(default)]
+    after_sequence: Option<u64>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

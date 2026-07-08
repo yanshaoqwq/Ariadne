@@ -92,4 +92,47 @@ fn ipc_run_workflow_starts_background_run_for_tool_callers() {
 
     assert_eq!(run_state.status, RunStatus::Succeeded);
     assert!(run_state.nodes.contains_key(&NodeId::from("start-main")));
+
+    let events_response = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_workflow_events".to_owned(),
+            params: json!({
+                "workflow_id": "ipc-run",
+                "run_id": run_id,
+                "after_sequence": 0,
+                "limit": 1
+            }),
+        },
+    );
+    assert!(events_response.ok, "{:?}", events_response.error);
+    let events_data = events_response
+        .data
+        .expect("ipc response should include workflow events");
+    assert_eq!(events_data["status"], "succeeded");
+    assert_eq!(events_data["next_sequence"], 1);
+    assert_eq!(events_data["events"].as_array().unwrap().len(), 1);
+    assert_eq!(events_data["events"][0]["sequence"], 0);
+
+    let next_response = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_workflow_events".to_owned(),
+            params: json!({
+                "workflow_id": "ipc-run",
+                "run_id": run_id,
+                "after_sequence": events_data["next_sequence"].as_u64().unwrap()
+            }),
+        },
+    );
+    assert!(next_response.ok, "{:?}", next_response.error);
+    let next_data = next_response
+        .data
+        .expect("ipc response should include incremental events");
+    assert!(next_data["events"].as_array().unwrap().len() >= 1);
+    assert!(next_data["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["sequence"].as_u64().unwrap() >= 1));
 }

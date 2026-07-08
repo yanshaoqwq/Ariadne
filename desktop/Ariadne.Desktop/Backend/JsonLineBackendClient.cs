@@ -234,6 +234,17 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<WorkflowRunState>("get_workflow_run_state", new { workflow_id = workflowId, run_id = runId }, cancellationToken);
     }
 
+    public Task<WorkflowEventsResult> GetWorkflowEventsAsync(string workflowId, string runId, long afterSequence = 0, int? limit = null, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowEventsResult>("get_workflow_events", new
+        {
+            workflow_id = workflowId,
+            run_id = runId,
+            after_sequence = afterSequence,
+            limit,
+        }, cancellationToken);
+    }
+
     public Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default)
     {
         return ProjectAiChatAsync(message, Array.Empty<ProjectAiChatMessage>(), workflowIdToRun, cancellationToken);

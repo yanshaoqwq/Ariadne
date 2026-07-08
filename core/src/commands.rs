@@ -49,7 +49,7 @@ use crate::workflow::{
     execute_document_read_node_with_root, execute_llm_node, execute_summarizer_node,
     BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink, RoutedExternalNodeExecutor,
     RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRuntime,
-    WorkflowRuntimeStore,
+    WorkflowRuntimeEvent, WorkflowRuntimeStore,
 };
 
 pub const WORKFLOW_STATUS_UPDATE_EVENT: &str = "workflow_status_update";
@@ -416,6 +416,16 @@ pub struct WorkflowActionResult {
     pub workflow_id: String,
     pub run_id: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowEventsResult {
+    pub workflow_id: String,
+    pub run_id: String,
+    pub status: String,
+    pub next_sequence: u64,
+    #[serde(default)]
+    pub events: Vec<WorkflowRuntimeEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -946,6 +956,17 @@ pub fn get_workflow_run_state(
             &crate::contracts::RunId::from(run_id),
         )
         .map_err(error_to_string)
+}
+
+pub fn get_workflow_events(
+    state: &AriadneAppState,
+    workflow_id: String,
+    run_id: String,
+    after_sequence: Option<u64>,
+    limit: Option<usize>,
+) -> CommandResult<WorkflowEventsResult> {
+    let project_root = project_root_from_state(&state, None)?;
+    get_workflow_events_impl(&project_root, workflow_id, run_id, after_sequence, limit)
 }
 
 pub fn get_budget_status(state: &AriadneAppState) -> CommandResult<BudgetStatus> {
@@ -1623,6 +1644,44 @@ pub fn save_workflow_graph_impl(
         serde_json::to_string_pretty(&workflow).map_err(error_to_string)?,
     )
     .map_err(error_to_string)
+}
+
+pub fn get_workflow_events_impl(
+    project_root: &Path,
+    workflow_id: String,
+    run_id: String,
+    after_sequence: Option<u64>,
+    limit: Option<usize>,
+) -> CommandResult<WorkflowEventsResult> {
+    validate_existing_project_root(project_root)?;
+    let workflow_id_typed = WorkflowId::from(workflow_id.clone());
+    let run_id_typed = RunId::from(run_id.clone());
+    let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
+    let state = store
+        .load_state(&workflow_id_typed, &run_id_typed)
+        .map_err(error_to_string)?
+        .ok_or_else(|| format!("workflow run not found: {workflow_id}/{run_id}"))?;
+    let after_sequence = after_sequence.unwrap_or(0);
+    let mut events = state
+        .structured_events
+        .iter()
+        .filter(|event| event.sequence >= after_sequence)
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(limit) = limit {
+        events.truncate(limit);
+    }
+    let next_sequence = events
+        .last()
+        .map(|event| event.sequence.saturating_add(1))
+        .unwrap_or(after_sequence);
+    Ok(WorkflowEventsResult {
+        workflow_id,
+        run_id,
+        status: run_status_label(state.status).to_owned(),
+        next_sequence,
+        events,
+    })
 }
 
 pub fn run_workflow_impl(
