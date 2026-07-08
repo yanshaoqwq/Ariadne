@@ -496,6 +496,7 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             let params: RequestParam<commands::ProjectAiRequest> = params(request.params)?;
             ok(commands::project_ai_chat(state, params.request)?)
         }
+        "list_workflow_tools" => ok(commands::list_external_workflow_tools(state)?),
         "resolve_project_reference" => {
             let params: ReferenceParams = params(request.params)?;
             ok(commands::resolve_project_reference(

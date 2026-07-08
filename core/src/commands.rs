@@ -596,6 +596,16 @@ struct ProjectWorkflowTool {
     input_schema: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalWorkflowTool {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub workflow_id: String,
+    pub start_node_id: String,
+    pub input_schema: Value,
+}
+
 pub fn list_recent_projects(state: &AriadneAppState) -> CommandResult<Vec<RecentProjectEntry>> {
     recent_project_store(state.app_state_root())
         .read_all()
@@ -869,6 +879,14 @@ pub fn start_workflow(
             initial_inputs: BTreeMap::new(),
         },
     )
+}
+
+pub fn start_workflow_with_request(
+    state: &AriadneAppState,
+    request: RunWorkflowRequest,
+) -> CommandResult<WorkflowRunStarted> {
+    let project_root = project_root_from_state(state, None)?;
+    start_workflow_request(&project_root, Arc::clone(&state.secret_store), request)
 }
 
 fn start_workflow_request(
@@ -2832,6 +2850,31 @@ pub fn project_ai_chat_impl(
     })
 }
 
+pub fn list_external_workflow_tools(
+    state: &AriadneAppState,
+) -> CommandResult<Vec<ExternalWorkflowTool>> {
+    let project_root = project_root_from_state(&state, None)?;
+    list_external_workflow_tools_impl(&project_root)
+}
+
+pub fn list_external_workflow_tools_impl(
+    project_root: &Path,
+) -> CommandResult<Vec<ExternalWorkflowTool>> {
+    project_ai_workflow_tools(project_root).map(|tools| {
+        tools
+            .into_iter()
+            .map(|tool| ExternalWorkflowTool {
+                name: tool.tool_name.clone(),
+                display_name: tool.display_name.clone(),
+                description: workflow_tool_description(&tool),
+                workflow_id: tool.workflow_id,
+                start_node_id: tool.start_node_id,
+                input_schema: tool.input_schema,
+            })
+            .collect()
+    })
+}
+
 fn project_ai_chat_with_runner(
     project_root: &Path,
     secrets: &dyn SecretStore,
@@ -3209,13 +3252,17 @@ fn project_ai_tool_definitions(workflow_tools: &[ProjectWorkflowTool]) -> Vec<To
         .iter()
         .map(|tool| ToolDefinition {
             name: tool.tool_name.clone(),
-            description: format!(
-                "Start Ariadne workflow '{}' from start node '{}'.",
-                tool.display_name, tool.start_node_id
-            ),
+            description: workflow_tool_description(tool),
             input_schema: tool.input_schema.clone(),
         })
         .collect()
+}
+
+fn workflow_tool_description(tool: &ProjectWorkflowTool) -> String {
+    format!(
+        "Start Ariadne workflow '{}' from start node '{}'.",
+        tool.display_name, tool.start_node_id
+    )
 }
 
 fn project_ai_history_to_llm_message(history: &ProjectAiChatMessage) -> Option<LlmMessage> {

@@ -2,9 +2,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use ariadne::commands::{save_workflow_graph_impl, AriadneAppState, CanvasNode, WorkflowGraphData};
+use ariadne::commands::{
+    save_permissions_settings_impl, save_workflow_graph_impl, AriadneAppState, CanvasNode,
+    PermissionsSettings, WorkflowGraphData,
+};
 use ariadne::config::MemorySecretStore;
-use ariadne::contracts::{NodeId, RunId, RunStatus, WorkflowId};
+use ariadne::contracts::{NodeId, PermissionPolicy, RunId, RunStatus, WorkflowId};
 use ariadne::ipc::{handle_request, parse_call_params, IpcRequest};
 use ariadne::workflow::{SqliteWorkflowRuntimeStore, WorkflowRunState, WorkflowRuntimeStore};
 use serde_json::{json, Value};
@@ -135,4 +138,71 @@ fn ipc_run_workflow_starts_background_run_for_tool_callers() {
         .unwrap()
         .iter()
         .all(|event| event["sequence"].as_u64().unwrap() >= 1));
+}
+
+#[test]
+fn ipc_lists_workflow_tools_for_external_agents() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "agent-tools".to_owned(),
+            name: "Agent Tools".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-draft".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Draft Tool".to_owned()),
+                data: json!({
+                    "name": "Draft Tool",
+                    "expose_as_tool": true,
+                    "tool_input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" }
+                        },
+                        "required": ["topic"]
+                    }
+                }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+    save_permissions_settings_impl(
+        temp.path(),
+        PermissionsSettings {
+            policy: PermissionPolicy::default(),
+            tool_controls: std::collections::BTreeMap::from([(
+                "project_ai".to_owned(),
+                std::collections::BTreeMap::from([("project-ai-workflow-tools".to_owned(), true)]),
+            )]),
+        },
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "list_workflow_tools".to_owned(),
+            params: Value::Null,
+        },
+    );
+
+    assert!(response.ok, "{:?}", response.error);
+    let data = response.data.expect("ipc response should include tools");
+    assert_eq!(data[0]["name"], "draft_tool");
+    assert_eq!(data[0]["workflow_id"], "agent-tools");
+    assert_eq!(data[0]["start_node_id"], "start-draft");
+    assert_eq!(
+        data[0]["input_schema"]["properties"]["topic"]["type"],
+        "string"
+    );
 }

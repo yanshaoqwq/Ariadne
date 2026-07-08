@@ -11,6 +11,7 @@ pub mod knowledge;
 pub mod llm;
 pub mod providers;
 pub mod rag;
+pub mod rest;
 pub mod retrieval;
 pub mod skills;
 pub mod workflow;
