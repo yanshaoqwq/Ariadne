@@ -216,15 +216,44 @@ pub struct AutomationSettings {
     pub confirmation_policies: Vec<ConfirmationPolicySetting>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfirmationPolicySetting {
     pub confirmation_kind: String,
     #[serde(default)]
     pub normal_policy: ConfirmationNormalPolicy,
     #[serde(default)]
     pub auto_mode_policy: ConfirmationAutoModePolicy,
-    #[serde(default, rename = "policy", skip_serializing)]
-    pub legacy_policy: String,
+}
+
+impl<'de> Deserialize<'de> for ConfirmationPolicySetting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawConfirmationPolicySetting {
+            confirmation_kind: String,
+            #[serde(default)]
+            normal_policy: ConfirmationNormalPolicy,
+            #[serde(default)]
+            auto_mode_policy: ConfirmationAutoModePolicy,
+            #[serde(default, rename = "policy")]
+            policy_code: String,
+        }
+
+        let raw = RawConfirmationPolicySetting::deserialize(deserializer)?;
+        let (normal_policy, auto_mode_policy) = if raw.policy_code.trim().is_empty() {
+            (raw.normal_policy, raw.auto_mode_policy)
+        } else {
+            policies_from_policy_code(&raw.policy_code)
+        };
+
+        Ok(Self {
+            confirmation_kind: raw.confirmation_kind,
+            normal_policy,
+            auto_mode_policy,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2365,17 +2394,16 @@ pub fn save_automation_settings_impl(
                 setting.confirmation_kind
             ));
         }
-        let normalized = normalize_confirmation_policy_setting(setting);
-        let policy = approval_policy_from_ui(&legacy_policy_from_dual_policy(
-            normalized.normal_policy,
-            normalized.auto_mode_policy,
+        let policy = approval_policy_from_ui(&policy_code_from_dual_policy(
+            setting.normal_policy,
+            setting.auto_mode_policy,
         ))?;
         let prompt = ensure_approval_prompt(
             &mut config.auto_mode.available_approval_prompts,
-            &normalized.confirmation_kind,
+            &setting.confirmation_kind,
         );
         prompt.default_policy = policy;
-        normalized_settings.push(normalized);
+        normalized_settings.push(setting);
     }
     config_store.save(&config).map_err(error_to_string)?;
     write_confirmation_policy_settings(project_root, &normalized_settings)
@@ -3410,30 +3438,17 @@ fn confirmation_policy_settings_from_prompts(
         .into_iter()
         .map(|kind| {
             let policy = policy_for_kind(prompts, kind);
-            let (normal_policy, auto_mode_policy) = policies_from_legacy_policy(&policy);
+            let (normal_policy, auto_mode_policy) = policies_from_policy_code(&policy);
             ConfirmationPolicySetting {
                 confirmation_kind: kind.to_owned(),
                 normal_policy,
                 auto_mode_policy,
-                legacy_policy: policy,
             }
         })
         .collect()
 }
 
-fn normalize_confirmation_policy_setting(
-    mut setting: ConfirmationPolicySetting,
-) -> ConfirmationPolicySetting {
-    if !setting.legacy_policy.trim().is_empty() {
-        let (normal_policy, auto_mode_policy) = policies_from_legacy_policy(&setting.legacy_policy);
-        setting.normal_policy = normal_policy;
-        setting.auto_mode_policy = auto_mode_policy;
-    }
-    setting.legacy_policy.clear();
-    setting
-}
-
-fn policies_from_legacy_policy(
+fn policies_from_policy_code(
     policy: &str,
 ) -> (ConfirmationNormalPolicy, ConfirmationAutoModePolicy) {
     match policy {
@@ -3464,7 +3479,7 @@ fn policies_from_legacy_policy(
     }
 }
 
-fn legacy_policy_from_dual_policy(
+fn policy_code_from_dual_policy(
     normal_policy: ConfirmationNormalPolicy,
     auto_mode_policy: ConfirmationAutoModePolicy,
 ) -> String {
@@ -3492,12 +3507,7 @@ fn read_confirmation_policy_settings(
         Ok(content) => {
             let settings = serde_json::from_str::<Vec<ConfirmationPolicySetting>>(&content)
                 .map_err(error_to_string)?;
-            Ok(Some(
-                settings
-                    .into_iter()
-                    .map(normalize_confirmation_policy_setting)
-                    .collect(),
-            ))
+            Ok(Some(settings))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error_to_string(error)),

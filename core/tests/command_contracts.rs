@@ -1000,13 +1000,11 @@ fn automation_and_permission_settings_round_trip_config_files() {
                     confirmation_kind: "chapter_write".to_owned(),
                     normal_policy: ConfirmationNormalPolicy::ManualReview,
                     auto_mode_policy: ConfirmationAutoModePolicy::AutoApproval,
-                    legacy_policy: String::new(),
                 },
                 ConfirmationPolicySetting {
                     confirmation_kind: "summary_write".to_owned(),
                     normal_policy: ConfirmationNormalPolicy::AllowByDefault,
                     auto_mode_policy: ConfirmationAutoModePolicy::AllowByDefault,
-                    legacy_policy: String::new(),
                 },
             ],
         },
@@ -1072,6 +1070,47 @@ fn automation_and_permission_settings_round_trip_config_files() {
             .and_then(|scope| scope.get("writer-find")),
         Some(&true)
     );
+}
+
+#[test]
+fn automation_settings_read_old_policy_code_but_write_dual_policies_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings_path = temp
+        .path()
+        .join(".config/confirmation_policy_settings.json");
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&json!([
+            {
+                "confirmation_kind": "chapter_write",
+                "policy": "auto_approve"
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let automation = get_automation_settings_impl(temp.path()).unwrap();
+    let chapter = automation
+        .confirmation_policies
+        .iter()
+        .find(|item| item.confirmation_kind == "chapter_write")
+        .unwrap();
+    assert_eq!(
+        chapter.normal_policy,
+        ConfirmationNormalPolicy::AllowByDefault
+    );
+    assert_eq!(
+        chapter.auto_mode_policy,
+        ConfirmationAutoModePolicy::AutoApproval
+    );
+
+    save_automation_settings_impl(temp.path(), automation).unwrap();
+    let saved = std::fs::read_to_string(settings_path).unwrap();
+    assert!(saved.contains("\"normal_policy\""));
+    assert!(saved.contains("\"auto_mode_policy\""));
+    assert!(!saved.contains("\"policy\""));
 }
 
 #[test]
