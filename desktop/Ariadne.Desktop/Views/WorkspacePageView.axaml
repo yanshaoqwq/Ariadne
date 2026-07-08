@@ -18,7 +18,6 @@
         <Canvas.ContextMenu>
           <ContextMenu Classes="ariadne">
             <MenuItem Header="{Binding CtxAddNodeText}" Command="{Binding AddContextNodeCommand}" />
-            <MenuItem Header="{Binding CtxAddStartText}" Command="{Binding AddStartNodeCommand}" />
             <Separator />
             <MenuItem Header="{Binding UndoText}" Command="{Binding UndoCommand}" />
             <MenuItem Header="{Binding RedoText}" Command="{Binding RedoCommand}" />
@@ -284,7 +283,10 @@
               </ItemsControl.ItemsPanel>
               <ItemsControl.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
-                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}">
+                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}"
+                          PointerPressed="OnNodeLibraryItemPointerPressed"
+                          PointerMoved="OnNodeLibraryItemPointerMoved"
+                          PointerReleased="OnNodeLibraryItemPointerReleased">
                     <Border Classes="layer" Padding="10,6"
                             BorderBrush="{DynamicResource Ariadne.AccentPrimary}" BorderThickness="1">
                       <StackPanel Orientation="Horizontal" Spacing="7">
@@ -305,7 +307,10 @@
               </ItemsControl.ItemsPanel>
               <ItemsControl.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
-                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}">
+                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}"
+                          PointerPressed="OnNodeLibraryItemPointerPressed"
+                          PointerMoved="OnNodeLibraryItemPointerMoved"
+                          PointerReleased="OnNodeLibraryItemPointerReleased">
                     <Border Classes="layer" Padding="10,6">
                       <StackPanel Orientation="Horizontal" Spacing="7">
                         <Ellipse Width="6" Height="6" Fill="{DynamicResource Ariadne.AccentPrimary}" VerticalAlignment="Center" />
@@ -323,7 +328,10 @@
               </ItemsControl.ItemsPanel>
               <ItemsControl.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
-                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}">
+                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}"
+                          PointerPressed="OnNodeLibraryItemPointerPressed"
+                          PointerMoved="OnNodeLibraryItemPointerMoved"
+                          PointerReleased="OnNodeLibraryItemPointerReleased">
                     <Border Classes="layer" Padding="10,6">
                       <TextBlock Text="{Binding Title}" FontSize="12" />
                     </Border>

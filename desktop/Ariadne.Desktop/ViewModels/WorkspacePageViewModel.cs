@@ -115,7 +115,6 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             new("export", displayNames.Text("ui.node.export"), () => AddNode("export")),
         };
 
-        AddNode("start", capture: false);
         CaptureSnapshot();
         _ = LoadWorkflowAsync();
         _ = LoadConfirmationsAsync();
@@ -427,6 +426,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         StatusText = EdgeDetailsText;
     }
 
+    public void AddNodeAt(string nodeType, double x, double y)
+    {
+        AddNode(nodeType, x, y);
+    }
+
     public string CtxAddNodeText => _displayNames.Text("ui.workspace.context.add_node");
     public string CtxAddStartText => _displayNames.Text("ui.workspace.context.add_start");
     public string CtxPasteText => _displayNames.Text("ui.workspace.context.paste");
@@ -537,6 +541,13 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void AddNode(string nodeType, bool capture = true)
     {
+        var x = 120 + ((Nodes.Count % 4) * 230);
+        var y = 80 + ((Nodes.Count / 4) * 170);
+        AddNode(nodeType, x, y, capture);
+    }
+
+    private void AddNode(string nodeType, double x, double y, bool capture = true)
+    {
         if (capture)
         {
             CaptureUndoSnapshot();
@@ -547,8 +558,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             nodeType,
             label,
             defaultWorkDir: nodeType == "start" ? _displayNames.Text("ui.workspace.start_node.default_work_dir") : string.Empty,
-            x: 120 + ((Nodes.Count % 4) * 230),
-            y: 80 + ((Nodes.Count / 4) * 170),
+            x: Math.Max(0, x),
+            y: Math.Max(0, y),
             _backend,
             () => SelectNode(node: null),
             RefreshDirtyState);
@@ -1275,10 +1286,6 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 var node = CreateNodeFromCanvas(graphNode);
                 Nodes.Add(node);
-            }
-            if (Nodes.Count == 0)
-            {
-                AddNode("start", capture: false);
             }
             RefreshStartNodes();
             _nextNodeNumber = Math.Max(_nextNodeNumber, Nodes.Count + 1);

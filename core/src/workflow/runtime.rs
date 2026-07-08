@@ -2041,7 +2041,17 @@ fn collect_downstream_closure(
     node_id: &NodeId,
     affected: &mut Vec<NodeId>,
 ) {
-    if affected.contains(node_id) {
+    let mut seen = affected.iter().cloned().collect::<HashSet<_>>();
+    collect_downstream_closure_inner(workflow, node_id, affected, &mut seen);
+}
+
+fn collect_downstream_closure_inner(
+    workflow: &WorkflowDefinition,
+    node_id: &NodeId,
+    affected: &mut Vec<NodeId>,
+    seen: &mut HashSet<NodeId>,
+) {
+    if !seen.insert(node_id.clone()) {
         return;
     }
     affected.push(node_id.clone());
@@ -2056,7 +2066,7 @@ fn collect_downstream_closure(
             )
         })
     {
-        collect_downstream_closure(workflow, &edge.to.node_id, affected);
+        collect_downstream_closure_inner(workflow, &edge.to.node_id, affected, seen);
     }
 }
 

@@ -41,6 +41,11 @@ public partial class WorkspacePageView : UserControl
     private bool _edgeDragging;
     private WorkflowNodeViewModel? _edgeSourceNode;
 
+    // ---- 节点库拖放 ----
+    private NodeLibraryItemViewModel? _libraryDragItem;
+    private Point _libraryDragStart;
+    private bool _libraryItemDragging;
+
     private bool _layoutInitialized;
     private WorkspacePageViewModel? _attachedViewModel;
 
@@ -347,6 +352,77 @@ public partial class WorkspacePageView : UserControl
         _nodeDragOriginX = node.X;
         _nodeDragOriginY = node.Y;
         e.Pointer.Capture((IInputElement?)sender);
+        e.Handled = true;
+    }
+
+    // ===================== 节点库拖放 =====================
+
+    public void OnNodeLibraryItemPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if ((sender as Control)?.DataContext is not NodeLibraryItemViewModel item
+            || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        _libraryDragItem = item;
+        _libraryDragStart = e.GetPosition(this);
+        _libraryItemDragging = false;
+        e.Pointer.Capture((IInputElement?)sender);
+        e.Handled = true;
+    }
+
+    public void OnNodeLibraryItemPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (_libraryDragItem is null)
+        {
+            return;
+        }
+
+        var delta = e.GetPosition(this) - _libraryDragStart;
+        if (!_libraryItemDragging && Math.Sqrt((delta.X * delta.X) + (delta.Y * delta.Y)) < DragThreshold)
+        {
+            return;
+        }
+
+        _libraryItemDragging = true;
+        e.Handled = true;
+    }
+
+    public void OnNodeLibraryItemPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        var item = _libraryDragItem;
+        _libraryDragItem = null;
+        e.Pointer.Capture(null);
+        if (item is null)
+        {
+            return;
+        }
+
+        if (_libraryItemDragging)
+        {
+            if (DataContext is WorkspacePageViewModel viewModel && CanvasOverlay is not null)
+            {
+                var canvasPosition = e.GetPosition(CanvasOverlay);
+                if (canvasPosition.X >= 0
+                    && canvasPosition.Y >= 0
+                    && canvasPosition.X <= CanvasOverlay.Bounds.Width
+                    && canvasPosition.Y <= CanvasOverlay.Bounds.Height)
+                {
+                    var logical = ToLogicalCanvasPoint(canvasPosition);
+                    viewModel.AddNodeAt(item.NodeType, logical.X - 101, logical.Y - 38);
+                    SyncNodeContainerPositions();
+                    SyncEdgePositions();
+                    SyncMiniMapPositions();
+                }
+            }
+        }
+        else if (item.AddCommand.CanExecute(null))
+        {
+            item.AddCommand.Execute(null);
+        }
+
+        _libraryItemDragging = false;
         e.Handled = true;
     }
 
