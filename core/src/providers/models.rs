@@ -52,9 +52,16 @@ pub enum LlmRole {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContentPart {
-    Text { text: String },
-    Json { value: Value },
-    ToolResult { tool_call_id: String, value: Value },
+    Text {
+        text: String,
+    },
+    Json {
+        value: Value,
+    },
+    ToolResult {
+        tool_call_id: String,
+        value: Value,
+    },
     /// assistant 发起的工具调用；多轮 tool-use 必须把它随 assistant 消息回填，
     /// 否则后续 tool_result 会成为没有前置 tool_calls 的孤儿消息，被 provider 拒绝。
     ToolUse {

@@ -72,22 +72,28 @@ Ariadne 可以作为命令式工具或本地 REST 服务被其它程序、脚本
 
 ### 命令式调用
 
-先设置项目根目录，再使用 `ariadne-ipc call` 发起单次 JSON 调用：
+优先使用 `ariadne` 命令。它面向其它程序和 agent，输出统一 JSON：
 
 ```bash
-ARIADNE_PROJECT_ROOT=/path/to/project ariadne-ipc call get_current_project
+ariadne tools list --project /path/to/project --json
 ```
 
 启动工作流会立即返回运行编号，不会等待整条流程结束：
 
 ```bash
-ARIADNE_PROJECT_ROOT=/path/to/project ariadne-ipc call run_workflow '{"workflow_id":"default","start_node_id":"start-main"}'
+ariadne workflow run --project /path/to/project --workflow default --start start-main --json
 ```
 
 随后可以按事件序号增量轮询结构化运行事件：
 
 ```bash
-ARIADNE_PROJECT_ROOT=/path/to/project ariadne-ipc call get_workflow_events '{"workflow_id":"default","run_id":"run-xxx","after_sequence":0,"limit":50}'
+ariadne workflow events --project /path/to/project --workflow default --run run-xxx --after 0 --limit 50 --json
+```
+
+也可以查询运行日志：
+
+```bash
+ariadne workflow logs --project /path/to/project --run run-xxx --level error --query 关键词 --json
 ```
 
 也可以直接订阅运行事件，命令会持续输出 JSONL，直到该 run 停止、成功或失败：
@@ -96,7 +102,7 @@ ARIADNE_PROJECT_ROOT=/path/to/project ariadne-ipc call get_workflow_events '{"wo
 ARIADNE_PROJECT_ROOT=/path/to/project ariadne-ipc watch-events default run-xxx 0
 ```
 
-命令输出为统一 JSON：成功时 `ok=true` 且结果在 `data` 中；失败时 `ok=false` 且错误在 `error` 中。无参数运行 `ariadne-ipc` 或显式使用 `ariadne-ipc stdio` 时，会进入长驻 JSONL 模式，适合桌面端或需要复用同一后端进程的集成。
+命令输出为统一 JSON：成功时 `ok=true` 且结果在 `data` 中；失败时 `ok=false` 且错误在 `error` 中。`ariadne-ipc call` 仍可直接调用底层 command；无参数运行 `ariadne-ipc` 或显式使用 `ariadne-ipc stdio` 时，会进入长驻 JSONL 模式，适合桌面端或需要复用同一后端进程的集成。
 
 ### 本地 REST 服务
 
