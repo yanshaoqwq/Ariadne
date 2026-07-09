@@ -1397,6 +1397,21 @@ fn git_commands_create_checkpoint_and_return_history() {
 }
 
 #[test]
+fn git_commands_handle_new_project_without_user_git_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    assert!(get_git_history_impl(temp.path()).unwrap().is_empty());
+    std::fs::write(temp.path().join("documents").join("chapter.md"), "正文").unwrap();
+    let checkpoint = create_checkpoint_impl(temp.path(), "首次存档".to_owned()).unwrap();
+    let history = get_git_history_impl(temp.path()).unwrap();
+
+    assert_eq!(checkpoint.message, "首次存档");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].summary, "首次存档");
+}
+
+#[test]
 fn git_repository_status_reports_branch_head_and_worktree_diff() {
     let temp = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();

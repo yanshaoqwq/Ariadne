@@ -54,6 +54,37 @@ fn git_service_initializes_and_reports_health() {
 }
 
 #[test]
+fn git_service_sets_project_local_commit_identity() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let service = GitService::new(temp_dir.path());
+    service.init_repository().unwrap();
+    fs::write(temp_dir.path().join("chapter.md"), "first").unwrap();
+
+    let archive = service.create_archive_point("draft-1", None).unwrap();
+    let commits = service.recent_commits(5).unwrap();
+    let user_name = git_stdout(temp_dir.path(), ["config", "--local", "--get", "user.name"]);
+    let user_email = git_stdout(
+        temp_dir.path(),
+        ["config", "--local", "--get", "user.email"],
+    );
+
+    assert!(!archive.commit_id.is_empty());
+    assert_eq!(commits.len(), 1);
+    assert_eq!(user_name.trim(), "Ariadne");
+    assert_eq!(user_email.trim(), "ariadne@local.invalid");
+}
+
+#[test]
+fn git_service_returns_empty_history_for_unborn_repository() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let service = GitService::new(temp_dir.path());
+    service.init_repository().unwrap();
+
+    assert!(service.recent_commits(5).unwrap().is_empty());
+    assert!(service.branch_graph(5).unwrap().is_empty());
+}
+
+#[test]
 fn git_service_creates_archive_and_checkpoint_commits() {
     let (temp_dir, service) = init_test_repo();
     fs::write(temp_dir.path().join("chapter.md"), "first").unwrap();

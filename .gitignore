@@ -18,6 +18,7 @@
 /desktop/**/bin/
 /desktop/**/obj/
 /.cache/
+/.ariadne-app/
 /.runtime/
 /.indexes/
 /.knowledge/

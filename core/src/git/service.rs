@@ -9,6 +9,9 @@ use crate::git::models::{
     GitHealthStatus, RestoreReport,
 };
 
+const DEFAULT_GIT_USER_NAME: &str = "Ariadne";
+const DEFAULT_GIT_USER_EMAIL: &str = "ariadne@local.invalid";
+
 /// Git 服务，所有 Git 写操作通过同一把锁串行化。
 #[derive(Debug)]
 pub struct GitService {
@@ -48,6 +51,7 @@ impl GitService {
     pub fn init_repository(&self) -> CoreResult<()> {
         let _guard = self.git_guard()?;
         self.run_git(["init"])?;
+        self.ensure_local_commit_identity()?;
         Ok(())
     }
 
@@ -163,6 +167,9 @@ impl GitService {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        if !self.has_head_commit() {
+            return Ok(Vec::new());
+        }
 
         let output = self.run_git(["log", "--format=%H%x1f%s", &format!("-n{limit}")])?;
         Ok(output
@@ -181,6 +188,9 @@ impl GitService {
     /// 读取简化分支图。
     pub fn branch_graph(&self, limit: usize) -> CoreResult<Vec<BranchGraphNode>> {
         if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if !self.has_head_commit() {
             return Ok(Vec::new());
         }
 
@@ -223,6 +233,7 @@ impl GitService {
     pub fn reinitialize_repository(&self) -> CoreResult<()> {
         let _guard = self.git_guard()?;
         self.run_git(["init"])?;
+        self.ensure_local_commit_identity()?;
         Ok(())
     }
 
@@ -248,8 +259,30 @@ impl GitService {
 
     /// 创建 commit；即使没有文件变更，也允许创建 checkpoint。
     fn commit_allow_empty(&self, message: &str) -> CoreResult<String> {
+        self.ensure_local_commit_identity()?;
         self.run_git(["commit", "--allow-empty", "-m", message])?;
         self.run_git(["rev-parse", "HEAD"])
+    }
+
+    /// Ariadne 管理项目内存档提交；仓库本地缺身份时写入默认身份，避免依赖用户全局 Git 配置。
+    fn ensure_local_commit_identity(&self) -> CoreResult<()> {
+        if !self.has_local_config("user.name") {
+            self.run_git(["config", "--local", "user.name", DEFAULT_GIT_USER_NAME])?;
+        }
+        if !self.has_local_config("user.email") {
+            self.run_git(["config", "--local", "user.email", DEFAULT_GIT_USER_EMAIL])?;
+        }
+        Ok(())
+    }
+
+    fn has_local_config(&self, key: &str) -> bool {
+        self.run_git(["config", "--local", "--get", key])
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    fn has_head_commit(&self) -> bool {
+        self.run_git(["rev-parse", "--verify", "HEAD"]).is_ok()
     }
 
     /// 回档前要求工作区干净，避免覆盖用户未保存改动。
