@@ -1138,17 +1138,15 @@ pub fn save_git_settings(
 pub fn get_template_repository_settings(
     state: &AriadneAppState,
 ) -> CommandResult<TemplateRepositorySettings> {
-    let project_root = project_root_from_state(&state, None)?;
-    get_template_repository_settings_impl(&project_root)
+    get_template_repository_settings_impl(state.app_state_root())
 }
 
 pub fn save_template_repository_settings(
     state: &AriadneAppState,
     settings: TemplateRepositorySettings,
 ) -> CommandResult<TemplateRepositorySettings> {
-    let project_root = project_root_from_state(&state, None)?;
-    save_template_repository_settings_impl(&project_root, &settings)?;
-    get_template_repository_settings_impl(&project_root)
+    save_template_repository_settings_impl(state.app_state_root(), &settings)?;
+    get_template_repository_settings_impl(state.app_state_root())
 }
 
 pub fn update_budget_config(
@@ -2447,10 +2445,9 @@ pub fn save_git_settings_impl(project_root: &Path, settings: GitSettings) -> Com
 }
 
 pub fn get_template_repository_settings_impl(
-    project_root: &Path,
+    settings_root: &Path,
 ) -> CommandResult<TemplateRepositorySettings> {
-    validate_project_root(project_root)?;
-    let path = template_repository_settings_path(project_root);
+    let path = template_repository_settings_path(settings_root);
     match std::fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content).map_err(error_to_string),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2461,15 +2458,14 @@ pub fn get_template_repository_settings_impl(
 }
 
 pub fn save_template_repository_settings_impl(
-    project_root: &Path,
+    settings_root: &Path,
     settings: &TemplateRepositorySettings,
 ) -> CommandResult<()> {
-    validate_project_root(project_root)?;
     if settings.base_url.trim().is_empty() {
         return Err("template repository base_url cannot be empty".to_owned());
     }
     validate_template_url(&settings.base_url)?;
-    let path = template_repository_settings_path(project_root);
+    let path = template_repository_settings_path(settings_root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(error_to_string)?;
     }
@@ -3591,10 +3587,8 @@ fn budget_config_path(project_root: &Path) -> PathBuf {
     project_root.join(".config").join(BUDGET_CONFIG_FILE)
 }
 
-fn template_repository_settings_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".runtime")
-        .join(TEMPLATE_REPOSITORY_SETTINGS_FILE)
+fn template_repository_settings_path(settings_root: &Path) -> PathBuf {
+    settings_root.join(TEMPLATE_REPOSITORY_SETTINGS_FILE)
 }
 
 fn confirmation_policy_settings_path(project_root: &Path) -> PathBuf {

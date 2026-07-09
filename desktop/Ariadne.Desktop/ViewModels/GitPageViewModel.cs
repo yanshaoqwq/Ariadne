@@ -4,7 +4,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class GitPageViewModel : ViewModelBase
+public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
 {
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
@@ -157,6 +157,11 @@ public sealed class GitPageViewModel : ViewModelBase
         {
             await RefreshHistoryFallbackAsync().ConfigureAwait(true);
         }
+    }
+
+    public async Task ReloadProjectDataAsync()
+    {
+        await RefreshAsync().ConfigureAwait(true);
     }
 
     private async Task RefreshRepositoryStatusAsync()

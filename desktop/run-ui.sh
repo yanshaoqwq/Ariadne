@@ -63,24 +63,64 @@ case "$MODE" in
   shot)
     build
     OUT="${2:-$PROJ_DIR/ui-preview.png}"
-    VDISP=":99"
+    VDISP="${ARIADNE_SHOT_DISPLAY:-}"
+    if [[ -z "$VDISP" ]]; then
+      for display_num in $(seq 90 119); do
+        if [[ ! -e "/tmp/.X${display_num}-lock" && ! -S "/tmp/.X11-unix/X${display_num}" ]]; then
+          VDISP=":${display_num}"
+          break
+        fi
+      done
+    fi
+    if [[ -z "$VDISP" ]]; then
+      echo "[shot] 未找到可用 Xvfb display；请清理 /tmp/.X*-lock 后重试" >&2
+      exit 1
+    fi
+    DISPLAY_ID="${VDISP#:}"
+    XVFB_LOG="/tmp/ariadne-xvfb-${DISPLAY_ID}.log"
+    APP_LOG="/tmp/ariadne-desktop-${DISPLAY_ID}.log"
+    FFMPEG_LOG="/tmp/ariadne-ffmpeg-${DISPLAY_ID}.log"
+    XVFB_PID=""
+    APP_PID=""
+    cleanup_shot() {
+      if [[ -n "$APP_PID" ]]; then
+        kill "$APP_PID" 2>/dev/null || true
+      fi
+      if [[ -n "$XVFB_PID" ]]; then
+        kill "$XVFB_PID" 2>/dev/null || true
+      fi
+    }
+    trap cleanup_shot EXIT
     echo "[shot] 启动 Xvfb $VDISP (1440x900) ..."
-    Xvfb "$VDISP" -screen 0 1440x900x24 >/dev/null 2>&1 &
+    Xvfb "$VDISP" -screen 0 1440x900x24 >"$XVFB_LOG" 2>&1 &
     XVFB_PID=$!
     sleep 1.5
+    if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+      echo "[shot] Xvfb 启动失败，日志如下：" >&2
+      sed -n '1,120p' "$XVFB_LOG" >&2 || true
+      exit 1
+    fi
 
     echo "[shot] 无头启动 UI ..."
-    DISPLAY="$VDISP" ARIADNE_BACKEND_IPC="$BACKEND_IPC" dotnet run --project "$CSPROJ/Ariadne.Desktop.csproj" -v quiet --nologo >/dev/null 2>&1 &
+    DISPLAY="$VDISP" ARIADNE_BACKEND_IPC="$BACKEND_IPC" dotnet run --project "$CSPROJ/Ariadne.Desktop.csproj" -v quiet --nologo >"$APP_LOG" 2>&1 &
     APP_PID=$!
     # 等待窗口绘制完成
     sleep 20
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+      echo "[shot] UI 进程已退出，日志如下：" >&2
+      sed -n '1,160p' "$APP_LOG" >&2 || true
+      exit 1
+    fi
 
     echo "[shot] 截图 -> $OUT"
-    ffmpeg -y -f x11grab -video_size 1440x900 -i "$VDISP" -frames:v 1 "$OUT" >/dev/null 2>&1 || {
-      echo "[shot] ffmpeg 截图失败"; }
+    if ! ffmpeg -y -f x11grab -video_size 1440x900 -i "$VDISP" -frames:v 1 "$OUT" >"$FFMPEG_LOG" 2>&1; then
+      echo "[shot] ffmpeg 截图失败，日志如下：" >&2
+      sed -n '1,160p' "$FFMPEG_LOG" >&2 || true
+      exit 1
+    fi
 
-    kill "$APP_PID" 2>/dev/null || true
-    kill "$XVFB_PID" 2>/dev/null || true
+    cleanup_shot
+    trap - EXIT
     echo "[shot] 完成：$OUT"
     ;;
 

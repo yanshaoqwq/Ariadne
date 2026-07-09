@@ -11,21 +11,21 @@ use ariadne::commands::{
     get_budget_status_impl, get_display_name_language_pack_template, get_document_content_impl,
     get_document_tree_impl, get_git_history_impl, get_git_repository_status_impl,
     get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
-    get_provider_config_impl, get_rag_settings_impl, get_template_repository_settings_impl,
-    get_workflow_settings_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
-    pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl, query_run_logs,
-    resolve_confirmation_impl, resolve_project_references, restore_to_new_branch, run_workflow,
-    run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
+    get_provider_config_impl, get_rag_settings_impl, get_template_repository_settings,
+    get_template_repository_settings_impl, get_workflow_settings_impl, list_workflow_graphs_impl,
+    load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl,
+    query_run_logs, resolve_confirmation_impl, resolve_project_references, restore_to_new_branch,
+    run_workflow, run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
     save_document_content_impl, save_git_settings_impl, save_node_preset_settings_impl,
     save_permissions_settings_impl, save_provider_key_impl, save_provider_settings_impl,
-    save_rag_settings_impl, save_template_repository_settings_impl, save_workflow_graph_impl,
-    save_workflow_settings_impl, update_budget_config_impl, validate_display_name_language_pack,
-    AppSettings, AriadneAppState, AutomationSettings, CanvasEdge, CanvasNode,
-    ConfirmationAutoModePolicy, ConfirmationDecision, ConfirmationNormalPolicy,
-    ConfirmationPolicySetting, GitSettings, NodePresetSettings, PermissionsSettings,
-    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate, RagSettings,
-    ResolveConfirmationRequest, RunLogQuery, TemplateRepositorySettings, WorkflowGraphData,
-    WorkflowSettings,
+    save_rag_settings_impl, save_template_repository_settings,
+    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
+    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
+    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
+    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, NodePresetSettings,
+    PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest,
+    ProviderSettingsUpdate, RagSettings, ResolveConfirmationRequest, RunLogQuery,
+    TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
 use ariadne::contracts::{
@@ -1342,6 +1342,40 @@ fn module_settings_round_trip_config_files() {
             .base_url,
         "http://127.0.0.1:8080/templates"
     );
+}
+
+#[test]
+fn template_repository_settings_are_app_scoped_across_projects() {
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project_a.path()).unwrap();
+    ariadne::frontend::initialize_project(project_b.path()).unwrap();
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_TEMPLATE_REPOSITORY", "1");
+    let state = AriadneAppState::new(
+        project_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    save_template_repository_settings(
+        &state,
+        TemplateRepositorySettings {
+            base_url: "http://127.0.0.1:18080/templates".to_owned(),
+        },
+    )
+    .unwrap();
+    state.set_project_root(project_b.path()).unwrap();
+
+    assert_eq!(
+        get_template_repository_settings(&state).unwrap().base_url,
+        "http://127.0.0.1:18080/templates"
+    );
+    assert!(!project_a
+        .path()
+        .join(".runtime")
+        .join("template_repository_settings.json")
+        .exists());
 }
 
 #[test]

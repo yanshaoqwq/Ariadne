@@ -8,6 +8,8 @@ namespace Ariadne.Desktop.ViewModels;
 public sealed class MainWindowViewModel : ViewModelBase
 {
     private const string AppVersion = "0.1.0";
+    private static readonly string[] ProjectScopedPageIds = { "workspace", "works", "git", "run_logs", "settings" };
+    private static readonly string[] PreloadedProjectPageIds = { "workspace", "works", "git" };
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
@@ -200,12 +202,13 @@ public sealed class MainWindowViewModel : ViewModelBase
         });
         if (createPage)
         {
-            _pageCache.Clear();
+            ClearProjectScopedPageCache();
         }
         BackendStatus = _displayNames.Text("ui.status.healthy");
         NotificationText = string.Empty;
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
         SelectNavigationItem(PrimaryNavigationItems[0], createPage);
+        await LoadProjectDataPagesAsync().ConfigureAwait(true);
     }
 
     private async Task ApplySavedLanguageAsync()
@@ -223,7 +226,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task LeaveProjectAsync()
     {
-        if (!await ConfirmCurrentPageLeaveAsync().ConfigureAwait(true))
+        if (!await ConfirmCachedProjectPagesLeaveAsync().ConfigureAwait(true))
         {
             return;
         }
@@ -237,7 +240,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         ProjectTitle = _displayNames.Text("ui.window.no_project_title");
         BackendStatus = _displayNames.Text("ui.status.unavailable");
         NotificationText = string.Empty;
-        _pageCache.Clear();
+        ClearProjectScopedPageCache();
         BudgetStatusText = _displayNames.Text("ui.common.none");
         BudgetUsagePercent = 0;
         CurrentPage = Welcome;
@@ -246,7 +249,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task RunWelcomeCommandAfterLeaveGuardAsync(RelayCommand command)
     {
-        if (!await ConfirmCurrentPageLeaveAsync().ConfigureAwait(true))
+        if (!await ConfirmCachedProjectPagesLeaveAsync().ConfigureAwait(true))
         {
             return;
         }
@@ -385,6 +388,27 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
         await RefreshSidebarBadgesAsync(new SidebarBadgeCounts(0, 0, 0)).ConfigureAwait(true);
+    }
+
+    private async Task LoadProjectDataPagesAsync()
+    {
+        foreach (var id in PreloadedProjectPageIds)
+        {
+            var page = CreatePage(id, string.Empty);
+            if (page is IProjectDataReloadable reloadable)
+            {
+                await reloadable.ReloadProjectDataAsync().ConfigureAwait(true);
+            }
+        }
+        await RefreshSidebarBadgesAsync(new SidebarBadgeCounts(0, 0, 0)).ConfigureAwait(true);
+    }
+
+    private void ClearProjectScopedPageCache()
+    {
+        foreach (var id in ProjectScopedPageIds)
+        {
+            _pageCache.Remove(id);
+        }
     }
 
     private void SelectNavigationItem(NavigationItemViewModel item, bool createPage)
