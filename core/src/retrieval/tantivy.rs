@@ -3,7 +3,11 @@ use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, OwnedValue, Schema, TantivyDocument, STORED, TEXT};
+use tantivy::schema::{
+    Field, IndexRecordOption, OwnedValue, Schema, TantivyDocument, TextFieldIndexing, TextOptions,
+    STORED, STRING,
+};
+use tantivy::tokenizer::NgramTokenizer;
 use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
 
 use crate::contracts::{CoreError, CoreResult};
@@ -13,6 +17,8 @@ use crate::retrieval::models::{
     RetrievalResult, RetrievalSource, StoreHealth,
 };
 use crate::retrieval::traits::FullTextStore;
+
+const ARIADNE_TEXT_TOKENIZER: &str = "ariadne_cjk_ngram";
 
 /// Tantivy 真实全文检索后端。
 pub struct TantivyFullTextStore {
@@ -50,6 +56,10 @@ impl TantivyFullTextStore {
     }
 
     fn from_index(index: Index, fields: TantivyFields) -> CoreResult<Self> {
+        index.tokenizers().register(
+            ARIADNE_TEXT_TOKENIZER,
+            NgramTokenizer::all_ngrams(1, 3).map_err(tantivy_error)?,
+        );
         let writer = index.writer(50_000_000).map_err(tantivy_error)?;
         let reader = index.reader().map_err(tantivy_error)?;
         Ok(Self {
@@ -167,9 +177,14 @@ impl FullTextStore for TantivyFullTextStore {
 
 fn build_schema() -> (Schema, TantivyFields) {
     let mut builder = Schema::builder();
-    let chunk_id = builder.add_text_field("chunk_id", STORED | TEXT);
-    let document_id = builder.add_text_field("document_id", STORED | TEXT);
-    let text = builder.add_text_field("text", STORED | TEXT);
+    let chunk_id = builder.add_text_field("chunk_id", STORED | STRING);
+    let document_id = builder.add_text_field("document_id", STORED | STRING);
+    let text_options = TextOptions::default().set_stored().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer(ARIADNE_TEXT_TOKENIZER)
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+    let text = builder.add_text_field("text", text_options);
     let sources_json = builder.add_text_field("sources_json", STORED);
     let metadata_json = builder.add_text_field("metadata_json", STORED);
     (

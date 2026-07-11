@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
@@ -43,17 +43,7 @@ impl MemoryWritingKnowledgeBase {
     pub fn upsert_segment(&self, segment: StorySegment) -> CoreResult<()> {
         segment.validate()?;
         let mut state = self.lock_state()?;
-        state.remove_segment_chapter_link(&segment.segment_id);
-        link_unique(
-            &mut state.index.chapter_segments,
-            &segment.chapter_id,
-            segment.segment_id.clone(),
-        );
-        state
-            .index
-            .segment_chapter
-            .insert(segment.segment_id.clone(), segment.chapter_id.clone());
-        state.segments.insert(segment.segment_id.clone(), segment);
+        state.insert_segment(segment);
         Ok(())
     }
 
@@ -72,32 +62,104 @@ impl MemoryWritingKnowledgeBase {
     pub fn upsert_event(&self, event: StoryEvent) -> CoreResult<()> {
         event.validate()?;
         let mut state = self.lock_state()?;
-        state.remove_event_links(&event.event_id);
-        for segment_id in &event.segment_ids {
-            link_unique(
-                &mut state.index.event_segments,
-                &event.event_id,
-                segment_id.clone(),
-            );
-            link_unique(
-                &mut state.index.segment_events,
-                segment_id,
-                event.event_id.clone(),
-            );
+        validate_event_references(&state, &event)?;
+        state.insert_event(event);
+        Ok(())
+    }
+
+    /// 原子替换某章节当前 revision 的故事段和事件事实。
+    pub fn replace_chapter_summary_entities(
+        &self,
+        chapter_id: &str,
+        segments: Vec<StorySegment>,
+        events: Vec<StoryEvent>,
+    ) -> CoreResult<()> {
+        validate_non_empty_local("chapter_id", chapter_id)?;
+        let mut segment_ids = BTreeSet::new();
+        for segment in &segments {
+            segment.validate()?;
+            if segment.chapter_id != chapter_id {
+                return Err(CoreError::validation(
+                    "replacement story segment belongs to another chapter",
+                ));
+            }
+            if !segment_ids.insert(segment.segment_id.clone()) {
+                return Err(CoreError::validation(
+                    "replacement contains duplicate story segment id",
+                ));
+            }
         }
-        for chapter_id in &event.chapter_ids {
-            link_unique(
-                &mut state.index.event_chapters,
-                &event.event_id,
-                chapter_id.clone(),
-            );
-            link_unique(
-                &mut state.index.chapter_events,
-                chapter_id,
-                event.event_id.clone(),
-            );
+        let mut event_ids = BTreeSet::new();
+        for event in &events {
+            event.validate()?;
+            if !event.chapter_ids.iter().any(|id| id == chapter_id) {
+                return Err(CoreError::validation(
+                    "replacement story event does not reference chapter",
+                ));
+            }
+            if !event_ids.insert(event.event_id.clone()) {
+                return Err(CoreError::validation(
+                    "replacement contains duplicate story event id",
+                ));
+            }
+            if let Some(missing) = event
+                .segment_ids
+                .iter()
+                .find(|segment_id| !segment_ids.contains(*segment_id))
+            {
+                return Err(CoreError::validation(format!(
+                    "story event references missing replacement segment: {missing}"
+                )));
+            }
         }
-        state.events.insert(event.event_id.clone(), event);
+
+        let mut state = self.lock_state()?;
+        let old_segment_ids = state
+            .index
+            .chapter_segments
+            .get(chapter_id)
+            .cloned()
+            .unwrap_or_default();
+        let old_segment_set = old_segment_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let old_event_ids = state
+            .index
+            .chapter_events
+            .get(chapter_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut preserved_events = BTreeMap::new();
+        for event_id in old_event_ids {
+            if let Some(mut event) = state.events.remove(&event_id) {
+                state.remove_event_links(&event_id);
+                event.chapter_ids.retain(|id| id != chapter_id);
+                event.segment_ids.retain(|id| !old_segment_set.contains(id));
+                if !event.chapter_ids.is_empty() && !event.segment_ids.is_empty() {
+                    preserved_events.insert(event_id, event);
+                }
+            }
+        }
+        for segment_id in old_segment_ids {
+            state.segments.remove(&segment_id);
+            state.remove_segment_links(&segment_id);
+        }
+        for segment in segments {
+            state.insert_segment(segment);
+        }
+        for mut event in events {
+            if let Some(existing) = state.events.remove(&event.event_id) {
+                state.remove_event_links(&event.event_id);
+                merge_unique(&mut event.segment_ids, existing.segment_ids);
+                merge_unique(&mut event.chapter_ids, existing.chapter_ids);
+            }
+            if let Some(existing) = preserved_events.remove(&event.event_id) {
+                merge_unique(&mut event.segment_ids, existing.segment_ids);
+                merge_unique(&mut event.chapter_ids, existing.chapter_ids);
+            }
+            state.insert_event(event);
+        }
+        for (_, event) in preserved_events {
+            state.insert_event(event);
+        }
         Ok(())
     }
 
@@ -618,6 +680,48 @@ impl MemoryWritingKnowledgeBase {
 }
 
 impl WritingKnowledgeState {
+    fn insert_segment(&mut self, segment: StorySegment) {
+        self.remove_segment_chapter_link(&segment.segment_id);
+        link_unique(
+            &mut self.index.chapter_segments,
+            &segment.chapter_id,
+            segment.segment_id.clone(),
+        );
+        self.index
+            .segment_chapter
+            .insert(segment.segment_id.clone(), segment.chapter_id.clone());
+        self.segments.insert(segment.segment_id.clone(), segment);
+    }
+
+    fn insert_event(&mut self, event: StoryEvent) {
+        self.remove_event_links(&event.event_id);
+        for segment_id in &event.segment_ids {
+            link_unique(
+                &mut self.index.event_segments,
+                &event.event_id,
+                segment_id.clone(),
+            );
+            link_unique(
+                &mut self.index.segment_events,
+                segment_id,
+                event.event_id.clone(),
+            );
+        }
+        for chapter_id in &event.chapter_ids {
+            link_unique(
+                &mut self.index.event_chapters,
+                &event.event_id,
+                chapter_id.clone(),
+            );
+            link_unique(
+                &mut self.index.chapter_events,
+                chapter_id,
+                event.event_id.clone(),
+            );
+        }
+        self.events.insert(event.event_id.clone(), event);
+    }
+
     /// 仅移除故事段与章节的索引；普通 upsert 不应破坏事件/注册项等长期链接。
     fn remove_segment_chapter_link(&mut self, segment_id: &str) {
         if let Some(chapter_id) = self.index.segment_chapter.remove(segment_id) {
@@ -631,11 +735,17 @@ impl WritingKnowledgeState {
         if let Some(event_ids) = self.index.segment_events.remove(segment_id) {
             for event_id in event_ids {
                 unlink_value(&mut self.index.event_segments, &event_id, segment_id);
+                if let Some(event) = self.events.get_mut(&event_id) {
+                    event.segment_ids.retain(|id| id != segment_id);
+                }
             }
         }
         if let Some(change_ids) = self.index.segment_changes.remove(segment_id) {
             for change_id in change_ids {
                 unlink_value(&mut self.index.change_segments, &change_id, segment_id);
+                if let Some(change) = self.changes.get_mut(&change_id) {
+                    change.linked_segment_ids.retain(|id| id != segment_id);
+                }
             }
         }
         if let Some(foreshadowing_ids) = self.index.segment_foreshadowing.remove(segment_id) {
@@ -645,6 +755,10 @@ impl WritingKnowledgeState {
                     &foreshadowing_id,
                     segment_id,
                 );
+                if let Some(record) = self.foreshadowing.get_mut(&foreshadowing_id) {
+                    record.planted_segment_ids.retain(|id| id != segment_id);
+                    record.recovered_segment_ids.retain(|id| id != segment_id);
+                }
             }
         }
     }
@@ -1237,6 +1351,29 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
+}
+
+fn merge_unique(values: &mut Vec<String>, additional: Vec<String>) {
+    for value in additional {
+        push_unique(values, value);
+    }
+}
+
+fn validate_event_references(state: &WritingKnowledgeState, event: &StoryEvent) -> CoreResult<()> {
+    for segment_id in &event.segment_ids {
+        let segment = state.segments.get(segment_id).ok_or_else(|| {
+            CoreError::validation(format!(
+                "story event references missing story segment: {segment_id}"
+            ))
+        })?;
+        if !event.chapter_ids.iter().any(|id| id == &segment.chapter_id) {
+            return Err(CoreError::validation(format!(
+                "story event segment {segment_id} belongs to unreferenced chapter {}",
+                segment.chapter_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// 从索引 Vec 中移除指定值，空 Vec 会被清理。

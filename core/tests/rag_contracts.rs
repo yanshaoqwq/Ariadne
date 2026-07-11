@@ -12,14 +12,14 @@ use ariadne::rag::{
     search_response_to_writing_response, tool_definitions_for_agent, ForeshadowingContent,
     ForeshadowingRecord, ForeshadowingStatus, ForeshadowingUpdate, MemoryWritingKnowledgeBase,
     NodePromptConfig, PatchSession, PromptTemplateContext, RealizedChangeLink, RegisterContent,
-    RegisterFunction, RegisterOperation, RegisteredChange, RegisteredChangeStatus, StoryEvent,
-    StoryEventStatus, StorySegment, SummaryPipelineDraft, SummaryPipelineExecutor,
-    SummaryPipelineStep, WriterDocumentContext, WriterInsertLines, WriterReplaceLines,
-    WritingAgentKind, WritingConfirmationPolicy, WritingContextAssembler, WritingContextRequest,
-    WritingDocumentScope, WritingNodeDefinition, WritingToolExecutor, TOOL_CRITIC_FIND,
-    TOOL_CRITIC_SEARCH, TOOL_DESIGNER_FIND, TOOL_DESIGNER_INSERT_LINES, TOOL_DESIGNER_REGISTER,
-    TOOL_DESIGNER_REPLACE_LINES, TOOL_DESIGNER_SEARCH, TOOL_DETAIL_FIND, TOOL_DETAIL_SEARCH,
-    TOOL_OUTLINER_FIND, TOOL_OUTLINER_INSERT_LINES, TOOL_OUTLINER_REGISTER,
+    RegisterFunction, RegisterOperation, RegisteredChange, RegisteredChangeStatus,
+    SqliteWritingKnowledgeStore, StoryEvent, StoryEventStatus, StorySegment, SummaryPipelineDraft,
+    SummaryPipelineExecutor, SummaryPipelineStep, WriterDocumentContext, WriterInsertLines,
+    WriterReplaceLines, WritingAgentKind, WritingConfirmationPolicy, WritingContextAssembler,
+    WritingContextRequest, WritingDocumentScope, WritingNodeDefinition, WritingToolExecutor,
+    TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH, TOOL_DESIGNER_FIND, TOOL_DESIGNER_INSERT_LINES,
+    TOOL_DESIGNER_REGISTER, TOOL_DESIGNER_REPLACE_LINES, TOOL_DESIGNER_SEARCH, TOOL_DETAIL_FIND,
+    TOOL_DETAIL_SEARCH, TOOL_OUTLINER_FIND, TOOL_OUTLINER_INSERT_LINES, TOOL_OUTLINER_REGISTER,
     TOOL_OUTLINER_REPLACE_LINES, TOOL_OUTLINER_SEARCH, TOOL_PLANNER_FIND,
     TOOL_PLANNER_INSERT_LINES, TOOL_PLANNER_REGISTER, TOOL_PLANNER_REPLACE_LINES,
     TOOL_PLANNER_SEARCH, TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH, TOOL_WRITER_FIND,
@@ -829,6 +829,141 @@ fn summary_pipeline_applies_draft_and_tracks_confirmations_and_issues() {
     assert_eq!(kb.planner_issues("chapter-1").unwrap().len(), 1);
 }
 
+#[test]
+fn summary_pipeline_rejects_event_with_missing_segment_before_mutation() {
+    let kb = MemoryWritingKnowledgeBase::new();
+    let executor = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::normal_default(),
+        AutoModeState::default(),
+    );
+    let error = executor
+        .apply_draft(SummaryPipelineDraft {
+            chapter_id: "chapter-invalid".to_owned(),
+            segments: vec![StorySegment {
+                segment_id: "chapter-invalid::seg-1".to_owned(),
+                number: "1".to_owned(),
+                chapter_id: "chapter-invalid".to_owned(),
+                summary: "有效故事段".to_owned(),
+                source: source_span(),
+                metadata: Value::Null,
+            }],
+            events: vec![StoryEvent {
+                event_id: "event-invalid".to_owned(),
+                summary: "引用了不存在的故事段".to_owned(),
+                status: StoryEventStatus::Ongoing,
+                segment_ids: vec!["chapter-invalid::seg-missing".to_owned()],
+                chapter_ids: vec!["chapter-invalid".to_owned()],
+                metadata: Value::Null,
+            }],
+            chapter_summary: Some("不会写入".to_owned()),
+            stage_id: Some("stage-invalid".to_owned()),
+            stage_summary: Some("不会写入".to_owned()),
+            realized_changes: Vec::new(),
+            foreshadowing_updates: Vec::new(),
+            metadata: Value::Null,
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("missing story segment"));
+    assert!(kb.all_segments().unwrap().is_empty());
+    assert!(kb.all_events().unwrap().is_empty());
+    assert!(kb.confirmations(None).unwrap().is_empty());
+}
+
+#[test]
+fn summary_pipeline_rerun_replaces_active_entities_and_keeps_revision_history() {
+    let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+    let kb = MemoryWritingKnowledgeBase::new();
+    let executor = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::normal_default(),
+        AutoModeState::default(),
+    );
+    let first = executor
+        .apply_draft(SummaryPipelineDraft {
+            chapter_id: "chapter-rerun".to_owned(),
+            segments: vec![
+                StorySegment {
+                    segment_id: "chapter-rerun::seg-1".to_owned(),
+                    number: "1".to_owned(),
+                    chapter_id: "chapter-rerun".to_owned(),
+                    summary: "第一段".to_owned(),
+                    source: source_span(),
+                    metadata: Value::Null,
+                },
+                StorySegment {
+                    segment_id: "chapter-rerun::seg-2".to_owned(),
+                    number: "2".to_owned(),
+                    chapter_id: "chapter-rerun".to_owned(),
+                    summary: "将被新 revision 删除的第二段".to_owned(),
+                    source: source_span(),
+                    metadata: Value::Null,
+                },
+            ],
+            events: vec![StoryEvent {
+                event_id: "event-old".to_owned(),
+                summary: "旧事件".to_owned(),
+                status: StoryEventStatus::Ongoing,
+                segment_ids: vec!["chapter-rerun::seg-2".to_owned()],
+                chapter_ids: vec!["chapter-rerun".to_owned()],
+                metadata: Value::Null,
+            }],
+            chapter_summary: Some("旧章节总结".to_owned()),
+            stage_id: Some("stage-1".to_owned()),
+            stage_summary: Some("旧阶段总结".to_owned()),
+            realized_changes: Vec::new(),
+            foreshadowing_updates: Vec::new(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+    store.save_knowledge(&kb).unwrap();
+
+    let second = executor
+        .apply_draft(SummaryPipelineDraft {
+            chapter_id: "chapter-rerun".to_owned(),
+            segments: vec![StorySegment {
+                segment_id: "chapter-rerun::seg-1".to_owned(),
+                number: "1".to_owned(),
+                chapter_id: "chapter-rerun".to_owned(),
+                summary: "合并后的唯一故事段".to_owned(),
+                source: source_span(),
+                metadata: Value::Null,
+            }],
+            events: vec![StoryEvent {
+                event_id: "event-new".to_owned(),
+                summary: "新事件".to_owned(),
+                status: StoryEventStatus::Completed,
+                segment_ids: vec!["chapter-rerun::seg-1".to_owned()],
+                chapter_ids: vec!["chapter-rerun".to_owned()],
+                metadata: Value::Null,
+            }],
+            chapter_summary: Some("新章节总结".to_owned()),
+            stage_id: Some("stage-1".to_owned()),
+            stage_summary: Some("新阶段总结".to_owned()),
+            realized_changes: Vec::new(),
+            foreshadowing_updates: Vec::new(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+    store.save_knowledge(&kb).unwrap();
+
+    assert_ne!(first.revision_id, second.revision_id);
+    assert_eq!(kb.all_segments().unwrap().len(), 1);
+    assert_eq!(kb.all_events().unwrap()[0].event_id, "event-new");
+    assert_eq!(kb.confirmations(None).unwrap().len(), 8);
+
+    let loaded = store.load_knowledge().unwrap();
+    assert_eq!(loaded.all_segments().unwrap().len(), 1);
+    assert_eq!(loaded.all_events().unwrap()[0].event_id, "event-new");
+    assert_eq!(loaded.confirmations(None).unwrap().len(), 8);
+    assert!(loaded
+        .confirmations(None)
+        .unwrap()
+        .iter()
+        .all(|item| item.metadata.get("revision_id").is_some()));
+}
+
 /// 验证 Auto Mode 下确认项默认进入自动审计状态，且已落地注册项不会进问题队列。
 #[test]
 fn summary_pipeline_auto_mode_auto_audits_confirmations() {
@@ -1108,17 +1243,16 @@ fn line_patch_tool_allows_matching_scope_and_document() {
 
 #[cfg(test)]
 mod store_contracts {
+    use ariadne::contracts::AutoModeState;
     use ariadne::contracts::{SourceSpan, TextRange};
     use ariadne::rag::memory::MemoryWritingKnowledgeBase;
-    use ariadne::contracts::AutoModeState;
     use ariadne::rag::models::{
-        ForeshadowingContent, ForeshadowingRecord, ForeshadowingStatus,
-        RegisterContent, RegisteredChangeStatus, RegisterFunction, StoryEvent, StoryEventStatus,
-        StorySegment, WritingConfirmationPolicy,
+        ForeshadowingContent, ForeshadowingRecord, ForeshadowingStatus, RegisterContent,
+        RegisterFunction, StoryEvent, StoryEventStatus, StorySegment, WritingConfirmationPolicy,
     };
     use ariadne::rag::pipeline::SummaryPipelineExecutor;
     use ariadne::rag::store::SqliteWritingKnowledgeStore;
-    use ariadne::rag::{SummaryPipelineDraft, SummaryPipelineReport};
+    use ariadne::rag::SummaryPipelineDraft;
     use serde_json::{json, Value};
 
     fn source_span() -> SourceSpan {
@@ -1214,30 +1348,15 @@ mod store_contracts {
             Some("第一阶段开篇".to_owned()),
             "阶段总结"
         );
-        assert_eq!(
-            kb2.all_foreshadowing().unwrap().len(),
-            1,
-            "伏笔数量"
-        );
-        assert_eq!(
-            kb2.registered_changes().unwrap().len(),
-            1,
-            "注册项数量"
-        );
+        assert_eq!(kb2.all_foreshadowing().unwrap().len(), 1, "伏笔数量");
+        assert_eq!(kb2.registered_changes().unwrap().len(), 1, "注册项数量");
 
         // 确认项 4 个（segment/event/chapter/stage）
-        assert_eq!(
-            kb2.confirmations(None).unwrap().len(),
-            4,
-            "确认项数量"
-        );
+        assert_eq!(kb2.confirmations(None).unwrap().len(), 4, "确认项数量");
 
         // 双向索引在重放后正确重建
         let idx = kb2.index_snapshot().unwrap();
-        assert!(
-            idx.chapter_segments.contains_key("ch-1"),
-            "章节-故事段索引"
-        );
+        assert!(idx.chapter_segments.contains_key("ch-1"), "章节-故事段索引");
         assert!(
             idx.event_segments.contains_key("event-1"),
             "事件-故事段索引"

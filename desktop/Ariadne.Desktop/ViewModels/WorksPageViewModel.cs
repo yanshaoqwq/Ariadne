@@ -47,8 +47,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private int _documentCharacterCount;
     private int _nextDocumentBlockId;
     private bool _isEditMode;
-    private TextRange? _pendingQuickEditRange;
-    private string? _pendingQuickEditBaseVersion;
+    private QuickEditSession? _pendingQuickEdit;
+    private QuickEditUndoState? _quickEditUndo;
+    private CancellationTokenSource? _quickEditGenerationCts;
+    private long _quickEditGeneration;
+    private bool _isQuickEditGenerating;
 
     public WorksPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -80,7 +83,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         InsertOutlineCommand = new RelayCommand(InsertOutlineReference, () => HasCurrentDocument);
         ToggleEditCommand = new RelayCommand(() => IsEditMode = !IsEditMode);
         SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync(), CanSendProjectAi);
-        ApplyQuickEditCommand = new RelayCommand(() => _ = ApplyQuickEditAsync(), () => _pendingQuickEdit is not null);
+        ApplyQuickEditCommand = new RelayCommand(ApplyQuickEdit, CanApplyQuickEdit);
+        UndoQuickEditCommand = new RelayCommand(UndoQuickEdit, CanUndoQuickEdit);
         ExportFormats = new ObservableCollection<ExportFormatOption>
         {
             new("markdown", displayNames.Text("ui.works.export_format.markdown")),
@@ -189,6 +193,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public RelayCommand SendProjectAiCommand { get; }
 
     public RelayCommand ApplyQuickEditCommand { get; }
+    public RelayCommand UndoQuickEditCommand { get; }
     public Action? RequestEditorCopy { get; set; }
     public Action? RequestEditorSelectAll { get; set; }
     public Func<EditorTextSelection>? RequestEditorSelection { get; set; }
@@ -261,7 +266,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         {
             if (SetProperty(ref _quickEditInstruction, value))
             {
-                ClearPendingQuickEdit();
+                InvalidateQuickEditGeneration();
                 QuickAiCommand.NotifyCanExecuteChanged();
             }
         }
@@ -271,6 +276,20 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     {
         get => _quickEditDiff;
         set => SetProperty(ref _quickEditDiff, value);
+    }
+
+    public bool IsQuickEditGenerating
+    {
+        get => _isQuickEditGenerating;
+        private set
+        {
+            if (SetProperty(ref _isQuickEditGenerating, value))
+            {
+                OnPropertyChanged(nameof(QuickEditGenerateText));
+                QuickAiCommand.NotifyCanExecuteChanged();
+                ApplyQuickEditCommand.NotifyCanExecuteChanged();
+            }
+        }
     }
 
     public string ExportFormat
@@ -364,9 +383,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public string BrowseImportSourceText => _displayNames.Text("ui.works.import.browse_source");
     public string QuickEditTitle => _displayNames.Text("ui.works.quick_edit.title");
     public string QuickEditPlaceholder => _displayNames.Text("ui.works.quick_edit.placeholder");
-    public string QuickEditGenerateText => _displayNames.Text("ui.works.quick_edit.generate");
+    public string QuickEditGenerateText => _displayNames.Text(IsQuickEditGenerating
+        ? "ui.works.quick_edit.generating"
+        : "ui.works.quick_edit.generate");
     public string QuickEditDiffText => _displayNames.Text("ui.works.quick_edit.diff");
     public string QuickEditApplyText => _displayNames.Text("ui.works.quick_edit.apply");
+    public string QuickEditUndoText => _displayNames.Text("ui.works.quick_edit.undo");
 
     // 右键菜单文案（阅读/修改器）
     public string CtxCopyText => _displayNames.Text("ui.works.context.copy");
@@ -388,7 +410,27 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     {
         return HasCurrentDocument
                && _documentCharacterCount > 0
+               && !IsQuickEditGenerating
                && !string.IsNullOrWhiteSpace(QuickEditInstruction);
+    }
+
+    private bool CanApplyQuickEdit()
+    {
+        return !IsQuickEditGenerating
+               && _pendingQuickEdit is not null
+               && _pendingQuickEdit.MatchesCurrent(
+                   _currentDocumentId,
+                   _currentDocumentVersion,
+                   AssembleDocumentContent());
+    }
+
+    private bool CanUndoQuickEdit()
+    {
+        return _quickEditUndo is not null
+               && _quickEditUndo.TryUndo(
+                   _currentDocumentId,
+                   AssembleDocumentContent(),
+                   out _);
     }
 
     private bool CanSendProjectAi()
@@ -408,18 +450,34 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private void ClearPendingQuickEdit()
     {
         if (_pendingQuickEdit is null
-            && _pendingQuickEditRange is null
-            && _pendingQuickEditBaseVersion is null
             && string.IsNullOrEmpty(QuickEditDiff))
         {
             return;
         }
 
         _pendingQuickEdit = null;
-        _pendingQuickEditRange = null;
-        _pendingQuickEditBaseVersion = null;
         QuickEditDiff = string.Empty;
         ApplyQuickEditCommand.NotifyCanExecuteChanged();
+    }
+
+    private void InvalidateQuickEditGeneration()
+    {
+        Interlocked.Increment(ref _quickEditGeneration);
+        _quickEditGenerationCts?.Cancel();
+        _quickEditGenerationCts?.Dispose();
+        _quickEditGenerationCts = null;
+        IsQuickEditGenerating = false;
+        ClearPendingQuickEdit();
+    }
+
+    private void ClearQuickEditUndo()
+    {
+        if (_quickEditUndo is null)
+        {
+            return;
+        }
+        _quickEditUndo = null;
+        UndoQuickEditCommand.NotifyCanExecuteChanged();
     }
 
     private void ReplaceDocumentContent(string content)
@@ -445,7 +503,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         QuickAiCommand.NotifyCanExecuteChanged();
         if (!_suppressDirtyTracking)
         {
-            ClearPendingQuickEdit();
+            InvalidateQuickEditGeneration();
         }
     }
 
@@ -463,7 +521,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         QuickAiCommand.NotifyCanExecuteChanged();
         if (!_suppressDirtyTracking)
         {
-            ClearPendingQuickEdit();
+            InvalidateQuickEditGeneration();
+            ClearQuickEditUndo();
             MarkDocumentDirty();
         }
         if (newText.Length > RebalanceDocumentBlockSize)
@@ -644,6 +703,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 return;
             }
 
+            InvalidateQuickEditGeneration();
+            ClearQuickEditUndo();
+
             _suppressDirtyTracking = true;
             try
             {
@@ -653,7 +715,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 _currentDocumentPath = document.Metadata.Path;
                 _currentDocumentVersion = document.Metadata.Version;
                 OnCurrentDocumentChanged();
-                ClearPendingQuickEdit();
                 DocumentTitle = item.Title;
                 OnPropertyChanged(nameof(DocumentBodyText));
             }
@@ -882,43 +943,93 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private async Task QuickEditAsync()
     {
+        var documentId = _currentDocumentId;
+        var baseVersion = _currentDocumentVersion;
+        var documentContent = AssembleDocumentContent();
+        var instruction = QuickEditInstruction;
+        var selection = RequestEditorSelection?.Invoke();
+        var hasSelection = selection is { } currentSelection
+                           && currentSelection.End > currentSelection.Start
+                           && !string.IsNullOrWhiteSpace(currentSelection.Text);
+        var selectionStart = hasSelection && selection is not null
+            ? Math.Clamp(Math.Min(selection.Start, selection.End), 0, documentContent.Length)
+            : 0;
+        var selectionEnd = hasSelection && selection is not null
+            ? Math.Clamp(Math.Max(selection.Start, selection.End), 0, documentContent.Length)
+            : documentContent.Length;
+        var selectedText = documentContent[selectionStart..selectionEnd];
+        if (string.IsNullOrWhiteSpace(documentId)
+            || string.IsNullOrWhiteSpace(selectedText)
+            || string.IsNullOrWhiteSpace(instruction))
+        {
+            StatusText = QuickAiHint;
+            return;
+        }
+
+        InvalidateQuickEditGeneration();
+        var generation = Interlocked.Increment(ref _quickEditGeneration);
+        var cancellation = new CancellationTokenSource();
+        _quickEditGenerationCts = cancellation;
+        IsQuickEditGenerating = true;
         try
         {
-            var selection = RequestEditorSelection?.Invoke();
-            var hasSelection = selection is { } currentSelection
-                               && currentSelection.End > currentSelection.Start
-                               && !string.IsNullOrWhiteSpace(currentSelection.Text);
-            var selectedText = hasSelection && selection is not null
-                ? selection.Text
-                : AssembleDocumentContent();
-            if (string.IsNullOrWhiteSpace(selectedText) || string.IsNullOrWhiteSpace(QuickEditInstruction))
-            {
-                StatusText = QuickAiHint;
-                return;
-            }
-            var documentContent = AssembleDocumentContent();
-            _pendingQuickEditRange = hasSelection && selection is not null
-                ? Utf8Range(documentContent, selection.Start, selection.End)
-                : Utf8Range(documentContent, 0, documentContent.Length);
             var result = await _backend.QuickEditAsync(new QuickEditRequest(
                 selectedText,
-                QuickEditInstruction,
-                string.IsNullOrWhiteSpace(_currentDocumentId) ? null : _currentDocumentId)).ConfigureAwait(true);
-            _pendingQuickEdit = result;
-            _pendingQuickEditBaseVersion = _currentDocumentVersion;
+                instruction,
+                documentId), cancellation.Token).ConfigureAwait(true);
+            if (generation != Volatile.Read(ref _quickEditGeneration)
+                || cancellation.IsCancellationRequested)
+            {
+                return;
+            }
+
+            var session = new QuickEditSession(
+                documentId,
+                baseVersion,
+                documentContent,
+                selectionStart,
+                selectionEnd,
+                result);
+            if (!session.MatchesCurrent(
+                    _currentDocumentId,
+                    _currentDocumentVersion,
+                    AssembleDocumentContent()))
+            {
+                StatusText = _displayNames.Text("ui.works.quick_edit.outdated");
+                return;
+            }
+
+            _pendingQuickEdit = session;
             ApplyQuickEditCommand.NotifyCanExecuteChanged();
-            QuickEditDiff = result.Diff;
-            StatusText = QuickEditDiffText;
+            var preview = QuickEditPreviewBuilder.Build(result.Diff);
+            QuickEditDiff = preview.Text;
+            StatusText = _displayNames.Text(preview.IsTruncated
+                ? "ui.works.quick_edit.preview_truncated"
+                : "ui.works.quick_edit.ready");
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // 文档切换、继续编辑或新一轮生成已使本次结果失效。
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            if (generation == Volatile.Read(ref _quickEditGeneration))
+            {
+                StatusText = ex.Message;
+            }
+        }
+        finally
+        {
+            if (generation == Volatile.Read(ref _quickEditGeneration))
+            {
+                _quickEditGenerationCts?.Dispose();
+                _quickEditGenerationCts = null;
+                IsQuickEditGenerating = false;
+            }
         }
     }
 
-    private QuickEditResult? _pendingQuickEdit;
-
-    private async Task ApplyQuickEditAsync()
+    private void ApplyQuickEdit()
     {
         if (_pendingQuickEdit is null)
         {
@@ -930,43 +1041,43 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             StatusText = NoDocumentText;
             return;
         }
-        try
-        {
-            var documentContent = AssembleDocumentContent();
-            var report = await _backend.ApplyQuickEditAsync(
+        var documentContent = AssembleDocumentContent();
+        if (!_pendingQuickEdit.TryApply(
                 _currentDocumentId,
-                _pendingQuickEditBaseVersion,
+                _currentDocumentVersion,
                 documentContent,
-                _pendingQuickEditRange ?? Utf8Range(documentContent, 0, documentContent.Length),
-                _pendingQuickEdit).ConfigureAwait(true);
-            _suppressDirtyTracking = true;
-            try
-            {
-                var document = await _backend.GetDocumentContentDetailsAsync(_currentDocumentId).ConfigureAwait(true);
-                DocumentContent = document.Content;
-                _currentDocumentPath = document.Metadata.Path;
-                _currentDocumentVersion = document.Metadata.Version;
-            }
-            finally
-            {
-                _suppressDirtyTracking = false;
-            }
-            if (report.Metadata is not null)
-            {
-                _currentDocumentPath = report.Metadata.Path;
-                _currentDocumentVersion = report.Metadata.Version;
-            }
-            CaptureSnapshot();
-            _pendingQuickEdit = null;
-            _pendingQuickEditRange = null;
-            _pendingQuickEditBaseVersion = null;
-            ApplyQuickEditCommand.NotifyCanExecuteChanged();
-            StatusText = _displayNames.Text("ui.common.configured");
-        }
-        catch (Exception ex)
+                out var updatedContent))
         {
-            StatusText = ex.Message;
+            InvalidateQuickEditGeneration();
+            StatusText = _displayNames.Text("ui.works.quick_edit.outdated");
+            return;
         }
+
+        DocumentContent = updatedContent;
+        _quickEditUndo = new QuickEditUndoState(
+            _currentDocumentId,
+            updatedContent,
+            documentContent);
+        UndoQuickEditCommand.NotifyCanExecuteChanged();
+        StatusText = _displayNames.Text("ui.works.quick_edit.applied_locally");
+    }
+
+    private void UndoQuickEdit()
+    {
+        if (_quickEditUndo is null
+            || !_quickEditUndo.TryUndo(
+                _currentDocumentId,
+                AssembleDocumentContent(),
+                out var restoredContent))
+        {
+            ClearQuickEditUndo();
+            StatusText = _displayNames.Text("ui.works.quick_edit.undo_unavailable");
+            return;
+        }
+
+        DocumentContent = restoredContent;
+        ClearQuickEditUndo();
+        StatusText = _displayNames.Text("ui.works.quick_edit.undone");
     }
 
     public async Task<bool> ConfirmLeaveIfNeededAsync()
@@ -995,6 +1106,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public async Task ReloadProjectDataAsync()
     {
+        InvalidateQuickEditGeneration();
+        ClearQuickEditUndo();
         await LoadWorksTreeAsync().ConfigureAwait(true);
         if (string.IsNullOrWhiteSpace(_currentDocumentId))
         {
@@ -1009,7 +1122,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             _currentDocumentPath = document.Metadata.Path;
             _currentDocumentVersion = document.Metadata.Version;
             DocumentTitle = Path.GetFileNameWithoutExtension(document.Metadata.Path);
-            ClearPendingQuickEdit();
         }
         catch (Exception ex)
         {
@@ -1041,7 +1153,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         try
         {
             DocumentContent = _savedSnapshot;
-            ClearPendingQuickEdit();
+            InvalidateQuickEditGeneration();
+            ClearQuickEditUndo();
             _documentDirty = false;
             RefreshDirtyState();
         }
@@ -1113,15 +1226,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private static string ProjectRelativePath(string path) =>
         ProjectPathHelper.ToProjectRelativePath(path);
 
-    private static TextRange Utf8Range(string document, int start, int end)
-    {
-        var length = document.Length;
-        var startIndex = Math.Clamp(Math.Min(start, end), 0, length);
-        var endIndex = Math.Clamp(Math.Max(start, end), 0, length);
-        return new TextRange(
-            Encoding.UTF8.GetByteCount(document[..startIndex]),
-            Encoding.UTF8.GetByteCount(document[..endIndex]));
-    }
 }
 
 public sealed record ExportFormatOption(string Value, string Label);

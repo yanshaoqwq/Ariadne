@@ -67,6 +67,66 @@ public sealed class CanvasHelpersTests
     }
 
     [Theory]
+    [InlineData(0, 0, 0, 0)]
+    [InlineData(120, 80, 12, 8)]
+    [InlineData(1400, 900, 130, 78)] // 夹在 140-10 / 84-6
+    public void MiniMapDotPosition_StaysInsideContent(double logicalX, double logicalY, double expectedMaxX, double expectedMaxY)
+    {
+        // 与 WorkflowNodeViewModel.MiniMapX/Y 相同公式（shipped 常量）
+        var mx = Math.Clamp(logicalX * NodePortSpec.MiniMapScale, 0, NodePortSpec.MiniMapContentWidth - 10);
+        var my = Math.Clamp(logicalY * NodePortSpec.MiniMapScale, 0, NodePortSpec.MiniMapContentHeight - 6);
+        Assert.InRange(mx, 0, NodePortSpec.MiniMapContentWidth - 10);
+        Assert.InRange(my, 0, NodePortSpec.MiniMapContentHeight - 6);
+        Assert.True(mx <= expectedMaxX + 1e-9 || expectedMaxX >= NodePortSpec.MiniMapContentWidth - 10);
+        Assert.True(my <= expectedMaxY + 1e-9 || expectedMaxY >= NodePortSpec.MiniMapContentHeight - 6);
+    }
+
+    [Fact]
+    public void NormalizeRect_AllowsDragAnyCorner()
+    {
+        var (x, y, w, h) = CanvasSelectionHelpers.NormalizeRect(100, 80, 20, 10);
+        Assert.Equal(20, x);
+        Assert.Equal(10, y);
+        Assert.Equal(80, w);
+        Assert.Equal(70, h);
+    }
+
+    [Theory]
+    [InlineData(10, 10, 200, 96, 0, 0, 50, 50, true)]   // 部分重叠
+    [InlineData(100, 100, 200, 96, 0, 0, 50, 50, false)] // 不相交
+    [InlineData(0, 0, 200, 96, 10, 10, 20, 20, true)]    // 框在节点内
+    public void NodeIntersectsRect_HitsWhenOverlap(
+        double nx, double ny, double nw, double nh,
+        double rx, double ry, double rw, double rh,
+        bool expected)
+    {
+        Assert.Equal(expected, CanvasSelectionHelpers.NodeIntersectsRect(nx, ny, nw, nh, rx, ry, rw, rh));
+    }
+
+    [Fact]
+    public void ExceedsMarqueeThreshold_SeparatesClickFromDrag()
+    {
+        Assert.False(CanvasSelectionHelpers.ExceedsMarqueeThreshold(2, 2, 4));
+        Assert.True(CanvasSelectionHelpers.ExceedsMarqueeThreshold(5, 0, 4));
+    }
+
+    [Theory]
+    [InlineData("a", "b", "a", true)]
+    [InlineData("a", "b", "b", true)]
+    [InlineData("a", "b", "c", false)]
+    public void EdgeTouchesNode_OnlyEndpoints(string src, string tgt, string node, bool expected)
+    {
+        Assert.Equal(expected, CanvasSelectionHelpers.EdgeTouchesNode(src, tgt, node));
+    }
+
+    [Fact]
+    public void EdgeTouchesAnyNode_MatchesSelectedSet()
+    {
+        Assert.True(CanvasSelectionHelpers.EdgeTouchesAnyNode("n1", "n2", new[] { "n9", "n2" }));
+        Assert.False(CanvasSelectionHelpers.EdgeTouchesAnyNode("n1", "n2", new[] { "n3" }));
+    }
+
+    [Theory]
     [InlineData(NodePortKind.Data, NodePortDirection.Out, NodePortKind.Data, NodePortDirection.In, true)]
     [InlineData(NodePortKind.Control, NodePortDirection.Out, NodePortKind.Control, NodePortDirection.In, true)]
     [InlineData(NodePortKind.Communication, NodePortDirection.Both, NodePortKind.Communication, NodePortDirection.Both, true)]

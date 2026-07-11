@@ -69,6 +69,10 @@ fn document_service_reads_and_writes_supported_documents() {
     let document_ref = service.document_ref_for_path(&path).unwrap();
 
     assert_eq!(report.index_invalidation.reason, "document_saved");
+    let pending = service.invalidation_outbox().pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].document_id, report.metadata.document_id);
+    assert_eq!(pending[0].source_version, report.metadata.version);
     assert_eq!(content.content, "# 第一章\n正文");
     assert_eq!(
         document_ref,
@@ -180,6 +184,185 @@ fn document_service_previews_and_applies_patch_with_checkpoint() {
     assert_eq!(fs::read_to_string(&path).unwrap(), "alpha delta gamma");
     assert_eq!(report.index_invalidation.reason, "patch_applied");
     assert_eq!(report.checkpoint.unwrap().node_id, "node-6");
+    let pending = service.invalidation_outbox().pending().unwrap();
+    assert!(pending.iter().any(|event| {
+        event.document_id == report.metadata.document_id
+            && event.source_version == report.metadata.version
+            && event.reason == "patch_applied"
+    }));
+}
+
+/// Git checkpoint 失败时正文必须恢复，调用方不会看到普通失败但文件已改变。
+#[test]
+fn document_service_rolls_back_patch_when_checkpoint_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let service = test_service(temp_dir.path());
+    let path = temp_dir.path().join("chapter.txt");
+    fs::write(&path, "alpha beta gamma").unwrap();
+    let document = service
+        .open_document(DocumentReadRequest {
+            path: path.clone(),
+            format: None,
+        })
+        .unwrap();
+    let beta_start = document.content.find("beta").unwrap() as u64;
+    let patch = DocumentPatch {
+        document_id: document.metadata.document_id,
+        base_version: Some(document.metadata.version),
+        hunks: vec![PatchHunk {
+            range: TextRange {
+                start: beta_start,
+                end: beta_start + 4,
+            },
+            replacement: "delta".to_owned(),
+        }],
+    };
+    let non_repository = tempfile::tempdir().unwrap();
+    let git = GitService::new(non_repository.path());
+
+    let error = service
+        .apply_patch(
+            &patch,
+            Some(&git),
+            Some(&PatchCheckpointRequest {
+                node_id: "node-failing-checkpoint".to_owned(),
+                message: None,
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("document was rolled back"));
+    assert_eq!(fs::read_to_string(path).unwrap(), "alpha beta gamma");
+    assert!(service.invalidation_outbox().pending().unwrap().is_empty());
+}
+
+#[test]
+fn index_invalidation_outbox_claims_retries_and_completes_events() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let service = test_service(temp_dir.path());
+    let path = temp_dir.path().join("chapter.md");
+    let report = service
+        .save_document(DocumentWriteRequest {
+            path,
+            content: "第一版".to_owned(),
+            format: None,
+            base_version: None,
+        })
+        .unwrap();
+
+    let claimed = service.invalidation_outbox().claim_next().unwrap().unwrap();
+    assert_eq!(claimed.document_id, report.metadata.document_id);
+    assert_eq!(claimed.status, "processing");
+    assert!(service
+        .invalidation_outbox()
+        .claim_next()
+        .unwrap()
+        .is_none());
+
+    service
+        .invalidation_outbox()
+        .retry(&claimed.event_id)
+        .unwrap();
+    let retried = service.invalidation_outbox().claim_next().unwrap().unwrap();
+    assert_eq!(retried.attempt_count, 1);
+    service
+        .invalidation_outbox()
+        .complete(&retried.event_id)
+        .unwrap();
+    assert!(service.invalidation_outbox().pending().unwrap().is_empty());
+}
+
+#[test]
+fn index_invalidation_outbox_recovers_events_interrupted_by_process_exit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let service = test_service(temp_dir.path());
+    let path = temp_dir.path().join("chapter.md");
+    service
+        .save_document(DocumentWriteRequest {
+            path,
+            content: "待恢复索引".to_owned(),
+            format: None,
+            base_version: None,
+        })
+        .unwrap();
+
+    let claimed = service.invalidation_outbox().claim_next().unwrap().unwrap();
+    assert_eq!(claimed.status, "processing");
+    assert_eq!(
+        service.invalidation_outbox().requeue_interrupted().unwrap(),
+        1
+    );
+
+    let recovered = service.invalidation_outbox().claim_next().unwrap().unwrap();
+    assert_eq!(recovered.event_id, claimed.event_id);
+    assert_eq!(recovered.attempt_count, 1);
+}
+
+#[test]
+fn index_invalidation_outbox_dead_letters_poison_event_and_unblocks_queue() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = test_service(temp.path());
+    let poison_id = service
+        .invalidation_outbox()
+        .prepare("poison.md", "save", "v1", false)
+        .unwrap();
+    service.invalidation_outbox().activate(&poison_id).unwrap();
+    let healthy_id = service
+        .invalidation_outbox()
+        .prepare("healthy.md", "save", "v1", false)
+        .unwrap();
+    service.invalidation_outbox().activate(&healthy_id).unwrap();
+
+    for attempt in 1..=5 {
+        let claimed = service.invalidation_outbox().claim_next().unwrap().unwrap();
+        assert_eq!(claimed.event_id, poison_id);
+        let dead_lettered = service
+            .invalidation_outbox()
+            .retry(&claimed.event_id)
+            .unwrap();
+        assert_eq!(dead_lettered, attempt == 5);
+    }
+
+    let next = service.invalidation_outbox().claim_next().unwrap().unwrap();
+    assert_eq!(next.event_id, healthy_id);
+}
+
+#[test]
+fn project_maintenance_blocks_writes_until_completed_and_preserves_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = test_service(temp.path());
+    let outbox = service.invalidation_outbox();
+
+    outbox
+        .begin_maintenance("git_restore", "stopping_runtime")
+        .unwrap();
+    assert!(outbox
+        .ensure_available()
+        .unwrap_err()
+        .to_string()
+        .contains("git_restore"));
+    outbox
+        .update_maintenance_phase("rebuilding_full_text_indexes")
+        .unwrap();
+    outbox.complete_maintenance("completed").unwrap();
+    outbox.ensure_available().unwrap();
+
+    outbox
+        .begin_maintenance("git_restore", "checking_out_branch")
+        .unwrap();
+    outbox
+        .fail_maintenance("restore_incomplete", "checkout failed")
+        .unwrap();
+    let state = outbox.maintenance_state().unwrap().unwrap();
+    assert_eq!(state.status, "failed");
+    assert_eq!(state.error.as_deref(), Some("checkout failed"));
+    assert!(outbox.ensure_available().is_err());
+
+    outbox.begin_maintenance("git_restore", "retrying").unwrap();
+    assert_eq!(
+        outbox.maintenance_state().unwrap().unwrap().status,
+        "active"
+    );
 }
 
 /// 验证父目录穿越会被路径沙箱拒绝。

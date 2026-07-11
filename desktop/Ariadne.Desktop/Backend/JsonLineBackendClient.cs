@@ -335,9 +335,9 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
-    public Task<WorkflowGraphData> PackWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, string? subworkflowNodeId = null, string? title = null, CancellationToken cancellationToken = default)
+    public Task<WorkflowPackReport> PackWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, string? subworkflowNodeId = null, string? title = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<WorkflowGraphData>("pack_workflow_selection", new
+        return InvokeRequiredAsync<WorkflowPackReport>("pack_workflow_selection", new
         {
             workflow_id = workflowId,
             selected_node_ids = selectedNodeIds,

@@ -11,15 +11,16 @@ use ariadne::commands::{
     get_budget_status_impl, get_display_name_language_pack_template, get_document_content_impl,
     get_document_tree_impl, get_git_history_impl, get_git_repository_status_impl,
     get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
-    get_provider_config_impl, get_rag_settings_impl, get_template_repository_settings,
-    get_template_repository_settings_impl, get_workflow_settings_impl, import_chapter,
+    get_provider_config_impl, get_rag_settings_impl, get_sidebar_badges,
+    get_template_repository_settings, get_template_repository_settings_impl,
+    get_workflow_settings_impl, import_chapter, list_confirmations,
     list_external_workflow_tools_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
-    open_project, pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl, query_run_logs,
-    resolve_confirmation_impl, resolve_project_references, restore_to_new_branch, run_workflow,
-    run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
-    save_document_content_impl, save_git_settings_impl, save_node_preset_settings_impl,
-    save_permissions_settings_impl, save_provider_key_impl, save_provider_settings_impl,
-    save_rag_settings_impl, save_template_repository_settings,
+    open_project, pack_workflow_selection_impl, process_index_outbox_impl, project_ai_chat,
+    project_ai_chat_impl, query_run_logs, resolve_confirmation_impl, resolve_project_references,
+    restore_to_new_branch, run_workflow, run_workflow_impl, save_app_settings_impl,
+    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
+    save_node_preset_settings_impl, save_permissions_settings_impl, save_provider_key_impl,
+    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings,
     save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
     update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
     AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
@@ -34,9 +35,11 @@ use ariadne::contracts::{
     WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
 use ariadne::diagnostics::DiagnosticStatus;
+use ariadne::documents::IndexInvalidationOutbox;
 use ariadne::frontend::{
     ChapterImportRequest, ConfirmationLogEntry, ConfirmationLogState, FileConfirmationLogStore,
 };
+use ariadne::retrieval::{FullTextSearchRequest, FullTextStore, TantivyFullTextStore};
 use ariadne::workflow::{
     RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRunState,
     WorkflowRuntime, WorkflowRuntimeStore,
@@ -82,6 +85,47 @@ fn document_commands_read_tree_and_round_trip_content() {
 
     assert_eq!(content, "正文");
     assert!(format!("{tree:?}").contains("chapter.md"));
+}
+
+#[test]
+fn project_indexing_worker_consumes_persisted_document_event() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let path = temp.path().join("documents").join("chapter.md");
+    let content = "银色线索在旧钟楼再次出现";
+    std::fs::write(&path, content).unwrap();
+    let document_id = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let source_version = test_content_version(content.as_bytes());
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    let event_id = outbox
+        .prepare(&document_id, "document_saved", &source_version, false)
+        .unwrap();
+    outbox.activate(&event_id).unwrap();
+
+    assert_eq!(process_index_outbox_impl(temp.path()).unwrap(), 1);
+
+    let tantivy = TantivyFullTextStore::open(temp.path().join(".indexes/tantivy")).unwrap();
+    let results = tantivy
+        .search(FullTextSearchRequest::new("线索", 10))
+        .unwrap();
+    assert!(!results.is_empty());
+    assert!(results.iter().all(|result| {
+        result
+            .metadata
+            .get("source_version")
+            .and_then(|value| value.as_str())
+            == Some(source_version.as_str())
+    }));
+}
+
+fn test_content_version(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[test]
@@ -574,7 +618,7 @@ fn pack_workflow_selection_command_persists_subworkflow_graph() {
     .unwrap();
     let loaded = load_workflow_graph_impl(temp.path(), Some("pack-flow".to_owned())).unwrap();
 
-    assert_eq!(report.subworkflow_node_id, NodeId::from("sub-review"));
+    assert_eq!(report.subworkflow_node_id, "sub-review");
     assert_eq!(loaded.nodes.len(), 3);
     assert!(loaded.nodes.iter().any(|node| {
         node.id == "sub-review"
@@ -1464,6 +1508,11 @@ fn automation_settings_read_old_policy_code_but_write_dual_policies_only() {
             {
                 "confirmation_kind": "chapter_write",
                 "policy": "auto_approve"
+            },
+            {
+                "confirmation_kind": "future_extension_policy",
+                "normal_policy": "manual_review",
+                "auto_mode_policy": "auto_approval"
             }
         ]))
         .unwrap(),
@@ -1484,12 +1533,28 @@ fn automation_settings_read_old_policy_code_but_write_dual_policies_only() {
         chapter.auto_mode_policy,
         ConfirmationAutoModePolicy::AutoApproval
     );
+    assert!(automation
+        .confirmation_policies
+        .iter()
+        .any(|item| item.confirmation_kind == "future_extension_policy"));
+    let chapter_position = automation
+        .confirmation_policies
+        .iter()
+        .position(|item| item.confirmation_kind == "chapter_write")
+        .unwrap();
+    let extension_position = automation
+        .confirmation_policies
+        .iter()
+        .position(|item| item.confirmation_kind == "future_extension_policy")
+        .unwrap();
+    assert!(chapter_position < extension_position);
 
     save_automation_settings_impl(temp.path(), automation).unwrap();
     let saved = std::fs::read_to_string(settings_path).unwrap();
     assert!(saved.contains("\"normal_policy\""));
     assert!(saved.contains("\"auto_mode_policy\""));
     assert!(!saved.contains("\"policy\""));
+    assert!(saved.contains("future_extension_policy"));
 }
 
 #[test]
@@ -1675,6 +1740,14 @@ fn git_restore_command_records_rebuild_followup_log() {
     );
     std::fs::write(temp.path().join("documents").join("chapter.md"), "base").unwrap();
     let checkpoint = create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
+    let runtime_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let mut active = WorkflowRunState::new(
+        WorkflowId::from("restore-workflow"),
+        RunId::from("restore-run"),
+    );
+    active.status = RunStatus::Paused;
+    active.pause_reason = Some("waiting".to_owned());
+    runtime_store.save_state(&active).unwrap();
     let state = AriadneAppState::new(
         temp.path(),
         app_state.path(),
@@ -1697,12 +1770,94 @@ fn git_restore_command_records_rebuild_followup_log() {
     .unwrap();
 
     assert_eq!(report.new_branch, "restore/base");
-    assert!(report.index_rebuild_required);
-    assert!(report.runtime_rebind_required);
+    assert!(!report.index_rebuild_required);
+    assert!(!report.runtime_rebind_required);
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].level, ariadne::frontend::UiRunLogLevel::Warning);
     assert_eq!(logs[0].metadata["source"], "git_restore");
     assert_eq!(logs[0].metadata["new_branch"], "restore/base");
+    let stopped = runtime_store
+        .load_state(
+            &WorkflowId::from("restore-workflow"),
+            &RunId::from("restore-run"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(stopped.status, RunStatus::Stopped);
+    assert_eq!(stopped.control, ariadne::contracts::RunControl::Stop);
+    assert!(stopped.pause_reason.is_none());
+}
+
+#[test]
+fn failed_git_restore_persists_maintenance_gate_for_document_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    run_git(temp.path(), ["config", "user.name", "Ariadne Test"]);
+    run_git(
+        temp.path(),
+        ["config", "user.email", "ariadne@example.test"],
+    );
+    let document = temp.path().join("documents").join("chapter.md");
+    std::fs::write(&document, "base").unwrap();
+    let checkpoint = create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
+    std::fs::write(&document, "dirty").unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let restore_error =
+        restore_to_new_branch(&state, checkpoint.commit_id, "restore/blocked".to_owned())
+            .unwrap_err();
+    assert!(restore_error.contains("worktree must be clean"));
+
+    let write_error = save_document_content_impl(
+        temp.path(),
+        document.to_string_lossy().into_owned(),
+        "must not write".to_owned(),
+    )
+    .unwrap_err();
+    assert!(write_error.contains("project maintenance blocks writes"));
+    assert_eq!(std::fs::read_to_string(document).unwrap(), "dirty");
+
+    let run_error = run_workflow_impl(
+        temp.path(),
+        &MemorySecretStore::default(),
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "must-not-start".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap_err();
+    assert!(run_error.contains("project maintenance blocks writes"));
+}
+
+#[test]
+fn pending_confirmations_distinguish_missing_runtime_from_corrupt_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let runtime_path = temp.path().join(ariadne::workflow::RUNTIME_DB_FILE);
+
+    assert!(list_confirmations(&state).unwrap().is_empty());
+    assert!(
+        !runtime_path.exists(),
+        "empty state must not create runtime.db"
+    );
+
+    std::fs::write(&runtime_path, b"not a sqlite database").unwrap();
+    let list_error = list_confirmations(&state).unwrap_err();
+    assert!(list_error.contains("sqlite"));
+    let badge_error = get_sidebar_badges(&state).unwrap_err();
+    assert!(badge_error.contains("sqlite"));
 }
 
 #[test]
@@ -1866,6 +2021,106 @@ fn project_ai_chat_sends_chat_history_through_llm_provider() {
 }
 
 #[test]
+fn project_ai_chat_bounds_history_to_model_context_window() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = vec![0u8; 65536];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(!request.contains("oldest-history-marker"));
+        assert!(request.contains("newest-history-marker"));
+        let response_body = r#"{
+          "model":"bounded-chat",
+          "choices":[{"message":{"content":"bounded answer"},"finish_reason":"stop"}],
+          "usage":{"prompt_tokens":1000,"completion_tokens":4}
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let secrets = MemorySecretStore::default();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "bounded_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Bounded Chat".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            models: vec![ModelConfig {
+                model_id: "bounded-chat".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(4096),
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+        },
+    )
+    .unwrap();
+    save_provider_key_impl(
+        temp.path(),
+        &secrets,
+        "bounded_chat".to_owned(),
+        "local-key".to_owned(),
+    )
+    .unwrap();
+
+    let mut history = Vec::new();
+    for index in 0..30 {
+        let marker = if index == 0 {
+            "oldest-history-marker"
+        } else if index == 29 {
+            "newest-history-marker"
+        } else {
+            "history"
+        };
+        history.push(ProjectAiChatMessage {
+            role: ProjectAiChatRole::User,
+            content: format!("{marker}-{index}-{}", "x".repeat(500)),
+        });
+        history.push(ProjectAiChatMessage {
+            role: ProjectAiChatRole::Assistant,
+            content: format!("answer-{index}-{}", "y".repeat(500)),
+        });
+    }
+    let original_len = history.len();
+    let response = project_ai_chat_impl(
+        temp.path(),
+        &secrets,
+        ProjectAiRequest {
+            message: "current question".to_owned(),
+            chat_history: history,
+            references: Vec::new(),
+            workflow_id_to_run: None,
+            append_memory: None,
+        },
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    assert!(response.history_truncated);
+    assert_eq!(response.context_limit_tokens, 4096);
+    assert!(response.estimated_input_tokens < 4096);
+    assert!(response.chat_history.len() < original_len + 2);
+    assert_eq!(
+        response.chat_history.last().unwrap().content,
+        "bounded answer"
+    );
+}
+
+#[test]
 fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
     let temp = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
@@ -1924,7 +2179,8 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
             assert!(request.contains("\"name\":\"list_start_nodes\""));
             assert!(request.contains("\"name\":\"draft_tool\""));
             let response_body = match round {
-                0 => r#"{
+                0 => {
+                    r#"{
                   "model":"local-chat",
                   "choices":[{
                     "message":{
@@ -1938,8 +2194,10 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
                     "finish_reason":"tool_calls"
                   }],
                   "usage":{"prompt_tokens":16,"completion_tokens":1}
-                }"#,
-                1 => r#"{
+                }"#
+                }
+                1 => {
+                    r#"{
                   "model":"local-chat",
                   "choices":[{
                     "message":{
@@ -1953,15 +2211,18 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
                     "finish_reason":"tool_calls"
                   }],
                   "usage":{"prompt_tokens":20,"completion_tokens":1}
-                }"#,
-                _ => r#"{
+                }"#
+                }
+                _ => {
+                    r#"{
                   "model":"local-chat",
                   "choices":[{
                     "message":{"content":"已按起点启动","tool_calls":[]},
                     "finish_reason":"stop"
                   }],
                   "usage":{"prompt_tokens":24,"completion_tokens":4}
-                }"#,
+                }"#
+                }
             };
             respond(&mut stream, response_body);
         }

@@ -110,6 +110,9 @@ fn run_workflow_command(args: &[String]) -> Result<Value, String> {
                 run_id: Some(run_id),
                 node_id: options.node.clone(),
                 query: options.query.clone(),
+                after_timestamp_ms: None,
+                after_log_id: None,
+                limit: options.limit,
             };
             commands::query_run_logs(&state, Some(query)).map(|items| json!({ "items": items }))
         }

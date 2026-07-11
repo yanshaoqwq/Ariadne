@@ -461,10 +461,20 @@ pub struct StoryEvent {
 }
 
 impl StoryEvent {
-    /// 校验事件必须有 id 和概括。
+    /// 校验事件必须有 id、概括及可追溯的故事段/章节引用。
     pub fn validate(&self) -> crate::contracts::CoreResult<()> {
         validate_non_empty("event_id", &self.event_id)?;
         validate_non_empty("summary", &self.summary)?;
+        if self.segment_ids.is_empty() {
+            return Err(crate::contracts::CoreError::validation(
+                "story event requires at least one segment_id",
+            ));
+        }
+        if self.chapter_ids.is_empty() {
+            return Err(crate::contracts::CoreError::validation(
+                "story event requires at least one chapter_id",
+            ));
+        }
         Ok(())
     }
 }
@@ -1155,6 +1165,7 @@ impl SummaryPipelineStep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryPipelineReport {
     pub chapter_id: String,
+    pub revision_id: String,
     pub completed_steps: Vec<SummaryPipelineStep>,
     pub paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -145,6 +145,7 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
                                 input_cost_per_million_tokens: None,
                                 output_cost_per_million_tokens: None,
                                 max_output_tokens: None,
+                                max_context_tokens: None,
                             },
                             messages: vec![LlmMessage::user(render_prompt(
                                 &config.prompt_template,

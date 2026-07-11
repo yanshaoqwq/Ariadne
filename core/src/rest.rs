@@ -423,6 +423,19 @@ fn run_log_query_from_rest(
         run_id: Some(run_id),
         node_id: query.get("node_id").cloned(),
         query: query.get("query").or_else(|| query.get("q")).cloned(),
+        after_timestamp_ms: query
+            .get("after_timestamp_ms")
+            .map(|value| {
+                value.parse::<u64>().map_err(|_| {
+                    RestRouteError::new(400, "after_timestamp_ms must be an unsigned integer")
+                })
+            })
+            .transpose()?,
+        after_log_id: query.get("after_log_id").cloned(),
+        limit: query
+            .get("limit")
+            .map(|value| parse_usize("limit", value))
+            .transpose()?,
     })
 }
 

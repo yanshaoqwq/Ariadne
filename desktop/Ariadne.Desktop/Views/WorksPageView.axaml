@@ -154,8 +154,16 @@
                   </Grid>
                   <TextBox Text="{Binding QuickEditInstruction, Mode=TwoWay}" PlaceholderText="{Binding QuickEditPlaceholder}" />
                   <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption" />
-                  <TextBox Text="{Binding QuickEditDiff}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="110" IsReadOnly="True" />
-                  <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding QuickEditApplyText}" Command="{Binding ApplyQuickEditCommand}" />
+                  <TextBox Text="{Binding QuickEditDiff}"
+                           AcceptsReturn="True"
+                           TextWrapping="Wrap"
+                           MinHeight="110"
+                           MaxHeight="280"
+                           IsReadOnly="True" />
+                  <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                    <Button Classes="secondary" Content="{Binding QuickEditUndoText}" Command="{Binding UndoQuickEditCommand}" />
+                    <Button Classes="primary" Content="{Binding QuickEditApplyText}" Command="{Binding ApplyQuickEditCommand}" />
+                  </StackPanel>
                 </StackPanel>
               </Border>
             </Grid>

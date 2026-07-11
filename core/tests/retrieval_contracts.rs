@@ -1,18 +1,142 @@
 use std::net::TcpListener;
 use std::sync::Arc;
 
+use ariadne::documents::IndexInvalidationOutbox;
 use ariadne::retrieval::{
     recover_retrieval_components, select_available_port, ChunkDocument, FullTextRecord,
-    FullTextSearchRequest, HybridSearchEngine, HybridSearchRequest, MemoryFullTextStore,
-    MemoryVectorStore, RebuildStatus, RetrievalRecoveryAction, RetrievalSource, SidecarState,
-    SqliteFullTextStore, StoreStatus, TantivyFullTextStore, ThreeWayHybridSearchEngine,
-    VectorRecord, VectorSearchRequest, MAX_HYBRID_SEARCH_LIMIT,
+    FullTextSearchRequest, HybridSearchEngine, HybridSearchRequest, IndexingWorker,
+    MemoryFullTextStore, MemoryVectorStore, RebuildStatus, RetrievalRecoveryAction,
+    RetrievalSource, SidecarState, SqliteFullTextStore, StoreStatus, TantivyFullTextStore,
+    ThreeWayHybridSearchEngine, VectorRecord, VectorSearchRequest, MAX_HYBRID_SEARCH_LIMIT,
 };
 use ariadne::retrieval::{
     FullTextStore, HybridSearch, QdrantSidecarConfig, QdrantSidecarSupervisor,
     SidecarProcessRunner, VectorStore,
 };
 use std::process::{Child, Command};
+
+#[test]
+fn indexing_worker_consumes_outbox_and_preserves_utf8_source_versions() {
+    let temp = tempfile::tempdir().unwrap();
+    let document = temp.path().join("chapter.md");
+    let content = "第一幕银色线索。第二幕人物重逢。第三幕真相揭晓。";
+    std::fs::write(&document, content).unwrap();
+    let document_id = document
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let source_version = test_content_version(content.as_bytes());
+    let outbox = IndexInvalidationOutbox::new(temp.path().join("outbox.db"));
+    let event_id = outbox
+        .prepare(&document_id, "document_saved", &source_version, false)
+        .unwrap();
+    outbox.activate(&event_id).unwrap();
+    let tantivy = Arc::new(MemoryFullTextStore::new());
+    let sqlite = Arc::new(MemoryFullTextStore::new());
+    let worker =
+        IndexingWorker::new(outbox.clone(), tantivy.clone(), sqlite.clone(), 8, 2).unwrap();
+
+    let report = worker.process_next().unwrap().unwrap();
+
+    assert!(report.indexed_chunks >= 3);
+    assert_eq!(report.source_version, source_version);
+    let results = tantivy
+        .search(FullTextSearchRequest::new("人物", 10))
+        .unwrap();
+    assert!(!results.is_empty());
+    assert!(results.iter().all(|result| {
+        result
+            .metadata
+            .get("source_version")
+            .and_then(|value| value.as_str())
+            == Some(source_version.as_str())
+            && result.spans.iter().all(|span| {
+                span.version.as_deref() == Some(source_version.as_str())
+                    && span.range.end as usize <= content.len()
+            })
+    }));
+    assert!(outbox.pending().unwrap().is_empty());
+}
+
+#[test]
+fn indexing_worker_supersedes_stale_save_without_blocking_latest_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let document = temp.path().join("chapter.md");
+    std::fs::write(&document, "旧版本").unwrap();
+    let outbox = IndexInvalidationOutbox::new(temp.path().join("outbox.db"));
+    let stale_id = outbox
+        .prepare(
+            document.to_str().unwrap(),
+            "save",
+            "0000000000000000",
+            false,
+        )
+        .unwrap();
+    outbox.activate(&stale_id).unwrap();
+
+    std::fs::write(&document, "最新线索").unwrap();
+    let latest_version = test_content_version("最新线索".as_bytes());
+    let latest_id = outbox
+        .prepare(document.to_str().unwrap(), "save", &latest_version, false)
+        .unwrap();
+    outbox.activate(&latest_id).unwrap();
+
+    let tantivy = Arc::new(MemoryFullTextStore::new());
+    let sqlite = Arc::new(MemoryFullTextStore::new());
+    let worker = IndexingWorker::new(outbox.clone(), tantivy.clone(), sqlite, 8, 2).unwrap();
+    let report = worker.process_next().unwrap().unwrap();
+
+    assert_eq!(report.event_id, latest_id);
+    assert_eq!(report.source_version, latest_version);
+    assert!(outbox.pending().unwrap().is_empty());
+    let results = tantivy
+        .search(FullTextSearchRequest::new("线索", 10))
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].snippet.contains("最新线索"));
+}
+
+#[test]
+fn indexing_worker_executes_project_full_rebuild_event() {
+    let temp = tempfile::tempdir().unwrap();
+    let documents = temp.path().join("documents");
+    std::fs::create_dir_all(&documents).unwrap();
+    std::fs::write(documents.join("chapter.md"), "回档后的中文线索").unwrap();
+    let outbox = IndexInvalidationOutbox::new(temp.path().join("outbox.db"));
+    let event_id = outbox
+        .prepare(
+            temp.path().to_str().unwrap(),
+            "git_restore_full_rebuild",
+            "commit-1",
+            true,
+        )
+        .unwrap();
+    outbox.activate(&event_id).unwrap();
+    let tantivy = Arc::new(MemoryFullTextStore::new());
+    let sqlite = Arc::new(MemoryFullTextStore::new());
+    let worker = IndexingWorker::new(outbox.clone(), tantivy.clone(), sqlite, 8, 2).unwrap();
+
+    let report = worker.process_next().unwrap().unwrap();
+
+    assert_eq!(report.event_id, event_id);
+    assert!(report.indexed_chunks > 0);
+    assert!(!report.superseded);
+    assert!(outbox.pending().unwrap().is_empty());
+    assert!(!tantivy
+        .search(FullTextSearchRequest::new("线索", 10))
+        .unwrap()
+        .is_empty());
+}
+
+fn test_content_version(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
 
 #[test]
 fn vector_and_full_text_stores_return_referenced_results() {
@@ -253,7 +377,11 @@ fn sidecar_supervisor_reports_crash_as_unavailable() {
 struct NoopSidecarRunner;
 
 impl SidecarProcessRunner for NoopSidecarRunner {
-    fn spawn(&self, _config: &QdrantSidecarConfig, _port: u16) -> ariadne::contracts::CoreResult<Child> {
+    fn spawn(
+        &self,
+        _config: &QdrantSidecarConfig,
+        _port: u16,
+    ) -> ariadne::contracts::CoreResult<Child> {
         Command::new("sh")
             .arg("-c")
             .arg("sleep 1")

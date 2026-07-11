@@ -77,6 +77,12 @@ public static class NodeConfigData
             }
         }
 
+        // 新建节点也写入统一配置版本；旧节点加载时的更高版本由 opaque 数据保留。
+        if (!data.ContainsKey("schema_version"))
+        {
+            data["schema_version"] = 1;
+        }
+
         data["name"] = name ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(userNote))
         {

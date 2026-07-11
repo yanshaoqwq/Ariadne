@@ -16,6 +16,7 @@ use crate::providers::{
     LlmProvider, LlmRequest, LlmResponse, ProviderCallContext, ProviderExecutor, SearchProvider,
     SearchProviderRequest,
 };
+use crate::retrieval::{HybridSearch, HybridSearchRequest};
 use crate::skills::{SkillExecutor, SkillManifest, SkillRunRequest};
 use crate::workflow::{
     PatchWriteBackState, RuntimeReferenceResolver, WorkflowExportRequest, WorkflowExportSink,
@@ -235,9 +236,16 @@ pub fn apply_confirmed_patch(
 /// LLM 节点配置。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct WorkflowLlmNodeConfig {
-    pub provider_id: String,
-    pub model_id: String,
-    pub prompt_alias: String,
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 }
@@ -248,8 +256,46 @@ pub fn execute_llm_node<L: CostLedger>(
     provider: &dyn LlmProvider,
     ledger: &L,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_llm_node_with_defaults(request, provider, ledger, None, None)
+}
+
+/// 使用项目默认 provider/model 执行 UI 创建的 LLM/写作节点。
+pub fn execute_llm_node_with_defaults<L: CostLedger>(
+    request: WorkflowNodeExecutionRequest,
+    provider: &dyn LlmProvider,
+    ledger: &L,
+    default_provider_id: Option<&str>,
+    default_model_id: Option<&str>,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
     let config = serde_json::from_value::<WorkflowLlmNodeConfig>(request.config.clone())?;
-    let prompt = input_text(&request.inputs, &config.prompt_alias)?;
+    let provider_id = config
+        .provider_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(default_provider_id)
+        .ok_or_else(|| CoreError::validation("LLM node provider_id is not configured"))?;
+    let model_id = config
+        .model_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(default_model_id)
+        .ok_or_else(|| CoreError::validation("LLM node model_id is not configured"))?;
+    let input_prompt = resolve_llm_input_prompt(&request.inputs, config.prompt_alias.as_deref())?;
+    let prompt_template = config
+        .prompt_template
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let prompt = match (prompt_template, input_prompt) {
+        (Some(template), Some(input)) => format!("{template}\n\n{input}"),
+        (Some(template), None) => template.to_owned(),
+        (None, Some(input)) => input,
+        (None, None) => {
+            return Err(CoreError::validation(
+                "LLM node requires prompt_template or a text input",
+            ))
+        }
+    };
     let mut messages = Vec::new();
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(crate::providers::LlmMessage {
@@ -265,7 +311,7 @@ pub fn execute_llm_node<L: CostLedger>(
     let response = executor.complete_llm(
         provider,
         &ProviderCallContext {
-            provider_id: config.provider_id.clone(),
+            provider_id: provider_id.to_owned(),
             workflow_id: Some(request.workflow_id.clone()),
             run_id: Some(request.run_id.clone()),
             node_id: Some(request.node_id.clone()),
@@ -275,7 +321,7 @@ pub fn execute_llm_node<L: CostLedger>(
             metadata: request.metadata.clone(),
         },
         LlmRequest {
-            model_id: config.model_id,
+            model_id: model_id.to_owned(),
             messages,
             tools: Vec::new(),
             temperature: None,
@@ -285,6 +331,29 @@ pub fn execute_llm_node<L: CostLedger>(
         },
     )?;
     llm_response_to_output(response)
+}
+
+fn resolve_llm_input_prompt(
+    inputs: &PortMap,
+    prompt_alias: Option<&str>,
+) -> CoreResult<Option<String>> {
+    if let Some(alias) = prompt_alias
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+    {
+        return input_text(inputs, alias).map(Some);
+    }
+    for alias in ["prompt", "input", "text"] {
+        if inputs.contains_key(alias) {
+            return input_text(inputs, alias).map(Some);
+        }
+    }
+    if inputs.len() == 1 {
+        if let Some(alias) = inputs.keys().next() {
+            return input_text(inputs, alias).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 /// Summarizer 节点配置：四步总结生产链的接线参数。
@@ -317,7 +386,6 @@ pub fn execute_summarizer_node<L: CostLedger>(
     project_root: &Path,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
     use crate::contracts::{AutoModeState, RunControl};
-    use crate::rag::memory::MemoryWritingKnowledgeBase;
     use crate::rag::models::{ConfirmationState, WritingConfirmationPolicy};
     use crate::rag::pipeline::SummaryPipelineExecutor;
     use crate::rag::store::SqliteWritingKnowledgeStore;
@@ -330,9 +398,9 @@ pub fn execute_summarizer_node<L: CostLedger>(
 
     // 加载持久化知识库（跨章、跨运行存活）；首次运行则得到空库。
     let store = SqliteWritingKnowledgeStore::open(project_root)?;
-    let knowledge = store
-        .load_knowledge()
-        .unwrap_or_else(|_| MemoryWritingKnowledgeBase::new());
+    // 只有迁移后的空数据库才代表新项目；损坏、权限或 JSON 错误必须阻断总结，
+    // 不能静默创建空知识库后覆盖已有作品事实。
+    let knowledge = store.load_knowledge()?;
 
     // 四步总结 → 组装 draft。
     let summarizer = SummarizerExecutor::new(
@@ -474,6 +542,35 @@ pub fn execute_search_node<L: CostLedger>(
     Ok(WorkflowNodeExecutionOutput {
         outputs,
         metadata: json!({ "cost_usd": response.cost_usd }),
+        ..WorkflowNodeExecutionOutput::default()
+    })
+}
+
+/// 项目内 RAG 搜索节点配置；与外部 Web SearchProvider 明确分离。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct WorkflowProjectSearchNodeConfig {
+    pub query_alias: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// 使用项目混合索引执行 search 节点。
+pub fn execute_project_search_node(
+    request: WorkflowNodeExecutionRequest,
+    retrieval: &dyn HybridSearch,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
+    let config = serde_json::from_value::<WorkflowProjectSearchNodeConfig>(request.config)?;
+    let query = input_text(&request.inputs, &config.query_alias)?;
+    let limit = config.limit.unwrap_or(10);
+    let results = retrieval.search(HybridSearchRequest::new(query, None, limit))?;
+    let mut outputs = PortMap::new();
+    outputs.insert("results".to_owned(), PortValue::inline(json!(results)));
+    Ok(WorkflowNodeExecutionOutput {
+        outputs,
+        metadata: json!({
+            "retrieval_scope": "project",
+            "result_count": results.len(),
+        }),
         ..WorkflowNodeExecutionOutput::default()
     })
 }

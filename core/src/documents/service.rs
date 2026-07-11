@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use crate::contracts::artifacts::{ArtifactDescriptor, DocumentPatch};
@@ -11,6 +12,7 @@ use crate::documents::models::{
     DocumentWriteRequest, IndexInvalidation, PatchApplyReport, PatchCheckpointRequest,
     PatchPreview,
 };
+use crate::documents::IndexInvalidationOutbox;
 use crate::git::GitService;
 
 /// 文档和 Artifact 的文件系统服务。
@@ -18,15 +20,28 @@ use crate::git::GitService;
 pub struct FileDocumentService {
     permissions: PermissionPolicy,
     artifact_root: PathBuf,
+    invalidation_outbox: IndexInvalidationOutbox,
 }
 
 impl FileDocumentService {
     /// 创建文件系统文档服务。
     pub fn new(permissions: PermissionPolicy, artifact_root: impl Into<PathBuf>) -> Self {
+        let artifact_root = artifact_root.into();
+        let runtime_root = artifact_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| artifact_root.clone());
         Self {
             permissions,
-            artifact_root: artifact_root.into(),
+            artifact_root,
+            invalidation_outbox: IndexInvalidationOutbox::new(
+                runtime_root.join("index_invalidation.db"),
+            ),
         }
+    }
+
+    pub fn invalidation_outbox(&self) -> &IndexInvalidationOutbox {
+        &self.invalidation_outbox
     }
 
     /// 生成 document_ref 端口值，运行状态只保存引用，不保存正文。
@@ -70,16 +85,47 @@ impl FileDocumentService {
 
         self.ensure_write(&path)?;
         validate_content_format(&patched, original.metadata.format)?;
-        fs::write(&path, patched.as_bytes())?;
+        let result_version = content_version(patched.as_bytes());
+        let outbox_event = self.invalidation_outbox.prepare(
+            &original.metadata.document_id,
+            "patch_applied",
+            &result_version,
+            false,
+        )?;
+        if let Err(error) = fs::write(&path, patched.as_bytes()) {
+            let _ = self.invalidation_outbox.cancel(&outbox_event);
+            return Err(error.into());
+        }
 
-        let metadata = self.metadata_for_path(&path, Some(original.metadata.format))?;
-        let index_invalidation = index_invalidation(&metadata.document_id, "patch_applied");
         let checkpoint = match (git, checkpoint_request) {
             (Some(git), Some(request)) => {
-                Some(git.create_checkpoint(&request.node_id, request.message.as_deref())?)
+                match git.create_checkpoint(&request.node_id, request.message.as_deref()) {
+                    Ok(checkpoint) => Some(checkpoint),
+                    Err(checkpoint_error) => {
+                        if let Err(rollback_error) = fs::write(&path, original.content.as_bytes()) {
+                            return Err(CoreError::External {
+                            service: "document_patch_transaction".to_owned(),
+                            message: format!(
+                                "checkpoint failed after document write; rollback also failed: checkpoint={checkpoint_error}; rollback={rollback_error}"
+                            ),
+                        });
+                        }
+                        let _ = self.invalidation_outbox.cancel(&outbox_event);
+                        return Err(CoreError::External {
+                            service: "git_checkpoint".to_owned(),
+                            message: format!(
+                            "patch checkpoint failed; document was rolled back: {checkpoint_error}"
+                        ),
+                        });
+                    }
+                }
             }
             _ => None,
         };
+
+        let metadata = self.metadata_for_path(&path, Some(original.metadata.format))?;
+        self.invalidation_outbox.activate(&outbox_event)?;
+        let index_invalidation = index_invalidation(&metadata.document_id, "patch_applied");
 
         Ok(PatchApplyReport {
             preview,
@@ -136,7 +182,7 @@ impl FileDocumentService {
             format,
             media_type: format.media_type().to_owned(),
             size_bytes: metadata.len(),
-            version: file_version(path, metadata.len())?,
+            version: file_version(path)?,
         })
     }
 
@@ -178,9 +224,27 @@ impl DocumentRepository for FileDocumentService {
         if let Some(parent) = request.path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let previous = fs::read(&request.path).ok();
         fs::write(&request.path, request.content.as_bytes())?;
 
         let metadata = self.metadata_for_path(&request.path, Some(format))?;
+        let outbox_event = match self.invalidation_outbox.prepare(
+            &metadata.document_id,
+            "document_saved",
+            &metadata.version,
+            false,
+        ) {
+            Ok(event) => event,
+            Err(error) => {
+                restore_previous_file(&request.path, previous.as_deref())?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.invalidation_outbox.activate(&outbox_event) {
+            restore_previous_file(&request.path, previous.as_deref())?;
+            let _ = self.invalidation_outbox.cancel(&outbox_event);
+            return Err(error);
+        }
         Ok(DocumentWriteReport {
             index_invalidation: index_invalidation(&metadata.document_id, "document_saved"),
             metadata,
@@ -202,6 +266,15 @@ impl DocumentRepository for FileDocumentService {
             &patched,
         ))
     }
+}
+
+fn restore_previous_file(path: &Path, previous: Option<&[u8]>) -> CoreResult<()> {
+    match previous {
+        Some(bytes) => fs::write(path, bytes)?,
+        None if path.exists() => fs::remove_file(path)?,
+        None => {}
+    }
+    Ok(())
 }
 
 /// 解析文档格式，拒绝不支持的文件扩展名。
@@ -228,20 +301,23 @@ fn document_id_for_path(path: &Path) -> CoreResult<DocumentId> {
     Ok(path.canonicalize()?.to_string_lossy().into_owned())
 }
 
-/// 文件版本号由修改时间和长度组成，足够支撑乐观并发检查。
-fn file_version(path: &Path, size_bytes: u64) -> CoreResult<String> {
-    let modified = fs::metadata(path)?
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            CoreError::validation(format!("file modified time is invalid: {error}"))
-        })?;
-    Ok(format!(
-        "{}.{:09}-{}",
-        modified.as_secs(),
-        modified.subsec_nanos(),
-        size_bytes
-    ))
+/// 文件版本使用流式内容 hash，避免同长度快速改写或时间戳精度导致漏检。
+fn file_version(path: &Path) -> CoreResult<String> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        for byte in &buffer[..read] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    Ok(format!("{hash:016x}"))
 }
 
 /// patch 指定 base_version 时必须与当前文件版本一致。

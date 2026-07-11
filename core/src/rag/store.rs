@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -188,6 +189,16 @@ impl SqliteWritingKnowledgeStore {
     pub fn save_knowledge(&self, kb: &MemoryWritingKnowledgeBase) -> CoreResult<()> {
         let conn = self.connection.lock().map_err(lock_error)?;
         let tx = conn.unchecked_transaction().map_err(sqlite_error)?;
+
+        // 故事段与事件代表当前 active revision；先清除旧快照，再在同一事务重建。
+        // 审核确认历史使用独立不可变 id，不在这里清除。
+        tx.execute_batch(
+            "DELETE FROM event_segment_links;
+             DELETE FROM event_chapter_links;
+             DELETE FROM story_events;
+             DELETE FROM story_segments;",
+        )
+        .map_err(sqlite_error)?;
 
         // -- 故事段 --
         for seg in kb.all_segments()? {
@@ -435,6 +446,14 @@ impl SqliteWritingKnowledgeStore {
 
         // -- 事件 + 关联段/章节 --
         {
+            let mut event_segments = load_string_multimap(
+                &conn,
+                "SELECT event_id, segment_id FROM event_segment_links ORDER BY event_id, segment_id",
+            )?;
+            let mut event_chapters = load_string_multimap(
+                &conn,
+                "SELECT event_id, chapter_id FROM event_chapter_links ORDER BY event_id, chapter_id",
+            )?;
             let mut stmt = conn
                 .prepare("SELECT event_id, summary, status, metadata_json FROM story_events")
                 .map_err(sqlite_error)?;
@@ -450,26 +469,12 @@ impl SqliteWritingKnowledgeStore {
                 .map_err(sqlite_error)?;
             for row in rows {
                 let (event_id, summary, status_str, metadata_json) = row.map_err(sqlite_error)?;
-                let mut seg_stmt = conn
-                    .prepare("SELECT segment_id FROM event_segment_links WHERE event_id=?1")
-                    .map_err(sqlite_error)?;
-                let segment_ids: Vec<String> = seg_stmt
-                    .query_map(params![event_id], |r| r.get(0))
-                    .map_err(sqlite_error)?
-                    .collect::<Result<_, _>>()
-                    .map_err(sqlite_error)?;
-                let mut ch_stmt = conn
-                    .prepare("SELECT chapter_id FROM event_chapter_links WHERE event_id=?1")
-                    .map_err(sqlite_error)?;
-                let chapter_ids: Vec<String> = ch_stmt
-                    .query_map(params![event_id], |r| r.get(0))
-                    .map_err(sqlite_error)?
-                    .collect::<Result<_, _>>()
-                    .map_err(sqlite_error)?;
+                let segment_ids = event_segments.remove(&event_id).unwrap_or_default();
+                let chapter_ids = event_chapters.remove(&event_id).unwrap_or_default();
                 kb.upsert_event(StoryEvent {
                     event_id,
                     summary,
-                    status: parse_event_status(&status_str),
+                    status: parse_event_status(&status_str)?,
                     segment_ids,
                     chapter_ids,
                     metadata: serde_json::from_str(&metadata_json)
@@ -480,6 +485,10 @@ impl SqliteWritingKnowledgeStore {
 
         // -- 注册项 + 关联段 --
         {
+            let mut change_segments = load_string_multimap(
+                &conn,
+                "SELECT change_id, segment_id FROM change_segment_links ORDER BY change_id, segment_id",
+            )?;
             let mut stmt = conn
                 .prepare(
                     "SELECT change_id, function, status, content_json, metadata_json
@@ -500,14 +509,7 @@ impl SqliteWritingKnowledgeStore {
             for row in rows {
                 let (change_id, function_str, status_str, content_json, metadata_json) =
                     row.map_err(sqlite_error)?;
-                let mut seg_stmt = conn
-                    .prepare("SELECT segment_id FROM change_segment_links WHERE change_id=?1")
-                    .map_err(sqlite_error)?;
-                let linked_segment_ids: Vec<String> = seg_stmt
-                    .query_map(params![change_id], |r| r.get(0))
-                    .map_err(sqlite_error)?
-                    .collect::<Result<_, _>>()
-                    .map_err(sqlite_error)?;
+                let linked_segment_ids = change_segments.remove(&change_id).unwrap_or_default();
                 let content: RegisterContent = serde_json::from_str(&content_json)?;
                 kb.upsert_registered_change(crate::rag::models::RegisteredChange {
                     change_id,
@@ -523,6 +525,14 @@ impl SqliteWritingKnowledgeStore {
 
         // -- 伏笔 + 种植/回收段 --
         {
+            let mut planted_segments = load_string_multimap(
+                &conn,
+                "SELECT foreshadowing_id, segment_id FROM foreshadowing_planted ORDER BY foreshadowing_id, segment_id",
+            )?;
+            let mut recovered_segments = load_string_multimap(
+                &conn,
+                "SELECT foreshadowing_id, segment_id FROM foreshadowing_recovered ORDER BY foreshadowing_id, segment_id",
+            )?;
             let mut stmt = conn
                 .prepare(
                     "SELECT foreshadowing_id, title, description, status, metadata_json
@@ -543,26 +553,8 @@ impl SqliteWritingKnowledgeStore {
             for row in rows {
                 let (fid, title, description, status_str, metadata_json) =
                     row.map_err(sqlite_error)?;
-                let mut planted_stmt = conn
-                    .prepare(
-                        "SELECT segment_id FROM foreshadowing_planted WHERE foreshadowing_id=?1",
-                    )
-                    .map_err(sqlite_error)?;
-                let planted: Vec<String> = planted_stmt
-                    .query_map(params![fid], |r| r.get(0))
-                    .map_err(sqlite_error)?
-                    .collect::<Result<_, _>>()
-                    .map_err(sqlite_error)?;
-                let mut recovered_stmt = conn
-                    .prepare(
-                        "SELECT segment_id FROM foreshadowing_recovered WHERE foreshadowing_id=?1",
-                    )
-                    .map_err(sqlite_error)?;
-                let recovered: Vec<String> = recovered_stmt
-                    .query_map(params![fid], |r| r.get(0))
-                    .map_err(sqlite_error)?
-                    .collect::<Result<_, _>>()
-                    .map_err(sqlite_error)?;
+                let planted = planted_segments.remove(&fid).unwrap_or_default();
+                let recovered = recovered_segments.remove(&fid).unwrap_or_default();
                 kb.upsert_foreshadowing(ForeshadowingRecord {
                     foreshadowing_id: fid,
                     title,
@@ -715,11 +707,14 @@ fn event_status_str(s: StoryEventStatus) -> &'static str {
         StoryEventStatus::Completed => "completed",
     }
 }
-fn parse_event_status(s: &str) -> StoryEventStatus {
+fn parse_event_status(s: &str) -> CoreResult<StoryEventStatus> {
     match s {
-        "paused" => StoryEventStatus::Paused,
-        "completed" => StoryEventStatus::Completed,
-        _ => StoryEventStatus::Ongoing,
+        "ongoing" => Ok(StoryEventStatus::Ongoing),
+        "paused" => Ok(StoryEventStatus::Paused),
+        "completed" => Ok(StoryEventStatus::Completed),
+        _ => Err(CoreError::validation(format!(
+            "unknown story event status in knowledge store: {s}"
+        ))),
     }
 }
 
@@ -774,6 +769,24 @@ fn parse_foreshadowing_status(s: &str) -> ForeshadowingStatus {
         "abandoned" => ForeshadowingStatus::Abandoned,
         _ => ForeshadowingStatus::Planned,
     }
+}
+
+fn load_string_multimap(
+    connection: &Connection,
+    sql: &str,
+) -> CoreResult<BTreeMap<String, Vec<String>>> {
+    let mut statement = connection.prepare(sql).map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(sqlite_error)?;
+    let mut values = BTreeMap::<String, Vec<String>>::new();
+    for row in rows {
+        let (owner_id, value_id) = row.map_err(sqlite_error)?;
+        values.entry(owner_id).or_default().push(value_id);
+    }
+    Ok(values)
 }
 
 fn confirmation_kind_str(k: ConfirmationKind) -> &'static str {

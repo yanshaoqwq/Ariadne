@@ -33,6 +33,8 @@ pub struct LlmServiceConfig {
     pub output_cost_per_million_tokens: Option<f64>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
 }
 
 impl LlmServiceConfig {
@@ -48,12 +50,14 @@ impl LlmServiceConfig {
             input_cost_per_million_tokens: None,
             output_cost_per_million_tokens: None,
             max_output_tokens: None,
+            max_context_tokens: None,
         }
     }
 
     pub fn with_model_config(mut self, model: &ModelConfig) -> Self {
         self.input_cost_per_million_tokens = model.input_cost_per_million_tokens;
         self.output_cost_per_million_tokens = model.output_cost_per_million_tokens;
+        self.max_context_tokens = model.max_context_tokens;
         self
     }
 }

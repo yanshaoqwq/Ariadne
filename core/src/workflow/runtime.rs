@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -622,6 +622,9 @@ impl WorkflowRuntime {
         store: Option<&dyn WorkflowRuntimeStore>,
     ) -> CoreResult<RunStatus> {
         workflow.validate_topology()?;
+        let graph_index = WorkflowGraphIndex::build(workflow);
+        let mut ready_queue =
+            ReadyQueue::from_nodes(ready_nodes(workflow, &graph_index, &self.state));
         if self.state.status.is_terminal() {
             return Ok(self.state.status);
         }
@@ -675,10 +678,9 @@ impl WorkflowRuntime {
                 return Ok(self.state.status);
             }
 
-            // ready_nodes 同时处理普通 control AND-join、communication 重跑和 Loop
-            // 显式 rerun 队列。没有 ready 节点时，要区分自然成功和卡死暂停。
-            let ready = ready_nodes(workflow, &self.state);
-            if ready.is_empty() {
+            // 启动/恢复时只扫描一次全图；之后节点完成只唤醒直接下游、通信邻居
+            // 和 Loop 重跑目标，避免链式工作流每完成一步都重新遍历全部节点。
+            let Some(node_id) = ready_queue.pop() else {
                 if all_nodes_succeeded(workflow, &self.state) {
                     self.state.status = RunStatus::Succeeded;
                     self.record_event(
@@ -698,137 +700,145 @@ impl WorkflowRuntime {
                 self.pause("no runnable nodes are ready");
                 persist_if_needed(store, &self.state)?;
                 return Ok(self.state.status);
+            };
+            if !node_is_ready(workflow, &graph_index, &self.state, &node_id) {
+                continue;
+            }
+            // rerun_queue 只负责唤醒目标节点一次；节点开始执行前移除，避免
+            // Resume 时重复消费同一个 Loop 触发。
+            self.state.rerun_queue.retain(|queued| queued != &node_id);
+            if self.node_succeeded(&node_id)
+                && !has_pending_communication_for_node(&self.state, &node_id)
+            {
+                continue;
             }
 
-            for node_id in ready {
-                // rerun_queue 只负责唤醒目标节点一次；节点开始执行前移除，避免
-                // Resume 时重复消费同一个 Loop 触发。
-                self.state.rerun_queue.retain(|queued| queued != &node_id);
-                if self.node_succeeded(&node_id)
-                    && !has_pending_communication_for_node(&self.state, &node_id)
-                {
-                    continue;
-                }
-
-                // Stop 可能在同一轮循环中由前一个节点设置。每个节点启动前都检查，
-                // 确保 Stop 不会继续推进下游。
-                refresh_external_control(store, &mut self.state)?;
-                if self.state.control == RunControl::Stop {
-                    self.stop("stop requested during run");
-                    persist_if_needed(store, &self.state)?;
-                    return Ok(self.state.status);
-                }
-                if self.state.control == RunControl::Pause {
-                    self.pause(
-                        self.state
-                            .pause_reason
-                            .clone()
-                            .unwrap_or_else(|| "pause requested during run".to_owned()),
-                    );
-                    persist_if_needed(store, &self.state)?;
-                    return Ok(self.state.status);
-                }
-                let Some(node_instance) = workflow.nodes.iter().find(|node| node.id == node_id)
-                else {
-                    return Err(CoreError::validation(format!(
-                        "node {} not found in workflow",
-                        node_id.as_str()
-                    )));
-                };
-                if should_pause_for_breakpoint(&mut self.state, node_instance) {
-                    self.pause(format!("breakpoint before node {}", node_id.as_str()));
-                    persist_if_needed(store, &self.state)?;
-                    return Ok(self.state.status);
-                }
-                let inputs = match collect_data_inputs(workflow, &self.state, &node_id) {
-                    Ok(inputs) => inputs,
-                    Err(error) => {
-                        if self.record_node_error(node_id.clone(), error) {
-                            persist_if_needed(store, &self.state)?;
-                            continue;
-                        }
-                        self.state.status = if self
-                            .state
-                            .nodes
-                            .get(&node_id)
-                            .and_then(|node| node.error_state.as_ref())
-                            .is_some_and(|error| error.retryable)
-                        {
-                            RunStatus::Paused
-                        } else {
-                            RunStatus::Failed
-                        };
+            // Stop 可能在同一轮循环中由前一个节点设置。每个节点启动前都检查，
+            // 确保 Stop 不会继续推进下游。
+            refresh_external_control(store, &mut self.state)?;
+            if self.state.control == RunControl::Stop {
+                self.stop("stop requested during run");
+                persist_if_needed(store, &self.state)?;
+                return Ok(self.state.status);
+            }
+            if self.state.control == RunControl::Pause {
+                self.pause(
+                    self.state
+                        .pause_reason
+                        .clone()
+                        .unwrap_or_else(|| "pause requested during run".to_owned()),
+                );
+                persist_if_needed(store, &self.state)?;
+                return Ok(self.state.status);
+            }
+            let Some(node_instance) = graph_index.node(workflow, &node_id) else {
+                return Err(CoreError::validation(format!(
+                    "node {} not found in workflow",
+                    node_id.as_str()
+                )));
+            };
+            if should_pause_for_breakpoint(&mut self.state, node_instance) {
+                self.pause(format!("breakpoint before node {}", node_id.as_str()));
+                persist_if_needed(store, &self.state)?;
+                return Ok(self.state.status);
+            }
+            let inputs = match collect_data_inputs(workflow, &graph_index, &self.state, &node_id) {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    if self.record_node_error(node_id.clone(), error) {
                         persist_if_needed(store, &self.state)?;
-                        return Ok(self.state.status);
+                        continue;
                     }
-                };
-                let request = WorkflowNodeExecutionRequest {
-                    workflow_id: workflow.id.clone(),
-                    run_id: self.state.run_id.clone(),
-                    node_id: node_id.clone(),
-                    type_name: node_instance.type_name.clone(),
-                    config: node_instance.config.clone(),
-                    inputs,
-                    communication_messages: collect_inbound_messages(&self.state, &node_id),
-                    metadata: self
+                    self.state.status = if self
                         .state
                         .nodes
                         .get(&node_id)
-                        .map(|node| node.metadata.clone())
-                        .unwrap_or(Value::Null),
-                };
-                self.record_node_started(&node_id);
-                match executor.execute(request) {
-                    Ok(output) => {
-                        let requested_control = output.run_control;
-                        let loop_control = output.loop_control.clone();
-                        match requested_control {
-                            Some(RunControl::Pause) => {
-                                // 节点主动 Pause 表示这次节点尚未完成。保存中间输出和
-                                // metadata，但节点状态保持 Paused，Resume 后允许重试。
-                                self.record_node_paused(node_id.clone(), output);
-                                self.pause(format!("node {} requested pause", node_id.as_str()));
-                            }
-                            Some(RunControl::Stop) => {
-                                // 节点主动 Stop 表示当前节点结果有效，但整个运行不再
-                                // 继续下游。先记录成功输出，再停止运行。
-                                self.record_node_success(node_id.clone(), output);
-                                self.stop(format!("node {} requested stop", node_id.as_str()));
-                            }
-                            Some(RunControl::Continue) | None => {
-                                // 普通完成路径先固化节点输出，再推进 communication 和
-                                // Loop。二者都可能把运行切成 Paused。
-                                self.record_node_success(node_id.clone(), output);
-                                self.advance_communication(workflow, &node_id)?;
-                                self.advance_loop(workflow, &node_id, loop_control.as_ref())?;
-                            }
-                        }
-                        persist_if_needed(store, &self.state)?;
-                    }
-                    Err(error) => {
-                        if self.record_node_error(node_id.clone(), error) {
-                            persist_if_needed(store, &self.state)?;
-                            continue;
-                        }
-                        self.state.status = if self
-                            .state
-                            .nodes
-                            .get(&node_id)
-                            .and_then(|node| node.error_state.as_ref())
-                            .is_some_and(|error| error.retryable)
-                        {
-                            RunStatus::Paused
-                        } else {
-                            RunStatus::Failed
-                        };
-                        persist_if_needed(store, &self.state)?;
-                        return Ok(self.state.status);
-                    }
-                }
-
-                if matches!(self.state.status, RunStatus::Paused | RunStatus::Stopped) {
+                        .and_then(|node| node.error_state.as_ref())
+                        .is_some_and(|error| error.retryable)
+                    {
+                        RunStatus::Paused
+                    } else {
+                        RunStatus::Failed
+                    };
+                    persist_if_needed(store, &self.state)?;
                     return Ok(self.state.status);
                 }
+            };
+            let request = WorkflowNodeExecutionRequest {
+                workflow_id: workflow.id.clone(),
+                run_id: self.state.run_id.clone(),
+                node_id: node_id.clone(),
+                type_name: node_instance.type_name.clone(),
+                config: node_instance.config.clone(),
+                inputs,
+                communication_messages: collect_inbound_messages(&self.state, &node_id),
+                metadata: self
+                    .state
+                    .nodes
+                    .get(&node_id)
+                    .map(|node| node.metadata.clone())
+                    .unwrap_or(Value::Null),
+            };
+            self.record_node_started(&node_id);
+            match executor.execute(request) {
+                Ok(output) => {
+                    let requested_control = output.run_control;
+                    let loop_control = output.loop_control.clone();
+                    match requested_control {
+                        Some(RunControl::Pause) => {
+                            // 节点主动 Pause 表示这次节点尚未完成。保存中间输出和
+                            // metadata，但节点状态保持 Paused，Resume 后允许重试。
+                            self.record_node_paused(node_id.clone(), output);
+                            self.pause(format!("node {} requested pause", node_id.as_str()));
+                        }
+                        Some(RunControl::Stop) => {
+                            // 节点主动 Stop 表示当前节点结果有效，但整个运行不再
+                            // 继续下游。先记录成功输出，再停止运行。
+                            self.record_node_success(node_id.clone(), output);
+                            self.stop(format!("node {} requested stop", node_id.as_str()));
+                        }
+                        Some(RunControl::Continue) | None => {
+                            // 普通完成路径先固化节点输出，再推进 communication 和
+                            // Loop。二者都可能把运行切成 Paused。
+                            self.record_node_success(node_id.clone(), output);
+                            self.advance_communication(workflow, &node_id)?;
+                            self.advance_loop(workflow, &node_id, loop_control.as_ref())?;
+                        }
+                    }
+                    persist_if_needed(store, &self.state)?;
+                }
+                Err(error) => {
+                    if self.record_node_error(node_id.clone(), error) {
+                        persist_if_needed(store, &self.state)?;
+                        continue;
+                    }
+                    self.state.status = if self
+                        .state
+                        .nodes
+                        .get(&node_id)
+                        .and_then(|node| node.error_state.as_ref())
+                        .is_some_and(|error| error.retryable)
+                    {
+                        RunStatus::Paused
+                    } else {
+                        RunStatus::Failed
+                    };
+                    persist_if_needed(store, &self.state)?;
+                    return Ok(self.state.status);
+                }
+            }
+
+            ready_queue.extend(graph_index.dependent_nodes(&node_id).iter().cloned());
+            ready_queue.extend(
+                graph_index
+                    .communication_neighbors(&node_id)
+                    .iter()
+                    .cloned(),
+            );
+            ready_queue.extend(self.state.rerun_queue.iter().cloned());
+
+            if matches!(self.state.status, RunStatus::Paused | RunStatus::Stopped) {
+                return Ok(self.state.status);
             }
         }
     }
@@ -1892,10 +1902,164 @@ fn recovery_suggestion(kind: NodeErrorKind, retryable: bool, retry_scheduled: bo
 }
 
 /// 计算当前可运行节点。
-fn ready_nodes(workflow: &WorkflowDefinition, state: &WorkflowRunState) -> Vec<NodeId> {
+#[derive(Debug)]
+struct WorkflowGraphIndex {
+    node_positions: HashMap<NodeId, usize>,
+    dependency_edges: HashMap<NodeId, Vec<usize>>,
+    data_edges: HashMap<NodeId, Vec<usize>>,
+    dependent_nodes: HashMap<NodeId, Vec<NodeId>>,
+    communication_neighbors: HashMap<NodeId, Vec<NodeId>>,
+    communication_nodes: HashSet<NodeId>,
+    loop_nodes: HashSet<NodeId>,
+}
+
+impl WorkflowGraphIndex {
+    fn build(workflow: &WorkflowDefinition) -> Self {
+        let node_positions = workflow
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let loop_nodes = workflow
+            .nodes
+            .iter()
+            .filter(|node| node.type_name == "loop")
+            .map(|node| node.id.clone())
+            .collect::<HashSet<_>>();
+        let mut dependency_edges = HashMap::<NodeId, Vec<usize>>::new();
+        let mut data_edges = HashMap::<NodeId, Vec<usize>>::new();
+        let mut dependent_nodes = HashMap::<NodeId, Vec<NodeId>>::new();
+        let mut communication_neighbors = HashMap::<NodeId, Vec<NodeId>>::new();
+        let mut communication_nodes = HashSet::new();
+        for (index, edge) in workflow.edges.iter().enumerate() {
+            match edge.kind {
+                WorkflowEdgeKind::Control => {
+                    dependency_edges
+                        .entry(edge.to.node_id.clone())
+                        .or_default()
+                        .push(index);
+                    dependent_nodes
+                        .entry(edge.from.node_id.clone())
+                        .or_default()
+                        .push(edge.to.node_id.clone());
+                }
+                WorkflowEdgeKind::Data => {
+                    dependency_edges
+                        .entry(edge.to.node_id.clone())
+                        .or_default()
+                        .push(index);
+                    data_edges
+                        .entry(edge.to.node_id.clone())
+                        .or_default()
+                        .push(index);
+                    dependent_nodes
+                        .entry(edge.from.node_id.clone())
+                        .or_default()
+                        .push(edge.to.node_id.clone());
+                }
+                WorkflowEdgeKind::Communication => {
+                    communication_nodes.insert(edge.from.node_id.clone());
+                    communication_nodes.insert(edge.to.node_id.clone());
+                    communication_neighbors
+                        .entry(edge.from.node_id.clone())
+                        .or_default()
+                        .push(edge.to.node_id.clone());
+                    communication_neighbors
+                        .entry(edge.to.node_id.clone())
+                        .or_default()
+                        .push(edge.from.node_id.clone());
+                }
+            }
+        }
+        Self {
+            node_positions,
+            dependency_edges,
+            data_edges,
+            dependent_nodes,
+            communication_neighbors,
+            communication_nodes,
+            loop_nodes,
+        }
+    }
+
+    fn node<'a>(
+        &self,
+        workflow: &'a WorkflowDefinition,
+        node_id: &NodeId,
+    ) -> Option<&'a crate::contracts::NodeInstance> {
+        self.node_positions
+            .get(node_id)
+            .and_then(|index| workflow.nodes.get(*index))
+    }
+
+    fn dependency_edge_indices(&self, node_id: &NodeId) -> &[usize] {
+        self.dependency_edges
+            .get(node_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn data_edge_indices(&self, node_id: &NodeId) -> &[usize] {
+        self.data_edges
+            .get(node_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn dependent_nodes(&self, node_id: &NodeId) -> &[NodeId] {
+        self.dependent_nodes
+            .get(node_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn communication_neighbors(&self, node_id: &NodeId) -> &[NodeId] {
+        self.communication_neighbors
+            .get(node_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
+struct ReadyQueue {
+    queue: VecDeque<NodeId>,
+    queued: HashSet<NodeId>,
+}
+
+impl ReadyQueue {
+    fn from_nodes(nodes: impl IntoIterator<Item = NodeId>) -> Self {
+        let mut ready = Self {
+            queue: VecDeque::new(),
+            queued: HashSet::new(),
+        };
+        ready.extend(nodes);
+        ready
+    }
+
+    fn extend(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
+        for node_id in nodes {
+            if self.queued.insert(node_id.clone()) {
+                self.queue.push_back(node_id);
+            }
+        }
+    }
+
+    fn pop(&mut self) -> Option<NodeId> {
+        let node_id = self.queue.pop_front()?;
+        self.queued.remove(&node_id);
+        Some(node_id)
+    }
+}
+
+fn ready_nodes(
+    workflow: &WorkflowDefinition,
+    graph_index: &WorkflowGraphIndex,
+    state: &WorkflowRunState,
+) -> Vec<NodeId> {
     let mut ready = Vec::new();
     for node_id in &state.rerun_queue {
-        if workflow.nodes.iter().any(|node| node.id == *node_id) {
+        if graph_index.node_positions.contains_key(node_id) {
             ready.push(node_id.clone());
         }
     }
@@ -1914,13 +2078,37 @@ fn ready_nodes(workflow: &WorkflowDefinition, state: &WorkflowRunState) -> Vec<N
         if retry_backoff_ready(state, &node.id)
             && (pending_communication
                 || (!succeeded
-                    && dependencies_satisfied(workflow, state, &node.id)
-                    && communication_start_ready(workflow, state, &node.id)))
+                    && dependencies_satisfied(workflow, graph_index, state, &node.id)
+                    && communication_start_ready(graph_index, state, &node.id)))
         {
             ready.push(node.id.clone());
         }
     }
     ready
+}
+
+fn node_is_ready(
+    workflow: &WorkflowDefinition,
+    graph_index: &WorkflowGraphIndex,
+    state: &WorkflowRunState,
+    node_id: &NodeId,
+) -> bool {
+    if state.rerun_queue.contains(node_id) {
+        return graph_index.node_positions.contains_key(node_id);
+    }
+    let succeeded = state
+        .nodes
+        .get(node_id)
+        .is_some_and(|node| node.status == RunStatus::Succeeded);
+    let pending_communication = has_pending_communication_for_node(state, node_id);
+    if succeeded && !pending_communication {
+        return false;
+    }
+    retry_backoff_ready(state, node_id)
+        && (pending_communication
+            || (!succeeded
+                && dependencies_satisfied(workflow, graph_index, state, node_id)
+                && communication_start_ready(graph_index, state, node_id)))
 }
 
 /// 判断排队节点的退避窗口是否已经到期。
@@ -2001,23 +2189,20 @@ fn should_pause_for_breakpoint(
 /// control/data 边依赖全部满足后节点才可运行。
 fn dependencies_satisfied(
     workflow: &WorkflowDefinition,
+    graph_index: &WorkflowGraphIndex,
     state: &WorkflowRunState,
     node_id: &NodeId,
 ) -> bool {
-    workflow
-        .edges
+    graph_index
+        .dependency_edge_indices(node_id)
         .iter()
-        .filter(|edge| edge.to.node_id == *node_id)
-        .filter(|edge| {
-            matches!(
-                edge.kind,
-                WorkflowEdgeKind::Control | WorkflowEdgeKind::Data
-            )
-        })
+        .filter_map(|index| workflow.edges.get(*index))
         .all(|edge| {
             // Loop 回边是显式循环触发器，不应阻塞首轮运行。首轮时 Loop 节点还
             // 没有状态，因此把未完成的 Loop 回边视为已满足。
-            if is_loop_back_edge(workflow, edge) && !state.nodes.contains_key(&edge.from.node_id) {
+            if graph_index.loop_nodes.contains(&edge.from.node_id)
+                && !state.nodes.contains_key(&edge.from.node_id)
+            {
                 return true;
             }
             state
@@ -2025,14 +2210,6 @@ fn dependencies_satisfied(
                 .get(&edge.from.node_id)
                 .is_some_and(|node| node.status == RunStatus::Succeeded)
         })
-}
-
-/// 判断控制边是否来自显式 Loop 节点。
-fn is_loop_back_edge(workflow: &WorkflowDefinition, edge: &Edge) -> bool {
-    workflow
-        .nodes
-        .iter()
-        .any(|node| node.id == edge.from.node_id && node.type_name == "loop")
 }
 
 /// 收集从某个节点出发的 control/data 下游闭包。
@@ -2081,19 +2258,11 @@ fn has_pending_communication_for_node(state: &WorkflowRunState, node_id: &NodeId
 
 /// communication 初始阶段只允许发起方先运行，避免接收方在没有消息时抢跑。
 fn communication_start_ready(
-    workflow: &WorkflowDefinition,
+    graph_index: &WorkflowGraphIndex,
     state: &WorkflowRunState,
     node_id: &NodeId,
 ) -> bool {
-    let related_edges = workflow
-        .edges
-        .iter()
-        .filter(|edge| {
-            edge.kind == WorkflowEdgeKind::Communication
-                && (edge.from.node_id == *node_id || edge.to.node_id == *node_id)
-        })
-        .collect::<Vec<_>>();
-    if related_edges.is_empty() {
+    if !graph_index.communication_nodes.contains(node_id) {
         return true;
     }
 
@@ -2115,14 +2284,15 @@ fn all_nodes_succeeded(workflow: &WorkflowDefinition, state: &WorkflowRunState) 
 /// 汇总数据边输入。
 fn collect_data_inputs(
     workflow: &WorkflowDefinition,
+    graph_index: &WorkflowGraphIndex,
     state: &WorkflowRunState,
     node_id: &NodeId,
 ) -> CoreResult<PortMap> {
     let mut inputs = PortMap::new();
-    for edge in workflow
-        .edges
+    for edge in graph_index
+        .data_edge_indices(node_id)
         .iter()
-        .filter(|edge| edge.kind == WorkflowEdgeKind::Data && edge.to.node_id == *node_id)
+        .filter_map(|index| workflow.edges.get(*index))
     {
         let Some(alias) = &edge.alias else {
             return Err(CoreError::validation(format!(

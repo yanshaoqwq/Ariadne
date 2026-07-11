@@ -39,6 +39,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
         let mut audit_log = Vec::new();
         audit_log.push(started_event(&request, LlmCallMode::Basic));
         self.check_estimated_budget(&request)?;
+        check_context_limit(&request)?;
 
         let response = self.call_provider(provider, &request, None, false)?;
         self.check_after_provider_response(&request, &response, started_at, cancellation)?;
@@ -70,6 +71,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
             cancellation.check()?;
             check_timeout(started_at, request.config.timeout_ms)?;
             self.check_estimated_budget(&request)?;
+            check_context_limit(&request)?;
 
             let response = self.call_provider(provider, &request, None, false)?;
             self.check_after_provider_response(&request, &response, started_at, cancellation)?;
@@ -310,6 +312,25 @@ fn estimate_prompt_tokens(messages: &[crate::providers::LlmMessage]) -> u64 {
         .map(content_part_char_len)
         .sum::<usize>();
     u64::try_from(chars.div_ceil(4)).unwrap_or(u64::MAX).max(1)
+}
+
+fn check_context_limit(request: &LlmRunRequest) -> CoreResult<()> {
+    let Some(limit) = request.config.max_context_tokens else {
+        return Ok(());
+    };
+    let prompt_tokens = estimate_prompt_tokens(&request.messages);
+    let default_output = (limit / 4).clamp(256, 4_096);
+    let output_tokens = u64::from(request.config.max_output_tokens.unwrap_or(default_output));
+    let required = prompt_tokens.saturating_add(output_tokens);
+    if required > u64::from(limit) {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "llm_context_tokens".to_owned(),
+            reason: format!(
+                "estimated prompt {prompt_tokens} + output reserve {output_tokens} exceeds model context {limit}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn content_part_char_len(part: &ContentPart) -> usize {

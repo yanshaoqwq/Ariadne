@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::contracts::{CoreError, CoreResult};
@@ -11,6 +12,13 @@ use crate::git::models::{
 
 const DEFAULT_GIT_USER_NAME: &str = "Ariadne";
 const DEFAULT_GIT_USER_EMAIL: &str = "ariadne@local.invalid";
+
+/// 有界 Git diff 预览；完整输出只流式计数，不在内存中整体物化。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitDiffPreview {
+    pub line_count: usize,
+    pub preview: String,
+}
 
 /// Git 服务，所有 Git 写操作通过同一把锁串行化。
 #[derive(Debug)]
@@ -57,15 +65,34 @@ impl GitService {
 
     /// 执行 Git 健康检查。
     pub fn health_check(&self) -> GitHealthReport {
-        let inside = self.run_git(["rev-parse", "--is-inside-work-tree"]);
-        if inside.is_err() {
-            return GitHealthReport {
+        self.health_check_with_policy(&GitStagePolicy::default())
+            .map(|(health, _)| health)
+            .unwrap_or_else(|error| GitHealthReport {
                 status: GitHealthStatus::NotRepository,
                 branch: None,
                 head: None,
                 dirty: false,
-                reason: Some("not a git repository".to_owned()),
-            };
+                reason: Some(error.to_string()),
+            })
+    }
+
+    /// 一次读取 porcelain 状态并同时生成健康报告，供状态页避免重复执行 git status。
+    pub fn health_check_with_policy(
+        &self,
+        policy: &GitStagePolicy,
+    ) -> CoreResult<(GitHealthReport, String)> {
+        let inside = self.run_git(["rev-parse", "--is-inside-work-tree"]);
+        if inside.is_err() {
+            return Ok((
+                GitHealthReport {
+                    status: GitHealthStatus::NotRepository,
+                    branch: None,
+                    head: None,
+                    dirty: false,
+                    reason: Some("not a git repository".to_owned()),
+                },
+                String::new(),
+            ));
         }
 
         let head = self.run_git(["rev-parse", "--verify", "HEAD"]).ok();
@@ -73,10 +100,8 @@ impl GitService {
             .run_git(["branch", "--show-current"])
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let dirty = self
-            .status_with_policy(&GitStagePolicy::default())
-            .map(|output| !output.trim().is_empty())
-            .unwrap_or(true);
+        let porcelain = self.status_with_policy(policy)?;
+        let dirty = !porcelain.trim().is_empty();
 
         let status = if head.is_some() {
             GitHealthStatus::Healthy
@@ -84,14 +109,17 @@ impl GitService {
             GitHealthStatus::Degraded
         };
 
-        GitHealthReport {
-            status,
-            branch,
-            head,
-            dirty,
-            reason: (status == GitHealthStatus::Degraded)
-                .then_some("repository has no commits yet".to_owned()),
-        }
+        Ok((
+            GitHealthReport {
+                status,
+                branch,
+                head,
+                dirty,
+                reason: (status == GitHealthStatus::Degraded)
+                    .then_some("repository has no commits yet".to_owned()),
+            },
+            porcelain,
+        ))
     }
 
     /// 创建用户命名存档点 commit。
@@ -169,6 +197,64 @@ impl GitService {
         self.run_git(args)
     }
 
+    /// 流式统计完整 diff 行数，但只保留指定字符数的预览，避免大型 diff 整体驻留内存。
+    pub fn diff_preview_with_policy(
+        &self,
+        policy: &GitStagePolicy,
+        preview_char_limit: usize,
+    ) -> CoreResult<GitDiffPreview> {
+        let mut args = vec!["diff".to_owned(), "--".to_owned(), ".".to_owned()];
+        args.extend(policy.exclude_pathspecs());
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(&self.repo_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CoreError::validation("git diff stdout pipe is unavailable"))?;
+        let mut reader = BufReader::new(stdout);
+        let mut bytes = Vec::new();
+        let mut line_count = 0usize;
+        let mut preview = String::new();
+        let mut preview_chars = 0usize;
+        loop {
+            bytes.clear();
+            if reader.read_until(b'\n', &mut bytes)? == 0 {
+                break;
+            }
+            line_count = line_count.saturating_add(1);
+            if preview_chars < preview_char_limit {
+                let line = String::from_utf8_lossy(&bytes);
+                let remaining = preview_char_limit - preview_chars;
+                let fragment = line.chars().take(remaining).collect::<String>();
+                preview_chars += fragment.chars().count();
+                preview.push_str(&fragment);
+            }
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_string(&mut stderr)?;
+            }
+            return Err(CoreError::External {
+                service: "git".to_owned(),
+                message: if stderr.trim().is_empty() {
+                    format!("git exited with status {status}")
+                } else {
+                    stderr.trim().to_owned()
+                },
+            });
+        }
+        Ok(GitDiffPreview {
+            line_count,
+            preview,
+        })
+    }
+
     /// 按暂存策略返回 porcelain 状态。
     pub fn status_with_policy(&self, policy: &GitStagePolicy) -> CoreResult<String> {
         let mut args = vec![
@@ -230,10 +316,20 @@ impl GitService {
         commit_id: &str,
         new_branch: &str,
     ) -> CoreResult<RestoreReport> {
+        self.restore_to_new_branch_with_policy(commit_id, new_branch, &GitStagePolicy::default())
+    }
+
+    /// 使用项目 Git 排除策略回档，运行时数据库和索引等内部文件不应阻止安全回档。
+    pub fn restore_to_new_branch_with_policy(
+        &self,
+        commit_id: &str,
+        new_branch: &str,
+        policy: &GitStagePolicy,
+    ) -> CoreResult<RestoreReport> {
         validate_non_empty("commit_id", commit_id)?;
         validate_branch_name(new_branch)?;
         let _guard = self.git_guard()?;
-        self.ensure_clean_worktree()?;
+        self.ensure_clean_worktree(policy)?;
         self.run_git(["rev-parse", "--verify", commit_id])?;
         self.run_git(["checkout", "-b", new_branch, commit_id])?;
         Ok(RestoreReport {
@@ -306,8 +402,8 @@ impl GitService {
     }
 
     /// 回档前要求工作区干净，避免覆盖用户未保存改动。
-    fn ensure_clean_worktree(&self) -> CoreResult<()> {
-        let status = self.status_with_policy(&GitStagePolicy::default())?;
+    fn ensure_clean_worktree(&self, policy: &GitStagePolicy) -> CoreResult<()> {
+        let status = self.status_with_policy(policy)?;
         if status.trim().is_empty() {
             Ok(())
         } else {
@@ -386,7 +482,11 @@ fn default_ignored_paths() -> Vec<String> {
         ".indexes".to_owned(),
         ".knowledge".to_owned(),
         "costs.db".to_owned(),
+        "costs.db-wal".to_owned(),
+        "costs.db-shm".to_owned(),
         "runtime.db".to_owned(),
+        "runtime.db-wal".to_owned(),
+        "runtime.db-shm".to_owned(),
     ]
 }
 

@@ -39,6 +39,10 @@ fn allow_local_template_repository_for_test() {
 
 struct MockQuickEditProvider;
 
+struct MockLongQuickEditProvider {
+    response: String,
+}
+
 impl Provider for MockQuickEditProvider {
     fn definition(&self) -> ProviderDefinition {
         ProviderDefinition {
@@ -59,6 +63,35 @@ impl LlmProvider for MockQuickEditProvider {
     ) -> ariadne::contracts::CoreResult<LlmResponse> {
         Ok(LlmResponse {
             message: LlmMessage::assistant("改写后文本"),
+            tool_calls: Vec::new(),
+            usage: None,
+            finish_reason: Some("stop".to_owned()),
+            cost_usd: None,
+            raw: Value::Null,
+        })
+    }
+}
+
+impl Provider for MockLongQuickEditProvider {
+    fn definition(&self) -> ProviderDefinition {
+        ProviderDefinition {
+            provider_id: "mock-long".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Mock Long".to_owned(),
+            capabilities: vec![ProviderCapability::Llm],
+            config_schema: Value::Null,
+        }
+    }
+}
+
+impl LlmProvider for MockLongQuickEditProvider {
+    fn complete(
+        &self,
+        _context: &ProviderCallContext,
+        _request: LlmRequest,
+    ) -> ariadne::contracts::CoreResult<LlmResponse> {
+        Ok(LlmResponse {
+            message: LlmMessage::assistant(self.response.clone()),
             tool_calls: Vec::new(),
             usage: None,
             finish_reason: Some("stop".to_owned()),
@@ -363,6 +396,7 @@ fn quick_edit_generates_result_and_patch() {
             input_cost_per_million_tokens: None,
             output_cost_per_million_tokens: None,
             max_output_tokens: None,
+            max_context_tokens: None,
         },
     );
 
@@ -381,6 +415,39 @@ fn quick_edit_generates_result_and_patch() {
     assert_eq!(result.suggested, "改写后文本");
     assert!(!result.diff.is_empty());
     assert_eq!(patch.document_id, "doc-1");
+}
+
+#[test]
+fn quick_edit_diff_preview_is_bounded_for_long_chapters() {
+    let original = "旧".repeat(20_000);
+    let suggested = "新".repeat(20_000);
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let llm = LlmService::new(&ledger, Default::default());
+    let provider = MockLongQuickEditProvider {
+        response: suggested,
+    };
+    let result = QuickEditService::new(
+        llm,
+        &provider,
+        LlmServiceConfig {
+            provider_id: "mock-long".to_owned(),
+            model_id: "model".to_owned(),
+            max_tool_rounds: 0,
+            timeout_ms: 1_000,
+            max_total_tokens: None,
+            budget_limits: BudgetLimits::default(),
+            input_cost_per_million_tokens: None,
+            output_cost_per_million_tokens: None,
+            max_output_tokens: None,
+            max_context_tokens: None,
+        },
+    )
+    .quick_edit(&original, "改写", None)
+    .unwrap();
+
+    assert!(result.diff.len() <= 16 * 1024);
+    assert!(result.diff.starts_with("- 旧"));
+    assert!(result.diff.contains("\n+ 新"));
 }
 
 #[test]
@@ -648,6 +715,110 @@ fn run_log_store_generates_toasts_filters_logs_and_badges() {
             .unwrap()
             .run_logs,
         0
+    );
+}
+
+#[test]
+fn ui_log_stores_migrate_legacy_json_once_and_use_sqlite_indexes() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join(".runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let confirmation = ConfirmationLogEntry {
+        confirmation_id: "legacy-confirm".to_owned(),
+        kind: "writer_patch".to_owned(),
+        node_id: "writer".to_owned(),
+        timestamp_ms: 10,
+        state: ConfirmationLogState::Pending,
+        handling_method: "pending".to_owned(),
+        summary: "旧确认".to_owned(),
+        diff: "diff".to_owned(),
+        workflow_id: "wf".to_owned(),
+        run_id: "run".to_owned(),
+    };
+    let run_log = UiRunLogEntry {
+        log_id: "legacy-log".to_owned(),
+        timestamp_ms: 11,
+        kind: UiRunLogKind::Error,
+        level: UiRunLogLevel::Error,
+        message: "legacy failure".to_owned(),
+        workflow_id: Some(WorkflowId::from("wf")),
+        run_id: Some(RunId::from("run")),
+        node_id: Some(NodeId::from("writer")),
+        unread: true,
+        metadata: Value::Null,
+    };
+    std::fs::write(
+        runtime.join("confirmation_log.json"),
+        serde_json::to_string(&vec![confirmation]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        runtime.join("run_log.json"),
+        serde_json::to_string(&vec![run_log]).unwrap(),
+    )
+    .unwrap();
+
+    let confirmations = FileConfirmationLogStore::default_for_project(temp.path());
+    let logs = UiRunLogStore::default_for_project(temp.path());
+    assert_eq!(confirmations.pending_count().unwrap(), 1);
+    assert_eq!(logs.read_all().unwrap().len(), 1);
+    assert!(runtime.join("ui_logs.db").exists());
+
+    // 再次打开只读取迁移后的 SQLite，不重复导入旧 JSON。
+    assert_eq!(confirmations.read_all().unwrap().len(), 1);
+    assert_eq!(logs.read_all().unwrap().len(), 1);
+    logs.mark_all_read().unwrap();
+    assert!(!logs.read_all().unwrap()[0].unread);
+}
+
+#[test]
+fn run_log_query_supports_stable_cursor_and_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = UiRunLogStore::default_for_project(temp.path());
+    for (log_id, timestamp_ms) in [("a", 100), ("b", 100), ("c", 101)] {
+        store
+            .append(UiRunLogEntry {
+                log_id: log_id.to_owned(),
+                timestamp_ms,
+                kind: UiRunLogKind::Node,
+                level: UiRunLogLevel::Info,
+                message: format!("log {log_id}"),
+                workflow_id: Some(WorkflowId::from("wf")),
+                run_id: Some(RunId::from("run")),
+                node_id: None,
+                unread: false,
+                metadata: Value::Null,
+            })
+            .unwrap();
+    }
+
+    let first = store
+        .query(UiRunLogFilter {
+            limit: Some(2),
+            ..UiRunLogFilter::default()
+        })
+        .unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|entry| entry.log_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    let second = store
+        .query(UiRunLogFilter {
+            after_timestamp_ms: Some(first[1].timestamp_ms),
+            after_log_id: Some(first[1].log_id.clone()),
+            limit: Some(2),
+            ..UiRunLogFilter::default()
+        })
+        .unwrap();
+    assert_eq!(
+        second
+            .iter()
+            .map(|entry| entry.log_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c"]
     );
 }
 

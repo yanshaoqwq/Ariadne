@@ -43,6 +43,91 @@ fn call_params_parse_json_or_default_to_null() {
 }
 
 #[test]
+fn ipc_update_budget_returns_saved_budget_status_instead_of_null() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "update_budget_config".to_owned(),
+            params: json!({
+                "budget_usd": 25.0,
+                "preauthorized_usd": 3.5
+            }),
+        },
+    );
+
+    assert!(response.ok, "{:?}", response.error);
+    let data = response.data.expect("budget update must return data");
+    assert_eq!(data["budget_usd"], 25.0);
+    assert_eq!(data["preauthorized_usd"], 3.5);
+    assert!(data.get("spent_usd").is_some());
+    assert!(data.get("auto_mode_enabled").is_some());
+}
+
+#[test]
+fn ipc_pack_workflow_selection_returns_report_with_nested_workflow_graph() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "ipc-pack".to_owned(),
+            name: "IPC Pack".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "writer".to_owned(),
+                r#type: "writer".to_owned(),
+                label: Some("Writer".to_owned()),
+                data: Value::Null,
+                position: json!({ "x": 10.0, "y": 20.0 }),
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "pack_workflow_selection".to_owned(),
+            params: json!({
+                "workflow_id": "ipc-pack",
+                "selected_node_ids": ["writer"],
+                "subworkflow_node_id": "sub-writer",
+                "title": "Writer Subflow"
+            }),
+        },
+    );
+
+    assert!(response.ok, "{:?}", response.error);
+    let data = response
+        .data
+        .expect("pack response should include report data");
+    assert_eq!(data["subworkflow_node_id"], "sub-writer");
+    assert_eq!(data["workflow"]["workflow_id"], "ipc-pack");
+    assert_eq!(data["workflow"]["nodes"][0]["id"], "sub-writer");
+    assert_eq!(data["embedded_workflow"]["nodes"][0]["id"], "writer");
+    assert!(
+        data.get("nodes").is_none(),
+        "report must not masquerade as a graph"
+    );
+}
+
+#[test]
 fn ipc_run_workflow_starts_background_run_for_tool_callers() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();

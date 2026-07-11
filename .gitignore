@@ -12,6 +12,9 @@
 /项目完成情况.md
 /.cargo/
 /.rustup/
+/.dotnet-cli-home/
+/.nuget-packages/
+/.config/
 /node_modules/
 /dist/
 /build/

@@ -150,18 +150,20 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
         if parsed.events.is_empty() {
             return Err(CoreError::validation("summarizer produced no events"));
         }
-        Ok(parsed
+        parsed
             .events
             .into_iter()
-            .map(|dto| StoryEvent {
-                event_id: dto.event_id,
-                summary: dto.summary,
-                status: parse_event_status(&dto.status),
-                segment_ids: dto.segment_ids,
-                chapter_ids: vec![chapter_id.to_owned()],
-                metadata: json!({}),
+            .map(|dto| {
+                Ok(StoryEvent {
+                    event_id: dto.event_id,
+                    summary: dto.summary,
+                    status: parse_event_status(&dto.status)?,
+                    segment_ids: dto.segment_ids,
+                    chapter_ids: vec![chapter_id.to_owned()],
+                    metadata: json!({}),
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// 步骤 3：总结本章，写出事件进展。
@@ -311,11 +313,28 @@ struct StageSummaryDto {
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────
 
-fn parse_event_status(s: &str) -> StoryEventStatus {
+fn parse_event_status(s: &str) -> CoreResult<StoryEventStatus> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "paused" => StoryEventStatus::Paused,
-        "completed" => StoryEventStatus::Completed,
-        _ => StoryEventStatus::Ongoing,
+        "ongoing" => Ok(StoryEventStatus::Ongoing),
+        "paused" => Ok(StoryEventStatus::Paused),
+        "completed" => Ok(StoryEventStatus::Completed),
+        other => Err(CoreError::validation(format!(
+            "summarizer produced unknown story event status: {other}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_status_parser_rejects_unknown_values() {
+        assert_eq!(
+            parse_event_status("completed").unwrap(),
+            StoryEventStatus::Completed
+        );
+        assert!(parse_event_status("completeed").is_err());
     }
 }
 

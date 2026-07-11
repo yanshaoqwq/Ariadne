@@ -41,7 +41,11 @@
         <Canvas x:Name="CanvasOverlay"
                 HorizontalAlignment="Stretch"
                 VerticalAlignment="Stretch"
-                Background="Transparent">
+                Background="Transparent"
+                PointerPressed="OnCanvasBackgroundPointerPressed"
+                PointerMoved="OnCanvasBackgroundPointerMoved"
+                PointerReleased="OnCanvasBackgroundPointerReleased"
+                PointerCaptureLost="OnCanvasBackgroundCaptureLost">
         <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
           <ItemsControl.RenderTransform>
             <TransformGroup>
@@ -101,6 +105,16 @@
               Opacity="0.85"
               IsVisible="False"
               IsHitTestVisible="False" />
+
+        <!-- 左键拖空白处框选 -->
+        <Border x:Name="MarqueeRect"
+                IsVisible="False"
+                IsHitTestVisible="False"
+                BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
+                BorderThickness="1.5"
+                Background="#222E726B"
+                CornerRadius="2"
+                ZIndex="50" />
 
         <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}">
           <ItemsControl.RenderTransform>
@@ -172,7 +186,8 @@
                             Cursor="SizeAll"
                             PointerPressed="OnNodePointerPressed"
                             PointerMoved="OnNodePointerMoved"
-                            PointerReleased="OnNodePointerReleased">
+                            PointerReleased="OnNodePointerReleased"
+                            PointerCaptureLost="OnNodePointerCaptureLost">
                       <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" ColumnSpacing="6">
                         <Border Grid.Column="0"
                                 Width="16" Height="16"
@@ -359,23 +374,33 @@
                 Cursor="Hand"
                 ToolTip.Tip="{Binding MinimapText}"
                 PointerPressed="OnMiniMapPointerPressed">
-          <Canvas x:Name="MiniMapCanvas" ClipToBounds="True">
-            <ItemsControl x:Name="MiniMapItemsControl" ItemsSource="{Binding Nodes}">
+          <Canvas x:Name="MiniMapCanvas"
+                  Width="140"
+                  Height="84"
+                  ClipToBounds="True"
+                  Background="Transparent">
+            <!-- 显式尺寸 + Canvas 面板；位置由 code-behind ContainerFromItem 写入（绑定 Canvas.Left 对容器无效） -->
+            <ItemsControl x:Name="MiniMapItemsControl"
+                          Canvas.Left="0"
+                          Canvas.Top="0"
+                          Width="140"
+                          Height="84"
+                          ItemsSource="{Binding Nodes}"
+                          IsHitTestVisible="False">
               <ItemsControl.ItemsPanel>
                 <ItemsPanelTemplate>
-                  <Canvas />
+                  <Canvas Width="140" Height="84" ClipToBounds="True" />
                 </ItemsPanelTemplate>
               </ItemsControl.ItemsPanel>
               <ItemsControl.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:WorkflowNodeViewModel}">
-                  <Border Canvas.Left="{Binding MiniMapX}"
-                          Canvas.Top="{Binding MiniMapY}"
-                          Width="10"
+                  <Border Width="10"
                           Height="6"
                           CornerRadius="2"
                           Background="{Binding TypeAccentBrush}"
                           BorderBrush="{DynamicResource Ariadne.BackgroundSurface}"
-                          BorderThickness="1" />
+                          BorderThickness="1"
+                          IsHitTestVisible="False" />
                 </DataTemplate>
               </ItemsControl.ItemTemplate>
             </ItemsControl>
@@ -894,7 +919,8 @@
                     </StackPanel>
                   </Border>
 
-                  <Border Classes="panel-section" Padding="0,0,0,18">
+                  <!-- 只显示与当前选中节点相关的边；点边也会选中端点节点 -->
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding HasRelatedEdges}">
                     <StackPanel Spacing="10">
                       <Grid ColumnDefinitions="*,Auto">
                         <TextBlock Grid.Column="0" Text="{Binding EdgeDetailsText}" Classes="subtitle" />
@@ -902,7 +928,7 @@
                           <TextBlock Text="{Binding EdgeCountText}" Classes="caption" />
                         </Border>
                       </Grid>
-                      <ItemsControl ItemsSource="{Binding Edges}">
+                      <ItemsControl ItemsSource="{Binding RelatedEdges}">
                         <ItemsControl.ItemTemplate>
                           <DataTemplate DataType="{x:Type vm:WorkflowEdgeViewModel}">
                             <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Command="{Binding SelectCommand}" HorizontalContentAlignment="Stretch">
@@ -914,9 +940,11 @@
                           </DataTemplate>
                         </ItemsControl.ItemTemplate>
                       </ItemsControl>
-                      <Border Classes="soft-panel" Padding="12" IsVisible="{Binding HasSelectedEdge}">
+                      <Border Classes="soft-panel" Padding="12" IsVisible="{Binding ShowEdgeConfigPanel}">
                         <StackPanel Spacing="8">
-                          <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                          <TextBlock Text="{Binding SelectedEdge.KindDisplay}" Classes="caption" FontWeight="SemiBold" />
+                          <!-- 数据边：可改句柄/别名 -->
+                          <Grid ColumnDefinitions="*,*" ColumnSpacing="8" IsVisible="{Binding SelectedEdge.ShowHandleFields}">
                             <StackPanel Grid.Column="0" Spacing="4">
                               <TextBlock Text="{Binding SourceAliasText}" Classes="caption" />
                               <TextBox Text="{Binding SelectedEdge.SourceHandle, Mode=TwoWay}" />
@@ -926,9 +954,13 @@
                               <TextBox Text="{Binding SelectedEdge.TargetHandle, Mode=TwoWay}" />
                             </StackPanel>
                           </Grid>
-                          <TextBlock Text="{Binding EdgeLabelText}" Classes="caption" />
-                          <TextBox Text="{Binding SelectedEdge.Label, Mode=TwoWay}" />
-                          <StackPanel IsVisible="{Binding SelectedEdge.IsCommunication}" Spacing="8">
+                          <!-- 通用标签（执行/数据/通信均可） -->
+                          <StackPanel Spacing="4" IsVisible="{Binding SelectedEdge.ShowLabelField}">
+                            <TextBlock Text="{Binding EdgeLabelText}" Classes="caption" />
+                            <TextBox Text="{Binding SelectedEdge.Label, Mode=TwoWay}" />
+                          </StackPanel>
+                          <!-- 仅通信边：双向 alias / 模板 / 次数 -->
+                          <StackPanel IsVisible="{Binding SelectedEdge.ShowCommunicationFields}" Spacing="8">
                             <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
                               <StackPanel Grid.Column="0" Spacing="4">
                                 <TextBlock Text="{Binding ForwardAliasText}" Classes="caption" />

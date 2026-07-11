@@ -2093,17 +2093,20 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                     item.Kind,
                     item.NormalPolicy,
                     item.AutoModePolicy)).ToArray());
-            var budget = await _backend.UpdateBudgetConfigAsync(ParseDouble(BudgetUsd, 0), ParseDouble(PreauthorizedUsd, 0)).ConfigureAwait(true);
-            await _backend.SetAutoModeAsync(AutoModeEnabled).ConfigureAwait(true);
-            SpentText = $"${budget.SpentUsd:0.####}";
-            await _backend.SaveAutomationSettingsAsync(automation).ConfigureAwait(true);
-            await _backend.SaveWorkflowSettingsAsync(new WorkflowSettings(new WorkflowConfig(
+            var savedAutomation = await _backend.SaveAutomationSettingsAsync(automation).ConfigureAwait(true);
+            ApplyAutomation(savedAutomation);
+            var savedWorkflow = await _backend.SaveWorkflowSettingsAsync(new WorkflowSettings(new WorkflowConfig(
                 _workflowSchemaVersion,
                 ParseLong(WorkflowDefaultTimeoutMs, 300000),
                 ParseInt(MaxLoopIterations, 5),
                 ParseInt(MaxToolRounds, 8),
                 CheckpointEnabled,
                 ParseLong(RuntimeAutosaveMs, 5000)))).ConfigureAwait(true);
+            WorkflowDefaultTimeoutMs = savedWorkflow.Workflow.DefaultTimeoutMs.ToString();
+            MaxLoopIterations = savedWorkflow.Workflow.MaxLoopIterations.ToString();
+            MaxToolRounds = savedWorkflow.Workflow.MaxToolRounds.ToString();
+            CheckpointEnabled = savedWorkflow.Workflow.CheckpointEnabled;
+            RuntimeAutosaveMs = savedWorkflow.Workflow.RuntimeAutosaveMs.ToString();
         });
     }
 

@@ -1,6 +1,6 @@
 use std::fs;
 
-use ariadne::git::{CheckpointKind, GitHealthStatus, GitService};
+use ariadne::git::{CheckpointKind, GitHealthStatus, GitService, GitStagePolicy};
 
 /// 初始化带本地提交身份的临时 Git 仓库。
 fn init_test_repo() -> (tempfile::TempDir, GitService) {
@@ -101,6 +101,31 @@ fn git_service_creates_archive_and_checkpoint_commits() {
     assert_eq!(commits.len(), 2);
     assert_eq!(commits[0].checkpoint_kind, Some(CheckpointKind::Auto));
     assert_eq!(commits[1].checkpoint_kind, Some(CheckpointKind::Manual));
+}
+
+#[test]
+fn git_service_streams_bounded_diff_preview_and_reuses_porcelain_status() {
+    let (temp_dir, service) = init_test_repo();
+    let document = temp_dir.path().join("chapter.md");
+    fs::write(&document, "original\n").unwrap();
+    service.create_checkpoint("initial", None).unwrap();
+    let changed = (0..2_000)
+        .map(|index| format!("changed line {index}\n"))
+        .collect::<String>();
+    fs::write(&document, changed).unwrap();
+
+    let (health, porcelain) = service
+        .health_check_with_policy(&GitStagePolicy::default())
+        .unwrap();
+    let diff = service
+        .diff_preview_with_policy(&GitStagePolicy::default(), 128)
+        .unwrap();
+
+    assert!(health.dirty);
+    assert!(!porcelain.trim().is_empty());
+    assert!(diff.line_count > 2_000);
+    assert_eq!(diff.preview.chars().count(), 128);
+    assert!(diff.preview.contains("diff --git"));
 }
 
 #[test]

@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::{blocking::Client, Url};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -28,6 +29,10 @@ use crate::workflow::{RuntimeConfirmationState, WorkflowRunState};
 
 const MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const ALLOW_LOCAL_TEMPLATE_REPOSITORY_ENV: &str = "ARIADNE_ALLOW_LOCAL_TEMPLATE_REPOSITORY";
+const MAX_QUICK_EDIT_DIFF_BYTES: usize = 16 * 1024;
+const MAX_RUN_LOG_ENTRIES: i64 = 100_000;
+const MAX_RESOLVED_CONFIRMATION_ENTRIES: i64 = 100_000;
+const MAX_PROJECT_MEMORY_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 最近项目和项目初始化状态，默认落在 `.runtime/recent_projects.json`。
 #[derive(Debug, Clone)]
@@ -171,6 +176,15 @@ impl ProjectMemoryStore {
 
     /// 覆盖写入项目记忆。
     pub fn write_all(&self, content: &str) -> CoreResult<()> {
+        if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_PROJECT_MEMORY_BYTES {
+            return Err(CoreError::ResourceLimitExceeded {
+                resource: "project_memory_bytes".to_owned(),
+                reason: format!(
+                    "project memory exceeds {} bytes; compact or remove obsolete entries",
+                    MAX_PROJECT_MEMORY_BYTES
+                ),
+            });
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -180,16 +194,52 @@ impl ProjectMemoryStore {
 
     /// 追加项目记忆内容，自动补换行边界。
     pub fn append(&self, content: &str) -> CoreResult<String> {
-        let mut existing = self.read_all()?;
-        if !existing.is_empty() && !existing.ends_with('\n') {
-            existing.push('\n');
+        if content.trim().is_empty() {
+            return self.read_all();
         }
-        existing.push_str(content);
-        if !existing.ends_with('\n') {
-            existing.push('\n');
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        self.write_all(&existing)?;
-        Ok(existing)
+        let existing_len = std::fs::metadata(&self.path)
+            .map(|metadata| metadata.len())
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(0)
+                } else {
+                    Err(error)
+                }
+            })?;
+        let additional = u64::try_from(content.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(2);
+        if existing_len.saturating_add(additional) > MAX_PROJECT_MEMORY_BYTES {
+            return Err(CoreError::ResourceLimitExceeded {
+                resource: "project_memory_bytes".to_owned(),
+                reason: format!(
+                    "project memory would exceed {} bytes; compact or remove obsolete entries",
+                    MAX_PROJECT_MEMORY_BYTES
+                ),
+            });
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&self.path)?;
+        if existing_len > 0 {
+            file.seek(SeekFrom::End(-1))?;
+            let mut last = [0u8; 1];
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                file.write_all(b"\n")?;
+            }
+        }
+        file.write_all(content.as_bytes())?;
+        if !content.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+        file.flush()?;
+        self.read_all()
     }
 }
 
@@ -270,30 +320,47 @@ impl ConfirmationLogStore {
     }
 }
 
-/// 文件型确认项日志，默认落在 `.runtime/confirmation_log.json`。
+/// SQLite 确认项日志；旧 JSON 文件在首次打开时幂等迁移。
 #[derive(Debug, Clone)]
 pub struct FileConfirmationLogStore {
     path: PathBuf,
+    legacy_path: Option<PathBuf>,
 }
 
 impl FileConfirmationLogStore {
     /// 创建文件型确认项日志。
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            legacy_path: None,
+        }
     }
 
-    /// 使用项目根目录下的默认 `.runtime/confirmation_log.json`。
+    /// 使用项目根目录下的统一 `.runtime/ui_logs.db`。
     pub fn default_for_project(project_root: impl AsRef<Path>) -> Self {
-        Self::new(project_root.as_ref().join(".runtime/confirmation_log.json"))
+        let runtime = project_root.as_ref().join(".runtime");
+        Self {
+            path: runtime.join("ui_logs.db"),
+            legacy_path: Some(runtime.join("confirmation_log.json")),
+        }
     }
 
     /// 读取全部确认项日志。
     pub fn read_all(&self) -> CoreResult<Vec<ConfirmationLogEntry>> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(content) => serde_json::from_str(&content).map_err(Into::into),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.into()),
+        let connection = self.open_database()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT entry_json FROM confirmation_logs ORDER BY timestamp_ms, confirmation_id",
+            )
+            .map_err(sqlite_frontend_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sqlite_frontend_error)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(serde_json::from_str(&row.map_err(sqlite_frontend_error)?)?);
         }
+        Ok(entries)
     }
 
     /// 覆盖写入确认项日志。
@@ -301,27 +368,24 @@ impl FileConfirmationLogStore {
         for entry in entries {
             validate_confirmation_entry(entry)?;
         }
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let mut connection = self.open_database()?;
+        let transaction = connection.transaction().map_err(sqlite_frontend_error)?;
+        transaction
+            .execute("DELETE FROM confirmation_logs", [])
+            .map_err(sqlite_frontend_error)?;
+        for entry in entries {
+            upsert_confirmation_entry(&transaction, entry)?;
         }
-        let content = serde_json::to_string_pretty(entries)?;
-        std::fs::write(&self.path, content)?;
-        Ok(())
+        prune_confirmation_logs(&transaction)?;
+        transaction.commit().map_err(sqlite_frontend_error)
     }
 
     /// 追加或更新确认项日志；同 id 后写覆盖，保持状态最新。
     pub fn record(&self, entry: ConfirmationLogEntry) -> CoreResult<()> {
         validate_confirmation_entry(&entry)?;
-        let mut entries = self.read_all()?;
-        if let Some(existing) = entries
-            .iter_mut()
-            .find(|existing| existing.confirmation_id == entry.confirmation_id)
-        {
-            *existing = entry;
-        } else {
-            entries.push(entry);
-        }
-        self.write_all(&entries)
+        let connection = self.open_database()?;
+        upsert_confirmation_entry(&connection, &entry)?;
+        prune_confirmation_logs(&connection)
     }
 
     /// 通过 `@确认项:<confirmation_id>` 或裸 id 解析持久化引用。
@@ -331,19 +395,43 @@ impl FileConfirmationLogStore {
             .unwrap_or(reference)
             .trim();
         validate_non_empty("confirmation_id", confirmation_id)?;
-        let entry = self
-            .read_all()?
-            .into_iter()
-            .find(|entry| entry.confirmation_id == confirmation_id)
+        let connection = self.open_database()?;
+        let entry_json = connection
+            .query_row(
+                "SELECT entry_json FROM confirmation_logs WHERE confirmation_id = ?1",
+                params![confirmation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite_frontend_error)?
             .ok_or_else(|| {
                 CoreError::validation(format!("confirmation log not found: {confirmation_id}"))
             })?;
+        let entry = serde_json::from_str::<ConfirmationLogEntry>(&entry_json)?;
         Ok(ConfirmationReference {
             confirmation_id: entry.confirmation_id,
             state: entry.state,
             diff: entry.diff,
             summary: entry.summary,
         })
+    }
+
+    /// 使用状态索引统计待确认项，侧栏徽标无需加载全部 JSON。
+    pub fn pending_count(&self) -> CoreResult<u32> {
+        let connection = self.open_database()?;
+        let count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM confirmation_logs WHERE state = 'pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sqlite_frontend_error)?;
+        u32::try_from(count.max(0))
+            .map_err(|_| CoreError::validation("confirmation badge count exceeds u32"))
+    }
+
+    fn open_database(&self) -> CoreResult<Connection> {
+        open_ui_log_database(&self.path, self.legacy_path.as_deref(), None)
     }
 }
 
@@ -661,6 +749,9 @@ pub struct UiRunLogFilter {
     pub run_id: Option<RunId>,
     pub node_id: Option<NodeId>,
     pub query: Option<String>,
+    pub after_timestamp_ms: Option<u64>,
+    pub after_log_id: Option<String>,
+    pub limit: Option<usize>,
 }
 
 /// toast 通知。
@@ -682,39 +773,59 @@ pub struct SidebarBadgeCounts {
     pub diagnostics: u32,
 }
 
-/// 文件型运行日志，默认落在 `.runtime/run_log.json`。
+/// SQLite 运行日志，默认与确认日志共用 `.runtime/ui_logs.db`。
 #[derive(Debug, Clone)]
 pub struct UiRunLogStore {
     path: PathBuf,
+    legacy_path: Option<PathBuf>,
 }
 
 impl UiRunLogStore {
     /// 创建运行日志存储。
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            legacy_path: None,
+        }
     }
 
-    /// 使用项目根目录下默认 `.runtime/run_log.json`。
+    /// 使用项目根目录下默认 `.runtime/ui_logs.db`。
     pub fn default_for_project(project_root: impl AsRef<Path>) -> Self {
-        Self::new(project_root.as_ref().join(".runtime/run_log.json"))
+        let runtime = project_root.as_ref().join(".runtime");
+        Self {
+            path: runtime.join("ui_logs.db"),
+            legacy_path: Some(runtime.join("run_log.json")),
+        }
     }
 
     /// 读取全部日志。
     pub fn read_all(&self) -> CoreResult<Vec<UiRunLogEntry>> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(content) => serde_json::from_str(&content).map_err(Into::into),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.into()),
+        let connection = self.open_database()?;
+        let mut statement = connection
+            .prepare("SELECT entry_json FROM run_logs ORDER BY timestamp_ms, log_id")
+            .map_err(sqlite_frontend_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sqlite_frontend_error)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(serde_json::from_str(&row.map_err(sqlite_frontend_error)?)?);
         }
+        Ok(entries)
     }
 
     /// 覆盖写入日志。
     pub fn write_all(&self, entries: &[UiRunLogEntry]) -> CoreResult<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let mut connection = self.open_database()?;
+        let transaction = connection.transaction().map_err(sqlite_frontend_error)?;
+        transaction
+            .execute("DELETE FROM run_logs", [])
+            .map_err(sqlite_frontend_error)?;
+        for entry in entries {
+            insert_run_log(&transaction, entry)?;
         }
-        std::fs::write(&self.path, serde_json::to_string_pretty(entries)?)?;
-        Ok(())
+        prune_run_logs(&transaction)?;
+        transaction.commit().map_err(sqlite_frontend_error)
     }
 
     /// 追加日志并返回可展示 toast。
@@ -736,62 +847,82 @@ impl UiRunLogStore {
                 _ => "workspace.execution".to_owned(),
             }),
         };
-        let mut entries = self.read_all()?;
-        entries.push(entry);
-        self.write_all(&entries)?;
+        let connection = self.open_database()?;
+        insert_run_log(&connection, &entry)?;
+        prune_run_logs(&connection)?;
         Ok(toast)
     }
 
     /// 按过滤条件查询日志。
     pub fn query(&self, filter: UiRunLogFilter) -> CoreResult<Vec<UiRunLogEntry>> {
-        let query = filter.query.as_ref().map(|value| value.to_lowercase());
-        Ok(self
-            .read_all()?
-            .into_iter()
-            .filter(|entry| filter.kind.map(|kind| entry.kind == kind).unwrap_or(true))
-            .filter(|entry| {
-                filter
-                    .level
-                    .map(|level| entry.level == level)
-                    .unwrap_or(true)
-            })
-            .filter(|entry| {
-                filter
-                    .workflow_id
-                    .as_ref()
-                    .map(|workflow_id| entry.workflow_id.as_ref() == Some(workflow_id))
-                    .unwrap_or(true)
-            })
-            .filter(|entry| {
-                filter
-                    .run_id
-                    .as_ref()
-                    .map(|run_id| entry.run_id.as_ref() == Some(run_id))
-                    .unwrap_or(true)
-            })
-            .filter(|entry| {
-                filter
-                    .node_id
-                    .as_ref()
-                    .map(|node_id| entry.node_id.as_ref() == Some(node_id))
-                    .unwrap_or(true)
-            })
-            .filter(|entry| {
-                query
-                    .as_ref()
-                    .map(|query| entry.message.to_lowercase().contains(query))
-                    .unwrap_or(true)
-            })
-            .collect())
+        let connection = self.open_database()?;
+        let kind = filter.kind.map(run_log_kind_str);
+        let level = filter.level.map(run_log_level_str);
+        let workflow_id = filter.workflow_id.as_ref().map(WorkflowId::as_str);
+        let run_id = filter.run_id.as_ref().map(RunId::as_str);
+        let node_id = filter.node_id.as_ref().map(NodeId::as_str);
+        let query = filter
+            .query
+            .map(|value| format!("%{}%", value.to_lowercase()));
+        let after_timestamp = filter
+            .after_timestamp_ms
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| CoreError::validation("run log cursor timestamp exceeds SQLite i64"))?;
+        let after_log_id = filter.after_log_id.as_deref().unwrap_or("");
+        let limit = filter
+            .limit
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| CoreError::validation("run log query limit exceeds SQLite i64"))?
+            .unwrap_or(i64::MAX);
+        let mut statement = connection
+            .prepare(
+                "SELECT entry_json FROM run_logs
+             WHERE (?1 IS NULL OR kind = ?1)
+               AND (?2 IS NULL OR level = ?2)
+               AND (?3 IS NULL OR workflow_id = ?3)
+               AND (?4 IS NULL OR run_id = ?4)
+               AND (?5 IS NULL OR node_id = ?5)
+               AND (?6 IS NULL OR lower(message) LIKE ?6)
+               AND (?7 IS NULL OR timestamp_ms > ?7 OR (timestamp_ms = ?7 AND log_id > ?8))
+             ORDER BY timestamp_ms, log_id
+             LIMIT ?9",
+            )
+            .map_err(sqlite_frontend_error)?;
+        let rows = statement
+            .query_map(
+                params![
+                    kind,
+                    level,
+                    workflow_id,
+                    run_id,
+                    node_id,
+                    query,
+                    after_timestamp,
+                    after_log_id,
+                    limit
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(sqlite_frontend_error)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(serde_json::from_str(&row.map_err(sqlite_frontend_error)?)?);
+        }
+        Ok(entries)
     }
 
     /// 标记全部日志已读。
     pub fn mark_all_read(&self) -> CoreResult<()> {
-        let mut entries = self.read_all()?;
-        for entry in &mut entries {
-            entry.unread = false;
-        }
-        self.write_all(&entries)
+        let connection = self.open_database()?;
+        connection
+            .execute(
+                "UPDATE run_logs SET unread = 0, entry_json = json_set(entry_json, '$.unread', json('false'))",
+                [],
+            )
+            .map_err(sqlite_frontend_error)?;
+        Ok(())
     }
 
     /// 汇总侧栏徽标。
@@ -800,33 +931,249 @@ impl UiRunLogStore {
         confirmation_log: Option<&FileConfirmationLogStore>,
         diagnostics: Option<&BackendDiagnosticsReport>,
     ) -> CoreResult<SidebarBadgeCounts> {
-        let entries = self.read_all()?;
-        let run_logs = entries
-            .iter()
-            .filter(|entry| entry.unread)
-            .filter(|entry| entry.level != UiRunLogLevel::Info)
-            .count();
+        let connection = self.open_database()?;
+        let run_logs = connection
+            .query_row(
+                "SELECT COUNT(*) FROM run_logs WHERE unread = 1 AND level != 'info'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sqlite_frontend_error)?;
         let confirmations = confirmation_log
-            .map(|store| {
-                store
-                    .read_all()
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter(|entry| entry.state == ConfirmationLogState::Pending)
-                            .count()
-                    })
-                    .unwrap_or(0)
-            })
+            .map(|store| store.pending_count().unwrap_or(0))
             .unwrap_or(0);
         let diagnostics = diagnostics
             .map(|report| usize::from(report.status != DiagnosticStatus::Healthy))
             .unwrap_or(0);
         Ok(SidebarBadgeCounts {
-            run_logs: usize_to_u32(run_logs)?,
-            confirmations: usize_to_u32(confirmations)?,
+            run_logs: u32::try_from(run_logs.max(0))
+                .map_err(|_| CoreError::validation("run log badge count exceeds u32"))?,
+            confirmations,
             diagnostics: usize_to_u32(diagnostics)?,
         })
+    }
+
+    fn open_database(&self) -> CoreResult<Connection> {
+        open_ui_log_database(&self.path, None, self.legacy_path.as_deref())
+    }
+}
+
+fn open_ui_log_database(
+    path: &Path,
+    confirmation_legacy: Option<&Path>,
+    run_legacy: Option<&Path>,
+) -> CoreResult<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut connection = Connection::open(path).map_err(sqlite_frontend_error)?;
+    connection
+        .execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA journal_mode = WAL;
+             CREATE TABLE IF NOT EXISTS ui_log_migrations (
+                 name TEXT PRIMARY KEY,
+                 applied_at_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS confirmation_logs (
+                 confirmation_id TEXT PRIMARY KEY,
+                 timestamp_ms INTEGER NOT NULL,
+                 state TEXT NOT NULL,
+                 entry_json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_confirmation_logs_state
+                 ON confirmation_logs(state, timestamp_ms);
+             CREATE TABLE IF NOT EXISTS run_logs (
+                 log_id TEXT PRIMARY KEY,
+                 timestamp_ms INTEGER NOT NULL,
+                 kind TEXT NOT NULL,
+                 level TEXT NOT NULL,
+                 message TEXT NOT NULL,
+                 workflow_id TEXT,
+                 run_id TEXT,
+                 node_id TEXT,
+                 unread INTEGER NOT NULL,
+                 entry_json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_run_logs_filter
+                 ON run_logs(workflow_id, run_id, node_id, kind, level, timestamp_ms);
+             CREATE INDEX IF NOT EXISTS idx_run_logs_unread
+                 ON run_logs(unread, level);
+            ",
+        )
+        .map_err(sqlite_frontend_error)?;
+    if let Some(legacy) = confirmation_legacy {
+        migrate_confirmation_log(&mut connection, legacy)?;
+    }
+    if let Some(legacy) = run_legacy {
+        migrate_run_log(&mut connection, legacy)?;
+    }
+    Ok(connection)
+}
+
+fn migrate_confirmation_log(connection: &mut Connection, legacy: &Path) -> CoreResult<()> {
+    if !legacy.exists() || ui_log_migration_applied(connection, "confirmation_log_json_v1")? {
+        return Ok(());
+    }
+    let entries =
+        serde_json::from_str::<Vec<ConfirmationLogEntry>>(&std::fs::read_to_string(legacy)?)?;
+    let transaction = connection.transaction().map_err(sqlite_frontend_error)?;
+    for entry in &entries {
+        validate_confirmation_entry(entry)?;
+        upsert_confirmation_entry(&transaction, entry)?;
+    }
+    prune_confirmation_logs(&transaction)?;
+    record_ui_log_migration(&transaction, "confirmation_log_json_v1")?;
+    transaction.commit().map_err(sqlite_frontend_error)
+}
+
+fn migrate_run_log(connection: &mut Connection, legacy: &Path) -> CoreResult<()> {
+    if !legacy.exists() || ui_log_migration_applied(connection, "run_log_json_v1")? {
+        return Ok(());
+    }
+    let entries = serde_json::from_str::<Vec<UiRunLogEntry>>(&std::fs::read_to_string(legacy)?)?;
+    let transaction = connection.transaction().map_err(sqlite_frontend_error)?;
+    for entry in &entries {
+        insert_run_log(&transaction, entry)?;
+    }
+    prune_run_logs(&transaction)?;
+    record_ui_log_migration(&transaction, "run_log_json_v1")?;
+    transaction.commit().map_err(sqlite_frontend_error)
+}
+
+fn ui_log_migration_applied(connection: &Connection, name: &str) -> CoreResult<bool> {
+    connection
+        .query_row(
+            "SELECT 1 FROM ui_log_migrations WHERE name = ?1",
+            params![name],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(sqlite_frontend_error)
+}
+
+fn record_ui_log_migration(connection: &Connection, name: &str) -> CoreResult<()> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO ui_log_migrations(name, applied_at_ms) VALUES(?1, ?2)",
+            params![name, i64::try_from(now_timestamp_ms()).unwrap_or(i64::MAX)],
+        )
+        .map_err(sqlite_frontend_error)?;
+    Ok(())
+}
+
+fn upsert_confirmation_entry(
+    connection: &Connection,
+    entry: &ConfirmationLogEntry,
+) -> CoreResult<()> {
+    let timestamp = i64::try_from(entry.timestamp_ms)
+        .map_err(|_| CoreError::validation("confirmation timestamp exceeds SQLite i64"))?;
+    connection
+        .execute(
+            "INSERT INTO confirmation_logs(confirmation_id, timestamp_ms, state, entry_json)
+             VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(confirmation_id) DO UPDATE SET
+                 timestamp_ms=excluded.timestamp_ms, state=excluded.state, entry_json=excluded.entry_json",
+            params![entry.confirmation_id, timestamp, confirmation_state_str(entry.state), serde_json::to_string(entry)?],
+        )
+        .map_err(sqlite_frontend_error)?;
+    Ok(())
+}
+
+fn insert_run_log(connection: &Connection, entry: &UiRunLogEntry) -> CoreResult<()> {
+    let timestamp = i64::try_from(entry.timestamp_ms)
+        .map_err(|_| CoreError::validation("run log timestamp exceeds SQLite i64"))?;
+    connection
+        .execute(
+            "INSERT INTO run_logs(log_id, timestamp_ms, kind, level, message, workflow_id, run_id, node_id, unread, entry_json)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(log_id) DO UPDATE SET
+                 timestamp_ms=excluded.timestamp_ms, kind=excluded.kind, level=excluded.level,
+                 message=excluded.message, workflow_id=excluded.workflow_id, run_id=excluded.run_id,
+                 node_id=excluded.node_id, unread=excluded.unread, entry_json=excluded.entry_json",
+            params![
+                entry.log_id,
+                timestamp,
+                run_log_kind_str(entry.kind),
+                run_log_level_str(entry.level),
+                entry.message,
+                entry.workflow_id.as_ref().map(WorkflowId::as_str),
+                entry.run_id.as_ref().map(RunId::as_str),
+                entry.node_id.as_ref().map(NodeId::as_str),
+                i64::from(entry.unread),
+                serde_json::to_string(entry)?,
+            ],
+        )
+        .map_err(sqlite_frontend_error)?;
+    Ok(())
+}
+
+fn prune_run_logs(connection: &Connection) -> CoreResult<()> {
+    connection
+        .execute(
+            "DELETE FROM run_logs
+             WHERE log_id IN (
+                 SELECT log_id FROM run_logs
+                 ORDER BY timestamp_ms DESC, log_id DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+            params![MAX_RUN_LOG_ENTRIES],
+        )
+        .map_err(sqlite_frontend_error)?;
+    Ok(())
+}
+
+fn prune_confirmation_logs(connection: &Connection) -> CoreResult<()> {
+    // Pending 项属于待处理工作，不能因为历史配额被自动删除；只限制已解决历史。
+    connection
+        .execute(
+            "DELETE FROM confirmation_logs
+             WHERE confirmation_id IN (
+                 SELECT confirmation_id FROM confirmation_logs
+                 WHERE state != 'pending'
+                 ORDER BY timestamp_ms DESC, confirmation_id DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+            params![MAX_RESOLVED_CONFIRMATION_ENTRIES],
+        )
+        .map_err(sqlite_frontend_error)?;
+    Ok(())
+}
+
+fn run_log_kind_str(kind: UiRunLogKind) -> &'static str {
+    match kind {
+        UiRunLogKind::Node => "node",
+        UiRunLogKind::Tool => "tool",
+        UiRunLogKind::Provider => "provider",
+        UiRunLogKind::Cost => "cost",
+        UiRunLogKind::Confirmation => "confirmation",
+        UiRunLogKind::Error => "error",
+        UiRunLogKind::Diagnostic => "diagnostic",
+    }
+}
+
+fn run_log_level_str(level: UiRunLogLevel) -> &'static str {
+    match level {
+        UiRunLogLevel::Info => "info",
+        UiRunLogLevel::Warning => "warning",
+        UiRunLogLevel::Error => "error",
+    }
+}
+
+fn confirmation_state_str(state: ConfirmationLogState) -> &'static str {
+    match state {
+        ConfirmationLogState::Pending => "pending",
+        ConfirmationLogState::Approved => "approved",
+        ConfirmationLogState::Rejected => "rejected",
+        ConfirmationLogState::AutoAudited => "auto_audited",
+    }
+}
+
+fn sqlite_frontend_error(error: rusqlite::Error) -> CoreError {
+    CoreError::External {
+        service: "ui_log_sqlite".to_owned(),
+        message: error.to_string(),
     }
 }
 
@@ -1693,8 +2040,14 @@ impl UiPreferencesStore {
         validate_optional_color("theme_surface_color", &preferences.theme_surface_color)?;
         validate_optional_color("theme_brand_color", &preferences.theme_brand_color)?;
         validate_optional_color("theme_main_color_dark", &preferences.theme_main_color_dark)?;
-        validate_optional_color("theme_surface_color_dark", &preferences.theme_surface_color_dark)?;
-        validate_optional_color("theme_brand_color_dark", &preferences.theme_brand_color_dark)?;
+        validate_optional_color(
+            "theme_surface_color_dark",
+            &preferences.theme_surface_color_dark,
+        )?;
+        validate_optional_color(
+            "theme_brand_color_dark",
+            &preferences.theme_brand_color_dark,
+        )?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2170,7 +2523,35 @@ fn simple_diff(original: &str, suggested: &str) -> String {
     if original == suggested {
         return String::new();
     }
-    format!("- {original}\n+ {suggested}")
+    let fixed_bytes = "- …\n+ …".len();
+    let content_budget = MAX_QUICK_EDIT_DIFF_BYTES.saturating_sub(fixed_bytes);
+    let original_budget = content_budget / 2;
+    let suggested_budget = content_budget - original_budget;
+    let (original_preview, original_truncated) = utf8_prefix(original, original_budget);
+    let (suggested_preview, suggested_truncated) = utf8_prefix(suggested, suggested_budget);
+    let mut diff = String::with_capacity(MAX_QUICK_EDIT_DIFF_BYTES);
+    diff.push_str("- ");
+    diff.push_str(original_preview);
+    if original_truncated {
+        diff.push('…');
+    }
+    diff.push_str("\n+ ");
+    diff.push_str(suggested_preview);
+    if suggested_truncated {
+        diff.push('…');
+    }
+    diff
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> (&str, bool) {
+    if value.len() <= max_bytes {
+        return (value, false);
+    }
+    let mut boundary = max_bytes.min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    (&value[..boundary], true)
 }
 
 pub fn validate_template_repository_base_url(base_url: &str) -> CoreResult<()> {

@@ -331,6 +331,18 @@ public sealed record WorkflowGraphData(
     [property: JsonPropertyName("edges")] IReadOnlyList<CanvasEdge> Edges,
     [property: JsonPropertyName("metadata")] Dictionary<string, object?> Metadata);
 
+public sealed record WorkflowPortEndpoint(
+    [property: JsonPropertyName("node_id")] string NodeId,
+    [property: JsonPropertyName("port_name")] string PortName);
+
+/// <summary>与 Rust WorkflowPackReport 保持同构，避免把顶层报告误当成工作流图。</summary>
+public sealed record WorkflowPackReport(
+    [property: JsonPropertyName("workflow")] WorkflowGraphData Workflow,
+    [property: JsonPropertyName("subworkflow_node_id")] string SubworkflowNodeId,
+    [property: JsonPropertyName("embedded_workflow")] WorkflowGraphData EmbeddedWorkflow,
+    [property: JsonPropertyName("boundary_inputs")] IReadOnlyList<WorkflowPortEndpoint> BoundaryInputs,
+    [property: JsonPropertyName("boundary_outputs")] IReadOnlyList<WorkflowPortEndpoint> BoundaryOutputs);
+
 public sealed record WorkflowSummary(
     [property: JsonPropertyName("workflow_id")] string WorkflowId,
     [property: JsonPropertyName("name")] string Name,

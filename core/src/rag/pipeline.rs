@@ -1,4 +1,8 @@
-use serde_json::json;
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
 
 use crate::contracts::{AutoModeState, CoreError, CoreResult};
 use crate::rag::memory::MemoryWritingKnowledgeBase;
@@ -29,19 +33,27 @@ impl<'a> SummaryPipelineExecutor<'a> {
     }
 
     /// 执行故事段 -> 事件 -> 章节 -> 阶段的写入流程。
-    pub fn apply_draft(&self, draft: SummaryPipelineDraft) -> CoreResult<SummaryPipelineReport> {
+    pub fn apply_draft(
+        &self,
+        mut draft: SummaryPipelineDraft,
+    ) -> CoreResult<SummaryPipelineReport> {
+        let revision_id = summary_revision_id(&draft);
+        attach_revision_metadata(&mut draft, &revision_id);
         validate_complete_draft(&draft)?;
 
         let chapter_id = draft.chapter_id.clone();
         let mut completed_steps = Vec::new();
         let mut confirmation_ids = Vec::new();
-        for segment in draft.segments {
-            self.knowledge.upsert_segment(segment)?;
-        }
+        self.knowledge.replace_chapter_summary_entities(
+            &chapter_id,
+            draft.segments,
+            draft.events,
+        )?;
         confirmation_ids.push(
             self.enqueue_confirmation(
                 ConfirmationKind::SegmentSummary,
                 &chapter_id,
+                &revision_id,
                 json!({
                     "step": "segment",
                     "chapter_id": chapter_id.clone(),
@@ -66,13 +78,11 @@ impl<'a> SummaryPipelineExecutor<'a> {
             self.knowledge.apply_foreshadowing_update(update)?;
         }
 
-        for event in draft.events {
-            self.knowledge.upsert_event(event)?;
-        }
         confirmation_ids.push(
             self.enqueue_confirmation(
                 ConfirmationKind::EventSummary,
                 &chapter_id,
+                &revision_id,
                 json!({ "step": "event", "chapter_id": chapter_id.clone() }),
             )?
             .confirmation_id,
@@ -86,6 +96,7 @@ impl<'a> SummaryPipelineExecutor<'a> {
             self.enqueue_confirmation(
                 ConfirmationKind::ChapterSummary,
                 &chapter_id,
+                &revision_id,
                 json!({ "step": "chapter", "chapter_id": chapter_id.clone() }),
             )?
             .confirmation_id,
@@ -101,6 +112,7 @@ impl<'a> SummaryPipelineExecutor<'a> {
             self.enqueue_confirmation(
                 ConfirmationKind::StageSummary,
                 &chapter_id,
+                &revision_id,
                 json!({
                     "step": "stage",
                     "chapter_id": chapter_id.clone(),
@@ -123,6 +135,7 @@ impl<'a> SummaryPipelineExecutor<'a> {
         let has_unrealized_issues = !issues.is_empty();
         Ok(SummaryPipelineReport {
             chapter_id: draft.chapter_id,
+            revision_id,
             completed_steps,
             paused: pending_confirmations || has_unrealized_issues,
             pause_reason: if has_unrealized_issues {
@@ -151,12 +164,22 @@ impl<'a> SummaryPipelineExecutor<'a> {
         &self,
         kind: ConfirmationKind,
         chapter_id: &str,
+        revision_id: &str,
         metadata: serde_json::Value,
     ) -> CoreResult<ConfirmationItem> {
         let state = self
             .confirmation_policy
             .initial_state(kind, &self.auto_mode);
-        let item = ConfirmationItem::new(confirmation_id(kind, chapter_id), kind, state, metadata);
+        let metadata = merge_metadata(
+            metadata,
+            json!({ "revision_id": revision_id, "chapter_id": chapter_id }),
+        );
+        let item = ConfirmationItem::new(
+            confirmation_id(kind, chapter_id, revision_id),
+            kind,
+            state,
+            metadata,
+        );
         self.knowledge.upsert_confirmation(item.clone())?;
         Ok(item)
     }
@@ -186,7 +209,7 @@ pub fn has_pending_confirmations(knowledge: &MemoryWritingKnowledgeBase) -> Core
 }
 
 /// 生成稳定确认项 id。
-fn confirmation_id(kind: ConfirmationKind, chapter_id: &str) -> String {
+fn confirmation_id(kind: ConfirmationKind, chapter_id: &str, revision_id: &str) -> String {
     let name = match kind {
         ConfirmationKind::OutlinerOutput => "outliner-output",
         ConfirmationKind::DesignerOutput => "designer-output",
@@ -201,7 +224,7 @@ fn confirmation_id(kind: ConfirmationKind, chapter_id: &str) -> String {
         ConfirmationKind::WriterCorrectionPatch => "writer-correction-patch",
         ConfirmationKind::PolisherCorrectionPatch => "polisher-correction-patch",
     };
-    format!("{chapter_id}::{name}")
+    format!("{chapter_id}::{revision_id}::{name}")
 }
 
 /// 校验正式章节总结草稿必须完整覆盖四个步骤。
@@ -214,10 +237,16 @@ fn validate_complete_draft(draft: &SummaryPipelineDraft) -> CoreResult<()> {
             "summary pipeline requires at least one story segment",
         ));
     }
+    let mut segment_ids = BTreeSet::new();
     for segment in &draft.segments {
         if segment.chapter_id != draft.chapter_id {
             return Err(CoreError::validation(
                 "story segment chapter_id must match pipeline chapter_id",
+            ));
+        }
+        if !segment_ids.insert(segment.segment_id.as_str()) {
+            return Err(CoreError::validation(
+                "summary pipeline contains duplicate story segment id",
             ));
         }
     }
@@ -227,16 +256,66 @@ fn validate_complete_draft(draft: &SummaryPipelineDraft) -> CoreResult<()> {
         ));
     }
     for event in &draft.events {
+        event.validate()?;
         if !event.chapter_ids.iter().any(|id| id == &draft.chapter_id) {
             return Err(CoreError::validation(
                 "changed event must link back to pipeline chapter_id",
             ));
+        }
+        for segment_id in &event.segment_ids {
+            if !segment_ids.contains(segment_id.as_str()) {
+                return Err(CoreError::validation(format!(
+                    "changed event references missing story segment: {segment_id}"
+                )));
+            }
         }
     }
     validate_required_text("chapter_summary", draft.chapter_summary.as_deref())?;
     validate_required_text("stage_id", draft.stage_id.as_deref())?;
     validate_required_text("stage_summary", draft.stage_summary.as_deref())?;
     Ok(())
+}
+
+fn summary_revision_id(draft: &SummaryPipelineDraft) -> String {
+    if let Some(value) = draft
+        .metadata
+        .get("revision_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return value.to_owned();
+    }
+    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("summary-{nanos:x}-{sequence:x}")
+}
+
+fn attach_revision_metadata(draft: &mut SummaryPipelineDraft, revision_id: &str) {
+    for segment in &mut draft.segments {
+        segment.metadata = merge_metadata(
+            std::mem::take(&mut segment.metadata),
+            json!({ "revision_id": revision_id, "active_revision": true }),
+        );
+    }
+    for event in &mut draft.events {
+        event.metadata = merge_metadata(
+            std::mem::take(&mut event.metadata),
+            json!({ "revision_id": revision_id, "active_revision": true }),
+        );
+    }
+}
+
+fn merge_metadata(base: Value, extra: Value) -> Value {
+    let mut object = base.as_object().cloned().unwrap_or_default();
+    if let Some(extra) = extra.as_object() {
+        object.extend(extra.clone());
+    }
+    Value::Object(object)
 }
 
 fn validate_required_text(field: &str, value: Option<&str>) -> CoreResult<()> {

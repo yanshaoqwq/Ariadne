@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -45,16 +45,23 @@ use crate::git::{
     ArchivePoint, BranchGraphNode, GitCommitSummary, GitHealthStatus, GitService, GitStagePolicy,
     RestoreReport,
 };
-use crate::llm::{tool_result_message, LlmRunRequest, LlmService, LlmServiceConfig, ToolExecutionOutput};
+use crate::llm::{
+    tool_result_message, LlmRunRequest, LlmService, LlmServiceConfig, ToolExecutionOutput,
+};
 use crate::providers::{
     ContentPart, LlmMessage, LlmRole, OpenAiCompatibleLlmProvider, ProviderProtocol, ToolDefinition,
 };
+use crate::retrieval::{
+    FullTextStore, IndexingWorker, MemoryVectorStore, SqliteFullTextStore, TantivyFullTextStore,
+    ThreeWayHybridSearchEngine,
+};
 use crate::skills::{WorkflowManifest, WORKFLOW_MANIFEST_FILE};
 use crate::workflow::{
-    execute_document_read_node_with_root, execute_llm_node, execute_summarizer_node,
-    BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink, RoutedExternalNodeExecutor,
-    RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRuntime,
-    WorkflowRuntimeEvent, WorkflowRuntimeStore,
+    execute_document_read_node_with_root, execute_llm_node_with_defaults,
+    execute_project_search_node, execute_summarizer_node, BuiltinWorkflowNodeExecutor,
+    DocumentWorkflowExportSink, RoutedExternalNodeExecutor, RuntimeConfirmation,
+    RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRuntime, WorkflowRuntimeEvent,
+    WorkflowRuntimeStore,
 };
 
 pub const WORKFLOW_STATUS_UPDATE_EVENT: &str = "workflow_status_update";
@@ -158,6 +165,18 @@ pub struct WorkflowGraphData {
     pub edges: Vec<CanvasEdge>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+/// IPC/桌面专用的子工作流打包结果；领域工作流在边界处统一转换为画布 DTO。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowPackGraphReport {
+    pub workflow: WorkflowGraphData,
+    pub subworkflow_node_id: String,
+    pub embedded_workflow: WorkflowGraphData,
+    #[serde(default)]
+    pub boundary_inputs: Vec<PortEndpoint>,
+    #[serde(default)]
+    pub boundary_outputs: Vec<PortEndpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -492,6 +511,12 @@ pub struct RunLogQuery {
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_timestamp_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_log_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +638,14 @@ pub struct ProjectAiResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run: Option<WorkflowRunStarted>,
     pub project_memory: String,
+    #[serde(default)]
+    pub history_truncated: bool,
+    #[serde(default)]
+    pub memory_truncated: bool,
+    #[serde(default)]
+    pub estimated_input_tokens: u64,
+    #[serde(default)]
+    pub context_limit_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -622,6 +655,16 @@ struct ProjectWorkflowTool {
     workflow_id: String,
     start_node_id: String,
     input_schema: Value,
+}
+
+struct ProjectAiContextWindow {
+    memory: String,
+    reference_context: String,
+    history: Vec<ProjectAiChatMessage>,
+    history_truncated: bool,
+    memory_truncated: bool,
+    estimated_input_tokens: u64,
+    context_limit_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,6 +707,7 @@ pub fn open_project(
     persist_project_name(&project_root, name.as_deref())?;
     state.set_project_root(project_root.clone())?;
     record_recent_project(state.app_state_root(), name, &project_root)?;
+    resume_indexing_worker(project_root.clone());
     current_project_status(&project_root)
 }
 
@@ -672,22 +716,28 @@ pub fn get_current_project(state: &AriadneAppState) -> CommandResult<CurrentProj
 }
 
 pub fn get_app_status(state: &AriadneAppState) -> CommandResult<AppStatus> {
-    // 个性化与项目解耦：始终可读全局偏好；无项目时 current_project / badges 走兜底
+    // 空路径表示尚未打开项目；非空路径必须是已初始化项目，不能把损坏状态伪装成无项目。
+    let configured_root = state.project_root()?;
+    let active_project = if configured_root.as_os_str().is_empty() {
+        None
+    } else {
+        validate_initialized_project_root(&configured_root)?;
+        Some(configured_root)
+    };
+
+    // 个性化与项目解耦：始终可读全局偏好；仅真正无项目时 current_project / badges 走兜底。
     let preferences = UiPreferencesStore::read_global_or_migrate(
         state.app_state_root(),
-        project_root_from_state(&state, None).ok().as_deref(),
+        active_project.as_deref(),
     )
     .map_err(error_to_string)?;
 
-    let (current_project, badges) = match project_root_from_state(&state, None) {
-        Ok(project_root) => (
-            current_project_status(&project_root).unwrap_or(CurrentProjectStatus {
-                project_root: project_root.clone(),
-                project_name: String::new(),
-            }),
-            get_sidebar_badges_impl(&project_root).unwrap_or_default(),
+    let (current_project, badges) = match active_project {
+        Some(project_root) => (
+            current_project_status(&project_root)?,
+            get_sidebar_badges_impl(&project_root)?,
         ),
-        Err(_) => (
+        None => (
             CurrentProjectStatus {
                 project_root: PathBuf::new(),
                 project_name: String::new(),
@@ -712,7 +762,9 @@ pub fn set_project_root(state: &AriadneAppState, project_root: String) -> Comman
     let project_root = PathBuf::from(project_root);
     validate_initialized_project_root(&project_root)?;
     ensure_project_config(&project_root)?;
-    state.set_project_root(project_root)
+    state.set_project_root(project_root.clone())?;
+    resume_indexing_worker(project_root);
+    Ok(())
 }
 
 pub fn get_works_tree(state: &AriadneAppState) -> CommandResult<WorksTreeNode> {
@@ -770,6 +822,7 @@ pub fn import_chapter(
     mut request: ChapterImportRequest,
 ) -> CommandResult<ChapterDocumentIndex> {
     let project_root = project_root_from_state(&state, None)?;
+    ensure_project_not_in_maintenance(&project_root)?;
     request.source_path = project_path_buf(&project_root, &request.source_path)?;
     request.target_path = project_path_buf(&project_root, &request.target_path)?;
     let documents = document_service(&project_root);
@@ -780,6 +833,7 @@ pub fn import_chapter(
         .retain(|entry| entry.chapter_id != report.entry.chapter_id);
     index.entries.push(report.entry);
     save_chapter_index(&project_root, &index)?;
+    spawn_indexing_worker(project_root);
     Ok(index)
 }
 
@@ -886,7 +940,7 @@ pub fn pack_workflow_selection_impl(
     selected_node_ids: Vec<String>,
     subworkflow_node_id: Option<String>,
     title: Option<String>,
-) -> CommandResult<crate::frontend::WorkflowPackReport> {
+) -> CommandResult<WorkflowPackGraphReport> {
     let mut workflow = load_workflow_definition(project_root, Some(workflow_id))?;
     let report = pack_workflow_selection_in_workflow(
         &mut workflow,
@@ -895,8 +949,15 @@ pub fn pack_workflow_selection_impl(
         title,
     )
     .map_err(error_to_string)?;
-    save_workflow_graph_impl(project_root, workflow_to_graph(report.workflow.clone()))?;
-    Ok(report)
+    let workflow = workflow_to_graph(report.workflow);
+    save_workflow_graph_impl(project_root, workflow.clone())?;
+    Ok(WorkflowPackGraphReport {
+        workflow,
+        subworkflow_node_id: report.subworkflow_node_id.as_str().to_owned(),
+        embedded_workflow: workflow_to_graph(report.embedded_workflow),
+        boundary_inputs: report.boundary_inputs,
+        boundary_outputs: report.boundary_outputs,
+    })
 }
 
 pub fn pack_workflow_selection(
@@ -905,7 +966,7 @@ pub fn pack_workflow_selection(
     selected_node_ids: Vec<String>,
     subworkflow_node_id: Option<String>,
     title: Option<String>,
-) -> CommandResult<crate::frontend::WorkflowPackReport> {
+) -> CommandResult<WorkflowPackGraphReport> {
     let project_root = project_root_from_state(&state, None)?;
     pack_workflow_selection_impl(
         &project_root,
@@ -955,6 +1016,7 @@ fn start_workflow_request(
     request: RunWorkflowRequest,
 ) -> CommandResult<WorkflowRunStarted> {
     validate_existing_project_root(project_root)?;
+    ensure_project_not_in_maintenance(project_root)?;
     let run_id = new_run_id()?;
     let run_id_text = run_id.as_str().to_owned();
     let worker_workflow_id = request.workflow_id.clone();
@@ -1027,6 +1089,7 @@ pub fn resume_workflow(
     run_id: String,
 ) -> CommandResult<WorkflowActionResult> {
     let project_root = project_root_from_state(&state, None)?;
+    ensure_project_not_in_maintenance(&project_root)?;
     let result = update_workflow_run_control(&project_root, workflow_id, run_id, |runtime| {
         runtime.resume()
     })?;
@@ -1040,6 +1103,7 @@ pub fn override_confirmation_output(
     request: OverrideConfirmationOutputRequest,
 ) -> CommandResult<WorkflowActionResult> {
     let project_root = project_root_from_state(&state, None)?;
+    ensure_project_not_in_maintenance(&project_root)?;
     let result = update_workflow_run_control(
         &project_root,
         request.workflow_id,
@@ -1058,6 +1122,7 @@ pub fn resume_from_node(
     request: ResumeFromNodeRequest,
 ) -> CommandResult<WorkflowActionResult> {
     let project_root = project_root_from_state(&state, None)?;
+    ensure_project_not_in_maintenance(&project_root)?;
     let workflow = load_workflow_definition(&project_root, Some(request.workflow_id.clone()))
         .map_err(error_to_string)?;
     let result = update_workflow_run_control(
@@ -1181,9 +1246,10 @@ pub fn update_budget_config(
     state: &AriadneAppState,
     budget_usd: f64,
     preauthorized_usd: f64,
-) -> CommandResult<()> {
+) -> CommandResult<BudgetStatus> {
     let project_root = project_root_from_state(&state, None)?;
-    update_budget_config_impl(&project_root, budget_usd, preauthorized_usd)
+    update_budget_config_impl(&project_root, budget_usd, preauthorized_usd)?;
+    get_budget_status_impl(&project_root)
 }
 
 pub fn set_auto_mode(state: &AriadneAppState, enabled: bool) -> CommandResult<()> {
@@ -1606,6 +1672,7 @@ pub fn resolve_confirmation(
     request: ResolveConfirmationRequest,
 ) -> CommandResult<ResolveConfirmationResult> {
     let project_root = project_root_from_state(&state, None)?;
+    ensure_project_not_in_maintenance(&project_root)?;
     let should_continue = request.decision == ConfirmationDecision::Approve;
     let result = resolve_confirmation_impl(&project_root, request)?;
     if should_continue {
@@ -1649,11 +1716,62 @@ pub fn restore_to_new_branch(
     new_branch: String,
 ) -> CommandResult<RestoreReport> {
     let project_root = project_root_from_state(&state, None)?;
-    let report = GitService::new(&project_root)
-        .restore_to_new_branch(&commit_id, &new_branch)
+    let documents = document_service(&project_root);
+    let maintenance = documents.invalidation_outbox();
+    maintenance
+        .begin_maintenance("git_restore", "stopping_runtime")
         .map_err(error_to_string)?;
-    record_git_restore_log(&project_root, &report);
-    Ok(report)
+    let result: CommandResult<RestoreReport> = (|| -> CommandResult<RestoreReport> {
+        let runtime_path = project_root.join(crate::workflow::RUNTIME_DB_FILE);
+        if runtime_path.exists() {
+            let runtime_store =
+                SqliteWorkflowRuntimeStore::open(&project_root).map_err(error_to_string)?;
+            runtime_store
+                .stop_non_terminal_for_restore("stopped for Git restore maintenance")
+                .map_err(error_to_string)?;
+        }
+        maintenance
+            .update_maintenance_phase("checking_out_branch")
+            .map_err(error_to_string)?;
+        let config = ConfigStore::new(&project_root)
+            .load_or_create()
+            .map_err(error_to_string)?;
+        let policy = git_stage_policy_from_config(&config.git);
+        let mut report = GitService::new(&project_root)
+            .restore_to_new_branch_with_policy(&commit_id, &new_branch, &policy)
+            .map_err(error_to_string)?;
+        maintenance
+            .update_maintenance_phase("rebuilding_full_text_indexes")
+            .map_err(error_to_string)?;
+        let rebuild_event = maintenance
+            .prepare(
+                &project_root.to_string_lossy(),
+                "git_restore_full_rebuild",
+                &report.base_commit,
+                true,
+            )
+            .map_err(error_to_string)?;
+        maintenance
+            .activate(&rebuild_event)
+            .map_err(error_to_string)?;
+        process_index_outbox_impl(&project_root)?;
+        report.index_rebuild_required = false;
+        report.runtime_rebind_required = false;
+        Ok(report)
+    })();
+    match result {
+        Ok(report) => {
+            maintenance
+                .complete_maintenance("completed")
+                .map_err(error_to_string)?;
+            record_git_restore_log(&project_root, &report);
+            Ok(report)
+        }
+        Err(error) => {
+            let _ = maintenance.fail_maintenance("restore_incomplete", &error);
+            Err(error)
+        }
+    }
 }
 
 pub fn get_provider_config(state: &AriadneAppState) -> CommandResult<ProviderConfigStatus> {
@@ -1693,6 +1811,9 @@ pub fn query_run_logs(
             run_id: filter.run_id.map(RunId::from),
             node_id: filter.node_id.map(NodeId::from),
             query: filter.query,
+            after_timestamp_ms: filter.after_timestamp_ms,
+            after_log_id: filter.after_log_id,
+            limit: filter.limit,
         })
         .map_err(error_to_string)
 }
@@ -1742,8 +1863,9 @@ pub fn apply_quick_edit(
     result: QuickEditResult,
 ) -> CommandResult<crate::documents::PatchApplyReport> {
     let project_root = project_root_from_state(&state, None)?;
+    ensure_project_not_in_maintenance(&project_root)?;
     let documents = document_service(&project_root);
-    crate::frontend::apply_quick_edit_patch(
+    let report = crate::frontend::apply_quick_edit_patch(
         &documents,
         &document_id,
         base_version,
@@ -1751,7 +1873,9 @@ pub fn apply_quick_edit(
         range,
         &result,
     )
-    .map_err(error_to_string)
+    .map_err(error_to_string)?;
+    spawn_indexing_worker(project_root);
+    Ok(report)
 }
 
 pub fn project_ai_chat(
@@ -2019,16 +2143,151 @@ pub fn save_document_content_report_impl(
     content: String,
     base_version: Option<String>,
 ) -> CommandResult<DocumentWriteReport> {
+    ensure_project_not_in_maintenance(project_root)?;
     let document_path = project_path(project_root, &document_id)?;
     let documents = document_service(project_root);
-    documents
+    let report = documents
         .save_document(DocumentWriteRequest {
             path: document_path,
             content,
             format: None,
             base_version,
         })
+        .map_err(error_to_string)?;
+    spawn_indexing_worker(project_root.to_path_buf());
+    Ok(report)
+}
+
+fn ensure_project_not_in_maintenance(project_root: &Path) -> CommandResult<()> {
+    document_service(project_root)
+        .invalidation_outbox()
+        .ensure_available()
         .map_err(error_to_string)
+}
+
+/// 同步消费当前项目的索引 outbox，供后台线程、诊断恢复和契约测试复用。
+pub fn process_index_outbox_impl(project_root: &Path) -> CommandResult<usize> {
+    validate_initialized_project_root(project_root)?;
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    config.rag.validate().map_err(error_to_string)?;
+    let tantivy_path = project_path(project_root, &config.rag.full_text_store.index_dir)?;
+    let sqlite_path = project_root.join(".indexes").join("full_text.db");
+    if let Some(parent) = sqlite_path.parent() {
+        std::fs::create_dir_all(parent).map_err(error_to_string)?;
+    }
+    let tantivy: Arc<dyn FullTextStore> =
+        Arc::new(TantivyFullTextStore::open(tantivy_path).map_err(error_to_string)?);
+    let sqlite: Arc<dyn FullTextStore> =
+        Arc::new(SqliteFullTextStore::open(sqlite_path).map_err(error_to_string)?);
+    let documents = document_service(project_root);
+    let worker = IndexingWorker::new(
+        documents.invalidation_outbox().clone(),
+        tantivy,
+        sqlite,
+        config.rag.chunk_size_chars as usize,
+        config.rag.chunk_overlap_chars as usize,
+    )
+    .map_err(error_to_string)?;
+    let mut processed = 0usize;
+    let mut first_error = None;
+    loop {
+        match worker.process_next() {
+            Ok(Some(_)) => processed = processed.saturating_add(1),
+            Ok(None) => break,
+            Err(error) => {
+                first_error.get_or_insert_with(|| error_to_string(error));
+            }
+        }
+    }
+    if processed == 0 {
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
+    Ok(processed)
+}
+
+fn spawn_indexing_worker(project_root: PathBuf) {
+    let Some(worker_key) = register_indexing_worker(&project_root) else {
+        return;
+    };
+    spawn_registered_indexing_worker(project_root, worker_key);
+}
+
+/// 项目重新打开时恢复上次进程中断的领取状态，再启动唯一后台 worker。
+fn resume_indexing_worker(project_root: PathBuf) {
+    let Some(worker_key) = register_indexing_worker(&project_root) else {
+        return;
+    };
+    let documents = document_service(&project_root);
+    if let Err(error) = documents.invalidation_outbox().requeue_interrupted() {
+        unregister_indexing_worker(&worker_key);
+        record_workflow_worker_error(
+            &project_root,
+            "indexing",
+            "indexing-worker-recovery",
+            "indexing worker recovery failed",
+            &error.to_string(),
+        );
+        return;
+    }
+    spawn_registered_indexing_worker(project_root, worker_key);
+}
+
+fn spawn_registered_indexing_worker(project_root: PathBuf, worker_key: PathBuf) {
+    let thread_root = project_root.clone();
+    let thread_key = worker_key.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("ariadne-indexing-worker".to_owned())
+        .spawn(move || {
+            let _guard = IndexingWorkerGuard(thread_key);
+            if let Err(error) = process_index_outbox_impl(&thread_root) {
+                record_workflow_worker_error(
+                    &thread_root,
+                    "indexing",
+                    "indexing-worker",
+                    "indexing worker failed",
+                    &error,
+                );
+                eprintln!("[ariadne] indexing worker failed: {error}");
+            }
+        })
+    {
+        unregister_indexing_worker(&worker_key);
+        eprintln!("[ariadne] failed to spawn indexing worker: {error}");
+    }
+}
+
+fn register_indexing_worker(project_root: &Path) -> Option<PathBuf> {
+    let worker_key = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let mut active = active_indexing_workers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    active.insert(worker_key.clone()).then_some(worker_key)
+}
+
+fn unregister_indexing_worker(worker_key: &Path) {
+    active_indexing_workers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(worker_key);
+}
+
+fn active_indexing_workers() -> &'static Mutex<HashSet<PathBuf>> {
+    static ACTIVE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+struct IndexingWorkerGuard(PathBuf);
+
+impl Drop for IndexingWorkerGuard {
+    fn drop(&mut self) {
+        unregister_indexing_worker(&self.0);
+    }
 }
 
 pub fn load_workflow_graph_impl(
@@ -2110,20 +2369,11 @@ pub fn get_workflow_events_impl(
     let workflow_id_typed = WorkflowId::from(workflow_id.clone());
     let run_id_typed = RunId::from(run_id.clone());
     let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
-    let state = store
-        .load_state(&workflow_id_typed, &run_id_typed)
+    let after_sequence = after_sequence.unwrap_or(0);
+    let (status, events) = store
+        .list_events_since(&workflow_id_typed, &run_id_typed, after_sequence, limit)
         .map_err(error_to_string)?
         .ok_or_else(|| format!("workflow run not found: {workflow_id}/{run_id}"))?;
-    let after_sequence = after_sequence.unwrap_or(0);
-    let mut events = state
-        .structured_events
-        .iter()
-        .filter(|event| event.sequence >= after_sequence)
-        .cloned()
-        .collect::<Vec<_>>();
-    if let Some(limit) = limit {
-        events.truncate(limit);
-    }
     let next_sequence = events
         .last()
         .map(|event| event.sequence.saturating_add(1))
@@ -2131,7 +2381,7 @@ pub fn get_workflow_events_impl(
     Ok(WorkflowEventsResult {
         workflow_id,
         run_id,
-        status: run_status_label(state.status).to_owned(),
+        status: run_status_label(status).to_owned(),
         next_sequence,
         events,
     })
@@ -2142,6 +2392,7 @@ pub fn run_workflow_impl(
     secrets: &dyn SecretStore,
     request: RunWorkflowRequest,
 ) -> CommandResult<WorkflowRunStarted> {
+    ensure_project_not_in_maintenance(project_root)?;
     run_workflow_impl_with_run_id(project_root, secrets, request, new_run_id()?)
 }
 
@@ -2152,6 +2403,7 @@ fn run_workflow_impl_with_run_id(
     run_id: RunId,
 ) -> CommandResult<WorkflowRunStarted> {
     validate_existing_project_root(project_root)?;
+    ensure_project_not_in_maintenance(project_root)?;
     let start_node_id = request.start_node_id.clone();
     let workflow = load_workflow_definition(project_root, Some(request.workflow_id))?;
     let mut workflow = if let Some(start_node_id) = start_node_id.as_deref() {
@@ -2187,6 +2439,7 @@ fn continue_workflow_run_impl(
     workflow_id: String,
     run_id: String,
 ) -> CommandResult<WorkflowRunStarted> {
+    ensure_project_not_in_maintenance(project_root)?;
     validate_existing_project_root(project_root)?;
     let workflow_id_typed = WorkflowId::from(workflow_id.clone());
     let run_id_typed = RunId::from(run_id.clone());
@@ -2262,13 +2515,16 @@ fn execute_workflow_runtime(
         project_root.join(".runtime").join("artifacts"),
     );
     let ledger = Arc::new(SqliteCostLedger::open(project_root).map_err(error_to_string)?);
-    let llm_provider = if workflow_requires_llm_provider(&workflow) {
-        Some(llm_runtime(project_root, secrets)?.provider)
+    let llm_runtime = if workflow_requires_llm_provider(&workflow) {
+        Some(llm_runtime(project_root, secrets)?)
     } else {
         None
     };
     let mut external = RoutedExternalNodeExecutor::new();
-    if let Some(provider) = llm_provider {
+    if let Some(llm_runtime) = llm_runtime {
+        let provider = llm_runtime.provider;
+        let default_provider_id = llm_runtime.config.provider_id;
+        let default_model_id = llm_runtime.config.model_id;
         // 普通 LLM 语义节点走 execute_llm_node。summarizer 例外：它是四步总结
         // 生产链（故事段划分并概括 → 事件 → 章节 → 阶段），走专用 handler 落库建索引。
         for type_name in [
@@ -2277,10 +2533,20 @@ fn execute_workflow_runtime(
         ] {
             let provider = provider.clone();
             let ledger = Arc::clone(&ledger);
+            let default_provider_id = default_provider_id.clone();
+            let default_model_id = default_model_id.clone();
             external
                 .register_handler(
                     type_name,
-                    Box::new(move |request| execute_llm_node(request, &provider, ledger.as_ref())),
+                    Box::new(move |request| {
+                        execute_llm_node_with_defaults(
+                            request,
+                            &provider,
+                            ledger.as_ref(),
+                            Some(&default_provider_id),
+                            Some(&default_model_id),
+                        )
+                    }),
                 )
                 .map_err(error_to_string)?;
         }
@@ -2314,6 +2580,28 @@ fn execute_workflow_runtime(
                 Box::new(move |request| {
                     execute_document_read_node_with_root(request, &documents, Some(&document_root))
                 }),
+            )
+            .map_err(error_to_string)?;
+    }
+    if workflow.nodes.iter().any(|node| node.type_name == "search") {
+        let config = ConfigStore::new(project_root)
+            .load_or_create()
+            .map_err(error_to_string)?;
+        let tantivy_path = project_path(project_root, &config.rag.full_text_store.index_dir)?;
+        let sqlite_path = project_root.join(".indexes").join("full_text.db");
+        if let Some(parent) = sqlite_path.parent() {
+            std::fs::create_dir_all(parent).map_err(error_to_string)?;
+        }
+        let vector = Arc::new(MemoryVectorStore::new());
+        let tantivy: Arc<dyn FullTextStore> =
+            Arc::new(TantivyFullTextStore::open(tantivy_path).map_err(error_to_string)?);
+        let sqlite: Arc<dyn FullTextStore> =
+            Arc::new(SqliteFullTextStore::open(sqlite_path).map_err(error_to_string)?);
+        let retrieval = Arc::new(ThreeWayHybridSearchEngine::new(vector, tantivy, sqlite));
+        external
+            .register_handler(
+                "search",
+                Box::new(move |request| execute_project_search_node(request, retrieval.as_ref())),
             )
             .map_err(error_to_string)?;
     }
@@ -2651,21 +2939,18 @@ pub fn save_automation_settings_impl(
     let mut normalized_settings = Vec::new();
     let allowed = confirmation_policy_keys();
     for setting in settings.confirmation_policies {
-        if !allowed.contains(&setting.confirmation_kind.as_str()) {
-            return Err(format!(
-                "unknown confirmation kind: {}",
-                setting.confirmation_kind
-            ));
+        if allowed.contains(&setting.confirmation_kind.as_str()) {
+            let policy = approval_policy_from_ui(&policy_code_from_dual_policy(
+                setting.normal_policy,
+                setting.auto_mode_policy,
+            ))?;
+            let prompt = ensure_approval_prompt(
+                &mut config.auto_mode.available_approval_prompts,
+                &setting.confirmation_kind,
+            );
+            prompt.default_policy = policy;
         }
-        let policy = approval_policy_from_ui(&policy_code_from_dual_policy(
-            setting.normal_policy,
-            setting.auto_mode_policy,
-        ))?;
-        let prompt = ensure_approval_prompt(
-            &mut config.auto_mode.available_approval_prompts,
-            &setting.confirmation_kind,
-        );
-        prompt.default_policy = policy;
+        // 未知键可能来自更新版本或插件，只做透明保存，不写入当前版本的 prompt 配置。
         normalized_settings.push(setting);
     }
     config_store.save(&config).map_err(error_to_string)?;
@@ -2804,19 +3089,20 @@ pub fn get_git_repository_status_impl(project_root: &Path) -> CommandResult<GitR
         .load_or_create()
         .map_err(error_to_string)?;
     let policy = git_stage_policy_from_config(&config.git);
-    let health = service.health_check();
-    let status = service.status_with_policy(&policy).unwrap_or_default();
-    let diff = service.diff_with_policy(&policy).unwrap_or_default();
-    let diff_line_count = diff.lines().count();
-    let diff_preview = diff.chars().take(4000).collect();
+    let (health, status) = service
+        .health_check_with_policy(&policy)
+        .map_err(|error| error.to_string())?;
+    let diff = service
+        .diff_preview_with_policy(&policy, 4000)
+        .map_err(|error| error.to_string())?;
     Ok(GitRepositoryStatus {
         status: health.status,
         branch: health.branch,
         head: health.head,
-        dirty: !status.trim().is_empty() || diff_line_count > 0,
+        dirty: !status.trim().is_empty() || diff.line_count > 0,
         reason: health.reason,
-        diff_line_count,
-        diff_preview,
+        diff_line_count: diff.line_count,
+        diff_preview: diff.preview,
     })
 }
 
@@ -2869,6 +3155,12 @@ fn record_git_restore_log(project_root: &Path, report: &RestoreReport) {
 
 fn git_stage_policy_from_config(config: &GitConfig) -> GitStagePolicy {
     let mut ignored_paths = config.ignored_paths.clone();
+    ignored_paths.extend([
+        "runtime.db-wal".to_owned(),
+        "runtime.db-shm".to_owned(),
+        "costs.db-wal".to_owned(),
+        "costs.db-shm".to_owned(),
+    ]);
     if !config.track_documents {
         ignored_paths.push("documents".to_owned());
     }
@@ -3106,10 +3398,25 @@ fn project_ai_chat_with_runner(
         project_ai_workflow_tools(project_root)?
     };
 
-    let answer = if request.message.trim().is_empty() {
-        "已处理项目记忆或工作流请求。".to_owned()
+    let (answer, effective_history, context_window) = if request.message.trim().is_empty() {
+        let memory = take_last_chars(project_memory.trim(), 16_384);
+        let history_start = request.chat_history.len().saturating_sub(64);
+        let history = request.chat_history[history_start..].to_vec();
+        (
+            "已处理项目记忆或工作流请求。".to_owned(),
+            history.clone(),
+            ProjectAiContextWindow {
+                memory_truncated: memory.chars().count() < project_memory.trim().chars().count(),
+                memory,
+                reference_context: String::new(),
+                history_truncated: history_start > 0,
+                history,
+                estimated_input_tokens: 0,
+                context_limit_tokens: 0,
+            },
+        )
     } else {
-        let (answer, tool_workflow_run) = project_ai_answer(
+        let (answer, tool_workflow_run, context_window) = project_ai_answer(
             project_root,
             secrets,
             &project_memory,
@@ -3122,17 +3429,20 @@ fn project_ai_chat_with_runner(
         if workflow_run.is_none() {
             workflow_run = tool_workflow_run;
         }
-        answer
+        (answer, context_window.history.clone(), context_window)
     };
-    let chat_history =
-        project_ai_response_history(&request.chat_history, &request.message, &answer)?;
+    let chat_history = project_ai_response_history(&effective_history, &request.message, &answer)?;
 
     Ok(ProjectAiResponse {
         answer,
         chat_history,
         resolved_references,
         workflow_run,
-        project_memory,
+        project_memory: context_window.memory,
+        history_truncated: context_window.history_truncated,
+        memory_truncated: context_window.memory_truncated,
+        estimated_input_tokens: context_window.estimated_input_tokens,
+        context_limit_tokens: context_window.context_limit_tokens,
     })
 }
 
@@ -3164,11 +3474,24 @@ fn project_ai_answer(
     message: &str,
     workflow_tools: &[ProjectWorkflowTool],
     workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
-) -> CommandResult<(String, Option<WorkflowRunStarted>)> {
+) -> CommandResult<(String, Option<WorkflowRunStarted>, ProjectAiContextWindow)> {
     let runtime = llm_runtime(project_root, secrets)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
     let service = LlmService::new(&ledger, runtime.auto_mode.clone());
-    let mut messages = project_ai_llm_messages(project_memory, references, chat_history, message)?;
+    let context_window = project_ai_context_window(
+        project_memory,
+        references,
+        chat_history,
+        message,
+        runtime.config.max_context_tokens,
+        runtime.config.max_output_tokens,
+    )?;
+    let mut messages = project_ai_llm_messages(
+        &context_window.memory,
+        &context_window.reference_context,
+        &context_window.history,
+        message,
+    )?;
     let start_catalog = project_ai_start_node_catalog(project_root)?;
     let tool_definitions = project_ai_tool_definitions(workflow_tools);
     let mut config = runtime.config;
@@ -3227,7 +3550,7 @@ fn project_ai_answer(
     } else {
         final_text
     };
-    Ok((answer, tool_workflow_run))
+    Ok((answer, tool_workflow_run, context_window))
 }
 
 fn project_ai_execute_tool_call(
@@ -3326,7 +3649,9 @@ struct ProjectAiStartNodeInfo {
 }
 
 /// 扫描全部起始节点（不限于 expose_as_tool），供 list_start_nodes 与测试使用。
-fn project_ai_start_node_catalog(project_root: &Path) -> CommandResult<Vec<ProjectAiStartNodeInfo>> {
+fn project_ai_start_node_catalog(
+    project_root: &Path,
+) -> CommandResult<Vec<ProjectAiStartNodeInfo>> {
     let workflows_root = absolute_path(&project_root.join("workflows"));
     reject_symlink_root(&workflows_root)?;
     if !workflows_root.exists() {
@@ -3340,7 +3665,11 @@ fn project_ai_start_node_catalog(project_root: &Path) -> CommandResult<Vec<Proje
         let content = std::fs::read_to_string(&path).map_err(error_to_string)?;
         let workflow: WorkflowDefinition =
             serde_json::from_str(&content).map_err(error_to_string)?;
-        for start_node in workflow.nodes.iter().filter(|node| node.type_name == "start") {
+        for start_node in workflow
+            .nodes
+            .iter()
+            .filter(|node| node.type_name == "start")
+        {
             catalog.push(ProjectAiStartNodeInfo {
                 workflow_id: workflow.id.as_str().to_owned(),
                 node_id: start_node.id.as_str().to_owned(),
@@ -3366,13 +3695,46 @@ fn project_ai_start_node_catalog(project_root: &Path) -> CommandResult<Vec<Proje
     Ok(catalog)
 }
 
-fn project_ai_llm_messages(
+fn project_ai_context_window(
     project_memory: &str,
     references: &[ProjectReference],
     chat_history: &[ProjectAiChatMessage],
     message: &str,
-) -> CommandResult<Vec<LlmMessage>> {
-    let reference_context = references
+    configured_context_tokens: Option<u32>,
+    configured_output_tokens: Option<u32>,
+) -> CommandResult<ProjectAiContextWindow> {
+    const DEFAULT_CONTEXT_TOKENS: u32 = 16_384;
+    const SYSTEM_AND_TOOL_RESERVE_CHARS: usize = 4_000;
+    let context_limit_tokens = configured_context_tokens.unwrap_or(DEFAULT_CONTEXT_TOKENS);
+    let output_reserve_tokens =
+        configured_output_tokens.unwrap_or_else(|| (context_limit_tokens / 4).clamp(256, 4_096));
+    if context_limit_tokens <= output_reserve_tokens.saturating_add(1_024) {
+        return Err(format!(
+            "project AI context limit {context_limit_tokens} leaves insufficient input space after output reserve {output_reserve_tokens}"
+        ));
+    }
+    let input_token_budget = context_limit_tokens - output_reserve_tokens;
+    let input_char_budget = usize::try_from(input_token_budget)
+        .unwrap_or(usize::MAX / 4)
+        .saturating_mul(4);
+    let message_chars = message.trim().chars().count();
+    if message_chars.saturating_add(SYSTEM_AND_TOOL_RESERVE_CHARS) > input_char_budget {
+        return Err(format!(
+            "project AI message is too large for model context: approximately {} input tokens available",
+            input_token_budget
+        ));
+    }
+
+    let available = input_char_budget
+        .saturating_sub(SYSTEM_AND_TOOL_RESERVE_CHARS)
+        .saturating_sub(message_chars);
+    let memory_budget = available / 4;
+    let reference_budget = available / 3;
+    let history_budget = available.saturating_sub(memory_budget + reference_budget);
+
+    let memory = take_last_chars(project_memory.trim(), memory_budget);
+    let memory_truncated = memory.chars().count() < project_memory.trim().chars().count();
+    let full_reference_context = references
         .iter()
         .map(|reference| {
             format!(
@@ -3382,6 +3744,66 @@ fn project_ai_llm_messages(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let reference_context = take_first_chars(&full_reference_context, reference_budget);
+
+    let mut selected_reversed = Vec::new();
+    let mut used_history_chars = 0usize;
+    for history in chat_history.iter().rev() {
+        let cost = history.content.chars().count().saturating_add(16);
+        if used_history_chars.saturating_add(cost) > history_budget {
+            break;
+        }
+        used_history_chars = used_history_chars.saturating_add(cost);
+        selected_reversed.push(history.clone());
+    }
+    selected_reversed.reverse();
+    if selected_reversed
+        .first()
+        .is_some_and(|entry| entry.role == ProjectAiChatRole::Assistant)
+    {
+        let first_non_assistant = selected_reversed
+            .iter()
+            .position(|entry| entry.role != ProjectAiChatRole::Assistant)
+            .unwrap_or(selected_reversed.len());
+        selected_reversed.drain(..first_non_assistant);
+    }
+    let history_truncated = selected_reversed.len() < chat_history.len();
+    let estimated_chars = SYSTEM_AND_TOOL_RESERVE_CHARS
+        .saturating_add(message_chars)
+        .saturating_add(memory.chars().count())
+        .saturating_add(reference_context.chars().count())
+        .saturating_add(
+            selected_reversed
+                .iter()
+                .map(|entry| entry.content.chars().count().saturating_add(16))
+                .sum::<usize>(),
+        );
+    Ok(ProjectAiContextWindow {
+        memory,
+        reference_context,
+        history: selected_reversed,
+        history_truncated,
+        memory_truncated,
+        estimated_input_tokens: u64::try_from(estimated_chars.div_ceil(4)).unwrap_or(u64::MAX),
+        context_limit_tokens,
+    })
+}
+
+fn take_first_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn take_last_chars(value: &str, limit: usize) -> String {
+    let count = value.chars().count();
+    value.chars().skip(count.saturating_sub(limit)).collect()
+}
+
+fn project_ai_llm_messages(
+    project_memory: &str,
+    reference_context: &str,
+    chat_history: &[ProjectAiChatMessage],
+    message: &str,
+) -> CommandResult<Vec<LlmMessage>> {
     let mut messages = vec![
         LlmMessage {
             role: LlmRole::System,
@@ -3749,10 +4171,11 @@ fn list_pending_confirmations_impl(
     project_root: &Path,
 ) -> CommandResult<Vec<ConfirmationLogEntry>> {
     validate_project_root(project_root)?;
-    let store = match SqliteWorkflowRuntimeStore::open(project_root) {
-        Ok(store) => store,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let runtime_path = project_root.join(crate::workflow::RUNTIME_DB_FILE);
+    if !runtime_path.exists() {
+        return Ok(Vec::new());
+    }
+    let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
     let mut pending = Vec::new();
     for state in store.list_non_terminal_states().map_err(error_to_string)? {
         let workflow_id = state.workflow_id.as_str().to_owned();
@@ -4125,12 +4548,6 @@ fn confirmation_kind_policy_key(kind: crate::rag::models::ConfirmationKind) -> &
     }
 }
 
-fn confirmation_policy_settings_from_prompts(
-    prompts: &[ApprovalPromptConfig],
-) -> Vec<ConfirmationPolicySetting> {
-    merge_confirmation_policy_settings(None, prompts)
-}
-
 /// 合并磁盘已存策略 + 全集 keys，保证设置页永远是完整列表。
 /// 旧文件只有 `planner_register` 时，会扩散到各 register 子功能（未单独配置的项）。
 fn merge_confirmation_policy_settings(
@@ -4169,12 +4586,13 @@ fn merge_confirmation_policy_settings(
             }
         });
     }
-    // 稳定顺序按 keys 全集
-    confirmation_policy_keys()
+    // 先结束对 map 的逐项可变借用，再消费剩余扩展项。
+    let mut ordered = confirmation_policy_keys()
         .into_iter()
         .filter_map(|k| map.remove(k))
-        .chain(map.into_values())
-        .collect()
+        .collect::<Vec<_>>();
+    ordered.extend(map.into_values());
+    ordered
 }
 
 fn policies_from_policy_code(

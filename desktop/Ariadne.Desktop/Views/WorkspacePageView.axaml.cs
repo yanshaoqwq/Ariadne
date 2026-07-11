@@ -37,6 +37,16 @@ public partial class WorkspacePageView : UserControl
     private Point _nodeDragStart;
     private double _nodeDragOriginX;
     private double _nodeDragOriginY;
+    private bool _dragFrameScheduled;
+    private readonly Dictionary<string, WorkflowNodeViewModel> _nodesById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<WorkflowEdgeViewModel>> _edgesByNodeId = new(StringComparer.Ordinal);
+
+    // ---- 左键框选（空白处按下拖动）----
+    private bool _marqueePointerDown;
+    private bool _marqueeActive;
+    private Point _marqueeOriginLogical;
+    private Point _marqueeCurrentLogical;
+    private bool _marqueeAdditive;
 
     // ---- 端口拖线（任意口起拖，落点类型校验 + 橡皮筋） ----
     private bool _edgeDragging;
@@ -141,6 +151,7 @@ public partial class WorkspacePageView : UserControl
                 node.PropertyChanged += OnNodePropertyChanged;
             }
             _attachedViewModel = viewModel;
+            RebuildCanvasIndexes(viewModel);
             ScheduleNodeContainerSync();
             ScheduleEdgeSync();
             ScheduleMiniMapSync();
@@ -199,6 +210,10 @@ public partial class WorkspacePageView : UserControl
                 item.PropertyChanged -= OnNodePropertyChanged;
             }
         }
+        if (_attachedViewModel is not null)
+        {
+            RebuildCanvasIndexes(_attachedViewModel);
+        }
         if (e.NewItems is not null)
         {
             foreach (var item in e.NewItems.OfType<WorkflowNodeViewModel>())
@@ -213,6 +228,10 @@ public partial class WorkspacePageView : UserControl
 
     private void OnEdgesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        if (_attachedViewModel is not null)
+        {
+            RebuildCanvasIndexes(_attachedViewModel);
+        }
         ScheduleEdgeSync();
     }
 
@@ -220,6 +239,10 @@ public partial class WorkspacePageView : UserControl
     {
         if (e.PropertyName is nameof(WorkflowNodeViewModel.X) or nameof(WorkflowNodeViewModel.Y))
         {
+            if (_nodeDragging)
+            {
+                return;
+            }
             ScheduleNodeContainerSync();
             ScheduleEdgeSync();
             ScheduleMiniMapSync();
@@ -424,11 +447,43 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        node.SelectCommand.Execute(null);
+        // 框选进行中时不抢节点拖
+        if (_marqueeActive)
+        {
+            return;
+        }
+
         if (DataContext is WorkspacePageViewModel viewModel)
         {
+            // Shift/Ctrl 点选：加入/切换多选
+            if (e.KeyModifiers.HasFlag(KeyModifiers.Shift)
+                || e.KeyModifiers.HasFlag(KeyModifiers.Control))
+            {
+                var current = viewModel.GetSelectedNodes().ToList();
+                if (node.IsSelected)
+                {
+                    current.Remove(node);
+                    viewModel.SelectNodes(current);
+                }
+                else
+                {
+                    current.Add(node);
+                    viewModel.SelectNodes(current);
+                }
+            }
+            else if (!node.IsSelected)
+            {
+                node.SelectCommand.Execute(null);
+            }
+
             viewModel.CaptureCanvasHistory();
+            viewModel.BeginContinuousCanvasEdit();
         }
+        else
+        {
+            node.SelectCommand.Execute(null);
+        }
+
         _draggedNode = node;
         _nodeDragging = true;
         _nodeDragStart = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
@@ -646,8 +701,37 @@ public partial class WorkspacePageView : UserControl
         {
             return;
         }
+
+        // 输入框内不劫持退格/删除
+        if (IsTextInputFocused())
+        {
+            return;
+        }
+
+        // Delete / Backspace 删选中节点（无修饰键）
+        if ((e.Key == Key.Delete || e.Key == Key.Back)
+            && !e.KeyModifiers.HasFlag(KeyModifiers.Control)
+            && !e.KeyModifiers.HasFlag(KeyModifiers.Meta)
+            && !e.KeyModifiers.HasFlag(KeyModifiers.Alt))
+        {
+            if (viewModel.DeleteSelectedNodeCommand.CanExecute(null))
+            {
+                viewModel.DeleteSelectedNodeCommand.Execute(null);
+                e.Handled = true;
+            }
+            return;
+        }
+
+        // Ctrl/Cmd+A 全选
         var hasCommandModifier = e.KeyModifiers.HasFlag(KeyModifiers.Control)
             || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+        if (hasCommandModifier && e.Key == Key.A)
+        {
+            viewModel.SelectNodes(viewModel.Nodes.ToArray());
+            e.Handled = true;
+            return;
+        }
+
         if (!hasCommandModifier)
         {
             return;
@@ -680,6 +764,164 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
+    private bool IsTextInputFocused()
+    {
+        var focus = TopLevel.GetTopLevel(this)?.FocusManager?.GetFocusedElement();
+        if (focus is null)
+        {
+            return false;
+        }
+
+        // 焦点在文本输入控件内时不拦截 Delete/Backspace
+        if (focus is TextBox or ComboBox)
+        {
+            return true;
+        }
+
+        if (focus is Control control)
+        {
+            for (var c = control; c is not null; c = c.Parent as Control)
+            {
+                if (c is TextBox or ComboBox)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // ===================== 空白处左键框选 =====================
+
+    public void OnCanvasBackgroundPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(CanvasOverlay).Properties.IsLeftButtonPressed
+            || CanvasOverlay is null
+            || DataContext is not WorkspacePageViewModel)
+        {
+            return;
+        }
+
+        // 点在节点 / 边 / 端口 / pill 上时不启动框选（它们会 Handled）
+        if (e.Source is Control src)
+        {
+            for (var c = src; c is not null && c != CanvasOverlay; c = c.Parent as Control)
+            {
+                if (c.DataContext is WorkflowNodeViewModel or WorkflowEdgeViewModel)
+                {
+                    return;
+                }
+
+                if (c.Name is "MiniMapHost" or "MiniMapCanvas" or "PillLayer"
+                    or "LibraryTogglePill" or "RightPanelTogglePill" or "TopToolbar")
+                {
+                    return;
+                }
+            }
+        }
+
+        _marqueePointerDown = true;
+        _marqueeActive = false;
+        _marqueeAdditive = e.KeyModifiers.HasFlag(KeyModifiers.Shift)
+                           || e.KeyModifiers.HasFlag(KeyModifiers.Control);
+        _marqueeOriginLogical = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
+        _marqueeCurrentLogical = _marqueeOriginLogical;
+        e.Pointer.Capture(CanvasOverlay);
+        // 不 Handled：允许其他层仍可接收；但已 capture
+        Focus();
+    }
+
+    public void OnCanvasBackgroundPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_marqueePointerDown || CanvasOverlay is null)
+        {
+            return;
+        }
+
+        var pos = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
+        var dx = pos.X - _marqueeOriginLogical.X;
+        var dy = pos.Y - _marqueeOriginLogical.Y;
+        if (!_marqueeActive
+            && !CanvasSelectionHelpers.ExceedsMarqueeThreshold(dx, dy, DragThreshold))
+        {
+            return;
+        }
+
+        _marqueeActive = true;
+        _marqueeCurrentLogical = pos;
+        UpdateMarqueeVisual();
+        e.Handled = true;
+    }
+
+    public void OnCanvasBackgroundPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (!_marqueePointerDown)
+        {
+            return;
+        }
+
+        if (_marqueeActive && DataContext is WorkspacePageViewModel vm)
+        {
+            var hits = vm.HitTestNodesInRect(
+                _marqueeOriginLogical.X, _marqueeOriginLogical.Y,
+                _marqueeCurrentLogical.X, _marqueeCurrentLogical.Y);
+            vm.SelectNodes(hits, additive: _marqueeAdditive);
+            e.Handled = true;
+        }
+        else if (!_marqueeActive && DataContext is WorkspacePageViewModel page
+                 && !e.KeyModifiers.HasFlag(KeyModifiers.Shift)
+                 && !e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            // 单击空白：取消选中
+            page.SelectNode(null);
+        }
+
+        EndMarquee(e.Pointer);
+    }
+
+    public void OnCanvasBackgroundCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        EndMarquee(null);
+    }
+
+    private void EndMarquee(IPointer? pointer)
+    {
+        _marqueePointerDown = false;
+        _marqueeActive = false;
+        pointer?.Capture(null);
+        if (MarqueeRect is not null)
+        {
+            MarqueeRect.IsVisible = false;
+        }
+    }
+
+    private void UpdateMarqueeVisual()
+    {
+        if (MarqueeRect is null || CanvasOverlay is null)
+        {
+            return;
+        }
+
+        var (lx, ly, lw, lh) = CanvasSelectionHelpers.NormalizeRect(
+            _marqueeOriginLogical.X, _marqueeOriginLogical.Y,
+            _marqueeCurrentLogical.X, _marqueeCurrentLogical.Y);
+
+        // 逻辑 → 屏幕（与节点层同一缩放/平移）
+        var zoom = CurrentCanvasZoom();
+        var offset = CurrentCanvasOffset();
+        var sx = lx * zoom + offset.X;
+        var sy = ly * zoom + offset.Y;
+        var sw = lw * zoom;
+        var sh = lh * zoom;
+
+        Canvas.SetLeft(MarqueeRect, sx);
+        Canvas.SetTop(MarqueeRect, sy);
+        MarqueeRect.Width = Math.Max(1, sw);
+        MarqueeRect.Height = Math.Max(1, sh);
+        MarqueeRect.IsVisible = true;
+    }
+
     public void OnNodePointerMoved(object? sender, PointerEventArgs e)
     {
         if (!_nodeDragging || _draggedNode is not { } node || CanvasOverlay is null)
@@ -693,9 +935,9 @@ public partial class WorkspacePageView : UserControl
         var zoom = CurrentCanvasZoom();
         node.X = Clamp(newX, 0, Math.Max(0, (CanvasOverlay.Bounds.Width / zoom) - NodePortSpec.NodeWidth));
         node.Y = Clamp(newY, 0, Math.Max(0, (CanvasOverlay.Bounds.Height / zoom) - 150));
-        SyncNodeContainerPositions();
-        SyncEdgePositions();
-        SyncMiniMapPositions();
+        SyncDraggedNode(node);
+        SyncConnectedEdges(node.Id);
+        ScheduleDragFrameSync();
         e.Handled = true;
     }
 
@@ -707,9 +949,29 @@ public partial class WorkspacePageView : UserControl
         }
 
         _nodeDragging = false;
+        if (DataContext is WorkspacePageViewModel viewModel)
+        {
+            viewModel.EndContinuousCanvasEdit();
+        }
         _draggedNode = null;
+        SyncMiniMapPositions();
         e.Pointer.Capture(null);
         e.Handled = true;
+    }
+
+    public void OnNodePointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        if (!_nodeDragging)
+        {
+            return;
+        }
+        _nodeDragging = false;
+        if (DataContext is WorkspacePageViewModel viewModel)
+        {
+            viewModel.EndContinuousCanvasEdit();
+        }
+        _draggedNode = null;
+        SyncMiniMapPositions();
     }
 
     public void OnNodeSelectPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -1052,6 +1314,87 @@ public partial class WorkspacePageView : UserControl
         return null;
     }
 
+    private void RebuildCanvasIndexes(WorkspacePageViewModel viewModel)
+    {
+        _nodesById.Clear();
+        _edgesByNodeId.Clear();
+        foreach (var node in viewModel.Nodes)
+        {
+            _nodesById[node.Id] = node;
+        }
+        foreach (var edge in viewModel.Edges)
+        {
+            AddEdgeIndex(edge.Source, edge);
+            if (!string.Equals(edge.Source, edge.Target, StringComparison.Ordinal))
+            {
+                AddEdgeIndex(edge.Target, edge);
+            }
+        }
+    }
+
+    private void AddEdgeIndex(string nodeId, WorkflowEdgeViewModel edge)
+    {
+        if (!_edgesByNodeId.TryGetValue(nodeId, out var edges))
+        {
+            edges = new List<WorkflowEdgeViewModel>();
+            _edgesByNodeId[nodeId] = edges;
+        }
+        edges.Add(edge);
+    }
+
+    private void SyncDraggedNode(WorkflowNodeViewModel node)
+    {
+        if (NodesItemsControl?.ContainerFromItem(node) is not Control container)
+        {
+            return;
+        }
+        Canvas.SetLeft(container, node.X);
+        Canvas.SetTop(container, node.Y);
+    }
+
+    private void SyncConnectedEdges(string nodeId)
+    {
+        if (!_edgesByNodeId.TryGetValue(nodeId, out var edges))
+        {
+            return;
+        }
+        foreach (var edge in edges)
+        {
+            if (_nodesById.TryGetValue(edge.Source, out var source)
+                && _nodesById.TryGetValue(edge.Target, out var target))
+            {
+                edge.UpdateEdgePath(source.X, source.Y, target.X, target.Y);
+            }
+        }
+    }
+
+    private void ScheduleDragFrameSync()
+    {
+        if (_dragFrameScheduled)
+        {
+            return;
+        }
+        _dragFrameScheduled = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _dragFrameScheduled = false;
+            if (_nodeDragging && _draggedNode is { } node)
+            {
+                SyncDraggedMiniMapNode(node);
+            }
+        }, DispatcherPriority.Render);
+    }
+
+    private void SyncDraggedMiniMapNode(WorkflowNodeViewModel node)
+    {
+        if (MiniMapItemsControl?.ContainerFromItem(node) is not Control container)
+        {
+            return;
+        }
+        Canvas.SetLeft(container, node.MiniMapX);
+        Canvas.SetTop(container, node.MiniMapY);
+    }
+
     private void SyncNodeContainerPositions()
     {
         if (NodesItemsControl is null || DataContext is not WorkspacePageViewModel viewModel)
@@ -1115,13 +1458,95 @@ public partial class WorkspacePageView : UserControl
 
     private void SyncMiniMapPositions()
     {
+        if (MiniMapItemsControl is null || DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return;
+        }
+
+        // 与主画布一致：对 item 容器设 Canvas 附加属性（DataTemplate 根上的 Canvas.Left 不生效）
+        EnsureMiniMapItemsControlSize();
+        MiniMapItemsControl.UpdateLayout();
+        var missing = 0;
+        foreach (var node in viewModel.Nodes)
+        {
+            if (MiniMapItemsControl.ContainerFromItem(node) is Control container)
+            {
+                Canvas.SetLeft(container, node.MiniMapX);
+                Canvas.SetTop(container, node.MiniMapY);
+                // 容器默认可能铺满，压成点状
+                container.Width = 10;
+                container.Height = 6;
+                container.IsVisible = true;
+            }
+            else
+            {
+                missing++;
+            }
+        }
+
+        // 兜底：遍历视觉树
+        SyncMiniMapContainerPositions(MiniMapItemsControl);
+        SyncMiniMapViewportFrame();
+
+        // 容器尚未生成时再补一帧
+        if (missing > 0 && viewModel.Nodes.Count > 0)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (MiniMapItemsControl is null || DataContext is not WorkspacePageViewModel vm)
+                {
+                    return;
+                }
+
+                MiniMapItemsControl.UpdateLayout();
+                foreach (var node in vm.Nodes)
+                {
+                    if (MiniMapItemsControl.ContainerFromItem(node) is Control container)
+                    {
+                        Canvas.SetLeft(container, node.MiniMapX);
+                        Canvas.SetTop(container, node.MiniMapY);
+                        container.Width = 10;
+                        container.Height = 6;
+                    }
+                }
+
+                SyncMiniMapViewportFrame();
+            }, DispatcherPriority.Loaded);
+        }
+    }
+
+    private void EnsureMiniMapItemsControlSize()
+    {
         if (MiniMapItemsControl is null)
         {
             return;
         }
 
-        SyncMiniMapContainerPositions(MiniMapItemsControl);
-        SyncMiniMapViewportFrame();
+        // ItemsControl 嵌在 Canvas 上时 DesiredSize 常为 0，必须显式尺寸才能画子项
+        var w = NodePortSpec.MiniMapContentWidth;
+        var h = NodePortSpec.MiniMapContentHeight;
+        if (Math.Abs(MiniMapItemsControl.Width - w) > 0.5)
+        {
+            MiniMapItemsControl.Width = w;
+        }
+
+        if (Math.Abs(MiniMapItemsControl.Height - h) > 0.5)
+        {
+            MiniMapItemsControl.Height = h;
+        }
+
+        if (MiniMapCanvas is not null)
+        {
+            if (Math.Abs(MiniMapCanvas.Width - w) > 0.5)
+            {
+                MiniMapCanvas.Width = w;
+            }
+
+            if (Math.Abs(MiniMapCanvas.Height - h) > 0.5)
+            {
+                MiniMapCanvas.Height = h;
+            }
+        }
     }
 
     private void SyncMiniMapViewportFrame()

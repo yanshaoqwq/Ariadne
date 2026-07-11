@@ -11,7 +11,7 @@ namespace Ariadne.Desktop.ViewModels;
 public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable
 {
     private const string DefaultWorkflowId = "default";
-    private const double MinRightPanelWidth = 300;
+    private const double MinRightPanelWidth = 260;
     private const double MaxRightPanelWidth = 560;
     // 收起后列宽为 0：展开只靠画布右缘 pill，避免窄条 + float 双箭头
     private const double CollapsedRightPanelWidth = 0;
@@ -20,7 +20,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
     private bool _isRightPanelOpen = true;
-    private GridLength _rightPanelColumnWidth = new(360);
+    // 默认右栏略窄，多留给画布
+    private GridLength _rightPanelColumnWidth = new(280);
     private bool _isLibraryOpen = true;
     private bool _isExecutionPanel;
     private bool _isProjectAiTab = true;
@@ -29,6 +30,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _hasUnsavedChanges;
     private string _savedSnapshot = string.Empty;
     private bool _suppressSnapshotChecks;
+    private bool _deferDirtyRefresh;
+    private bool _dirtyRefreshPending;
     private int _nextNodeNumber = 1;
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
@@ -49,6 +52,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private WorkflowNodeViewModel? _selectedNode;
     private ConfirmationItemViewModel? _selectedConfirmation;
     private WorkflowEdgeViewModel? _selectedEdge;
+    private WorkflowLoadState _workflowLoadState = WorkflowLoadState.NoProject;
 
     public WorkspacePageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -65,7 +69,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ShowNodeDetailsCommand = new RelayCommand(() => IsProjectAiTab = false);
         ImportCommand = new RelayCommand(() => _ = LoadWorkflowWithUnsavedCheckAsync());
         ExportCommand = new RelayCommand(() => _ = ExportWorkflowAsync(requireSelection: false));
-        SaveCommand = new RelayCommand(() => _ = SaveWorkflowAsync());
+        SaveCommand = new RelayCommand(() => _ = SaveWorkflowAsync(), CanPersistWorkflow);
         UndoCommand = new RelayCommand(UndoCanvasChange, () => _undoSnapshots.Count > 0);
         RedoCommand = new RelayCommand(RedoCanvasChange, () => _redoSnapshots.Count > 0);
         AddContextNodeCommand = new RelayCommand(() => AddNode("llm"));
@@ -102,6 +106,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         WorkflowSummaries = new ObservableCollection<WorkflowSummary>();
         Confirmations = new ObservableCollection<ConfirmationItemViewModel>();
         Edges = new ObservableCollection<WorkflowEdgeViewModel>();
+        RelatedEdges = new ObservableCollection<WorkflowEdgeViewModel>();
         ProjectAiBubbles = new ObservableCollection<ChatBubbleViewModel>();
         EntryNodes = new ObservableCollection<NodeLibraryItemViewModel>
         {
@@ -225,7 +230,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string AnnotationTitlePlaceholder => _displayNames.Text("ui.workspace.annotation_title.placeholder");
     public string SubworkflowText => _displayNames.Text("ui.workspace.subworkflow");
     public string EdgeDetailsText => _displayNames.Text("ui.workspace.edge_details");
-    public string EdgeCountText => $"{Edges.Count}";
+    /// <summary>与当前选中节点相关的边数量（非整图）。</summary>
+    public string EdgeCountText => $"{RelatedEdges.Count}";
+    public bool HasRelatedEdges => RelatedEdges.Count > 0;
     public string SourceAliasText => _displayNames.Text("ui.workspace.edge.source_alias");
     public string TargetAliasText => _displayNames.Text("ui.workspace.edge.target_alias");
     public string EdgeLabelText => _displayNames.Text("ui.workspace.edge.label");
@@ -436,6 +443,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<NodeLibraryItemViewModel> UtilityNodes { get; }
     public ObservableCollection<ConfirmationItemViewModel> Confirmations { get; }
     public ObservableCollection<WorkflowEdgeViewModel> Edges { get; }
+    /// <summary>仅当前选中节点相关的边（右栏列表）。</summary>
+    public ObservableCollection<WorkflowEdgeViewModel> RelatedEdges { get; }
     public ObservableCollection<ChatBubbleViewModel> ProjectAiBubbles { get; }
     public bool HasProjectAiBubbles => ProjectAiBubbles.Count > 0;
 
@@ -498,6 +507,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             if (SetProperty(ref _selectedEdge, value))
             {
                 OnPropertyChanged(nameof(HasSelectedEdge));
+                OnPropertyChanged(nameof(ShowEdgeConfigPanel));
                 SaveEdgeConfigCommand.NotifyCanExecuteChanged();
                 InsertForwardTemplateVariableCommand.NotifyCanExecuteChanged();
                 InsertReverseTemplateVariableCommand.NotifyCanExecuteChanged();
@@ -506,6 +516,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 
     public bool HasSelectedEdge => SelectedEdge is not null;
+
+    /// <summary>
+    /// 边配置面板：仅当选中边，且该边挂在当前选中节点上（点击相关节点/相关边时）。
+    /// </summary>
+    public bool ShowEdgeConfigPanel =>
+        SelectedEdge is not null
+        && HasSelectedNode
+        && RelatedEdges.Any(e => ReferenceEquals(e, SelectedEdge));
     private bool HasCurrentRun() => !string.IsNullOrWhiteSpace(CurrentRunId);
     private bool HasProjectAiMessage() => !string.IsNullOrWhiteSpace(ProjectAiMessage);
     private bool CanResolveConfirmation() =>
@@ -595,6 +613,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             edgeData);
         var viewModel = new WorkflowEdgeViewModel(edge, _displayNames, SelectEdge, RefreshDirtyState);
         Edges.Add(viewModel);
+        RefreshRelatedEdges();
         RefreshEdgeLabels();
         RefreshPortConnectionStates();
         _edges = Edges.Select(item => item.ToCanvasEdge()).ToArray();
@@ -934,7 +953,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         node.RunCommand = new RelayCommand(() => _ = RunNodeAsync(node));
     }
 
-    private void SelectNode(WorkflowNodeViewModel? node)
+    public void SelectNode(WorkflowNodeViewModel? node)
     {
         foreach (var item in Nodes)
         {
@@ -945,16 +964,144 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             IsProjectAiTab = false;
         }
+
+        // 换节点时清掉无关边选中；相关边配置仅随当前节点展示
+        if (SelectedEdge is not null
+            && (node is null
+                || !CanvasSelectionHelpers.EdgeTouchesNode(SelectedEdge.Source, SelectedEdge.Target, node.Id)))
+        {
+            foreach (var edge in Edges)
+            {
+                edge.IsSelected = false;
+            }
+
+            SelectedEdge = null;
+        }
+
+        RefreshRelatedEdges();
+        NotifySelectionCommands();
+    }
+
+    /// <summary>多选（框选 / Shift+点选）：主选为列表最后一项，供右栏细节。</summary>
+    public void SelectNodes(IReadOnlyList<WorkflowNodeViewModel> nodes, bool additive = false)
+    {
+        var set = new HashSet<WorkflowNodeViewModel>(nodes);
+        if (additive)
+        {
+            foreach (var item in Nodes)
+            {
+                if (set.Contains(item))
+                {
+                    item.IsSelected = true;
+                }
+            }
+        }
+        else
+        {
+            foreach (var item in Nodes)
+            {
+                item.IsSelected = set.Contains(item);
+            }
+        }
+
+        SelectedNode = Nodes.LastOrDefault(n => n.IsSelected) ?? nodes.LastOrDefault();
+        if (SelectedNode is not null)
+        {
+            IsProjectAiTab = false;
+        }
+
+        // 多选后只保留挂在已选节点上的边选中
+        if (SelectedEdge is not null)
+        {
+            var ids = GetSelectedNodes().Select(n => n.Id).ToArray();
+            if (!CanvasSelectionHelpers.EdgeTouchesAnyNode(SelectedEdge.Source, SelectedEdge.Target, ids))
+            {
+                foreach (var edge in Edges)
+                {
+                    edge.IsSelected = false;
+                }
+
+                SelectedEdge = null;
+            }
+        }
+
+        RefreshRelatedEdges();
+        NotifySelectionCommands();
+    }
+
+    /// <summary>刷新「与选中节点相关」的边列表。</summary>
+    public void RefreshRelatedEdges()
+    {
+        var selectedIds = GetSelectedNodes().Select(n => n.Id).ToArray();
+        if (selectedIds.Length == 0 && SelectedNode is not null)
+        {
+            selectedIds = new[] { SelectedNode.Id };
+        }
+
+        RelatedEdges.Clear();
+        if (selectedIds.Length == 0)
+        {
+            OnPropertyChanged(nameof(EdgeCountText));
+            OnPropertyChanged(nameof(HasRelatedEdges));
+            OnPropertyChanged(nameof(ShowEdgeConfigPanel));
+            return;
+        }
+
+        foreach (var edge in Edges)
+        {
+            if (CanvasSelectionHelpers.EdgeTouchesAnyNode(edge.Source, edge.Target, selectedIds))
+            {
+                RelatedEdges.Add(edge);
+            }
+        }
+
+        OnPropertyChanged(nameof(EdgeCountText));
+        OnPropertyChanged(nameof(HasRelatedEdges));
+        OnPropertyChanged(nameof(ShowEdgeConfigPanel));
+    }
+
+    /// <summary>框选矩形（逻辑坐标）命中的节点。</summary>
+    public IReadOnlyList<WorkflowNodeViewModel> HitTestNodesInRect(
+        double x0, double y0, double x1, double y1)
+    {
+        var (rx, ry, rw, rh) = CanvasSelectionHelpers.NormalizeRect(x0, y0, x1, y1);
+        return Nodes
+            .Where(n => CanvasSelectionHelpers.NodeIntersectsRect(
+                n.X, n.Y, NodePortSpec.NodeWidth, NodePortSpec.NodeBodyHeight,
+                rx, ry, rw, rh))
+            .ToArray();
+    }
+
+    public IReadOnlyList<WorkflowNodeViewModel> GetSelectedNodes() =>
+        Nodes.Where(n => n.IsSelected).ToArray();
+
+    private void NotifySelectionCommands()
+    {
+        DeleteSelectedNodeCommand.NotifyCanExecuteChanged();
+        RunSelectedNodeCommand.NotifyCanExecuteChanged();
+        CopySelectedNodeCommand.NotifyCanExecuteChanged();
+        CutSelectedNodeCommand.NotifyCanExecuteChanged();
+        ApplyNodeConfigCommand.NotifyCanExecuteChanged();
+        ToggleBreakpointCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(HasSelectedNode));
+        OnPropertyChanged(nameof(IsSelectedStartNode));
+        OnPropertyChanged(nameof(SelectedNodeTitle));
     }
 
     private async Task DeleteSelectedNodeAsync()
     {
-        var node = SelectedNode;
-        if (node is null)
+        var selected = GetSelectedNodes();
+        if (selected.Count == 0 && SelectedNode is not null)
+        {
+            selected = new[] { SelectedNode };
+        }
+
+        if (selected.Count == 0)
         {
             StatusText = NoNodeSelectedText;
             return;
         }
+
         if (!await ConfirmDangerAsync(
                 "ui.dialog.workspace.delete_node.title",
                 "ui.dialog.workspace.delete_node.message",
@@ -962,19 +1109,32 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             return;
         }
-        DeleteNode(node);
+
+        DeleteNodes(selected);
         StatusText = _displayNames.Format("ui.workspace.deleted_selection", new Dictionary<string, string>
         {
-            ["count"] = "1",
+            ["count"] = selected.Count.ToString(),
         });
     }
 
-    private void DeleteNode(WorkflowNodeViewModel node)
+    private void DeleteNode(WorkflowNodeViewModel node) => DeleteNodes(new[] { node });
+
+    private void DeleteNodes(IReadOnlyList<WorkflowNodeViewModel> nodes)
     {
+        if (nodes.Count == 0)
+        {
+            return;
+        }
+
         CaptureUndoSnapshot();
-        Nodes.Remove(node);
+        var ids = nodes.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var node in nodes.ToArray())
+        {
+            Nodes.Remove(node);
+        }
+
         _edges = _edges
-            .Where(edge => edge.Source != node.Id && edge.Target != node.Id)
+            .Where(edge => !ids.Contains(edge.Source) && !ids.Contains(edge.Target))
             .ToArray();
         Edges.Clear();
         foreach (var edge in _edges)
@@ -983,11 +1143,13 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         SelectedNode = null;
         SelectedEdge = null;
+        RefreshRelatedEdges();
         OnPropertyChanged(nameof(EdgeCountText));
         RefreshEdgeLabels();
         RefreshStartNodes();
         RefreshPortConnectionStates();
         RefreshDirtyState();
+        NotifySelectionCommands();
     }
 
     private void CopySelectedNode()
@@ -1098,6 +1260,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         // 无打开项目：保持空画布，不打项目 IPC（避免 cwd 误当项目 / 英文技术报错）
         if (!_backend.HasProjectRoot)
         {
+            SetWorkflowLoadState(WorkflowLoadState.NoProject);
             Nodes.Clear();
             StartNodes.Clear();
             Edges.Clear();
@@ -1120,11 +1283,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch
         {
-            Nodes.Clear();
-            StartNodes.Clear();
-            Edges.Clear();
-            StatusText = string.Empty;
-            CaptureSnapshot();
+            SetWorkflowLoadState(WorkflowLoadState.LoadFailed);
+            StatusText = _displayNames.Text("ui.workspace.load_failed");
             OnPropertyChanged(nameof(HasStartNodes));
             OnPropertyChanged(nameof(HasNodes));
             OnPropertyChanged(nameof(EmptyCanvasTitle));
@@ -1218,6 +1378,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         if (!_backend.HasProjectRoot)
         {
+            SetWorkflowLoadState(WorkflowLoadState.NoProject);
             Nodes.Clear();
             StartNodes.Clear();
             Edges.Clear();
@@ -1230,18 +1391,21 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             return;
         }
 
+        SetWorkflowLoadState(WorkflowLoadState.Loading);
+        StatusText = _displayNames.Text("ui.common.loading");
         try
         {
             var graph = await _backend.LoadWorkflowGraphAsync(string.IsNullOrWhiteSpace(workflowId) ? SelectedWorkflowId : workflowId).ConfigureAwait(true);
             CurrentWorkflowName = graph.Name;
             ApplyGraph(graph);
             CaptureSnapshot();
+            SetWorkflowLoadState(WorkflowLoadState.Loaded);
             StatusText = _displayNames.Text("ui.common.open");
         }
         catch
         {
-            // 不把后端英文/技术错误甩到状态栏
-            StatusText = string.Empty;
+            SetWorkflowLoadState(WorkflowLoadState.LoadFailed);
+            StatusText = _displayNames.Text("ui.workspace.load_failed");
             OnPropertyChanged(nameof(HasStartNodes));
             OnPropertyChanged(nameof(HasNodes));
         }
@@ -1270,6 +1434,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private async Task SaveWorkflowAsync()
     {
+        if (!EnsureWorkflowLoadedForPersistence())
+        {
+            return;
+        }
         try
         {
             var graph = BuildGraph();
@@ -1341,6 +1509,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private async Task ExportWorkflowAsync(bool requireSelection)
     {
+        if (!EnsureWorkflowLoadedForPersistence())
+        {
+            return;
+        }
         try
         {
             if (requireSelection && SelectedNode is null)
@@ -1398,6 +1570,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private async Task RunNodeAsync(WorkflowNodeViewModel node)
     {
+        if (!EnsureWorkflowLoadedForPersistence())
+        {
+            return;
+        }
         try
         {
             var startNodeId = node.NodeType == "start" ? node.Id : null;
@@ -1565,6 +1741,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 StatusText = ProjectAiPlaceholder;
                 return;
             }
+            if (!EnsureWorkflowLoadedForPersistence())
+            {
+                return;
+            }
             if (HasUnsavedChanges)
             {
                 var graph = BuildGraph();
@@ -1612,6 +1792,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             StatusText = NoNodeSelectedText;
             return;
         }
+        if (!EnsureWorkflowLoadedForPersistence())
+        {
+            return;
+        }
         try
         {
             // 先整图落盘：节点名 / work_dir / 暴露工具 / 边 等细节 patch 覆盖不到。
@@ -1647,6 +1831,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             StatusText = NoNodeSelectedText;
             return;
         }
+        if (!EnsureWorkflowLoadedForPersistence())
+        {
+            return;
+        }
         try
         {
             await _backend.SetNodeBreakpointAsync(CurrentWorkflowId, SelectedNode.Id, SelectedNode.BreakpointEnabled).ConfigureAwait(true);
@@ -1660,6 +1848,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private async Task AddAnnotationAsync()
     {
+        if (!EnsureWorkflowLoadedForPersistence())
+        {
+            return;
+        }
         var selected = SelectedNode is null ? Nodes.Select(node => node.Id).ToArray() : new[] { SelectedNode.Id };
         if (SelectedNode is null && selected.Length > 1
             && !await ConfirmAllNodesAsync("ui.dialog.workspace.annotate_all.message").ConfigureAwait(true))
@@ -1683,6 +1875,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private async Task PackSelectionAsync()
     {
+        if (!EnsureWorkflowLoadedForPersistence())
+        {
+            return;
+        }
         var selected = SelectedNode is null ? Nodes.Select(node => node.Id).ToArray() : new[] { SelectedNode.Id };
         if (SelectedNode is null && selected.Length > 1
             && !await ConfirmDangerAsync(
@@ -1698,8 +1894,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 ["count"] = selected.Length.ToString(),
             });
-            var graph = await _backend.PackWorkflowSelectionAsync(CurrentWorkflowId, selected, null, title).ConfigureAwait(true);
-            ApplyGraph(graph);
+            var report = await _backend.PackWorkflowSelectionAsync(CurrentWorkflowId, selected, null, title).ConfigureAwait(true);
+            ApplyGraph(report.Workflow);
             CaptureSnapshot();
             await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
             StatusText = _displayNames.Format("ui.workspace.packed_selection", new Dictionary<string, string>
@@ -1897,6 +2093,33 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         await LoadConfirmationsAsync().ConfigureAwait(true);
     }
 
+    private bool CanPersistWorkflow()
+    {
+        return WorkflowLoadGuard.CanPersist(_backend.HasProjectRoot, _workflowLoadState);
+    }
+
+    private bool EnsureWorkflowLoadedForPersistence()
+    {
+        if (CanPersistWorkflow())
+        {
+            return true;
+        }
+
+        StatusText = _displayNames.Text("ui.workspace.load_required_before_save");
+        return false;
+    }
+
+    private void SetWorkflowLoadState(WorkflowLoadState state)
+    {
+        if (_workflowLoadState == state)
+        {
+            return;
+        }
+
+        _workflowLoadState = state;
+        SaveCommand.NotifyCanExecuteChanged();
+    }
+
     private WorkflowGraphData BuildGraph()
     {
         return new WorkflowGraphData(
@@ -1935,6 +2158,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             RefreshEdgeLabels();
             RefreshStartNodes();
             RefreshPortConnectionStates();
+            RefreshRelatedEdges();
             _nextNodeNumber = Math.Max(_nextNodeNumber, Nodes.Count + 1);
         }
         finally
@@ -1971,6 +2195,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void RefreshDirtyState()
     {
+        if (_deferDirtyRefresh)
+        {
+            _dirtyRefreshPending = true;
+            HasUnsavedChanges = true;
+            return;
+        }
         if (!_suppressSnapshotChecks)
         {
             try
@@ -1981,6 +2211,22 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 HasUnsavedChanges = true;
             }
+        }
+    }
+
+    public void BeginContinuousCanvasEdit()
+    {
+        _deferDirtyRefresh = true;
+        _dirtyRefreshPending = false;
+    }
+
+    public void EndContinuousCanvasEdit()
+    {
+        _deferDirtyRefresh = false;
+        if (_dirtyRefreshPending)
+        {
+            _dirtyRefreshPending = false;
+            RefreshDirtyState();
         }
     }
 
@@ -2070,6 +2316,26 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         SelectedEdge = edge;
         IsProjectAiTab = false;
+
+        // 点边时同步选中一个端点节点，右栏才显示「相关边」配置（符合直觉）
+        var prefer = SelectedNode is not null
+                     && CanvasSelectionHelpers.EdgeTouchesNode(edge.Source, edge.Target, SelectedNode.Id)
+            ? SelectedNode
+            : Nodes.FirstOrDefault(n => n.Id == edge.Source)
+              ?? Nodes.FirstOrDefault(n => n.Id == edge.Target);
+
+        if (prefer is not null)
+        {
+            foreach (var item in Nodes)
+            {
+                item.IsSelected = item == prefer;
+            }
+
+            SelectedNode = prefer;
+        }
+
+        RefreshRelatedEdges();
+        NotifySelectionCommands();
     }
 
     private void SaveSelectedEdgeConfig()
@@ -2218,6 +2484,8 @@ public static class NodePortSpec
 {
     /// <summary>节点外框宽（单卡片，引脚在内侧）。与 WorkspacePageView 节点模板一致。</summary>
     public const double NodeWidth = 200;
+    /// <summary>框选命中用节点高度（通信行 + 标题 + 内容栏近似）。</summary>
+    public const double NodeBodyHeight = 96;
     /// <summary>内侧引脚中心到左右边的内缩。</summary>
     public const double PinInsetX = 14;
     /// <summary>通信口中心 Y：顶行 10px 内、半出卡片上沿。</summary>
@@ -2605,8 +2873,9 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
             }
         }
     }
-    public double MiniMapX => Math.Clamp(X * NodePortSpec.MiniMapScale, 2, 142);
-    public double MiniMapY => Math.Clamp(Y * NodePortSpec.MiniMapScale, 2, 86);
+    // 点宽 10 / 高 6，夹在 140×84 内容区内
+    public double MiniMapX => Math.Clamp(X * NodePortSpec.MiniMapScale, 0, NodePortSpec.MiniMapContentWidth - 10);
+    public double MiniMapY => Math.Clamp(Y * NodePortSpec.MiniMapScale, 0, NodePortSpec.MiniMapContentHeight - 6);
     public bool IsSelected
     {
         get => _isSelected;
@@ -2929,6 +3198,12 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
     public bool IsCommunication => string.Equals(Kind, "communication", StringComparison.OrdinalIgnoreCase);
+    public bool IsControl => string.Equals(Kind, "control", StringComparison.OrdinalIgnoreCase);
+    public bool IsData => !IsCommunication && !IsControl;
+    /// <summary>数据边可改别名/句柄；执行边一般只改标签；通信边用通信专用字段。</summary>
+    public bool ShowHandleFields => IsData;
+    public bool ShowLabelField => true;
+    public bool ShowCommunicationFields => IsCommunication;
     public IBrush StrokeBrush => Kind.ToLowerInvariant() switch
     {
         "control" => ControlBrush,

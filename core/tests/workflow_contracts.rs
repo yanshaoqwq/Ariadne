@@ -4,22 +4,143 @@ use std::path::Path;
 
 use ariadne::contracts::{
     CommunicationEdgeConfig, DocumentPatch, Edge, EdgeId, NodeId, NodeInstance, PatchHunk,
-    PermissionPolicy, PortEndpoint, PortMap, PortValue, RunControl, RunId, RunStatus, TextRange,
-    WorkflowDefinition, WorkflowEdgeKind, WorkflowId, COMMUNICATION_PORT, EXECUTION_INPUT_PORT,
-    EXECUTION_OUTPUT_PORT,
+    PermissionPolicy, PortEndpoint, PortMap, PortValue, ProviderCapability, ProviderDefinition,
+    ProviderType, RunControl, RunId, RunStatus, TextRange, WorkflowDefinition, WorkflowEdgeKind,
+    WorkflowId, COMMUNICATION_PORT, EXECUTION_INPUT_PORT, EXECUTION_OUTPUT_PORT,
 };
+use ariadne::costs::{SqliteCostLedger, TokenUsage};
 use ariadne::documents::{DocumentReadRequest, DocumentRepository, FileDocumentService};
 use ariadne::git::GitService;
+use ariadne::providers::{
+    LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider, ProviderCallContext, ProviderHealth,
+};
+use ariadne::retrieval::{
+    FullTextRecord, FullTextStore, HybridSearchEngine, MemoryFullTextStore, MemoryVectorStore,
+};
 use ariadne::workflow::{
-    apply_confirmed_patch, BuiltinWorkflowNodeExecutor, CommunicationControl,
-    DocumentWorkflowExportSink, FilesystemRuntimeReferenceResolver, NodeErrorKind, NodeRetryPolicy,
-    NoopExternalNodeExecutor, PatchWriteBackState, RoutedExternalNodeExecutor, RuntimeConfirmation,
-    RuntimeConfirmationState, RuntimeReferenceKind, RuntimeReferenceResolver,
-    SqliteWorkflowRuntimeStore, WorkflowExportRequest, WorkflowExportSink,
-    WorkflowExternalNodeExecutor, WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest,
-    WorkflowNodeExecutor, WorkflowRuntime, WorkflowRuntimeEventType, WorkflowRuntimeStore,
+    apply_confirmed_patch, execute_llm_node_with_defaults, execute_project_search_node,
+    BuiltinWorkflowNodeExecutor, CommunicationControl, DocumentWorkflowExportSink,
+    FilesystemRuntimeReferenceResolver, NodeErrorKind, NodeRetryPolicy, NoopExternalNodeExecutor,
+    PatchWriteBackState, RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
+    RuntimeReferenceKind, RuntimeReferenceResolver, SqliteWorkflowRuntimeStore,
+    WorkflowExportRequest, WorkflowExportSink, WorkflowExternalNodeExecutor,
+    WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest, WorkflowNodeExecutor,
+    WorkflowRuntime, WorkflowRuntimeEventType, WorkflowRuntimeStore,
 };
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct RecordingLlmProvider {
+    requests: Mutex<Vec<LlmRequest>>,
+}
+
+impl Provider for RecordingLlmProvider {
+    fn definition(&self) -> ProviderDefinition {
+        ProviderDefinition {
+            provider_id: "default-provider".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "default-provider".to_owned(),
+            capabilities: vec![ProviderCapability::Llm],
+            config_schema: Value::Null,
+        }
+    }
+
+    fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+        Ok(ProviderHealth::Healthy)
+    }
+}
+
+impl LlmProvider for RecordingLlmProvider {
+    fn complete(
+        &self,
+        _context: &ProviderCallContext,
+        request: LlmRequest,
+    ) -> ariadne::contracts::CoreResult<LlmResponse> {
+        self.requests.lock().unwrap().push(request);
+        Ok(LlmResponse {
+            message: LlmMessage::assistant("完成"),
+            tool_calls: Vec::new(),
+            usage: Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 2,
+            }),
+            finish_reason: Some("stop".to_owned()),
+            cost_usd: None,
+            raw: Value::Null,
+        })
+    }
+}
+
+#[test]
+fn ui_llm_node_uses_prompt_template_and_project_provider_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let provider = RecordingLlmProvider::default();
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf"),
+        run_id: RunId::from("run"),
+        node_id: NodeId::from("writer"),
+        type_name: "writer".to_owned(),
+        config: json!({
+            "schema_version": 1,
+            "prompt_template": "你是 Writer 节点",
+        }),
+        inputs: PortMap::from([(
+            "input".to_owned(),
+            PortValue::inline(json!("根据本章大纲续写")),
+        )]),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+    };
+
+    let output = execute_llm_node_with_defaults(
+        request,
+        &provider,
+        &ledger,
+        Some("default-provider"),
+        Some("default-model"),
+    )
+    .unwrap();
+
+    assert!(format!("{:?}", output.outputs).contains("完成"));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests[0].model_id, "default-model");
+    let prompt = format!("{:?}", requests[0].messages);
+    assert!(prompt.contains("你是 Writer 节点"));
+    assert!(prompt.contains("根据本章大纲续写"));
+}
+
+#[test]
+fn project_search_node_returns_indexed_project_results() {
+    let vector = Arc::new(MemoryVectorStore::new());
+    let text = Arc::new(MemoryFullTextStore::new());
+    text.upsert(vec![FullTextRecord {
+        chunk: ariadne::retrieval::ChunkDocument::new(
+            "chunk-1",
+            "chapter.md",
+            "银色线索出现在旧钟楼",
+        ),
+    }])
+    .unwrap();
+    let retrieval = HybridSearchEngine::new(vector, text);
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf"),
+        run_id: RunId::from("run"),
+        node_id: NodeId::from("search"),
+        type_name: "search".to_owned(),
+        config: json!({"query_alias": "query", "limit": 5}),
+        inputs: PortMap::from([("query".to_owned(), PortValue::inline(json!("线索")))]),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+    };
+
+    let output = execute_project_search_node(request, &retrieval).unwrap();
+
+    let results = output.outputs.get("results").unwrap();
+    assert!(format!("{results:?}").contains("chapter.md"));
+    assert_eq!(output.metadata["retrieval_scope"], "project");
+}
 
 /// 预设节点输出并记录调度请求的测试执行器。
 #[derive(Default)]
@@ -305,6 +426,45 @@ fn runtime_schedules_control_edges_and_passes_data_aliases() {
     assert_eq!(executor.calls[0].node_id.as_str(), "planner");
     assert_eq!(executor.calls[1].node_id.as_str(), "writer");
     assert!(executor.calls[1].inputs.contains_key("本章大纲"));
+}
+
+#[test]
+fn runtime_schedules_large_chain_with_prebuilt_graph_indexes() {
+    const NODE_COUNT: usize = 500;
+    let nodes = (0..NODE_COUNT)
+        .map(|index| node(&format!("node-{index}"), "test"))
+        .collect::<Vec<_>>();
+    let edges = (1..NODE_COUNT)
+        .map(|index| {
+            control_edge(
+                &format!("edge-{index}"),
+                &format!("node-{}", index - 1),
+                &format!("node-{index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("large-chain"),
+        name: "Large chain".to_owned(),
+        nodes,
+        edges,
+        metadata: Value::Null,
+    };
+    let mut executor = ScriptedExecutor::default();
+    for index in 0..NODE_COUNT {
+        executor.push(
+            &format!("node-{index}"),
+            WorkflowNodeExecutionOutput::default(),
+        );
+    }
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("large-run")).unwrap();
+
+    let status = runtime.run(&workflow, &mut executor).unwrap();
+
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(executor.calls.len(), NODE_COUNT);
+    assert_eq!(executor.calls[0].node_id.as_str(), "node-0");
+    assert_eq!(executor.calls[NODE_COUNT - 1].node_id.as_str(), "node-499");
 }
 
 /// 验证没有 control 边时，data 边本身也会作为依赖阻塞目标节点。
@@ -823,6 +983,102 @@ fn runtime_persists_and_loads_run_state() {
         .unwrap()
         .outputs
         .contains_key("draft"));
+}
+
+/// 运行事件使用追加表持久化，主快照不再随事件历史增长而反复重写全部事件。
+#[test]
+fn runtime_store_persists_events_append_only_outside_main_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf-events"),
+        name: "Events".to_owned(),
+        nodes: vec![node("first", "writer"), node("second", "writer")],
+        edges: vec![Edge {
+            id: EdgeId::from("control"),
+            kind: WorkflowEdgeKind::Control,
+            from: PortEndpoint {
+                node_id: NodeId::from("first"),
+                port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+            },
+            to: PortEndpoint {
+                node_id: NodeId::from("second"),
+                port_name: EXECUTION_INPUT_PORT.to_owned(),
+            },
+            alias: None,
+            communication: None,
+        }],
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-events")).unwrap();
+    let mut executor = ScriptedExecutor::default();
+    executor.push("first", WorkflowNodeExecutionOutput::default());
+    executor.push("second", WorkflowNodeExecutionOutput::default());
+    runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    let state_json: String = connection
+        .query_row("SELECT state_json FROM workflow_runs", [], |row| row.get(0))
+        .unwrap();
+    let event_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM workflow_run_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(!state_json.contains("structured_events"));
+    assert!(!state_json.contains("\"events\""));
+    assert_eq!(event_count as usize, runtime.state.structured_events.len());
+
+    store.save_state(&runtime.state).unwrap();
+    let repeated_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM workflow_run_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(repeated_count, event_count);
+    let loaded = store
+        .load_state(&workflow.id, &RunId::from("run-events"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.structured_events, runtime.state.structured_events);
+}
+
+/// Git 回档停机应在一次批量事务中更新全部非终态快照，并保留终态运行。
+#[test]
+fn runtime_store_stops_all_non_terminal_runs_for_restore() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    for (run_id, status) in [
+        ("queued", RunStatus::Queued),
+        ("running", RunStatus::Running),
+        ("paused", RunStatus::Paused),
+        ("succeeded", RunStatus::Succeeded),
+    ] {
+        let mut state =
+            ariadne::workflow::WorkflowRunState::new(WorkflowId::from("wf"), RunId::from(run_id));
+        state.status = status;
+        store.save_state(&state).unwrap();
+    }
+
+    assert_eq!(
+        store.stop_non_terminal_for_restore("git restore").unwrap(),
+        3
+    );
+    for run_id in ["queued", "running", "paused"] {
+        let state = store
+            .load_state(&WorkflowId::from("wf"), &RunId::from(run_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.status, RunStatus::Stopped);
+        assert_eq!(state.control, RunControl::Stop);
+        assert_eq!(state.stop_reason.as_deref(), Some("git restore"));
+    }
+    let succeeded = store
+        .load_state(&WorkflowId::from("wf"), &RunId::from("succeeded"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(succeeded.status, RunStatus::Succeeded);
 }
 
 /// 验证 Stop 控制会保留当前节点输出并跳过下游节点。
