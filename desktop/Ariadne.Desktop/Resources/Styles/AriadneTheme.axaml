@@ -650,10 +650,11 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
   </Style>
 
-  <!-- 选中节点：边框颜色沿周流动（不旋转整框）；主题色 ↔ 浅主题色 -->
+  <!-- 选中节点：边框颜色沿周流动（不旋转整框）；主题色 ↔ 浅主题色；宽描边贴紧卡片外沿 -->
   <Style Selector="Border.node-flow-ring">
     <Setter Property="Opacity" Value="1" />
-    <Setter Property="BorderThickness" Value="2" />
+    <!-- 宽描边：与节点模板 Margin 配套，内侧贴紧卡片外缘 -->
+    <Setter Property="BorderThickness" Value="5" />
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush">
       <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
@@ -802,13 +803,14 @@
                 CornerRadius="0"
                 ClipToBounds="True">
           <Panel>
-            <!-- 满宽横条渐变底（高度=整行，左右贴齐） -->
+            <!-- 满宽横条渐变底：固定约 40 高（与 MinHeight 一致），不随项间距拉伸 -->
             <Border x:Name="GradientWash"
                     IsHitTestVisible="False"
                     Opacity="0"
                     CornerRadius="0"
+                    Height="40"
                     HorizontalAlignment="Stretch"
-                    VerticalAlignment="Stretch">
+                    VerticalAlignment="Center">
               <Border.Background>
                 <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
                   <GradientStop Offset="0" Color="#332E726B" />
@@ -822,11 +824,12 @@
                 </Transitions>
               </Border.Transitions>
             </Border>
-            <!-- 满高细光带：从左缘无缝扫到右缘 -->
+            <!-- 与 GradientWash 同高的细光带：从左缘无缝扫到右缘 -->
             <Border x:Name="Shine"
                     Width="48"
+                    Height="40"
                     HorizontalAlignment="Left"
-                    VerticalAlignment="Stretch"
+                    VerticalAlignment="Center"
                     IsHitTestVisible="False"
                     Opacity="0"
                     CornerRadius="0">

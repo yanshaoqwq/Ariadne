@@ -177,9 +177,14 @@
 
             <!-- 导航：上组 →(大间距分隔)→ 下组，顺排靠上，不置底 -->
             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-              <!-- 左右 0 边距：悬停横条贴齐左栏左缘，不留缝 -->
-              <StackPanel Margin="0,4,0,0" Spacing="0">
+              <!-- 左右 0 边距：悬停横条贴齐左栏；Spacing 加大项间距，渐变只在按钮高度内不撑满缝 -->
+              <StackPanel Margin="0,4,0,0" Spacing="6">
                 <ItemsControl ItemsSource="{Binding PrimaryNavigationItems}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                      <StackPanel Spacing="6" />
+                    </ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
                       <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Command="{Binding SelectCommand}">
@@ -207,6 +212,11 @@
                 </Grid>
 
                 <ItemsControl ItemsSource="{Binding SecondaryNavigationItems}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                      <StackPanel Spacing="6" />
+                    </ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
                       <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Command="{Binding SelectCommand}">

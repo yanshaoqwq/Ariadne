@@ -1,128 +1,164 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="Ariadne.Desktop.Controls.SpectrumColorPicker"
-             MinWidth="280">
-  <Border Classes="layer" Padding="12" CornerRadius="10">
-    <Grid RowDefinitions="Auto,Auto" RowSpacing="12">
-      <!-- SV 大方块 + 右侧色相条（PS 式调色板） -->
-      <Grid Grid.Row="0" ColumnDefinitions="*,18" ColumnSpacing="10" Height="168">
-        <Border x:Name="SvField"
-                Grid.Column="0"
-                CornerRadius="8"
-                ClipToBounds="True"
-                BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                BorderThickness="1"
-                Cursor="Cross"
-                PointerPressed="OnSvPointerPressed"
-                PointerMoved="OnSvPointerMoved"
-                PointerReleased="OnSvPointerReleased"
-                PointerCaptureLost="OnSvCaptureLost">
-          <Panel>
-            <Border x:Name="SvHueBase" Background="#FF0000" />
-            <Border>
-              <Border.Background>
-                <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
-                  <GradientStop Offset="0" Color="#FFFFFFFF" />
-                  <GradientStop Offset="1" Color="#00FFFFFF" />
-                </LinearGradientBrush>
-              </Border.Background>
-            </Border>
-            <Border>
-              <Border.Background>
-                <LinearGradientBrush StartPoint="50%,0%" EndPoint="50%,100%">
-                  <GradientStop Offset="0" Color="#00000000" />
-                  <GradientStop Offset="1" Color="#FF000000" />
-                </LinearGradientBrush>
-              </Border.Background>
-            </Border>
-            <Canvas x:Name="SvCursorCanvas" IsHitTestVisible="False">
-              <Ellipse x:Name="SvCursor"
-                       Width="14" Height="14"
-                       Stroke="#FFFFFFFF" StrokeThickness="2"
-                       Fill="#00000000" />
-            </Canvas>
-          </Panel>
-        </Border>
+             MinWidth="40">
+  <!-- 折叠：色块按钮；点击后 Popup 打开完整调色板，锚点色块左下，无页面变黑 -->
+  <Panel>
+    <Button x:Name="CollapsedSwatch"
+            Width="40" Height="40"
+            Padding="0"
+            CornerRadius="8"
+            BorderBrush="{DynamicResource Ariadne.BorderDefault}"
+            BorderThickness="1"
+            Cursor="Hand"
+            HorizontalAlignment="Left"
+            Click="OnSwatchClick">
+      <Button.Template>
+        <ControlTemplate>
+          <Border Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="{TemplateBinding CornerRadius}" />
+        </ControlTemplate>
+      </Button.Template>
+    </Button>
 
-        <Border x:Name="HueBar"
-                Grid.Column="1"
-                CornerRadius="6"
-                ClipToBounds="True"
-                BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                BorderThickness="1"
-                Cursor="Hand"
-                PointerPressed="OnHuePointerPressed"
-                PointerMoved="OnHuePointerMoved"
-                PointerReleased="OnHuePointerReleased"
-                PointerCaptureLost="OnHueCaptureLost">
-          <Panel>
-            <Border>
-              <Border.Background>
-                <LinearGradientBrush StartPoint="50%,0%" EndPoint="50%,100%">
-                  <GradientStop Offset="0.00" Color="#FFFF0000" />
-                  <GradientStop Offset="0.17" Color="#FFFFFF00" />
-                  <GradientStop Offset="0.33" Color="#FF00FF00" />
-                  <GradientStop Offset="0.50" Color="#FF00FFFF" />
-                  <GradientStop Offset="0.67" Color="#FF0000FF" />
-                  <GradientStop Offset="0.83" Color="#FFFF00FF" />
-                  <GradientStop Offset="1.00" Color="#FFFF0000" />
-                </LinearGradientBrush>
-              </Border.Background>
+    <Popup x:Name="SpectrumPopup"
+           Placement="BottomEdgeAlignedLeft"
+           PlacementTarget="{Binding #CollapsedSwatch}"
+           IsLightDismissEnabled="True"
+           OverlayDismissEventPassThrough="True"
+           HorizontalOffset="0"
+           VerticalOffset="0">
+      <Border Classes="layer"
+              Padding="12"
+              CornerRadius="10"
+              MinWidth="280"
+              Background="{DynamicResource Ariadne.BackgroundElevated}"
+              BorderBrush="{DynamicResource Ariadne.BorderDefault}"
+              BorderThickness="1"
+              BoxShadow="0 8 24 0 #33000000">
+        <Grid RowDefinitions="Auto,Auto" RowSpacing="12">
+          <Grid Grid.Row="0" ColumnDefinitions="*,18" ColumnSpacing="10" Height="168">
+            <Border x:Name="SvField"
+                    Grid.Column="0"
+                    CornerRadius="8"
+                    ClipToBounds="True"
+                    BorderBrush="{DynamicResource Ariadne.BorderDefault}"
+                    BorderThickness="1"
+                    Cursor="Cross"
+                    PointerPressed="OnSvPointerPressed"
+                    PointerMoved="OnSvPointerMoved"
+                    PointerReleased="OnSvPointerReleased"
+                    PointerCaptureLost="OnSvCaptureLost">
+              <Panel>
+                <Border x:Name="SvHueBase" Background="#FF0000" />
+                <Border>
+                  <Border.Background>
+                    <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
+                      <GradientStop Offset="0" Color="#FFFFFFFF" />
+                      <GradientStop Offset="1" Color="#00FFFFFF" />
+                    </LinearGradientBrush>
+                  </Border.Background>
+                </Border>
+                <Border>
+                  <Border.Background>
+                    <LinearGradientBrush StartPoint="50%,0%" EndPoint="50%,100%">
+                      <GradientStop Offset="0" Color="#00000000" />
+                      <GradientStop Offset="1" Color="#FF000000" />
+                    </LinearGradientBrush>
+                  </Border.Background>
+                </Border>
+                <Canvas x:Name="SvCursorCanvas" IsHitTestVisible="False">
+                  <Ellipse x:Name="SvCursor"
+                           Width="14" Height="14"
+                           Stroke="#FFFFFFFF" StrokeThickness="2"
+                           Fill="#00000000" />
+                </Canvas>
+              </Panel>
             </Border>
-            <Canvas x:Name="HueCursorCanvas" IsHitTestVisible="False">
-              <Border x:Name="HueCursor"
-                      Width="16" Height="4"
-                      CornerRadius="1"
-                      BorderBrush="#FFFFFFFF" BorderThickness="1.5"
-                      Background="#66000000" />
-            </Canvas>
-          </Panel>
-        </Border>
-      </Grid>
 
-      <Grid Grid.Row="1" ColumnDefinitions="40,*" ColumnSpacing="12">
-        <Border x:Name="PreviewSwatch"
-                Grid.Column="0"
-                Width="40" Height="40"
-                CornerRadius="8"
-                BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                BorderThickness="1" />
-        <StackPanel Grid.Column="1" Spacing="8">
-          <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-            <TextBlock Text="Hex" Classes="caption" VerticalAlignment="Center" Width="28" />
-            <TextBox x:Name="HexBox"
-                     Grid.Column="1"
-                     Classes="mono"
-                     FontSize="12"
-                     MinHeight="30"
-                     Padding="8,4"
-                     LostFocus="OnHexLostFocus"
-                     KeyDown="OnHexKeyDown" />
-            <TextBlock x:Name="RgbLabel"
-                       Grid.Column="2"
-                       Classes="caption mono"
-                       VerticalAlignment="Center"
-                       MinWidth="110"
-                       TextAlignment="Right" />
+            <Border x:Name="HueBar"
+                    Grid.Column="1"
+                    CornerRadius="6"
+                    ClipToBounds="True"
+                    BorderBrush="{DynamicResource Ariadne.BorderDefault}"
+                    BorderThickness="1"
+                    Cursor="Hand"
+                    PointerPressed="OnHuePointerPressed"
+                    PointerMoved="OnHuePointerMoved"
+                    PointerReleased="OnHuePointerReleased"
+                    PointerCaptureLost="OnHueCaptureLost">
+              <Panel>
+                <Border>
+                  <Border.Background>
+                    <LinearGradientBrush StartPoint="50%,0%" EndPoint="50%,100%">
+                      <GradientStop Offset="0.00" Color="#FFFF0000" />
+                      <GradientStop Offset="0.17" Color="#FFFFFF00" />
+                      <GradientStop Offset="0.33" Color="#FF00FF00" />
+                      <GradientStop Offset="0.50" Color="#FF00FFFF" />
+                      <GradientStop Offset="0.67" Color="#FF0000FF" />
+                      <GradientStop Offset="0.83" Color="#FFFF00FF" />
+                      <GradientStop Offset="1.00" Color="#FFFF0000" />
+                    </LinearGradientBrush>
+                  </Border.Background>
+                </Border>
+                <Canvas x:Name="HueCursorCanvas" IsHitTestVisible="False">
+                  <Border x:Name="HueCursor"
+                          Width="16" Height="4"
+                          CornerRadius="1"
+                          BorderBrush="#FFFFFFFF" BorderThickness="1.5"
+                          Background="#66000000" />
+                </Canvas>
+              </Panel>
+            </Border>
           </Grid>
-          <Grid ColumnDefinitions="Auto,*,36" ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto" RowSpacing="4">
-            <TextBlock Grid.Row="0" Grid.Column="0" Text="R" Classes="caption" VerticalAlignment="Center" Width="14" />
-            <Slider x:Name="RSlider" Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="255"
-                    ValueChanged="OnRgbSliderChanged" />
-            <TextBlock x:Name="RValue" Grid.Row="0" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />
 
-            <TextBlock Grid.Row="1" Grid.Column="0" Text="G" Classes="caption" VerticalAlignment="Center" Width="14" />
-            <Slider x:Name="GSlider" Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="255"
-                    ValueChanged="OnRgbSliderChanged" />
-            <TextBlock x:Name="GValue" Grid.Row="1" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />
+          <Grid Grid.Row="1" ColumnDefinitions="40,*" ColumnSpacing="12">
+            <Border x:Name="PreviewSwatch"
+                    Grid.Column="0"
+                    Width="40" Height="40"
+                    CornerRadius="8"
+                    BorderBrush="{DynamicResource Ariadne.BorderDefault}"
+                    BorderThickness="1" />
+            <StackPanel Grid.Column="1" Spacing="8">
+              <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                <TextBlock Text="Hex" Classes="caption" VerticalAlignment="Center" Width="28" />
+                <TextBox x:Name="HexBox"
+                         Grid.Column="1"
+                         Classes="mono"
+                         FontSize="12"
+                         MinHeight="30"
+                         Padding="8,4"
+                         LostFocus="OnHexLostFocus"
+                         KeyDown="OnHexKeyDown" />
+                <TextBlock x:Name="RgbLabel"
+                           Grid.Column="2"
+                           Classes="caption mono"
+                           VerticalAlignment="Center"
+                           MinWidth="110"
+                           TextAlignment="Right" />
+              </Grid>
+              <Grid ColumnDefinitions="Auto,*,36" ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto" RowSpacing="4">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="R" Classes="caption" VerticalAlignment="Center" Width="14" />
+                <Slider x:Name="RSlider" Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="255"
+                        ValueChanged="OnRgbSliderChanged" />
+                <TextBlock x:Name="RValue" Grid.Row="0" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />
 
-            <TextBlock Grid.Row="2" Grid.Column="0" Text="B" Classes="caption" VerticalAlignment="Center" Width="14" />
-            <Slider x:Name="BSlider" Grid.Row="2" Grid.Column="1" Minimum="0" Maximum="255"
-                    ValueChanged="OnRgbSliderChanged" />
-            <TextBlock x:Name="BValue" Grid.Row="2" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="G" Classes="caption" VerticalAlignment="Center" Width="14" />
+                <Slider x:Name="GSlider" Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="255"
+                        ValueChanged="OnRgbSliderChanged" />
+                <TextBlock x:Name="GValue" Grid.Row="1" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="B" Classes="caption" VerticalAlignment="Center" Width="14" />
+                <Slider x:Name="BSlider" Grid.Row="2" Grid.Column="1" Minimum="0" Maximum="255"
+                        ValueChanged="OnRgbSliderChanged" />
+                <TextBlock x:Name="BValue" Grid.Row="2" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />
+              </Grid>
+            </StackPanel>
           </Grid>
-        </StackPanel>
-      </Grid>
-    </Grid>
-  </Border>
+        </Grid>
+      </Border>
+    </Popup>
+  </Panel>
 </UserControl>

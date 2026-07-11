@@ -4,12 +4,14 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Controls.Primitives;
+using Avalonia.Threading;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Controls;
 
 /// <summary>
-/// PS 式调色板：连续 SV 色图 + 色相条 + RGB 滑条 + Hex。
+/// 折叠色块 + Flyout 调色板（SV 色图 / 色相条 / RGB / Hex）。
+/// 默认只显示色块；点击在色块左下角打开完整色板，无页面变黑遮罩。
 /// </summary>
 public partial class SpectrumColorPicker : UserControl
 {
@@ -35,6 +37,89 @@ public partial class SpectrumColorPicker : UserControl
             UpdateVisuals();
         };
         SizeChanged += (_, _) => UpdateCursors();
+    }
+
+    private void OnSwatchClick(object? sender, RoutedEventArgs e)
+    {
+        if (SpectrumPopup is null || CollapsedSwatch is null)
+        {
+            return;
+        }
+
+        // 无全页变黑；锚点：色块左下 ↔ 调色板左下；不够空间则右下 ↔ 右下。
+        SpectrumPopup.IsOpen = !SpectrumPopup.IsOpen;
+        if (SpectrumPopup.IsOpen)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                PositionSpectrumPopup();
+                UpdateCursors();
+            }, DispatcherPriority.Loaded);
+        }
+    }
+
+    /// <summary>
+    /// 色块左下角对齐调色板左下角（弹窗向上展开）；若横向/纵向放不下则改右下角对齐。
+    /// </summary>
+    private void PositionSpectrumPopup()
+    {
+        if (SpectrumPopup is null || CollapsedSwatch is null || SpectrumPopup.Child is not Control child)
+        {
+            return;
+        }
+
+        SpectrumPopup.PlacementTarget = CollapsedSwatch;
+        SpectrumPopup.Placement = PlacementMode.BottomEdgeAlignedLeft;
+
+        child.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var popupW = child.DesiredSize.Width;
+        var popupH = child.DesiredSize.Height;
+        if (popupW <= 1 || popupH <= 1)
+        {
+            popupW = Math.Max(popupW, child.Bounds.Width);
+            popupH = Math.Max(popupH, child.Bounds.Height);
+        }
+
+        if (popupW <= 1)
+        {
+            popupW = 280;
+        }
+
+        if (popupH <= 1)
+        {
+            popupH = 260;
+        }
+
+        var topLevel = TopLevel.GetTopLevel(this);
+        var swatch = CollapsedSwatch;
+        var swatchH = Math.Max(1, swatch.Bounds.Height);
+        var swatchW = Math.Max(1, swatch.Bounds.Width);
+
+        // BottomEdge 把 popup 顶边贴色块底边；VerticalOffset = -popupH → 底边重合（左下/右下角对齐）
+        var preferLeft = true;
+        if (topLevel is not null)
+        {
+            var bl = swatch.TranslatePoint(new Point(0, swatchH), topLevel);
+            var br = swatch.TranslatePoint(new Point(swatchW, swatchH), topLevel);
+            if (bl is Point blp && br is Point brp)
+            {
+                var corner = SpectrumPopupAnchor.ChooseCorner(
+                    swatchLeft: blp.X,
+                    swatchRight: brp.X,
+                    swatchBottom: blp.Y,
+                    popupW: popupW,
+                    popupH: popupH,
+                    viewW: topLevel.ClientSize.Width,
+                    viewH: topLevel.ClientSize.Height);
+                preferLeft = corner == "bl";
+            }
+        }
+
+        SpectrumPopup.Placement = preferLeft
+            ? PlacementMode.BottomEdgeAlignedLeft
+            : PlacementMode.BottomEdgeAlignedRight;
+        SpectrumPopup.HorizontalOffset = 0;
+        SpectrumPopup.VerticalOffset = -popupH;
     }
 
     public string SelectedHex
@@ -246,9 +331,15 @@ public partial class SpectrumColorPicker : UserControl
             SvHueBase.Background = new SolidColorBrush(Color.FromRgb(hr, hg, hb));
         }
 
+        var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
         if (PreviewSwatch is not null)
         {
-            PreviewSwatch.Background = new SolidColorBrush(Color.FromRgb(r, g, b));
+            PreviewSwatch.Background = brush;
+        }
+
+        if (CollapsedSwatch is not null)
+        {
+            CollapsedSwatch.Background = brush;
         }
 
         if (HexBox is not null && !HexBox.IsFocused)

@@ -672,13 +672,34 @@ pub fn get_current_project(state: &AriadneAppState) -> CommandResult<CurrentProj
 }
 
 pub fn get_app_status(state: &AriadneAppState) -> CommandResult<AppStatus> {
-    let project_root = project_root_from_state(&state, None)?;
+    // 个性化与项目解耦：始终可读全局偏好；无项目时 current_project / badges 走兜底
+    let preferences = UiPreferencesStore::read_global_or_migrate(
+        state.app_state_root(),
+        project_root_from_state(&state, None).ok().as_deref(),
+    )
+    .map_err(error_to_string)?;
+
+    let (current_project, badges) = match project_root_from_state(&state, None) {
+        Ok(project_root) => (
+            current_project_status(&project_root).unwrap_or(CurrentProjectStatus {
+                project_root: project_root.clone(),
+                project_name: String::new(),
+            }),
+            get_sidebar_badges_impl(&project_root).unwrap_or_default(),
+        ),
+        Err(_) => (
+            CurrentProjectStatus {
+                project_root: PathBuf::new(),
+                project_name: String::new(),
+            },
+            SidebarBadgeCounts::default(),
+        ),
+    };
+
     Ok(AppStatus {
-        current_project: current_project_status(&project_root)?,
-        badges: get_sidebar_badges_impl(&project_root)?,
-        preferences: UiPreferencesStore::default_for_project(&project_root)
-            .read()
-            .map_err(error_to_string)?,
+        current_project,
+        badges,
+        preferences,
     })
 }
 
@@ -1767,9 +1788,9 @@ pub fn resolve_project_reference(
 }
 
 pub fn get_ui_preferences(state: &AriadneAppState) -> CommandResult<UiPreferences> {
-    let project_root = project_root_from_state(&state, None)?;
-    UiPreferencesStore::default_for_project(project_root)
-        .read()
+    // 与项目解耦：应用级偏好，无项目也可读写
+    let project = project_root_from_state(&state, None).ok();
+    UiPreferencesStore::read_global_or_migrate(state.app_state_root(), project.as_deref())
         .map_err(error_to_string)
 }
 
@@ -1777,8 +1798,7 @@ pub fn save_ui_preferences(
     state: &AriadneAppState,
     preferences: UiPreferences,
 ) -> CommandResult<()> {
-    let project_root = project_root_from_state(&state, None)?;
-    UiPreferencesStore::default_for_project(project_root)
+    UiPreferencesStore::default_for_app(state.app_state_root())
         .write(&preferences)
         .map_err(error_to_string)
 }
@@ -2605,9 +2625,11 @@ pub fn get_automation_settings_impl(project_root: &Path) -> CommandResult<Automa
         .load_or_create()
         .map_err(error_to_string)?;
     let budget = get_budget_status_impl(project_root)?;
-    let policies = read_confirmation_policy_settings(project_root)?.unwrap_or_else(|| {
-        confirmation_policy_settings_from_prompts(&config.auto_mode.available_approval_prompts)
-    });
+    let stored = read_confirmation_policy_settings(project_root)?;
+    let policies = merge_confirmation_policy_settings(
+        stored.as_deref(),
+        &config.auto_mode.available_approval_prompts,
+    );
     Ok(AutomationSettings {
         budget,
         confirmation_policies: policies,
@@ -2627,8 +2649,9 @@ pub fn save_automation_settings_impl(
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     let mut normalized_settings = Vec::new();
+    let allowed = confirmation_policy_keys();
     for setting in settings.confirmation_policies {
-        if !confirmation_policy_keys().contains(&setting.confirmation_kind.as_str()) {
+        if !allowed.contains(&setting.confirmation_kind.as_str()) {
             return Err(format!(
                 "unknown confirmation kind: {}",
                 setting.confirmation_kind
@@ -3985,21 +4008,158 @@ fn default_node_type_presets() -> Vec<NodeTypePreset> {
     .collect()
 }
 
-fn confirmation_policy_keys() -> [&'static str; 4] {
-    [
+/// 设置页可配置确认项全集。
+///
+/// 对齐：
+/// - `指导性文件/配置项与确认项清单.md` §四：自动化 4 项 + 写作总结 12 类
+/// - `指导性文件/创作总结机制(不可删除).md`：register **子功能**可独立配置
+/// - `指导性文件/总结机制具体实现计划.md` §8：Outliner/Designer/Planner 输出、register 子功能、
+///   Critic/Prudent、四步总结、Writer/Polisher patch
+///
+/// 禁止空列表；顺序即设置页表格顺序。
+fn confirmation_policy_keys() -> Vec<&'static str> {
+    let mut keys: Vec<&'static str> = Vec::with_capacity(32);
+
+    // —— 自动化运行门禁（配置项清单 §四）——
+    keys.extend_from_slice(&[
         "chapter_write",
         "summary_write",
         "high_risk_permission",
         "budget_exceeded",
+    ]);
+
+    // —— 规划节点输出 / 纲领 patch（总结机制 §8）——
+    keys.extend_from_slice(&["outliner_output", "designer_output", "planner_output"]);
+
+    // —— register 子功能独立策略（创作总结机制：子功能是否跳过可独立配置）——
+    // 总览者 / 设计师 / Planner 共用同一套 RegisterFunction；按 agent 分行便于策略不同。
+    for agent in ["outliner", "designer", "planner"] {
+        for func in register_function_policy_suffixes() {
+            // 形如 planner_register_character_trait
+            // 使用静态拼接表，避免 format! 产生非 'static
+            keys.push(register_policy_key(agent, func));
+        }
+    }
+
+    // 兼容旧聚合键（WritingConfirmationPolicy.planner_register / ConfirmationKind::PlannerRegister）
+    keys.push("planner_register");
+
+    // —— 审稿 ——
+    keys.extend_from_slice(&["critic_review", "prudent_review"]);
+
+    // —— 章节总结四步 ——
+    keys.extend_from_slice(&[
+        "segment_summary",
+        "event_summary",
+        "chapter_summary",
+        "stage_summary",
+    ]);
+
+    // —— 正文修正 patch ——
+    keys.extend_from_slice(&["writer_correction_patch", "polisher_correction_patch"]);
+
+    // 再并入 WritingNodeDefinition 声明的 ConfirmationKind，防止模型漏项
+    for node in crate::rag::models::WritingNodeDefinition::built_in_nodes() {
+        for kind in node.confirmation_kinds {
+            let s = confirmation_kind_policy_key(kind);
+            if !keys.contains(&s) {
+                keys.push(s);
+            }
+        }
+    }
+
+    keys
+}
+
+fn register_function_policy_suffixes() -> &'static [&'static str] {
+    // 与 RegisterFunction 一一对应
+    &[
+        "character_profile",
+        "character_plan",
+        "character_trait",
+        "relationship",
+        "foreshadowing",
+        "theme_anchor",
     ]
+}
+
+fn register_policy_key(agent: &str, func: &str) -> &'static str {
+    match (agent, func) {
+        ("outliner", "character_profile") => "outliner_register_character_profile",
+        ("outliner", "character_plan") => "outliner_register_character_plan",
+        ("outliner", "character_trait") => "outliner_register_character_trait",
+        ("outliner", "relationship") => "outliner_register_relationship",
+        ("outliner", "foreshadowing") => "outliner_register_foreshadowing",
+        ("outliner", "theme_anchor") => "outliner_register_theme_anchor",
+        ("designer", "character_profile") => "designer_register_character_profile",
+        ("designer", "character_plan") => "designer_register_character_plan",
+        ("designer", "character_trait") => "designer_register_character_trait",
+        ("designer", "relationship") => "designer_register_relationship",
+        ("designer", "foreshadowing") => "designer_register_foreshadowing",
+        ("designer", "theme_anchor") => "designer_register_theme_anchor",
+        ("planner", "character_profile") => "planner_register_character_profile",
+        ("planner", "character_plan") => "planner_register_character_plan",
+        ("planner", "character_trait") => "planner_register_character_trait",
+        ("planner", "relationship") => "planner_register_relationship",
+        ("planner", "foreshadowing") => "planner_register_foreshadowing",
+        ("planner", "theme_anchor") => "planner_register_theme_anchor",
+        _ => "planner_register",
+    }
+}
+
+fn confirmation_kind_policy_key(kind: crate::rag::models::ConfirmationKind) -> &'static str {
+    use crate::rag::models::ConfirmationKind::*;
+    match kind {
+        OutlinerOutput => "outliner_output",
+        DesignerOutput => "designer_output",
+        PlannerOutput => "planner_output",
+        PlannerRegister => "planner_register",
+        CriticReview => "critic_review",
+        PrudentReview => "prudent_review",
+        SegmentSummary => "segment_summary",
+        EventSummary => "event_summary",
+        ChapterSummary => "chapter_summary",
+        StageSummary => "stage_summary",
+        WriterCorrectionPatch => "writer_correction_patch",
+        PolisherCorrectionPatch => "polisher_correction_patch",
+    }
 }
 
 fn confirmation_policy_settings_from_prompts(
     prompts: &[ApprovalPromptConfig],
 ) -> Vec<ConfirmationPolicySetting> {
-    confirmation_policy_keys()
-        .into_iter()
-        .map(|kind| {
+    merge_confirmation_policy_settings(None, prompts)
+}
+
+/// 合并磁盘已存策略 + 全集 keys，保证设置页永远是完整列表。
+/// 旧文件只有 `planner_register` 时，会扩散到各 register 子功能（未单独配置的项）。
+fn merge_confirmation_policy_settings(
+    existing: Option<&[ConfirmationPolicySetting]>,
+    prompts: &[ApprovalPromptConfig],
+) -> Vec<ConfirmationPolicySetting> {
+    let mut map = std::collections::BTreeMap::<String, ConfirmationPolicySetting>::new();
+    if let Some(items) = existing {
+        for item in items {
+            map.insert(item.confirmation_kind.clone(), item.clone());
+        }
+    }
+
+    // 旧聚合键 → 各 agent 的 register 子功能
+    if let Some(agg) = map.get("planner_register").cloned() {
+        for func in register_function_policy_suffixes() {
+            for agent in ["outliner", "designer", "planner"] {
+                let key = register_policy_key(agent, func).to_owned();
+                map.entry(key).or_insert_with(|| ConfirmationPolicySetting {
+                    confirmation_kind: register_policy_key(agent, func).to_owned(),
+                    normal_policy: agg.normal_policy,
+                    auto_mode_policy: agg.auto_mode_policy,
+                });
+            }
+        }
+    }
+
+    for kind in confirmation_policy_keys() {
+        map.entry(kind.to_owned()).or_insert_with(|| {
             let policy = policy_for_kind(prompts, kind);
             let (normal_policy, auto_mode_policy) = policies_from_policy_code(&policy);
             ConfirmationPolicySetting {
@@ -4007,7 +4167,13 @@ fn confirmation_policy_settings_from_prompts(
                 normal_policy,
                 auto_mode_policy,
             }
-        })
+        });
+    }
+    // 稳定顺序按 keys 全集
+    confirmation_policy_keys()
+        .into_iter()
+        .filter_map(|k| map.remove(k))
+        .chain(map.into_values())
         .collect()
 }
 

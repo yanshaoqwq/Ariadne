@@ -20,6 +20,7 @@
   <ItemGroup>
     <None Include="..\..\core\resources\display_name.json" Link="Resources\display_name.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\core\resources\display_name.*.json" Link="Resources\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\core\resources\prompt_list.json" Link="Resources\prompt_list.json" CopyToOutputDirectory="PreserveNewest" />
     <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
 </Project>

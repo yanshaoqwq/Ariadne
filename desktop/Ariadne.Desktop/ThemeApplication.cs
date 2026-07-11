@@ -8,7 +8,7 @@ namespace Ariadne.Desktop;
 
 /// <summary>
 /// 运行时应用个性化主题。
-/// 预设主题 + 可选自定义三色（主底 / 表面 / 强调）。
+/// 预设主题 + 可选自定义三色（主底 / 表面 / 强调）；跟随系统时可分别指定昼/夜三色。
 /// </summary>
 public static class ThemeApplication
 {
@@ -44,6 +44,21 @@ public static class ThemeApplication
     /// <param name="surfaceHex">表面</param>
     /// <param name="brandHex">强调</param>
     public static void Apply(string? theme, string? mainHex, string? surfaceHex, string? brandHex)
+        => Apply(theme, mainHex, surfaceHex, brandHex, null, null, null, followSystemColors: false);
+
+    /// <summary>
+    /// 应用主题。若 <paramref name="followSystemColors"/> 为 true（通常 theme=system），
+    /// 则按当前系统明暗选用昼/夜两套三色。
+    /// </summary>
+    public static void Apply(
+        string? theme,
+        string? mainHex,
+        string? surfaceHex,
+        string? brandHex,
+        string? mainDarkHex,
+        string? surfaceDarkHex,
+        string? brandDarkHex,
+        bool followSystemColors)
     {
         if (Application.Current is null)
         {
@@ -58,7 +73,18 @@ public static class ThemeApplication
             _ => ThemeVariant.Light,
         };
 
-        var hasCustom = HasHex(mainHex) || HasHex(surfaceHex) || HasHex(brandHex);
+        var isDark = ResolveIsDark(palette, followSystemColors || palette.Id == "system");
+        string? useMain = mainHex;
+        string? useSurface = surfaceHex;
+        string? useBrand = brandHex;
+        if (followSystemColors && isDark)
+        {
+            useMain = HasHex(mainDarkHex) ? mainDarkHex : mainHex;
+            useSurface = HasHex(surfaceDarkHex) ? surfaceDarkHex : surfaceHex;
+            useBrand = HasHex(brandDarkHex) ? brandDarkHex : brandHex;
+        }
+
+        var hasCustom = HasHex(useMain) || HasHex(useSurface) || HasHex(useBrand);
         if (!hasCustom && palette.UseDictionaryOnly)
         {
             ClearOverlay();
@@ -66,10 +92,21 @@ public static class ThemeApplication
             return;
         }
 
-        var main = ParseHexOr(mainHex, palette.SwatchMain);
-        var surface = ParseHexOr(surfaceHex, palette.SwatchSurface);
-        var brand = ParseHexOr(brandHex, palette.SwatchBrand);
-        WriteThreeColorOverlay(palette.IsDark, main, surface, brand, palette.Id);
+        // 跟随系统且无自定义时，用 light/dark 预设色，避免 system 字典 + 近黑 surface 演示污染
+        var baseMain = isDark && palette.Id == "system"
+            ? ThemeCatalog.Resolve("dark").SwatchMain
+            : palette.SwatchMain;
+        var baseSurface = isDark && palette.Id == "system"
+            ? ThemeCatalog.Resolve("dark").SwatchSurface
+            : palette.SwatchSurface;
+        var baseBrand = isDark && palette.Id == "system"
+            ? ThemeCatalog.Resolve("dark").SwatchBrand
+            : palette.SwatchBrand;
+
+        var main = ParseHexOr(useMain, baseMain);
+        var surface = ParseHexOr(useSurface, baseSurface);
+        var brand = ParseHexOr(useBrand, baseBrand);
+        WriteThreeColorOverlay(isDark, main, surface, brand, palette.Id);
         AppIconPainter.NotifyIconColorsChanged();
     }
 
@@ -113,6 +150,41 @@ public static class ThemeApplication
         SetBrush(resources, "Ariadne.TextOnAccent", onAccent);
         SetBrush(resources, "Ariadne.EditorSelection", WithAlpha(brand, 0x2E));
         resources[OverlayKey] = overlayId;
+    }
+
+    /// <summary>解析当前是否应按暗色方案应用（含跟随系统）。</summary>
+    public static bool ResolveIsDark(ThemePalette palette, bool respectSystem)
+    {
+        if (respectSystem && palette.Id == "system" && Application.Current is not null)
+        {
+            return Application.Current.ActualThemeVariant == ThemeVariant.Dark;
+        }
+
+        return palette.IsDark;
+    }
+
+    /// <summary>
+    /// 在昼/夜两套三色中选出当前生效的一套（纯函数，便于单测）。
+    /// </summary>
+    public static (string? Main, string? Surface, string? Brand) SelectActiveCustomColors(
+        bool isDark,
+        bool followSystemColors,
+        string? mainLight,
+        string? surfaceLight,
+        string? brandLight,
+        string? mainDark,
+        string? surfaceDark,
+        string? brandDark)
+    {
+        if (followSystemColors && isDark)
+        {
+            return (
+                HasHex(mainDark) ? mainDark : mainLight,
+                HasHex(surfaceDark) ? surfaceDark : surfaceLight,
+                HasHex(brandDark) ? brandDark : brandLight);
+        }
+
+        return (mainLight, surfaceLight, brandLight);
     }
 
     private static void ClearOverlay()

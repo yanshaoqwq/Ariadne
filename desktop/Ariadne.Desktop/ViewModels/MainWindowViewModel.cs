@@ -208,7 +208,11 @@ public sealed class MainWindowViewModel : ViewModelBase
                 status.Preferences.Theme,
                 status.Preferences.ThemeMainColor,
                 status.Preferences.ThemeSurfaceColor,
-                status.Preferences.ThemeBrandColor);
+                status.Preferences.ThemeBrandColor,
+                status.Preferences.ThemeMainColorDark,
+                status.Preferences.ThemeSurfaceColorDark,
+                status.Preferences.ThemeBrandColorDark,
+                status.Preferences.ThemeFollowSystemColors);
         if (status.CurrentProject is not null
             && !string.IsNullOrWhiteSpace(status.CurrentProject.ProjectRoot))
         {

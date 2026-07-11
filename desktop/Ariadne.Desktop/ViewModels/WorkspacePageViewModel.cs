@@ -878,7 +878,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             _backend,
             () => CurrentWorkflowId,
             () => SelectNode(node: null),
-            RefreshDirtyState);
+            RefreshDirtyState)
+        {
+            // 新建节点：从 prompt_list.json 填入 agent_prompt.{type}
+            PromptTemplate = Localization.PromptCatalog.ResolveNodePrompt(nodeType),
+        };
         AttachNodeCommands(node);
         Nodes.Add(node);
         RefreshStartNodes();
@@ -913,6 +917,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             TimeoutMs = ReadString(data, "timeout_ms"),
             BreakpointEnabled = ReadBool(data, "breakpoint", false),
         };
+        // 画布已有节点若未存提示词，用 prompt_list 默认补全（不覆盖用户已写内容）
+        if (string.IsNullOrWhiteSpace(node.PromptTemplate))
+        {
+            node.PromptTemplate = Localization.PromptCatalog.ResolveNodePrompt(graphNode.Type);
+        }
         // 必须保留 tool_enabled / input_aliases 等非 UI 键，否则 SaveWorkflowGraph 会整表冲掉
         node.RetainOpaqueData(data);
         AttachNodeCommands(node);

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Avalonia;
 using Avalonia.Media;
 using Ariadne.Desktop;
 using Ariadne.Desktop.Backend;
@@ -13,8 +14,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private const int SnapshotLocaleIndex = 1;
     private const int SnapshotModelStartIndex = 7;
     private const int SnapshotModelEndIndex = 18;
-    // Theme + 三色自定义 + Git 双色 + panel + onboarding：onboarding 在 snapshot 中的下标
-    private const int SnapshotOnboardingSeenIndex = 48;
+    // Theme + 昼/夜六色 + follow + Git 双色 + panel + onboarding：onboarding 在 snapshot 中的下标
+    private const int SnapshotOnboardingSeenIndex = 52;
     private static readonly string[] LocalizedPropertyNames =
     {
         nameof(Title),
@@ -105,6 +106,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         nameof(ThemeMainColorLabel),
         nameof(ThemeSurfaceColorLabel),
         nameof(ThemeBrandColorLabel),
+        nameof(ThemeFollowSystemColorsText),
+        nameof(ThemeEditDayText),
+        nameof(ThemeEditNightText),
         nameof(ColorMapHintText),
         nameof(ShowAllSectionsText),
         nameof(SectionIndexHintText),
@@ -196,6 +200,14 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _writableRootsText = string.Empty;
 
     private string _theme = "system";
+    private string _themeMainLight = "#F6F7F6";
+    private string _themeSurfaceLight = "#FFFFFF";
+    private string _themeBrandLight = "#356F68";
+    private string _themeMainDark = "#121417";
+    private string _themeSurfaceDark = "#1B1F23";
+    private string _themeBrandDark = "#70B8AC";
+    private bool _themeFollowSystemColors = true;
+    private bool _editingNightThemeColors;
     private string _gitAutoColor = "#8a8f98";
     private string _gitManualColor = "#f59e0b";
     private bool _projectPanelVisible = true;
@@ -246,6 +258,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             ThemeOptions.GroupBy(o => o.GroupTitle)
                 .Select(g => new ThemeGroupViewModel(g.Key, g)));
         ConfirmationPolicies = new ObservableCollection<ConfirmationPolicyViewModel>();
+        ConfirmationPolicyGroups = new ObservableCollection<ConfirmationPolicyGroupViewModel>();
         NodePresets = new ObservableCollection<NodeTypePresetViewModel>();
         ProviderOptions = new ObservableCollection<ProviderOptionViewModel>();
         AvailableModels = new ObservableCollection<ModelOptionViewModel>();
@@ -461,6 +474,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<ThemeOption> ThemeOptions { get; }
     public ObservableCollection<ThemeGroupViewModel> ThemeGroups { get; }
     public ObservableCollection<ConfirmationPolicyViewModel> ConfirmationPolicies { get; }
+    /// <summary>确认项按总结机制分组（内容区 + 左栏子索引跳转）。</summary>
+    public ObservableCollection<ConfirmationPolicyGroupViewModel> ConfirmationPolicyGroups { get; }
     public ObservableCollection<NodeTypePresetViewModel> NodePresets { get; }
     public ObservableCollection<ProviderOptionViewModel> ProviderOptions { get; }
     public ObservableCollection<ModelOptionViewModel> AvailableModels { get; }
@@ -492,6 +507,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool IsThemeMainChannelActive => _activeThemeColorChannel == ThemeColorChannel.Main;
     public bool IsThemeSurfaceChannelActive => _activeThemeColorChannel == ThemeColorChannel.Surface;
     public bool IsThemeBrandChannelActive => _activeThemeColorChannel == ThemeColorChannel.Brand;
+    public bool IsEditingDayThemeColors => !_editingNightThemeColors;
+    public bool IsEditingNightThemeColors => _editingNightThemeColors;
 
     /// <summary>当前激活的主题色槽（供 PS 式调色板双向绑定）。</summary>
     public string ActiveThemeColorHex
@@ -517,6 +534,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand SelectThemeMainChannelCommand => new(() => SetActiveThemeColorChannel(ThemeColorChannel.Main));
     public RelayCommand SelectThemeSurfaceChannelCommand => new(() => SetActiveThemeColorChannel(ThemeColorChannel.Surface));
     public RelayCommand SelectThemeBrandChannelCommand => new(() => SetActiveThemeColorChannel(ThemeColorChannel.Brand));
+    public RelayCommand SelectThemeEditDayCommand => new(() => SetEditingNightThemeColors(false));
+    public RelayCommand SelectThemeEditNightCommand => new(() => SetEditingNightThemeColors(true));
 
     public RelayCommand SaveGeneralCommand { get; }
     public RelayCommand RefreshModelsCommand { get; }
@@ -635,6 +654,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ThemeCustomThreeLabel => _displayNames.Text("ui.settings.personalization.theme.custom_three");
     public string ThemeCustomThreeHint => _displayNames.Text("ui.settings.personalization.theme.custom_three_hint");
     public string ThemeMainColorLabel => _displayNames.Text("ui.settings.personalization.theme.color_main");
+    public string ThemeFollowSystemColorsText => _displayNames.Text("ui.settings.personalization.theme.follow_system_colors");
+    public string ThemeEditDayText => _displayNames.Text("ui.settings.personalization.theme.edit_day");
+    public string ThemeEditNightText => _displayNames.Text("ui.settings.personalization.theme.edit_night");
     public string ThemeSurfaceColorLabel => _displayNames.Text("ui.settings.personalization.theme.color_surface");
     public string ThemeBrandColorLabel => _displayNames.Text("ui.settings.personalization.theme.color_brand");
     public string GitAutoColorLabel => _displayNames.Text("ui.settings.personalization.git_auto_color");
@@ -763,12 +785,24 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
+    /// <summary>昼·主底（快照/持久化）。</summary>
     public string ThemeMainColor
     {
-        get => ThemeMainColorEditor.ToHexValue();
+        get => SettingsDirtyHelper.NormalizeHexForSnapshot(_themeMainLight);
         set
         {
-            ThemeMainColorEditor.SetFromHex(value);
+            var n = SettingsDirtyHelper.NormalizeHexForSnapshot(value);
+            if (string.Equals(_themeMainLight, n, StringComparison.OrdinalIgnoreCase) && ThemeApplication.HasHex(n))
+            {
+                return;
+            }
+
+            _themeMainLight = n;
+            if (!_editingNightThemeColors)
+            {
+                ThemeMainColorEditor.SetFromHex(n);
+            }
+
             OnPropertyChanged();
             SyncActiveThemeSwatchSelection();
         }
@@ -776,10 +810,21 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public string ThemeSurfaceColor
     {
-        get => ThemeSurfaceColorEditor.ToHexValue();
+        get => SettingsDirtyHelper.NormalizeHexForSnapshot(_themeSurfaceLight);
         set
         {
-            ThemeSurfaceColorEditor.SetFromHex(value);
+            var n = SettingsDirtyHelper.NormalizeHexForSnapshot(value);
+            if (string.Equals(_themeSurfaceLight, n, StringComparison.OrdinalIgnoreCase) && ThemeApplication.HasHex(n))
+            {
+                return;
+            }
+
+            _themeSurfaceLight = n;
+            if (!_editingNightThemeColors)
+            {
+                ThemeSurfaceColorEditor.SetFromHex(n);
+            }
+
             OnPropertyChanged();
             SyncActiveThemeSwatchSelection();
         }
@@ -787,12 +832,101 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public string ThemeBrandColor
     {
-        get => ThemeBrandColorEditor.ToHexValue();
+        get => SettingsDirtyHelper.NormalizeHexForSnapshot(_themeBrandLight);
         set
         {
-            ThemeBrandColorEditor.SetFromHex(value);
+            var n = SettingsDirtyHelper.NormalizeHexForSnapshot(value);
+            if (string.Equals(_themeBrandLight, n, StringComparison.OrdinalIgnoreCase) && ThemeApplication.HasHex(n))
+            {
+                return;
+            }
+
+            _themeBrandLight = n;
+            if (!_editingNightThemeColors)
+            {
+                ThemeBrandColorEditor.SetFromHex(n);
+            }
+
             OnPropertyChanged();
             SyncActiveThemeSwatchSelection();
+        }
+    }
+
+    public string ThemeMainColorDark
+    {
+        get => SettingsDirtyHelper.NormalizeHexForSnapshot(_themeMainDark);
+        set
+        {
+            var n = SettingsDirtyHelper.NormalizeHexForSnapshot(value);
+            if (string.Equals(_themeMainDark, n, StringComparison.OrdinalIgnoreCase) && ThemeApplication.HasHex(n))
+            {
+                return;
+            }
+
+            _themeMainDark = n;
+            if (_editingNightThemeColors)
+            {
+                ThemeMainColorEditor.SetFromHex(n);
+            }
+
+            OnPropertyChanged();
+            SyncActiveThemeSwatchSelection();
+        }
+    }
+
+    public string ThemeSurfaceColorDark
+    {
+        get => SettingsDirtyHelper.NormalizeHexForSnapshot(_themeSurfaceDark);
+        set
+        {
+            var n = SettingsDirtyHelper.NormalizeHexForSnapshot(value);
+            if (string.Equals(_themeSurfaceDark, n, StringComparison.OrdinalIgnoreCase) && ThemeApplication.HasHex(n))
+            {
+                return;
+            }
+
+            _themeSurfaceDark = n;
+            if (_editingNightThemeColors)
+            {
+                ThemeSurfaceColorEditor.SetFromHex(n);
+            }
+
+            OnPropertyChanged();
+            SyncActiveThemeSwatchSelection();
+        }
+    }
+
+    public string ThemeBrandColorDark
+    {
+        get => SettingsDirtyHelper.NormalizeHexForSnapshot(_themeBrandDark);
+        set
+        {
+            var n = SettingsDirtyHelper.NormalizeHexForSnapshot(value);
+            if (string.Equals(_themeBrandDark, n, StringComparison.OrdinalIgnoreCase) && ThemeApplication.HasHex(n))
+            {
+                return;
+            }
+
+            _themeBrandDark = n;
+            if (_editingNightThemeColors)
+            {
+                ThemeBrandColorEditor.SetFromHex(n);
+            }
+
+            OnPropertyChanged();
+            SyncActiveThemeSwatchSelection();
+        }
+    }
+
+    public bool ThemeFollowSystemColors
+    {
+        get => _themeFollowSystemColors;
+        set
+        {
+            if (SetProperty(ref _themeFollowSystemColors, value))
+            {
+                ApplyCurrentThemeColors();
+            }
         }
     }
     public ThemeOption? SelectedThemeOption
@@ -872,16 +1006,23 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         switch (_activeThemeColorChannel)
         {
             case ThemeColorChannel.Main:
-                ThemeMainColor = hex;
+                ThemeMainColorEditor.SetFromHex(hex);
                 break;
             case ThemeColorChannel.Surface:
-                ThemeSurfaceColor = hex;
+                ThemeSurfaceColorEditor.SetFromHex(hex);
                 break;
             default:
-                ThemeBrandColor = hex;
+                ThemeBrandColorEditor.SetFromHex(hex);
                 break;
         }
 
+        PersistActiveEditorsToScheme();
+        OnPropertyChanged(nameof(ThemeMainColor));
+        OnPropertyChanged(nameof(ThemeSurfaceColor));
+        OnPropertyChanged(nameof(ThemeBrandColor));
+        OnPropertyChanged(nameof(ThemeMainColorDark));
+        OnPropertyChanged(nameof(ThemeSurfaceColorDark));
+        OnPropertyChanged(nameof(ThemeBrandColorDark));
         ApplyCurrentThemeColors();
         if (!_suppressDirtyTracking)
         {
@@ -891,11 +1032,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void OnThemeCustomColorChanged(ThemeColorChannel channel)
     {
+        PersistActiveEditorsToScheme();
         OnPropertyChanged(channel switch
         {
-            ThemeColorChannel.Main => nameof(ThemeMainColor),
-            ThemeColorChannel.Surface => nameof(ThemeSurfaceColor),
-            _ => nameof(ThemeBrandColor),
+            ThemeColorChannel.Main => _editingNightThemeColors ? nameof(ThemeMainColorDark) : nameof(ThemeMainColor),
+            ThemeColorChannel.Surface => _editingNightThemeColors ? nameof(ThemeSurfaceColorDark) : nameof(ThemeSurfaceColor),
+            _ => _editingNightThemeColors ? nameof(ThemeBrandColorDark) : nameof(ThemeBrandColor),
         });
         if (channel == _activeThemeColorChannel)
         {
@@ -907,6 +1049,63 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         if (!_suppressDirtyTracking)
         {
             HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+        }
+    }
+
+    private void SetEditingNightThemeColors(bool night)
+    {
+        if (_editingNightThemeColors == night)
+        {
+            return;
+        }
+
+        PersistActiveEditorsToScheme();
+        _editingNightThemeColors = night;
+        LoadSchemeIntoEditors();
+        OnPropertyChanged(nameof(IsEditingDayThemeColors));
+        OnPropertyChanged(nameof(IsEditingNightThemeColors));
+        OnPropertyChanged(nameof(ActiveThemeColorHex));
+        SyncActiveThemeSwatchSelection();
+    }
+
+    private void PersistActiveEditorsToScheme()
+    {
+        if (_editingNightThemeColors)
+        {
+            _themeMainDark = ThemeMainColorEditor.ToHexValue();
+            _themeSurfaceDark = ThemeSurfaceColorEditor.ToHexValue();
+            _themeBrandDark = ThemeBrandColorEditor.ToHexValue();
+        }
+        else
+        {
+            _themeMainLight = ThemeMainColorEditor.ToHexValue();
+            _themeSurfaceLight = ThemeSurfaceColorEditor.ToHexValue();
+            _themeBrandLight = ThemeBrandColorEditor.ToHexValue();
+        }
+    }
+
+    private void LoadSchemeIntoEditors()
+    {
+        var suppress = _suppressDirtyTracking;
+        _suppressDirtyTracking = true;
+        try
+        {
+            if (_editingNightThemeColors)
+            {
+                ThemeMainColorEditor.SetFromHex(_themeMainDark);
+                ThemeSurfaceColorEditor.SetFromHex(_themeSurfaceDark);
+                ThemeBrandColorEditor.SetFromHex(_themeBrandDark);
+            }
+            else
+            {
+                ThemeMainColorEditor.SetFromHex(_themeMainLight);
+                ThemeSurfaceColorEditor.SetFromHex(_themeSurfaceLight);
+                ThemeBrandColorEditor.SetFromHex(_themeBrandLight);
+            }
+        }
+        finally
+        {
+            _suppressDirtyTracking = suppress;
         }
     }
 
@@ -935,12 +1134,30 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _suppressDirtyTracking = true;
         try
         {
-            ThemeMainColorEditor.SetFromHex(ThemeApplication.ToHex(palette.SwatchMain));
-            ThemeSurfaceColorEditor.SetFromHex(ThemeApplication.ToHex(palette.SwatchSurface));
-            ThemeBrandColorEditor.SetFromHex(ThemeApplication.ToHex(palette.SwatchBrand));
+            var light = palette.IsDark ? ThemeCatalog.Resolve("light") : palette;
+            var dark = palette.IsDark ? palette : ThemeCatalog.Resolve("dark");
+            _themeMainLight = ThemeApplication.ToHex(light.SwatchMain);
+            _themeSurfaceLight = ThemeApplication.ToHex(light.SwatchSurface);
+            _themeBrandLight = ThemeApplication.ToHex(light.SwatchBrand);
+            _themeMainDark = ThemeApplication.ToHex(dark.SwatchMain);
+            _themeSurfaceDark = ThemeApplication.ToHex(dark.SwatchSurface);
+            _themeBrandDark = ThemeApplication.ToHex(dark.SwatchBrand);
+            // system 演示禁止近黑 surface
+            if (palette.Id == "system")
+            {
+                var demo = ThemeCatalog.SystemDemoSwatches();
+                _themeMainLight = ThemeApplication.ToHex(demo.Main);
+                _themeSurfaceLight = ThemeApplication.ToHex(demo.Surface);
+                _themeBrandLight = ThemeApplication.ToHex(demo.Brand);
+            }
+
+            LoadSchemeIntoEditors();
             OnPropertyChanged(nameof(ThemeMainColor));
             OnPropertyChanged(nameof(ThemeSurfaceColor));
             OnPropertyChanged(nameof(ThemeBrandColor));
+            OnPropertyChanged(nameof(ThemeMainColorDark));
+            OnPropertyChanged(nameof(ThemeSurfaceColorDark));
+            OnPropertyChanged(nameof(ThemeBrandColorDark));
             SyncActiveThemeSwatchSelection();
         }
         finally
@@ -951,11 +1168,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void ApplyCurrentThemeColors()
     {
+        PersistActiveEditorsToScheme();
+        // 仅勾选「跟随系统明暗」时用昼/夜两套；未勾选始终用昼侧三色
         ThemeApplication.Apply(
             Theme,
-            ThemeMainColorEditor.ToHexValue(),
-            ThemeSurfaceColorEditor.ToHexValue(),
-            ThemeBrandColorEditor.ToHexValue());
+            _themeMainLight,
+            _themeSurfaceLight,
+            _themeBrandLight,
+            _themeMainDark,
+            _themeSurfaceDark,
+            _themeBrandDark,
+            ThemeFollowSystemColors);
     }
 
     private void LoadThemeColorsFromPreferences(UiPreferences prefs)
@@ -965,21 +1188,45 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _suppressDirtyTracking = true;
         try
         {
-            ThemeMainColorEditor.SetFromHex(
-                ThemeApplication.HasHex(prefs.ThemeMainColor)
-                    ? prefs.ThemeMainColor
-                    : ThemeApplication.ToHex(palette.SwatchMain));
-            ThemeSurfaceColorEditor.SetFromHex(
-                ThemeApplication.HasHex(prefs.ThemeSurfaceColor)
-                    ? prefs.ThemeSurfaceColor
-                    : ThemeApplication.ToHex(palette.SwatchSurface));
-            ThemeBrandColorEditor.SetFromHex(
-                ThemeApplication.HasHex(prefs.ThemeBrandColor)
-                    ? prefs.ThemeBrandColor
-                    : ThemeApplication.ToHex(palette.SwatchBrand));
+            var light = palette.IsDark ? ThemeCatalog.Resolve("light") : palette;
+            var dark = palette.IsDark ? palette : ThemeCatalog.Resolve("dark");
+            var defaultMain = palette.Id == "system"
+                ? ThemeApplication.ToHex(ThemeCatalog.SystemDemoSwatches().Main)
+                : ThemeApplication.ToHex(light.SwatchMain);
+            var defaultSurface = palette.Id == "system"
+                ? ThemeApplication.ToHex(ThemeCatalog.SystemDemoSwatches().Surface)
+                : ThemeApplication.ToHex(light.SwatchSurface);
+            var defaultBrand = palette.Id == "system"
+                ? ThemeApplication.ToHex(ThemeCatalog.SystemDemoSwatches().Brand)
+                : ThemeApplication.ToHex(light.SwatchBrand);
+
+            _themeMainLight = ThemeApplication.HasHex(prefs.ThemeMainColor)
+                ? SettingsDirtyHelper.NormalizeHexForSnapshot(prefs.ThemeMainColor)
+                : defaultMain;
+            _themeSurfaceLight = ThemeApplication.HasHex(prefs.ThemeSurfaceColor)
+                ? SettingsDirtyHelper.NormalizeHexForSnapshot(prefs.ThemeSurfaceColor)
+                : defaultSurface;
+            _themeBrandLight = ThemeApplication.HasHex(prefs.ThemeBrandColor)
+                ? SettingsDirtyHelper.NormalizeHexForSnapshot(prefs.ThemeBrandColor)
+                : defaultBrand;
+            _themeMainDark = ThemeApplication.HasHex(prefs.ThemeMainColorDark)
+                ? SettingsDirtyHelper.NormalizeHexForSnapshot(prefs.ThemeMainColorDark)
+                : ThemeApplication.ToHex(dark.SwatchMain);
+            _themeSurfaceDark = ThemeApplication.HasHex(prefs.ThemeSurfaceColorDark)
+                ? SettingsDirtyHelper.NormalizeHexForSnapshot(prefs.ThemeSurfaceColorDark)
+                : ThemeApplication.ToHex(dark.SwatchSurface);
+            _themeBrandDark = ThemeApplication.HasHex(prefs.ThemeBrandColorDark)
+                ? SettingsDirtyHelper.NormalizeHexForSnapshot(prefs.ThemeBrandColorDark)
+                : ThemeApplication.ToHex(dark.SwatchBrand);
+            _themeFollowSystemColors = prefs.ThemeFollowSystemColors;
+            LoadSchemeIntoEditors();
             OnPropertyChanged(nameof(ThemeMainColor));
             OnPropertyChanged(nameof(ThemeSurfaceColor));
             OnPropertyChanged(nameof(ThemeBrandColor));
+            OnPropertyChanged(nameof(ThemeMainColorDark));
+            OnPropertyChanged(nameof(ThemeSurfaceColorDark));
+            OnPropertyChanged(nameof(ThemeBrandColorDark));
+            OnPropertyChanged(nameof(ThemeFollowSystemColors));
             SyncActiveThemeSwatchSelection();
             ApplyCurrentThemeColors();
         }
@@ -1084,12 +1331,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 ("defaults", "ui.settings.section.defaults"),
                 ("templates", "ui.settings.section.templates"),
             },
-            "automation" => new[]
-            {
-                ("budget", "ui.settings.section.budget"),
-                ("confirmations", "ui.settings.section.confirmations"),
-                ("runtime", "ui.settings.section.runtime"),
-            },
+            "automation" => null, // 特殊：确认项下挂子索引
             "permissions" => new[]
             {
                 ("capabilities", "ui.settings.section.capabilities"),
@@ -1110,10 +1352,31 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             },
         };
 
-        foreach (var (id, key) in items)
+        if (items is null && SelectedTab.Id == "automation")
         {
-            SectionIndexItems.Add(new SettingsSectionIndexItemViewModel(id, _displayNames.Text(key), SelectSection));
+            // 预算 → 确认项 + 子索引 → 运行限制
+            SectionIndexItems.Add(new SettingsSectionIndexItemViewModel(
+                "budget", _displayNames.Text("ui.settings.section.budget"), SelectSection, indentLevel: 0));
+            SectionIndexItems.Add(new SettingsSectionIndexItemViewModel(
+                "confirmations", _displayNames.Text("ui.settings.section.confirmations"), SelectSection, indentLevel: 0));
+            foreach (var (subId, subKey) in SettingsDirtyHelper.ConfirmationSubIndexGroups)
+            {
+                SectionIndexItems.Add(new SettingsSectionIndexItemViewModel(
+                    subId, _displayNames.Text(subKey), SelectSection, indentLevel: 1));
+            }
+
+            SectionIndexItems.Add(new SettingsSectionIndexItemViewModel(
+                "runtime", _displayNames.Text("ui.settings.section.runtime"), SelectSection, indentLevel: 0));
         }
+        else if (items is not null)
+        {
+            foreach (var (id, key) in items)
+            {
+                SectionIndexItems.Add(new SettingsSectionIndexItemViewModel(
+                    id, _displayNames.Text(key), SelectSection, indentLevel: 0));
+            }
+        }
+
         _selectedSection = previousSectionId is null
             ? SectionIndexItems.FirstOrDefault()
             : SectionIndexItems.FirstOrDefault(item => item.Id == previousSectionId)
@@ -1252,16 +1515,25 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             var diagnostics = await _backend.GetBackendDiagnosticsAsync().ConfigureAwait(true);
             DiagnosticsStatus = diagnostics.Status;
 
-            HasUnsavedChanges = false;
-            CaptureSnapshot();
+            EnsureDefaultConfirmationPoliciesIfEmpty();
             StatusText = _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
         {
+            // 无项目/后端失败时仍给可编辑默认确认项，避免「确认项设置消失」
+            EnsureDefaultConfirmationPoliciesIfEmpty();
+            if (ConfirmationPolicies.Count == 0
+                || !ThemeApplication.HasHex(ThemeMainColor))
+            {
+                SeedThemeColorsFromPalette(ThemeCatalog.Resolve(Theme), force: true);
+            }
+
             StatusText = ex.Message;
         }
         finally
         {
+            // 无论成败都 Capture：避免「无项目文件时一点就脏」假阳性
+            CaptureSnapshot();
             _suppressDirtyTracking = false;
             IsLoading = false;
         }
@@ -1862,8 +2134,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         });
     }
 
-    private UiPreferences BuildUiPreferences() =>
-        new(
+    private UiPreferences BuildUiPreferences()
+    {
+        PersistActiveEditorsToScheme();
+        return new(
             Theme,
             GitAutoColor,
             GitManualColor,
@@ -1873,7 +2147,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             OnboardingSeen,
             ThemeMainColor,
             ThemeSurfaceColor,
-            ThemeBrandColor);
+            ThemeBrandColor,
+            ThemeMainColorDark,
+            ThemeSurfaceColorDark,
+            ThemeBrandColorDark,
+            ThemeFollowSystemColors);
+    }
 
     private async Task ResetOnboardingAsync()
     {
@@ -1933,16 +2212,83 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         PreauthorizedUsd = automation.Budget.PreauthorizedUsd.ToString("0.####");
         AutoModeEnabled = automation.Budget.AutoModeEnabled;
         SpentText = $"${automation.Budget.SpentUsd:0.####}";
+        var policies = SettingsDirtyHelper.EnsureConfirmationPolicies(
+            (automation.ConfirmationPolicies ?? Array.Empty<ConfirmationPolicySetting>())
+                .Select(item => (item.ConfirmationKind, item.NormalPolicy, item.AutoModePolicy)));
+        ApplyConfirmationPolicies(policies);
+    }
+
+    private void ApplyConfirmationPolicies(
+        IReadOnlyList<(string Kind, string NormalPolicy, string AutoModePolicy)> policies)
+    {
         ConfirmationPolicies.Clear();
-        foreach (var item in automation.ConfirmationPolicies)
+        foreach (var item in policies)
         {
             ConfirmationPolicies.Add(new ConfirmationPolicyViewModel(
-                item.ConfirmationKind,
-                ConfirmationLabel(item.ConfirmationKind),
+                item.Kind,
+                ConfirmationLabel(item.Kind),
                 item.NormalPolicy,
                 item.AutoModePolicy,
                 () => HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot));
         }
+
+        RebuildConfirmationGroups();
+    }
+
+    private void RebuildConfirmationGroups()
+    {
+        ConfirmationPolicyGroups.Clear();
+        var order = SettingsDirtyHelper.ConfirmationSubIndexGroups.Select(g => g.Id).ToList();
+        var buckets = order.ToDictionary(
+            id => id,
+            id => new List<ConfirmationPolicyViewModel>(),
+            StringComparer.Ordinal);
+
+        foreach (var policy in ConfirmationPolicies)
+        {
+            var groupId = SettingsDirtyHelper.ConfirmationGroupIdForKind(policy.Kind);
+            if (!buckets.ContainsKey(groupId))
+            {
+                buckets[groupId] = new List<ConfirmationPolicyViewModel>();
+                if (!order.Contains(groupId))
+                {
+                    order.Add(groupId);
+                }
+            }
+
+            buckets[groupId].Add(policy);
+        }
+
+        foreach (var groupId in order)
+        {
+            if (!buckets.TryGetValue(groupId, out var items) || items.Count == 0)
+            {
+                continue;
+            }
+
+            var titleKey = SettingsDirtyHelper.ConfirmationSubIndexGroups
+                .FirstOrDefault(g => g.Id == groupId).DisplayKey;
+            var title = string.IsNullOrWhiteSpace(titleKey)
+                ? groupId
+                : _displayNames.Text(titleKey);
+            ConfirmationPolicyGroups.Add(new ConfirmationPolicyGroupViewModel(groupId, title, items));
+        }
+
+        OnPropertyChanged(nameof(ConfirmationPolicyGroups));
+    }
+
+    private void EnsureDefaultConfirmationPoliciesIfEmpty()
+    {
+        // 不足全集时强制补齐（旧后端只回 4 项 / 空列表时）
+        if (ConfirmationPolicies.Count >= SettingsDirtyHelper.DefaultConfirmationKinds.Length)
+        {
+            return;
+        }
+
+        var existing = ConfirmationPolicies
+            .Select(p => (p.Kind, p.NormalPolicy, p.AutoModePolicy))
+            .ToArray();
+        ApplyConfirmationPolicies(SettingsDirtyHelper.EnsureConfirmationPolicies(existing));
     }
 
     private void ApplyPermissions(PermissionsSettings settings)
@@ -2025,14 +2371,66 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private string ConfirmationLabel(string kind)
     {
+        // 对齐 创作总结机制 / 配置项与确认项清单 的用户可见名称
         return kind switch
         {
             "chapter_write" => _displayNames.Text("ui.settings.automation.confirmation.chapter_write"),
             "summary_write" => _displayNames.Text("ui.settings.automation.confirmation.summary_write"),
             "high_risk_permission" => _displayNames.Text("ui.settings.automation.confirmation.high_risk_permission"),
             "budget_exceeded" => _displayNames.Text("ui.settings.automation.confirmation.budget_exceeded"),
+            "outliner_output" => _displayNames.Text("confirmation.outliner.output"),
+            "designer_output" => _displayNames.Text("confirmation.designer.output"),
+            "planner_output" => _displayNames.Text("confirmation.planner.output"),
+            "planner_register" => _displayNames.Text("ui.settings.automation.confirmation.planner_register_all"),
+            "critic_review" => _displayNames.Text("confirmation.critic.review"),
+            "prudent_review" => _displayNames.Text("confirmation.prudent.review"),
+            "segment_summary" => _displayNames.Text("confirmation.summarizer.segment"),
+            "event_summary" => _displayNames.Text("confirmation.summarizer.event"),
+            "chapter_summary" => _displayNames.Text("confirmation.summarizer.chapter"),
+            "stage_summary" => _displayNames.Text("confirmation.summarizer.stage"),
+            "writer_correction_patch" => _displayNames.Text("confirmation.writer.correction_patch"),
+            "polisher_correction_patch" => _displayNames.Text("confirmation.polisher.correction_patch"),
+            // register 子功能：{agent}_register_{function}
+            _ when kind.Contains("_register_", StringComparison.Ordinal) =>
+                RegisterConfirmationLabel(kind),
             _ => kind,
         };
+    }
+
+    private string RegisterConfirmationLabel(string kind)
+    {
+        // outliner_register_character_trait → agent=outliner, func=character_trait
+        var idx = kind.IndexOf("_register_", StringComparison.Ordinal);
+        if (idx <= 0)
+        {
+            return kind;
+        }
+
+        var agent = kind[..idx];
+        var func = kind[(idx + "_register_".Length)..];
+        var agentLabel = agent switch
+        {
+            "outliner" => _displayNames.Text("agent.outliner"),
+            "designer" => _displayNames.Text("agent.designer"),
+            "planner" => _displayNames.Text("agent.planner"),
+            _ => agent,
+        };
+        var funcKey = func switch
+        {
+            "character_trait" => "confirmation.planner.register.character_trait",
+            "relationship" => "confirmation.planner.register.relationship",
+            "foreshadowing" => "confirmation.planner.register.foreshadowing",
+            "character_profile" => "confirmation.register.character_profile",
+            "character_plan" => "confirmation.register.character_plan",
+            "theme_anchor" => "confirmation.register.theme_anchor",
+            _ => null,
+        };
+        var funcLabel = funcKey is null ? func : _displayNames.Text(funcKey);
+        // 人物性格注册确认 → 总览者 · 人物性格注册
+        var shortFunc = funcLabel
+            .Replace("确认", string.Empty, StringComparison.Ordinal)
+            .Trim();
+        return $"{agentLabel} · {shortFunc}";
     }
 
     private string ToolScopeLabel(string scope)
@@ -2168,7 +2566,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             case UnsavedLeaveChoice.Save:
                 await SaveCurrentSectionAsync().ConfigureAwait(true);
-                return !HasUnsavedChanges;
+                // 保存成功路径会 CaptureSnapshot；若仍脏（保存失败）则不允许跳转
+                return SettingsDirtyHelper.CanNavigateAfterLeaveSave(HasUnsavedChanges);
             case UnsavedLeaveChoice.Discard:
                 await LoadAsync().ConfigureAwait(true);
                 return true;
@@ -2426,6 +2825,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             ThemeMainColor,
             ThemeSurfaceColor,
             ThemeBrandColor,
+            ThemeMainColorDark,
+            ThemeSurfaceColorDark,
+            ThemeBrandColorDark,
+            ThemeFollowSystemColors.ToString(),
             GitAutoColor,
             GitManualColor,
             ProjectPanelVisible.ToString(),
@@ -2456,6 +2859,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             or nameof(AllowWebSearch) or nameof(AllowHttpSkill) or nameof(AllowWasmNetwork)
             or nameof(AllowSecretRead) or nameof(ReadableRootsText) or nameof(WritableRootsText)
             or nameof(Theme) or nameof(ThemeMainColor) or nameof(ThemeSurfaceColor) or nameof(ThemeBrandColor)
+            or nameof(ThemeMainColorDark) or nameof(ThemeSurfaceColorDark) or nameof(ThemeBrandColorDark)
+            or nameof(ThemeFollowSystemColors)
             or nameof(GitAutoColor) or nameof(GitManualColor)
             or nameof(ProjectPanelVisible) or nameof(OnboardingSeen) or nameof(RerankerEnabled)
             or nameof(ChunkSizeChars) or nameof(ChunkOverlapChars) or nameof(TrackDocuments)
@@ -2686,15 +3091,42 @@ public sealed class SettingsSectionIndexItemViewModel : ViewModelBase
 {
     private bool _isSelected;
 
-    public SettingsSectionIndexItemViewModel(string id, string title, Action<SettingsSectionIndexItemViewModel> select)
+    public SettingsSectionIndexItemViewModel(
+        string id,
+        string title,
+        Action<SettingsSectionIndexItemViewModel> select,
+        int indentLevel = 0)
     {
         Id = id;
         Title = title;
+        IndentLevel = Math.Max(0, indentLevel);
         SelectCommand = new RelayCommand(() => select(this));
     }
 
     public string Id { get; }
     public string Title { get; }
+    /// <summary>0=一级索引；1=确认项子索引等。</summary>
+    public int IndentLevel { get; }
+    public bool IsChild => IndentLevel > 0;
+    public Thickness IndentMargin => new(IndentLevel * 14, 0, 0, 0);
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
+}
+
+/// <summary>确认项策略分组（左栏子索引 + 内容区小标题）。</summary>
+public sealed class ConfirmationPolicyGroupViewModel : ViewModelBase
+{
+    public ConfirmationPolicyGroupViewModel(
+        string groupId,
+        string title,
+        IEnumerable<ConfirmationPolicyViewModel> items)
+    {
+        GroupId = groupId;
+        Title = title;
+        Items = new ObservableCollection<ConfirmationPolicyViewModel>(items);
+    }
+
+    public string GroupId { get; }
+    public string Title { get; }
+    public ObservableCollection<ConfirmationPolicyViewModel> Items { get; }
 }

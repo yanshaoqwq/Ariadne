@@ -66,10 +66,14 @@
                       ctl:SelectedClass.IsSelected="{Binding IsSelected}"
                       HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Left"
-                      Margin="0,1"
-                      Padding="10,8"
+                      Margin="{Binding IndentMargin}"
+                      Padding="10,6"
+                      MinHeight="32"
                       Command="{Binding SelectCommand}">
-                    <TextBlock Text="{Binding Title}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding Title}"
+                               TextWrapping="Wrap"
+                               FontSize="12"
+                               Opacity="0.95" />
                   </Button>
                 </DataTemplate>
               </ItemsControl.ItemTemplate>
@@ -310,26 +314,38 @@
             </Border>
 
             <Border Classes="settings-section" Padding="22" Tag="confirmations" IsVisible="{Binding IsSectionConfirmationsSelected}">
-              <StackPanel Spacing="12">
+              <StackPanel Spacing="14">
                 <TextBlock Text="{Binding ConfirmationPolicyHelpText}" Classes="caption" TextWrapping="Wrap" />
                 <Grid ColumnDefinitions="*,180,180" ColumnSpacing="12">
                   <TextBlock Grid.Column="1" Text="{Binding NormalModeLabel}" Classes="caption" />
                   <TextBlock Grid.Column="2" Text="{Binding AutoModePolicyLabel}" Classes="caption" />
                 </Grid>
-                <ItemsControl ItemsSource="{Binding ConfirmationPolicies}">
+                <!-- 按总结机制分组；每组 Tag 供左栏子索引跳转 -->
+                <ItemsControl ItemsSource="{Binding ConfirmationPolicyGroups}">
                   <ItemsControl.ItemTemplate>
-                    <DataTemplate DataType="{x:Type vm:ConfirmationPolicyViewModel}">
-                      <Grid ColumnDefinitions="*,180,180" ColumnSpacing="12" Margin="0,3">
-                        <TextBlock Grid.Column="0" Text="{Binding Label}" VerticalAlignment="Center" TextWrapping="Wrap" />
-                        <ToggleSwitch Grid.Column="1"
-                                      IsChecked="{Binding NormalAllowByDefault, Mode=TwoWay}"
-                                      OnContent="{Binding $parent[UserControl].DataContext.PolicyAllowText}"
-                                      OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}" />
-                        <ToggleSwitch Grid.Column="2"
-                                      IsChecked="{Binding AutoModeAutoApproval, Mode=TwoWay}"
-                                      OnContent="{Binding $parent[UserControl].DataContext.PolicyAllowText}"
-                                      OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}" />
-                      </Grid>
+                    <DataTemplate DataType="{x:Type vm:ConfirmationPolicyGroupViewModel}">
+                      <Border Tag="{Binding GroupId}" Margin="0,0,0,10" Padding="0,4,0,0">
+                        <StackPanel Spacing="8">
+                          <TextBlock Text="{Binding Title}" Classes="subtitle" FontWeight="SemiBold" />
+                          <ItemsControl ItemsSource="{Binding Items}">
+                            <ItemsControl.ItemTemplate>
+                              <DataTemplate DataType="{x:Type vm:ConfirmationPolicyViewModel}">
+                                <Grid ColumnDefinitions="*,180,180" ColumnSpacing="12" Margin="0,3">
+                                  <TextBlock Grid.Column="0" Text="{Binding Label}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                                  <ToggleSwitch Grid.Column="1"
+                                                IsChecked="{Binding NormalAllowByDefault, Mode=TwoWay}"
+                                                OnContent="{Binding $parent[UserControl].DataContext.PolicyAllowText}"
+                                                OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}" />
+                                  <ToggleSwitch Grid.Column="2"
+                                                IsChecked="{Binding AutoModeAutoApproval, Mode=TwoWay}"
+                                                OnContent="{Binding $parent[UserControl].DataContext.PolicyAllowText}"
+                                                OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}" />
+                                </Grid>
+                              </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                          </ItemsControl>
+                        </StackPanel>
+                      </Border>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
@@ -494,7 +510,7 @@
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
 
-                <!-- 主题自定义三色：主底 / 表面 / 强调 + 共用色图 -->
+                <!-- 主题自定义三色：折叠色块点开调色板；可跟随系统并分别调昼/夜 -->
                 <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}" Margin="0,4" />
                 <StackPanel Spacing="6">
                   <TextBlock Text="{Binding ThemeCustomThreeLabel}" Classes="subtitle" />
@@ -502,6 +518,20 @@
                 </StackPanel>
                 <Border Classes="layer" Padding="14">
                   <StackPanel Spacing="12">
+                    <CheckBox IsChecked="{Binding ThemeFollowSystemColors, Mode=TwoWay}"
+                              Content="{Binding ThemeFollowSystemColorsText}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding ThemeFollowSystemColors}">
+                      <Button Classes="tab"
+                              ctl:SelectedClass.IsSelected="{Binding IsEditingDayThemeColors}"
+                              Content="{Binding ThemeEditDayText}"
+                              Command="{Binding SelectThemeEditDayCommand}"
+                              MinWidth="72" Padding="12,6" />
+                      <Button Classes="tab"
+                              ctl:SelectedClass.IsSelected="{Binding IsEditingNightThemeColors}"
+                              Content="{Binding ThemeEditNightText}"
+                              Command="{Binding SelectThemeEditNightCommand}"
+                              MinWidth="72" Padding="12,6" />
+                    </StackPanel>
                     <UniformGrid Columns="3" Margin="0,0,0,4">
                       <Button Classes="theme-color-slot"
                               ctl:SelectedClass.IsSelected="{Binding IsThemeMainChannelActive}"
@@ -548,7 +578,7 @@
                         </StackPanel>
                       </Button>
                     </UniformGrid>
-                    <!-- PS 式：连续色图 + 色相条 + RGB + Hex -->
+                    <!-- 折叠色块；点击弹出完整调色板（无全页变黑） -->
                     <ctl:SpectrumColorPicker SelectedHex="{Binding ActiveThemeColorHex, Mode=TwoWay}" />
                   </StackPanel>
                 </Border>

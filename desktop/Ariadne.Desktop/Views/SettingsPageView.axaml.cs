@@ -34,8 +34,6 @@ public partial class SettingsPageView : UserControl
         }
     }
 
-    // PickFolderAsync(string? title) matches SetFolderPicker(Func<string?, Task<string?>>)
-
     private void ScrollToSection(string sectionId)
     {
         if (string.IsNullOrWhiteSpace(sectionId))
@@ -43,18 +41,39 @@ public partial class SettingsPageView : UserControl
             return;
         }
 
-        // 等布局稳定后再 BringIntoView，避免切换 Tab 后目标尚未挂到树上。
+        // 用 Offset 显式滚到目标顶边，避免短页/Panel 叠层时 BringIntoView 贴底无效。
         Dispatcher.UIThread.Post(() =>
         {
+            var scroll = this.FindControl<ScrollViewer>("SettingsContentScroll")
+                         ?? this.GetVisualDescendants().OfType<ScrollViewer>()
+                             .FirstOrDefault(c => c.Name == "SettingsContentScroll");
             var target = FindSectionControl(sectionId);
             if (target is null)
             {
                 return;
             }
 
-            target.BringIntoView();
-            // 再补一帧，ScrollViewer 对深层目标有时需二次确认。
-            Dispatcher.UIThread.Post(() => target.BringIntoView(), DispatcherPriority.Background);
+            if (scroll is null)
+            {
+                target.BringIntoView();
+                return;
+            }
+
+            // 先确保目标参与布局
+            target.UpdateLayout();
+            scroll.UpdateLayout();
+
+            var transform = target.TransformToVisual(scroll);
+            if (transform is null)
+            {
+                target.BringIntoView();
+                return;
+            }
+
+            var topLeft = transform.Value.Transform(new Point(0, 0));
+            var nextY = Math.Max(0, scroll.Offset.Y + topLeft.Y - 12);
+            var maxY = Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height);
+            scroll.Offset = new Vector(scroll.Offset.X, Math.Min(nextY, maxY));
         }, DispatcherPriority.Loaded);
     }
 

@@ -89,9 +89,9 @@ public static class ThemeCatalog
 
     private static readonly ThemePalette[] Palettes =
     {
-        // 基础
+        // 基础 · 跟随系统：演示色块用「昼」方案，禁止近纯黑表面（否则看起来像整块死黑不可用）
         Entry("system", "base", isDark: false, dictOnly: true,
-            main: "#F6F7F6", surface: "#121417", brand: "#356F68",
+            main: "#F6F7F6", surface: "#FFFFFF", brand: "#356F68",
             window: "#EFF2F5", bgMain: "#F6F8FA", bgSurface: "#FFFFFF", bgElev: "#FFFFFF", bgSubtle: "#EEF2F6",
             canvas: "#F2F6F8", editor: "#FAFBFC", onAccent: "#FFFFFF"),
         Entry("light", "base", isDark: false, dictOnly: true,
@@ -165,6 +165,23 @@ public static class ThemeCatalog
         }
 
         return Palettes.Any(p => p.Id == id) ? id : DefaultThemeId;
+    }
+
+    /// <summary>
+    /// 判断主题演示条是否「不可用」：主底与表面都接近纯黑，或表面本身是纯黑。
+    /// 供测试与 UI 校验「跟随系统」演示色。
+    /// </summary>
+    public static bool IsUnusableDemoSwatch(Color main, Color surface)
+    {
+        static bool NearBlack(Color c) => c.R < 24 && c.G < 24 && c.B < 24;
+        return NearBlack(surface) || (NearBlack(main) && NearBlack(surface));
+    }
+
+    /// <summary>跟随系统预设的演示 swatch（昼侧，保证非纯黑）。</summary>
+    public static (Color Main, Color Surface, Color Brand) SystemDemoSwatches()
+    {
+        var p = Resolve("system");
+        return (p.SwatchMain, p.SwatchSurface, p.SwatchBrand);
     }
 
     private static ThemePalette Entry(

@@ -147,11 +147,11 @@
                         PointerReleased="OnPortPointerReleased"
                         ZIndex="3" />
 
-                <!-- 选中环贴卡片 -->
+                <!-- 选中环：外扩 = 描边宽，内侧贴紧卡片外缘 -->
                 <Border Grid.Row="1"
                         Classes="node-flow-ring"
-                        Margin="-3"
-                        CornerRadius="11"
+                        Margin="-5"
+                        CornerRadius="14"
                         IsHitTestVisible="False"
                         IsVisible="{Binding IsSelected}" />
 

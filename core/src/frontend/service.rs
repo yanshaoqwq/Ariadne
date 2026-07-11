@@ -1577,19 +1577,33 @@ pub struct UiPreferences {
     pub theme: String,
     pub git_auto_color: String,
     pub git_manual_color: String,
-    /// 主题自定义三色（主底 / 表面 / 强调）。空字符串 = 使用主题预设 swatch。
+    /// 主题自定义三色·昼（主底 / 表面 / 强调）。空字符串 = 使用主题预设 swatch。
     #[serde(default)]
     pub theme_main_color: String,
     #[serde(default)]
     pub theme_surface_color: String,
     #[serde(default)]
     pub theme_brand_color: String,
+    /// 主题自定义三色·夜（跟随系统时使用）。
+    #[serde(default)]
+    pub theme_main_color_dark: String,
+    #[serde(default)]
+    pub theme_surface_color_dark: String,
+    #[serde(default)]
+    pub theme_brand_color_dark: String,
+    /// 自定义颜色是否跟随系统明暗分别应用昼/夜。
+    #[serde(default = "default_true")]
+    pub theme_follow_system_colors: bool,
     pub project_panel_visible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_panel_position: Option<(i32, i32)>,
     #[serde(default)]
     pub panel_states: BTreeMap<String, bool>,
     pub onboarding_seen: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for UiPreferences {
@@ -1601,6 +1615,10 @@ impl Default for UiPreferences {
             theme_main_color: String::new(),
             theme_surface_color: String::new(),
             theme_brand_color: String::new(),
+            theme_main_color_dark: String::new(),
+            theme_surface_color_dark: String::new(),
+            theme_brand_color_dark: String::new(),
+            theme_follow_system_colors: true,
             project_panel_visible: true,
             project_panel_position: None,
             panel_states: BTreeMap::new(),
@@ -1621,9 +1639,39 @@ impl UiPreferencesStore {
         Self { path: path.into() }
     }
 
-    /// 使用项目根目录下默认 `.runtime/ui_preferences.json`。
+    /// 使用项目根目录下默认 `.runtime/ui_preferences.json`（旧路径，仅迁移兼容）。
     pub fn default_for_project(project_root: impl AsRef<Path>) -> Self {
         Self::new(project_root.as_ref().join(".runtime/ui_preferences.json"))
+    }
+
+    /// 应用级（与项目分离）UI 偏好：落在 app_state_root/ui_preferences.json。
+    pub fn default_for_app(app_state_root: impl AsRef<Path>) -> Self {
+        Self::new(app_state_root.as_ref().join("ui_preferences.json"))
+    }
+
+    /// 先读应用级；若无则尝试从项目级迁移一次。
+    pub fn read_global_or_migrate(
+        app_state_root: impl AsRef<Path>,
+        project_root: Option<&Path>,
+    ) -> CoreResult<UiPreferences> {
+        let global = Self::default_for_app(app_state_root.as_ref());
+        if global.path.is_file() {
+            return global.read();
+        }
+        if let Some(root) = project_root {
+            let project = Self::default_for_project(root);
+            if project.path.is_file() {
+                let prefs = project.read()?;
+                let _ = global.write(&prefs);
+                return Ok(prefs);
+            }
+        }
+        global.read()
+    }
+
+    /// 存储文件路径（测试 / 迁移用）。
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// 读取 UI 偏好；不存在时返回默认值。
@@ -1644,6 +1692,9 @@ impl UiPreferencesStore {
         validate_optional_color("theme_main_color", &preferences.theme_main_color)?;
         validate_optional_color("theme_surface_color", &preferences.theme_surface_color)?;
         validate_optional_color("theme_brand_color", &preferences.theme_brand_color)?;
+        validate_optional_color("theme_main_color_dark", &preferences.theme_main_color_dark)?;
+        validate_optional_color("theme_surface_color_dark", &preferences.theme_surface_color_dark)?;
+        validate_optional_color("theme_brand_color_dark", &preferences.theme_brand_color_dark)?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }

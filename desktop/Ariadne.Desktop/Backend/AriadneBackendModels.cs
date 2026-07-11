@@ -24,12 +24,20 @@ public sealed record UiPreferences(
     [property: JsonPropertyName("project_panel_position")] int[]? ProjectPanelPosition,
     [property: JsonPropertyName("panel_states")] Dictionary<string, bool> PanelStates,
     [property: JsonPropertyName("onboarding_seen")] bool OnboardingSeen,
-    /// 主题主底色；空/缺省 = 用主题预设。
+    /// 主题主底色（昼）；空/缺省 = 用主题预设。
     [property: JsonPropertyName("theme_main_color")] string? ThemeMainColor = null,
-    /// 主题表面色。
+    /// 主题表面色（昼）。
     [property: JsonPropertyName("theme_surface_color")] string? ThemeSurfaceColor = null,
-    /// 主题强调色（品牌/Accent）。
-    [property: JsonPropertyName("theme_brand_color")] string? ThemeBrandColor = null);
+    /// 主题强调色（昼）。
+    [property: JsonPropertyName("theme_brand_color")] string? ThemeBrandColor = null,
+    /// 夜·主底（跟随系统时使用）。
+    [property: JsonPropertyName("theme_main_color_dark")] string? ThemeMainColorDark = null,
+    /// 夜·表面。
+    [property: JsonPropertyName("theme_surface_color_dark")] string? ThemeSurfaceColorDark = null,
+    /// 夜·强调。
+    [property: JsonPropertyName("theme_brand_color_dark")] string? ThemeBrandColorDark = null,
+    /// 自定义三色是否按系统明暗分别应用昼/夜。
+    [property: JsonPropertyName("theme_follow_system_colors")] bool ThemeFollowSystemColors = true);
 
 public sealed record AppStatus(
     [property: JsonPropertyName("current_project")] CurrentProjectStatus CurrentProject,
