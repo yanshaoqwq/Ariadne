@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Avalonia.Media;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -16,7 +17,7 @@ public sealed class RunLogPageViewModel : ViewModelBase
     {
         _displayNames = displayNames;
         _backend = backend;
-        Logs = new ObservableCollection<UiRunLogEntry>();
+        Logs = new ObservableCollection<RunLogItemViewModel>();
         LevelOptions = new ObservableCollection<RunLogLevelOption>
         {
             new(string.Empty, displayNames.Text("ui.run_log.all_levels")),
@@ -43,6 +44,14 @@ public sealed class RunLogPageViewModel : ViewModelBase
     public string MarkReadText => _displayNames.Text("ui.run_log.mark_read");
 
     public string EmptyText => _displayNames.Text("ui.run_log.empty");
+    public string EmptyTitle => _backend.HasProjectRoot
+        ? _displayNames.Text("ui.empty.run_log.title")
+        : _displayNames.Text("ui.empty.need_project.title");
+    public string EmptyHint => _backend.HasProjectRoot
+        ? _displayNames.Text("ui.empty.run_log.hint")
+        : _displayNames.Text("ui.empty.need_project.hint");
+    public bool HasLogs => Logs.Count > 0;
+    public bool IsLogListEmpty => Logs.Count == 0;
 
     public string LevelInfoText => _displayNames.Text("ui.level.info");
 
@@ -50,7 +59,7 @@ public sealed class RunLogPageViewModel : ViewModelBase
 
     public string LevelErrorText => _displayNames.Text("ui.level.error");
 
-    public ObservableCollection<UiRunLogEntry> Logs { get; }
+    public ObservableCollection<RunLogItemViewModel> Logs { get; }
 
     public ObservableCollection<RunLogLevelOption> LevelOptions { get; }
 
@@ -86,6 +95,17 @@ public sealed class RunLogPageViewModel : ViewModelBase
 
     private async Task RefreshAsync()
     {
+        if (!_backend.HasProjectRoot)
+        {
+            Logs.Clear();
+            StatusText = string.Empty;
+            OnPropertyChanged(nameof(HasLogs));
+            OnPropertyChanged(nameof(IsLogListEmpty));
+            OnPropertyChanged(nameof(EmptyTitle));
+            OnPropertyChanged(nameof(EmptyHint));
+            return;
+        }
+
         try
         {
             var level = string.IsNullOrWhiteSpace(SelectedLevel) ? null : SelectedLevel;
@@ -93,13 +113,18 @@ public sealed class RunLogPageViewModel : ViewModelBase
             Logs.Clear();
             foreach (var log in logs)
             {
-                Logs.Add(log);
+                Logs.Add(new RunLogItemViewModel(log));
             }
             StatusText = Logs.Count == 0 ? EmptyText : $"{Logs.Count}";
+            OnPropertyChanged(nameof(HasLogs));
+            OnPropertyChanged(nameof(IsLogListEmpty));
         }
-        catch (Exception ex)
+        catch
         {
-            StatusText = ex.Message;
+            Logs.Clear();
+            StatusText = string.Empty;
+            OnPropertyChanged(nameof(HasLogs));
+            OnPropertyChanged(nameof(IsLogListEmpty));
         }
     }
 
@@ -118,3 +143,65 @@ public sealed class RunLogPageViewModel : ViewModelBase
 }
 
 public sealed record RunLogLevelOption(string Value, string Label);
+
+public sealed class RunLogItemViewModel
+{
+    private static readonly IBrush ErrorBrush = new SolidColorBrush(Color.Parse("#DC2626"));
+    private static readonly IBrush WarningBrush = new SolidColorBrush(Color.Parse("#D97706"));
+    private static readonly IBrush InfoBrush = new SolidColorBrush(Color.Parse("#2563EB"));
+    private static readonly IBrush ErrorBg = new SolidColorBrush(Color.Parse("#1FDC2626"));
+    private static readonly IBrush WarningBg = new SolidColorBrush(Color.Parse("#1FD97706"));
+    private static readonly IBrush InfoBg = new SolidColorBrush(Color.Parse("#1F2563EB"));
+
+    public RunLogItemViewModel(UiRunLogEntry entry)
+    {
+        LogId = entry.LogId;
+        TimestampMs = entry.TimestampMs;
+        Kind = entry.Kind;
+        Level = entry.Level;
+        Message = entry.Message;
+        TimestampText = FormatTimestamp(entry.TimestampMs);
+        var level = entry.Level.ToLowerInvariant();
+        LevelBrushKey = level switch
+        {
+            "error" => "error",
+            "warning" or "warn" => "warning",
+            _ => "info",
+        };
+        LevelForeground = LevelBrushKey switch
+        {
+            "error" => ErrorBrush,
+            "warning" => WarningBrush,
+            _ => InfoBrush,
+        };
+        LevelBackground = LevelBrushKey switch
+        {
+            "error" => ErrorBg,
+            "warning" => WarningBg,
+            _ => InfoBg,
+        };
+    }
+
+    public string LogId { get; }
+    public long TimestampMs { get; }
+    public string TimestampText { get; }
+    public string Kind { get; }
+    public string Level { get; }
+    public string LevelBrushKey { get; }
+    public IBrush LevelForeground { get; }
+    public IBrush LevelBackground { get; }
+    public string Message { get; }
+
+    private static string FormatTimestamp(long timestampMs)
+    {
+        try
+        {
+            var dto = DateTimeOffset.FromUnixTimeMilliseconds(timestampMs).ToLocalTime();
+            return dto.ToString("MM-dd HH:mm:ss");
+        }
+        catch
+        {
+            return timestampMs.ToString();
+        }
+    }
+}

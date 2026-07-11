@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using System.Collections.Specialized;
@@ -37,14 +38,19 @@ public partial class WorkspacePageView : UserControl
     private double _nodeDragOriginX;
     private double _nodeDragOriginY;
 
-    // ---- 端口拖线 ----
+    // ---- 端口拖线（任意口起拖，落点类型校验 + 橡皮筋） ----
     private bool _edgeDragging;
     private WorkflowNodeViewModel? _edgeSourceNode;
+    private NodePortKind _edgeSourceKind;
+    private NodePortDirection _edgeSourceDirection;
+    private Point _rubberBandStartLogical;
 
-    // ---- 节点库拖放 ----
+    // ---- 节点库：页级指针手势（单击添加 / 拖到画布）----
+    private bool _libraryPointerDown;
+    private bool _libraryDragging;
+    private bool _libraryAddedThisGesture;
     private NodeLibraryItemViewModel? _libraryDragItem;
-    private Point _libraryDragStart;
-    private bool _libraryItemDragging;
+    private Point _libraryPressOrigin;
 
     private bool _layoutInitialized;
     private WorkspacePageViewModel? _attachedViewModel;
@@ -56,7 +62,37 @@ public partial class WorkspacePageView : UserControl
         AddHandler(KeyDownEvent, OnWorkspaceKeyDown, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         DataContextChanged += (_, _) => AttachViewActions();
         LayoutUpdated += OnFirstLayout;
+        if (CanvasOverlay is not null)
+        {
+            CanvasOverlay.SizeChanged += OnCanvasOverlaySizeChanged;
+        }
         AttachViewActions();
+    }
+
+    private void OnCanvasOverlaySizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        ResizeNodeLayers(e.NewSize.Width, e.NewSize.Height);
+    }
+
+    private void ResizeNodeLayers(double width, double height)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        // ItemsControl 作为 Canvas 子项时默认 DesiredSize 可能为 0，必须铺满宿主
+        if (NodesItemsControl is not null)
+        {
+            NodesItemsControl.Width = width;
+            NodesItemsControl.Height = height;
+        }
+        if (EdgesItemsControl is not null)
+        {
+            EdgesItemsControl.Width = width;
+            EdgesItemsControl.Height = height;
+        }
+        ScheduleFullCanvasSync();
     }
 
     private void OnFirstLayout(object? sender, EventArgs e)
@@ -66,6 +102,10 @@ public partial class WorkspacePageView : UserControl
             return;
         }
         _layoutInitialized = true;
+        if (CanvasOverlay is not null)
+        {
+            ResizeNodeLayers(CanvasOverlay.Bounds.Width, CanvasOverlay.Bounds.Height);
+        }
         PositionBottomPill();
         PositionRightPill();
         SyncNodeContainerPositions();
@@ -78,8 +118,10 @@ public partial class WorkspacePageView : UserControl
         if (_attachedViewModel is not null && !ReferenceEquals(_attachedViewModel, DataContext))
         {
             _attachedViewModel.RequestFitView = null;
+            _attachedViewModel.PickFolder = null;
             _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
             _attachedViewModel.Edges.CollectionChanged -= OnEdgesCollectionChanged;
+            _attachedViewModel.PropertyChanged -= OnViewModelPropertyChanged;
             foreach (var node in _attachedViewModel.Nodes)
             {
                 node.PropertyChanged -= OnNodePropertyChanged;
@@ -90,8 +132,10 @@ public partial class WorkspacePageView : UserControl
         if (DataContext is WorkspacePageViewModel viewModel)
         {
             viewModel.RequestFitView = FitViewToNodes;
+            viewModel.PickFolder = PickFolderAsync;
             viewModel.Nodes.CollectionChanged += OnNodesCollectionChanged;
             viewModel.Edges.CollectionChanged += OnEdgesCollectionChanged;
+            viewModel.PropertyChanged += OnViewModelPropertyChanged;
             foreach (var node in viewModel.Nodes)
             {
                 node.PropertyChanged += OnNodePropertyChanged;
@@ -103,6 +147,22 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
+    private async Task<string?> PickFolderAsync(string? title)
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return null;
+        }
+
+        var folders = await topLevel.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = string.IsNullOrWhiteSpace(title) ? null : title,
+            AllowMultiple = false,
+        });
+        return folders.FirstOrDefault()?.Path.LocalPath;
+    }
+
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         if (_attachedViewModel is not null)
@@ -110,6 +170,8 @@ public partial class WorkspacePageView : UserControl
             _attachedViewModel.RequestFitView = null;
             _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
             _attachedViewModel.Edges.CollectionChanged -= OnEdgesCollectionChanged;
+            _attachedViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+            _attachedViewModel.EndPortDragHighlight();
             foreach (var node in _attachedViewModel.Nodes)
             {
                 node.PropertyChanged -= OnNodePropertyChanged;
@@ -118,6 +180,14 @@ public partial class WorkspacePageView : UserControl
         }
 
         base.OnDetachedFromVisualTree(e);
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(WorkspacePageViewModel.CanvasZoom))
+        {
+            ScheduleMiniMapSync();
+        }
     }
 
     private void OnNodesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -227,14 +297,20 @@ public partial class WorkspacePageView : UserControl
 
     private void PositionRightPill()
     {
-        if (WorkspaceRightPill is null || CanvasOverlay is null)
+        if (WorkspaceRightPill is null)
+        {
+            return;
+        }
+
+        Control? host = CanvasHost is not null ? CanvasHost : CanvasOverlay;
+        if (host is null)
         {
             return;
         }
 
         if (_rightPillTop < 0)
         {
-            var h = CanvasOverlay.Bounds.Height;
+            var h = host.Bounds.Height;
             _rightPillTop = h > 0 ? (h - WorkspaceRightPill.Height) / 2 : 120;
         }
 
@@ -304,10 +380,17 @@ public partial class WorkspacePageView : UserControl
 
     public void OnRightPillPointerMoved(object? sender, PointerEventArgs e)
     {
-        if (!_rightPilDragging || WorkspaceRightPill is null || CanvasOverlay is null)
+        if (!_rightPilDragging || WorkspaceRightPill is null)
         {
             return;
         }
+
+        Control? host = CanvasHost is not null ? CanvasHost : CanvasOverlay;
+        if (host is null)
+        {
+            return;
+        }
+
         var dy = e.GetPosition(this).Y - _rightPilDragStartY;
         if (!_rightPilMoved && Math.Abs(dy) < DragThreshold)
         {
@@ -315,7 +398,7 @@ public partial class WorkspacePageView : UserControl
         }
         _rightPilMoved = true;
         var newTop = _rightPilDragOriginTop + dy;
-        var maxTop = CanvasOverlay.Bounds.Height - WorkspaceRightPill.Height;
+        var maxTop = host.Bounds.Height - WorkspaceRightPill.Height;
         _rightPillTop = Clamp(newTop, 0, Math.Max(0, maxTop));
         Canvas.SetTop(WorkspaceRightPill, _rightPillTop);
     }
@@ -355,7 +438,7 @@ public partial class WorkspacePageView : UserControl
         e.Handled = true;
     }
 
-    // ===================== 节点库拖放 =====================
+    // ===================== 节点库：单击添加 + 页级拖到画布（不用系统 DnD） =====================
 
     public void OnNodeLibraryItemPointerPressed(object? sender, PointerPressedEventArgs e)
     {
@@ -365,65 +448,196 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
+        _libraryPointerDown = true;
+        _libraryDragging = false;
+        _libraryAddedThisGesture = false;
         _libraryDragItem = item;
-        _libraryDragStart = e.GetPosition(this);
-        _libraryItemDragging = false;
-        e.Pointer.Capture((IInputElement?)sender);
+        _libraryPressOrigin = e.GetPosition(this);
+        // 页级捕获：拖过 ScrollViewer / 分割条不会丢
+        e.Pointer.Capture(this);
         e.Handled = true;
     }
 
     public void OnNodeLibraryItemPointerMoved(object? sender, PointerEventArgs e)
     {
-        if (_libraryDragItem is null)
-        {
-            return;
-        }
-
-        var delta = e.GetPosition(this) - _libraryDragStart;
-        if (!_libraryItemDragging && Math.Sqrt((delta.X * delta.X) + (delta.Y * delta.Y)) < DragThreshold)
-        {
-            return;
-        }
-
-        _libraryItemDragging = true;
-        e.Handled = true;
+        // 捕获在页面上时，Move 由页面处理；芯片上的 Move 作兜底
+        HandleLibraryPointerMove(e);
     }
 
     public void OnNodeLibraryItemPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
-        var item = _libraryDragItem;
-        _libraryDragItem = null;
-        e.Pointer.Capture(null);
-        if (item is null)
+        HandleLibraryPointerRelease(e);
+    }
+
+    public void OnNodeLibraryItemCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        // 按下时会把捕获从芯片转到页面，芯片 CaptureLost 是预期行为，绝不能在这里加节点/清状态。
+        // 真正结束只走页面 OnPointerReleased。
+    }
+
+    protected override void OnPointerMoved(PointerEventArgs e)
+    {
+        if (_libraryPointerDown)
+        {
+            HandleLibraryPointerMove(e);
+        }
+
+        base.OnPointerMoved(e);
+    }
+
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        if (_libraryPointerDown)
+        {
+            HandleLibraryPointerRelease(e);
+            return;
+        }
+
+        base.OnPointerReleased(e);
+    }
+
+    private void HandleLibraryPointerMove(PointerEventArgs e)
+    {
+        if (!_libraryPointerDown || _libraryDragItem is null)
         {
             return;
         }
 
-        if (_libraryItemDragging)
+        var pos = e.GetPosition(this);
+        var dx = pos.X - _libraryPressOrigin.X;
+        var dy = pos.Y - _libraryPressOrigin.Y;
+        if (!_libraryDragging && (dx * dx + dy * dy) >= DragThreshold * DragThreshold)
         {
-            if (DataContext is WorkspacePageViewModel viewModel && CanvasOverlay is not null)
-            {
-                var canvasPosition = e.GetPosition(CanvasOverlay);
-                if (canvasPosition.X >= 0
-                    && canvasPosition.Y >= 0
-                    && canvasPosition.X <= CanvasOverlay.Bounds.Width
-                    && canvasPosition.Y <= CanvasOverlay.Bounds.Height)
-                {
-                    var logical = ToLogicalCanvasPoint(canvasPosition);
-                    viewModel.AddNodeAt(item.NodeType, logical.X - 101, logical.Y - 38);
-                    SyncNodeContainerPositions();
-                    SyncEdgePositions();
-                    SyncMiniMapPositions();
-                }
-            }
-        }
-        else if (item.AddCommand.CanExecute(null))
-        {
-            item.AddCommand.Execute(null);
+            _libraryDragging = true;
+            ShowLibraryDragGhost(_libraryDragItem.Title, pos);
         }
 
-        _libraryItemDragging = false;
-        e.Handled = true;
+        if (_libraryDragging)
+        {
+            MoveLibraryDragGhost(pos);
+            e.Handled = true;
+        }
+    }
+
+    private void HandleLibraryPointerRelease(PointerReleasedEventArgs e)
+    {
+        if (!_libraryPointerDown || _libraryDragItem is null)
+        {
+            ResetLibraryGesture();
+            return;
+        }
+
+        try
+        {
+            if (DataContext is not WorkspacePageViewModel viewModel)
+            {
+                return;
+            }
+
+            if (_libraryDragging)
+            {
+                // 拖到画布：落点添加；拖到库外其它处：中心兜底
+                if (CanvasOverlay is not null
+                    && IsPointOver(CanvasOverlay, e.GetPosition(CanvasOverlay)))
+                {
+                    var logical = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
+                    viewModel.AddNodeAt(_libraryDragItem.NodeType, logical.X - 101, logical.Y - 38);
+                }
+                else
+                {
+                    viewModel.AddNodeAt(_libraryDragItem.NodeType,
+                        120 + (viewModel.Nodes.Count % 4) * 230,
+                        80 + (viewModel.Nodes.Count / 4) * 170);
+                }
+
+                _libraryAddedThisGesture = true;
+                ScheduleFullCanvasSync();
+            }
+            else if (!_libraryAddedThisGesture)
+            {
+                // 纯单击
+                viewModel.AddNodeAt(_libraryDragItem.NodeType,
+                    120 + (viewModel.Nodes.Count % 4) * 230,
+                    80 + (viewModel.Nodes.Count / 4) * 170);
+                _libraryAddedThisGesture = true;
+                ScheduleFullCanvasSync();
+            }
+
+            e.Handled = true;
+        }
+        finally
+        {
+            e.Pointer.Capture(null);
+            ResetLibraryGesture();
+        }
+    }
+
+    private static bool IsPointOver(Control control, Point localPoint)
+    {
+        return localPoint.X >= 0
+               && localPoint.Y >= 0
+               && localPoint.X <= control.Bounds.Width
+               && localPoint.Y <= control.Bounds.Height;
+    }
+
+    private void ResetLibraryGesture()
+    {
+        _libraryPointerDown = false;
+        _libraryDragging = false;
+        _libraryAddedThisGesture = false;
+        _libraryDragItem = null;
+        HideLibraryDragGhost();
+    }
+
+    private void ShowLibraryDragGhost(string title, Point positionInView)
+    {
+        if (LibraryDragGhost is null || LibraryDragGhostText is null)
+        {
+            return;
+        }
+
+        LibraryDragGhostText.Text = title;
+        LibraryDragGhost.IsVisible = true;
+        MoveLibraryDragGhost(positionInView);
+    }
+
+    private void MoveLibraryDragGhost(Point positionInView)
+    {
+        if (LibraryDragGhost is null)
+        {
+            return;
+        }
+
+        Canvas.SetLeft(LibraryDragGhost, positionInView.X + 12);
+        Canvas.SetTop(LibraryDragGhost, positionInView.Y + 12);
+    }
+
+    private void HideLibraryDragGhost()
+    {
+        if (LibraryDragGhost is not null)
+        {
+            LibraryDragGhost.IsVisible = false;
+        }
+    }
+
+    private void ScheduleFullCanvasSync()
+    {
+        // 容器尚未生成时立刻 Sync 会空跑；多档优先级确保落点可见。
+        ScheduleNodeContainerSync();
+        ScheduleEdgeSync();
+        ScheduleMiniMapSync();
+        Dispatcher.UIThread.Post(() =>
+        {
+            SyncNodeContainerPositions();
+            SyncEdgePositions();
+            SyncMiniMapPositions();
+        }, DispatcherPriority.Loaded);
+        Dispatcher.UIThread.Post(() =>
+        {
+            SyncNodeContainerPositions();
+            SyncEdgePositions();
+            SyncMiniMapPositions();
+        }, DispatcherPriority.Render);
     }
 
     private void OnWorkspaceKeyDown(object? sender, KeyEventArgs e)
@@ -477,7 +691,7 @@ public partial class WorkspacePageView : UserControl
         var newX = _nodeDragOriginX + position.X - _nodeDragStart.X;
         var newY = _nodeDragOriginY + position.Y - _nodeDragStart.Y;
         var zoom = CurrentCanvasZoom();
-        node.X = Clamp(newX, 0, Math.Max(0, (CanvasOverlay.Bounds.Width / zoom) - 202));
+        node.X = Clamp(newX, 0, Math.Max(0, (CanvasOverlay.Bounds.Width / zoom) - NodePortSpec.NodeWidth));
         node.Y = Clamp(newY, 0, Math.Max(0, (CanvasOverlay.Bounds.Height / zoom) - 150));
         SyncNodeContainerPositions();
         SyncEdgePositions();
@@ -506,50 +720,211 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
-    public void OnOutputPortPointerPressed(object? sender, PointerPressedEventArgs e)
+    public void OnEdgePointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        // 从 Path / 标签向上找边 VM
+        var control = sender as Control;
+        while (control is not null)
+        {
+            if (control.DataContext is WorkflowEdgeViewModel edge
+                && DataContext is WorkspacePageViewModel page)
+            {
+                edge.SelectCommand.Execute(null);
+                e.Handled = true;
+                return;
+            }
+            control = control.Parent as Control;
+        }
+    }
+
+    public void OnPortPointerPressed(object? sender, PointerPressedEventArgs e)
     {
         if (FindNodeDataContext(sender as Control) is not { } node
-            || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+            || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed
+            || !TryReadPortTag(sender as Control, out var kind, out var direction)
+            || DataContext is not WorkspacePageViewModel viewModel)
         {
             return;
         }
 
         _edgeDragging = true;
         _edgeSourceNode = node;
+        _edgeSourceKind = kind;
+        _edgeSourceDirection = direction;
+        var (lx, ly) = NodePortSpec.LocalCenter(kind, direction);
+        _rubberBandStartLogical = new Point(node.X + lx, node.Y + ly);
         node.SelectCommand.Execute(null);
+        viewModel.BeginPortDragHighlight(node.Id, kind, direction);
+        UpdateRubberBand(_rubberBandStartLogical);
         e.Pointer.Capture((IInputElement?)sender);
         e.Handled = true;
     }
 
-    public void OnOutputPortPointerMoved(object? sender, PointerEventArgs e)
+    public void OnPortPointerMoved(object? sender, PointerEventArgs e)
     {
-        if (_edgeDragging)
+        if (!_edgeDragging || CanvasOverlay is null)
         {
-            e.Handled = true;
+            return;
         }
+
+        var logical = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
+        UpdateRubberBand(logical);
+        e.Handled = true;
     }
 
-    public void OnOutputPortPointerReleased(object? sender, PointerReleasedEventArgs e)
+    public void OnPortPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
         if (!_edgeDragging || _edgeSourceNode is null || DataContext is not WorkspacePageViewModel viewModel)
         {
-            _edgeDragging = false;
-            _edgeSourceNode = null;
+            ResetEdgeDrag();
             e.Pointer.Capture(null);
             return;
         }
 
-        var target = FindNodeAt(ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay)));
-        if (target is not null && target != _edgeSourceNode)
+        var logical = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
+        // 优先命中具体端口；未点到端口时，若落在节点上则尝试同类型入/双向口。
+        if (TryFindPortAt(logical, out var targetNode, out var targetKind, out var targetDirection)
+            && targetNode is not null)
         {
-            viewModel.CreateDataEdge(_edgeSourceNode.Id, target.Id);
-            SyncEdgePositions();
+            if (viewModel.TryConnectPorts(
+                    _edgeSourceNode.Id, _edgeSourceKind, _edgeSourceDirection,
+                    targetNode.Id, targetKind, targetDirection))
+            {
+                SyncEdgePositions();
+            }
+        }
+        else if (FindNodeAt(logical) is { } node && node != _edgeSourceNode)
+        {
+            // 松手在节点体上：自动落到同类型的可接收端（入/双向）。
+            var receiveDir = _edgeSourceKind == NodePortKind.Communication
+                ? NodePortDirection.Both
+                : NodePortDirection.In;
+            if (viewModel.TryConnectPorts(
+                    _edgeSourceNode.Id, _edgeSourceKind, _edgeSourceDirection,
+                    node.Id, _edgeSourceKind, receiveDir))
+            {
+                SyncEdgePositions();
+            }
+        }
+        else
+        {
+            viewModel.NotifyConnectMissed();
         }
 
-        _edgeDragging = false;
-        _edgeSourceNode = null;
+        ResetEdgeDrag();
         e.Pointer.Capture(null);
         e.Handled = true;
+    }
+
+    // 兼容旧 XAML 名（若外部仍引用）
+    public void OnOutputPortPointerPressed(object? sender, PointerPressedEventArgs e) => OnPortPointerPressed(sender, e);
+    public void OnOutputPortPointerMoved(object? sender, PointerEventArgs e) => OnPortPointerMoved(sender, e);
+    public void OnOutputPortPointerReleased(object? sender, PointerReleasedEventArgs e) => OnPortPointerReleased(sender, e);
+
+    public void OnMiniMapPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed
+            || MiniMapCanvas is null
+            || NodesItemsControl is null
+            || CanvasOverlay is null)
+        {
+            return;
+        }
+
+        var miniPos = e.GetPosition(MiniMapCanvas);
+        var (logicalX, logicalY) = NodePortSpec.MiniMapToLogical(miniPos.X, miniPos.Y);
+        var zoom = CurrentCanvasZoom();
+        var viewW = CanvasOverlay.Bounds.Width / zoom;
+        var viewH = CanvasOverlay.Bounds.Height / zoom;
+        // 点击处对齐主视口中心。
+        var targetLeft = logicalX - (viewW * 0.5);
+        var targetTop = logicalY - (viewH * 0.5);
+        var transform = EnsureTranslateTransform(NodesItemsControl);
+        transform.X = -targetLeft * zoom;
+        transform.Y = -targetTop * zoom;
+        if (EdgesItemsControl is not null)
+        {
+            var edgeTransform = EnsureTranslateTransform(EdgesItemsControl);
+            edgeTransform.X = transform.X;
+            edgeTransform.Y = transform.Y;
+        }
+        SyncMiniMapViewportFrame();
+        e.Handled = true;
+    }
+
+    private void UpdateRubberBand(Point endLogical)
+    {
+        if (RubberBandPath is null)
+        {
+            return;
+        }
+
+        var zoom = CurrentCanvasZoom();
+        var offset = CurrentCanvasOffset();
+        var startScreen = new Point(
+            (_rubberBandStartLogical.X * zoom) + offset.X,
+            (_rubberBandStartLogical.Y * zoom) + offset.Y);
+        var endScreen = new Point(
+            (endLogical.X * zoom) + offset.X,
+            (endLogical.Y * zoom) + offset.Y);
+        // 橡皮筋与正式边同算法；通信口预览即「上拱跳线」
+        var isComm = _edgeSourceKind == NodePortKind.Communication;
+        var spec = NodePortSpec.BuildEdgePath(
+            startScreen.X, startScreen.Y, endScreen.X, endScreen.Y, isComm);
+        var geometry = new PathGeometry();
+        var figure = new PathFigure
+        {
+            StartPoint = spec.Start,
+            IsClosed = false,
+            IsFilled = false,
+        };
+        figure.Segments ??= new PathSegments();
+        figure.Segments.Add(new BezierSegment
+        {
+            Point1 = spec.Control1,
+            Point2 = spec.Control2,
+            Point3 = spec.End,
+        });
+        geometry.Figures ??= new PathFigures();
+        geometry.Figures.Add(figure);
+        RubberBandPath.Data = geometry;
+        RubberBandPath.Stroke = BrushForPortKind(_edgeSourceKind);
+        RubberBandPath.StrokeThickness = isComm ? 2.2 : 1.8;
+        RubberBandPath.IsVisible = true;
+    }
+
+    private void ClearRubberBand()
+    {
+        if (RubberBandPath is null)
+        {
+            return;
+        }
+
+        RubberBandPath.IsVisible = false;
+        RubberBandPath.Data = null;
+    }
+
+    private static IBrush BrushForPortKind(NodePortKind kind) => kind switch
+    {
+        NodePortKind.Control => new SolidColorBrush(Color.Parse("#8B939D")),
+        NodePortKind.Communication => new SolidColorBrush(Color.Parse("#7C3AED")),
+        _ => new SolidColorBrush(Color.Parse("#2E726B")),
+    };
+
+    private void ResetEdgeDrag()
+    {
+        if (DataContext is WorkspacePageViewModel viewModel)
+        {
+            viewModel.EndPortDragHighlight();
+        }
+        ClearRubberBand();
+        _edgeDragging = false;
+        _edgeSourceNode = null;
     }
 
     private WorkflowNodeViewModel? FindNodeAt(Point canvasPosition)
@@ -561,9 +936,107 @@ public partial class WorkspacePageView : UserControl
 
         return viewModel.Nodes.LastOrDefault(node =>
             canvasPosition.X >= node.X
-            && canvasPosition.X <= node.X + 202
+            && canvasPosition.X <= node.X + NodePortSpec.NodeWidth
             && canvasPosition.Y >= node.Y
             && canvasPosition.Y <= node.Y + 150);
+    }
+
+    private bool TryFindPortAt(
+        Point canvasPosition,
+        out WorkflowNodeViewModel? node,
+        out NodePortKind kind,
+        out NodePortDirection direction)
+    {
+        node = null;
+        kind = NodePortKind.Data;
+        direction = NodePortDirection.In;
+        if (DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return false;
+        }
+
+        WorkflowNodeViewModel? bestNode = null;
+        NodePortKind bestKind = NodePortKind.Data;
+        NodePortDirection bestDir = NodePortDirection.In;
+        var bestDist = double.MaxValue;
+        var candidates = new (NodePortKind Kind, NodePortDirection Dir)[]
+        {
+            (NodePortKind.Control, NodePortDirection.In),
+            (NodePortKind.Control, NodePortDirection.Out),
+            (NodePortKind.Data, NodePortDirection.In),
+            (NodePortKind.Data, NodePortDirection.Out),
+            (NodePortKind.Communication, NodePortDirection.Both),
+        };
+
+        foreach (var item in viewModel.Nodes)
+        {
+            foreach (var (portKind, portDir) in candidates)
+            {
+                var (lx, ly) = NodePortSpec.LocalCenter(portKind, portDir);
+                var cx = item.X + lx;
+                var cy = item.Y + ly;
+                var dx = canvasPosition.X - cx;
+                var dy = canvasPosition.Y - cy;
+                var dist = Math.Sqrt((dx * dx) + (dy * dy));
+                if (dist <= NodePortSpec.HitRadius && dist < bestDist)
+                {
+                    bestDist = dist;
+                    bestNode = item;
+                    bestKind = portKind;
+                    bestDir = portDir;
+                }
+            }
+        }
+
+        if (bestNode is null)
+        {
+            return false;
+        }
+
+        node = bestNode;
+        kind = bestKind;
+        direction = bestDir;
+        return true;
+    }
+
+    private static bool TryReadPortTag(Control? control, out NodePortKind kind, out NodePortDirection direction)
+    {
+        kind = NodePortKind.Data;
+        direction = NodePortDirection.Out;
+        while (control is not null)
+        {
+            if (control.Tag is string tag && TryParsePortTag(tag, out kind, out direction))
+            {
+                return true;
+            }
+            control = control.Parent as Control;
+        }
+        return false;
+    }
+
+    private static bool TryParsePortTag(string tag, out NodePortKind kind, out NodePortDirection direction)
+    {
+        kind = NodePortKind.Data;
+        direction = NodePortDirection.Out;
+        var parts = tag.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length < 2)
+        {
+            return false;
+        }
+
+        kind = parts[0].ToLowerInvariant() switch
+        {
+            "control" => NodePortKind.Control,
+            "communication" => NodePortKind.Communication,
+            _ => NodePortKind.Data,
+        };
+        direction = parts[1].ToLowerInvariant() switch
+        {
+            "in" => NodePortDirection.In,
+            "both" => NodePortDirection.Both,
+            _ => NodePortDirection.Out,
+        };
+        return true;
     }
 
     private static WorkflowNodeViewModel? FindNodeDataContext(Control? control)
@@ -581,11 +1054,22 @@ public partial class WorkspacePageView : UserControl
 
     private void SyncNodeContainerPositions()
     {
-        if (NodesItemsControl is null)
+        if (NodesItemsControl is null || DataContext is not WorkspacePageViewModel viewModel)
         {
             return;
         }
 
+        // 优先对 ItemsControl 容器设 Canvas 附加属性（DataTemplate 根上的 Canvas.Left 常不生效）
+        foreach (var node in viewModel.Nodes)
+        {
+            if (NodesItemsControl.ContainerFromItem(node) is Control container)
+            {
+                Canvas.SetLeft(container, node.X);
+                Canvas.SetTop(container, node.Y);
+            }
+        }
+
+        // 兜底：遍历视觉树（旧路径）
         SyncNodeContainerPositions(NodesItemsControl);
     }
 
@@ -608,6 +1092,7 @@ public partial class WorkspacePageView : UserControl
         edgeTransform.Y = transform.Y;
         SyncNodeContainerPositions();
         SyncEdgePositions();
+        SyncMiniMapViewportFrame();
     }
 
     private void SyncEdgePositions()
@@ -636,6 +1121,29 @@ public partial class WorkspacePageView : UserControl
         }
 
         SyncMiniMapContainerPositions(MiniMapItemsControl);
+        SyncMiniMapViewportFrame();
+    }
+
+    private void SyncMiniMapViewportFrame()
+    {
+        if (MiniMapViewportFrame is null || CanvasOverlay is null || NodesItemsControl is null)
+        {
+            return;
+        }
+
+        var zoom = CurrentCanvasZoom();
+        var offset = CurrentCanvasOffset();
+        // screen = logical * zoom + offset → logical visible origin
+        var logicalLeft = -offset.X / zoom;
+        var logicalTop = -offset.Y / zoom;
+        var logicalW = CanvasOverlay.Bounds.Width / zoom;
+        var logicalH = CanvasOverlay.Bounds.Height / zoom;
+        var (mx, my, mw, mh) = NodePortSpec.LogicalViewportToMiniMap(
+            logicalLeft, logicalTop, logicalW, logicalH);
+        Canvas.SetLeft(MiniMapViewportFrame, mx);
+        Canvas.SetTop(MiniMapViewportFrame, my);
+        MiniMapViewportFrame.Width = mw;
+        MiniMapViewportFrame.Height = mh;
     }
 
     private static void SyncNodeContainerPositions(Control control)

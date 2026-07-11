@@ -20,19 +20,22 @@ public partial class WelcomeView : UserControl
     {
         if (DataContext is WelcomeViewModel vm)
         {
-            vm.SetProjectFolderPicker(PickProjectFolderAsync);
+            // 新建：选父目录；打开：选已有项目根
+            vm.SetProjectFolderPicker(title => PickFolderAsync(title));
         }
     }
 
-    private async Task<string?> PickProjectFolderAsync()
+    private async Task<string?> PickFolderAsync(string? title)
     {
         var topLevel = TopLevel.GetTopLevel(this);
         if (topLevel is null)
         {
             return null;
         }
+
         var folders = await topLevel.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
+            Title = string.IsNullOrWhiteSpace(title) ? null : title,
             AllowMultiple = false,
         });
         return folders.FirstOrDefault()?.Path.LocalPath;

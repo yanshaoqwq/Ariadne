@@ -56,8 +56,48 @@ case "$MODE" in
   run)
     build
     REAL_DISPLAY="${DISPLAY:-:0}"
+    ICON_PNG="$CSPROJ/Assets/app-icon-512.png"
     echo "[run] 在显示 $REAL_DISPLAY 上启动窗口（Ctrl+C 关闭）..."
+    echo "[run] 应用图标母版（定稿 35）：$ICON_PNG"
     DISPLAY="$REAL_DISPLAY" ARIADNE_BACKEND_IPC="$BACKEND_IPC" dotnet run --project "$CSPROJ/Ariadne.Desktop.csproj" -v quiet --nologo
+    ;;
+
+  install-desktop)
+    # .desktop 使用 Icon=ariadne；运行时 AppIconDesktopSync 会按个性化写入
+    # ~/.local/share/icons/hicolor/*/apps/ariadne.png 并刷新缓存
+    build
+    OUT_DIR="${2:-$HOME/.local/share/applications}"
+    ICON_SRC="$CSPROJ/Assets/app-icon-512.png"
+    HICOLOR="$HOME/.local/share/icons/hicolor"
+    BIN_DIR="$CSPROJ/bin/Debug/net10.0"
+    mkdir -p "$OUT_DIR"
+    for s in 16 24 32 48 64 128 256 512; do
+      mkdir -p "$HICOLOR/${s}x${s}/apps"
+      # 开发态先用静态母版；应用启动/改主题后会被主题色覆盖
+      SRC="$CSPROJ/Assets/app-icon-${s}.png"
+      [[ -f "$SRC" ]] || SRC="$ICON_SRC"
+      cp -f "$SRC" "$HICOLOR/${s}x${s}/apps/ariadne.png"
+    done
+    mkdir -p "$HOME/.local/share/Ariadne/icons"
+    cp -f "$ICON_SRC" "$HOME/.local/share/Ariadne/icons/ariadne.png"
+    cat > "$OUT_DIR/ariadne.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Ariadne
+Comment=长篇小说创作工作台
+Icon=ariadne
+Exec=env ARIADNE_BACKEND_IPC=$BACKEND_IPC $BIN_DIR/Ariadne.Desktop
+Path=$BIN_DIR
+Terminal=false
+Categories=Office;Publishing;
+StartupWMClass=Ariadne.Desktop
+EOF
+    chmod +x "$OUT_DIR/ariadne.desktop" 2>/dev/null || true
+    gtk-update-icon-cache -f -t "$HICOLOR" 2>/dev/null || true
+    xdg-desktop-menu forceupdate 2>/dev/null || true
+    echo "[install-desktop] 已写入 $OUT_DIR/ariadne.desktop (Icon=ariadne)"
+    echo "[install-desktop] hicolor 图标已安装；改主题后由应用自动重写着色"
     ;;
 
   shot)

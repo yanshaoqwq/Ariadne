@@ -23,6 +23,9 @@ public interface IAriadneBackendClient
 
     void ClearProjectRoot();
 
+    /// <summary>桌面侧是否已打开项目根（未打开时项目页应走空态，勿把 cwd 当项目）。</summary>
+    bool HasProjectRoot { get; }
+
     Task<AppSettings> GetAppSettingsAsync(CancellationToken cancellationToken = default);
 
     Task<AppSettings> SaveAppSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default);

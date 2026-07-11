@@ -10,6 +10,11 @@ public sealed class MainWindowViewModel : ViewModelBase
     private const string AppVersion = "0.1.0";
     private static readonly string[] ProjectScopedPageIds = { "workspace", "works", "git", "run_logs", "settings" };
     private static readonly string[] PreloadedProjectPageIds = { "workspace", "works", "git" };
+    /// <summary>无项目时也可进入的页面（侧栏跳过开始页）。</summary>
+    private static readonly HashSet<string> AlwaysAvailablePageIds = new(StringComparer.Ordinal)
+    {
+        "workspace", "works", "git", "run_logs", "templates", "settings",
+    };
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
@@ -20,6 +25,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _budgetStatusText;
     private double _budgetUsagePercent;
     private bool _sidebarExpanded = true;
+    private bool _hasOpenProject;
+    private string? _lastNavId;
     private readonly Dictionary<string, object> _pageCache = new();
 
     public MainWindowViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
@@ -33,6 +40,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         _budgetStatusText = displayNames.Text("ui.common.none");
         ProjectMenuItems = new ObservableCollection<ProjectMenuItemViewModel>();
         ToggleSidebarCommand = new RelayCommand(() => SidebarExpanded = !SidebarExpanded);
+        // 标题栏：始终可打开/切换项目
+        SwitchProjectCommand = new RelayCommand(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectCommand));
 
         // 上组：创作主流程
         PrimaryNavigationItems = new ObservableCollection<NavigationItemViewModel>
@@ -84,6 +93,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string CreateProjectText => _displayNames.Text("ui.layout.create_project");
 
     public string OpenProjectText => _displayNames.Text("ui.layout.open_project");
+
+    public string SwitchProjectText => _displayNames.Text("ui.layout.switch_project");
 
     public string LeaveProjectText => _displayNames.Text("ui.layout.leave_project");
 
@@ -168,22 +179,49 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public RelayCommand OpenProjectCommand => new(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectCommand));
 
+    /// <summary>已进入工作台时打开/切换项目（与 Open 同源）。</summary>
+    public RelayCommand SwitchProjectCommand { get; }
+
     public RelayCommand LeaveProjectCommand => new(() => _ = LeaveProjectAsync());
+
+    public bool HasOpenProject
+    {
+        get => _hasOpenProject;
+        private set => SetProperty(ref _hasOpenProject, value);
+    }
 
     public async Task InitializeAsync()
     {
         await Welcome.LoadAsync().ConfigureAwait(true);
         RefreshProjectMenuItems();
+        _lastNavId = SessionNavStore.LoadLastNavId();
         var status = await _backend.GetAppStatusAsync().ConfigureAwait(true);
         if (status is null)
         {
             BackendStatus = _displayNames.Text("ui.status.unavailable");
+            // 无后端时仍允许侧栏进入空页面
+            TryRestoreLastNavWithoutProject();
             return;
         }
 
-        ThemeApplication.Apply(status.Preferences.Theme);
-        await EnterProjectAsync(status.CurrentProject, createPage: false).ConfigureAwait(true);
-        await RefreshSidebarBadgesAsync(status.Badges).ConfigureAwait(true);
+        ThemeApplication.Apply(
+                status.Preferences.Theme,
+                status.Preferences.ThemeMainColor,
+                status.Preferences.ThemeSurfaceColor,
+                status.Preferences.ThemeBrandColor);
+        if (status.CurrentProject is not null
+            && !string.IsNullOrWhiteSpace(status.CurrentProject.ProjectRoot))
+        {
+            await EnterProjectAsync(status.CurrentProject, createPage: false).ConfigureAwait(true);
+            await RefreshSidebarBadgesAsync(status.Badges).ConfigureAwait(true);
+        }
+        else
+        {
+            HasOpenProject = false;
+            BackendStatus = _displayNames.Text("ui.status.healthy");
+            // 上次侧栏跳过开始页：恢复到暂存的导航页
+            TryRestoreLastNavWithoutProject();
+        }
     }
 
     private async Task EnterProjectAsync(CurrentProjectStatus project)
@@ -193,21 +231,39 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task EnterProjectAsync(CurrentProjectStatus project, bool createPage)
     {
+        // 同步桌面侧项目根，避免页面误判「无项目」而只显示空态
+        if (!string.IsNullOrWhiteSpace(project.ProjectRoot) && !_backend.HasProjectRoot)
+        {
+            try
+            {
+                await _backend.SetProjectRootAsync(project.ProjectRoot).ConfigureAwait(true);
+            }
+            catch
+            {
+                // 后端已认可的当前项目时，尽力同步；失败仍进入 UI
+            }
+        }
+
         await ApplySavedLanguageAsync().ConfigureAwait(true);
         await Welcome.LoadAsync().ConfigureAwait(true);
         RefreshProjectMenuItems();
+        HasOpenProject = true;
         ProjectTitle = _displayNames.Format("ui.window.project_title", new Dictionary<string, string>
         {
             ["name"] = project.ProjectName,
         });
-        if (createPage)
-        {
-            ClearProjectScopedPageCache();
-        }
+        // 切换项目必须清缓存并重载，避免旧项目页面残留
+        ClearProjectScopedPageCache();
         BackendStatus = _displayNames.Text("ui.status.healthy");
         NotificationText = string.Empty;
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
-        SelectNavigationItem(PrimaryNavigationItems[0], createPage);
+
+        var targetId = !string.IsNullOrWhiteSpace(_lastNavId) && AlwaysAvailablePageIds.Contains(_lastNavId)
+            ? _lastNavId!
+            : "workspace";
+        var target = AllNavigationItems().FirstOrDefault(n => n.Id == targetId)
+                     ?? PrimaryNavigationItems[0];
+        SelectNavigationItem(target, createPage: true);
         await LoadProjectDataPagesAsync().ConfigureAwait(true);
     }
 
@@ -232,6 +288,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
 
         _backend.ClearProjectRoot();
+        HasOpenProject = false;
         foreach (var nav in AllNavigationItems())
         {
             nav.IsSelected = false;
@@ -243,8 +300,10 @@ public sealed class MainWindowViewModel : ViewModelBase
         ClearProjectScopedPageCache();
         BudgetStatusText = _displayNames.Text("ui.common.none");
         BudgetUsagePercent = 0;
+        // 离开项目回到开始页；侧栏暂存的 nav 仍保留，便于再次点侧栏进入
         CurrentPage = Welcome;
-        _ = Welcome.LoadAsync();
+        await Welcome.LoadAsync().ConfigureAwait(true);
+        RefreshProjectMenuItems();
     }
 
     private async Task RunWelcomeCommandAfterLeaveGuardAsync(RelayCommand command)
@@ -291,6 +350,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         OnPropertyChanged(nameof(ProjectMenuText));
         OnPropertyChanged(nameof(CreateProjectText));
         OnPropertyChanged(nameof(OpenProjectText));
+        OnPropertyChanged(nameof(SwitchProjectText));
         OnPropertyChanged(nameof(LeaveProjectText));
         OnPropertyChanged(nameof(FeedbackText));
         OnPropertyChanged(nameof(VersionText));
@@ -341,7 +401,8 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task SelectNavigationItemAsync(NavigationItemViewModel item)
     {
-        if (item.IsSelected)
+        // 已在该页且不在 Welcome：忽略；在 Welcome 上点侧栏必须能切走
+        if (item.IsSelected && !ReferenceEquals(CurrentPage, Welcome))
         {
             return;
         }
@@ -351,11 +412,86 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
 
+        if (!AlwaysAvailablePageIds.Contains(item.Id))
+        {
+            return;
+        }
+
         foreach (var nav in AllNavigationItems())
         {
             nav.IsSelected = nav == item;
         }
-        CurrentPage = item.PageFactory();
+
+        // 从开始页点侧栏 = 进入工作台页（可无项目，显示空态）；记住导航以便下次恢复
+        try
+        {
+            CurrentPage = item.PageFactory();
+        }
+        catch (Exception)
+        {
+            // 构造失败不抛工程师信息；回到开始页并清选中
+            NotificationText = string.Empty;
+            CurrentPage = Welcome;
+            foreach (var nav in AllNavigationItems())
+            {
+                nav.IsSelected = false;
+            }
+            return;
+        }
+
+        _lastNavId = item.Id;
+        SessionNavStore.SaveLastNavId(item.Id);
+
+        // 无项目时标题保持「未打开项目」，状态保持健康/连接文案，不要空白无反应
+        if (!HasOpenProject && string.IsNullOrWhiteSpace(ProjectTitle))
+        {
+            ProjectTitle = _displayNames.Text("ui.window.no_project_title");
+        }
+
+        if (string.IsNullOrWhiteSpace(BackendStatus)
+            || string.Equals(BackendStatus, _displayNames.Text("ui.status.unavailable"), StringComparison.Ordinal))
+        {
+            // 仅在原先是不可用占位时，进入壳后标为健康（有后端时 Initialize 已设过）
+            if (HasOpenProject || _backend.HasProjectRoot)
+            {
+                BackendStatus = _displayNames.Text("ui.status.healthy");
+            }
+        }
+
+        OnPropertyChanged(nameof(HeaderStatusText));
+    }
+
+    /// <summary>无打开项目时恢复上次侧栏页（跳过开始页的暂存）。</summary>
+    private void TryRestoreLastNavWithoutProject()
+    {
+        if (string.IsNullOrWhiteSpace(_lastNavId) || !AlwaysAvailablePageIds.Contains(_lastNavId))
+        {
+            return;
+        }
+
+        var item = AllNavigationItems().FirstOrDefault(n => n.Id == _lastNavId);
+        if (item is null)
+        {
+            return;
+        }
+
+        foreach (var nav in AllNavigationItems())
+        {
+            nav.IsSelected = nav == item;
+        }
+
+        try
+        {
+            CurrentPage = item.PageFactory();
+        }
+        catch
+        {
+            CurrentPage = Welcome;
+            foreach (var nav in AllNavigationItems())
+            {
+                nav.IsSelected = false;
+            }
+        }
     }
 
     private async Task<bool> ConfirmCurrentPageLeaveAsync()
@@ -428,11 +564,25 @@ public sealed class MainWindowViewModel : ViewModelBase
         ProjectMenuItems.Clear();
         foreach (var item in Welcome.RecentProjects)
         {
+            // 菜单打开最近项目 = 切换项目（经 leave 守卫 + EnterProject 清缓存）
             ProjectMenuItems.Add(new ProjectMenuItemViewModel(
                 item.Name,
                 item.ProjectRoot,
-                new RelayCommand(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(item.OpenCommand))));
+                new RelayCommand(() => _ = SwitchToProjectRootAsync(item.ProjectRoot))));
         }
+    }
+
+    private async Task SwitchToProjectRootAsync(string projectRoot)
+    {
+        if (!await ConfirmCachedProjectPagesLeaveAsync().ConfigureAwait(true))
+        {
+            return;
+        }
+
+        // 复用 Welcome 的打开逻辑（预检 + OpenProjectAsync + EnterProject）
+        await Welcome.OpenProjectRootForHostAsync(projectRoot).ConfigureAwait(true);
+        await Welcome.LoadAsync().ConfigureAwait(true);
+        RefreshProjectMenuItems();
     }
 
     private void SetBadge(string id, int value)

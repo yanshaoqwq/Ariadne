@@ -70,6 +70,8 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         _projectRoot = null;
     }
 
+    public bool HasProjectRoot => !string.IsNullOrWhiteSpace(_projectRoot);
+
     public Task<AppSettings> GetAppSettingsAsync(CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<AppSettings>("get_app_settings", null, cancellationToken);

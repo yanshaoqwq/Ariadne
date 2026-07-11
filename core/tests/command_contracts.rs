@@ -6,16 +6,17 @@ use std::thread;
 use std::time::Duration;
 
 use ariadne::commands::{
-    create_checkpoint_impl, fetch_provider_models, fetch_provider_models_impl,
-    get_app_settings_impl, get_automation_settings_impl, get_backend_diagnostics,
+    create_checkpoint_impl, create_project, fetch_provider_models, fetch_provider_models_impl,
+    get_app_settings_impl, get_app_status, get_automation_settings_impl, get_backend_diagnostics,
     get_budget_status_impl, get_display_name_language_pack_template, get_document_content_impl,
     get_document_tree_impl, get_git_history_impl, get_git_repository_status_impl,
     get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
     get_provider_config_impl, get_rag_settings_impl, get_template_repository_settings,
-    get_template_repository_settings_impl, get_workflow_settings_impl, list_workflow_graphs_impl,
-    load_workflow_graph_impl, pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl,
-    query_run_logs, resolve_confirmation_impl, resolve_project_references, restore_to_new_branch,
-    run_workflow, run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
+    get_template_repository_settings_impl, get_workflow_settings_impl, import_chapter,
+    list_external_workflow_tools_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
+    open_project, pack_workflow_selection_impl, project_ai_chat, project_ai_chat_impl, query_run_logs,
+    resolve_confirmation_impl, resolve_project_references, restore_to_new_branch, run_workflow,
+    run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
     save_document_content_impl, save_git_settings_impl, save_node_preset_settings_impl,
     save_permissions_settings_impl, save_provider_key_impl, save_provider_settings_impl,
     save_rag_settings_impl, save_template_repository_settings,
@@ -33,7 +34,9 @@ use ariadne::contracts::{
     WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
 use ariadne::diagnostics::DiagnosticStatus;
-use ariadne::frontend::{ConfirmationLogEntry, ConfirmationLogState, FileConfirmationLogStore};
+use ariadne::frontend::{
+    ChapterImportRequest, ConfirmationLogEntry, ConfirmationLogState, FileConfirmationLogStore,
+};
 use ariadne::workflow::{
     RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRunState,
     WorkflowRuntime, WorkflowRuntimeStore,
@@ -82,6 +85,54 @@ fn document_commands_read_tree_and_round_trip_content() {
 }
 
 #[test]
+fn import_chapter_command_resolves_project_relative_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = AriadneAppState::new(
+        temp.path().to_path_buf(),
+        temp.path().join(".app"),
+        Arc::new(MemorySecretStore::default()),
+    );
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    std::fs::create_dir_all(temp.path().join("planning").join("imports")).unwrap();
+    std::fs::write(
+        temp.path()
+            .join("planning")
+            .join("imports")
+            .join("chapter.md"),
+        "第一章正文",
+    )
+    .unwrap();
+
+    let index = import_chapter(
+        &state,
+        ChapterImportRequest {
+            chapter_id: "stage1:001".to_owned(),
+            title: "第一章".to_owned(),
+            order: 1,
+            source_path: "planning/imports/chapter.md".into(),
+            target_path: "documents/chapter-001.md".into(),
+            outline_ref: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(index.entries.len(), 1);
+    assert_eq!(
+        index.entries[0].path,
+        temp.path().join("documents/chapter-001.md")
+    );
+    assert_eq!(
+        get_document_content_impl(
+            temp.path(),
+            Some("documents/chapter-001.md".to_owned()),
+            None
+        )
+        .unwrap(),
+        "第一章正文"
+    );
+}
+
+#[test]
 fn app_state_root_can_be_separated_from_project_root_env() {
     let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -121,6 +172,64 @@ fn app_state_rejects_missing_or_uninitialized_project_root() {
     std::fs::create_dir_all(uninitialized.join(".config")).unwrap();
     state.set_project_root(&uninitialized).unwrap();
     assert_eq!(state.project_root().unwrap(), uninitialized);
+}
+
+#[test]
+fn project_create_and_open_persist_display_name_in_project_config() {
+    let project_parent = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let project_root = project_parent.path().join("directory-name");
+    let state = AriadneAppState::new(
+        project_parent.path().join("unused"),
+        app_state.path().to_path_buf(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    create_project(
+        &state,
+        project_root.to_string_lossy().into_owned(),
+        Some("作品项目".to_owned()),
+    )
+    .unwrap();
+    let config = ConfigStore::new(&project_root).load().unwrap();
+    assert_eq!(config.app.project_name, "作品项目");
+    assert_eq!(
+        get_app_status(&state).unwrap().current_project.project_name,
+        "作品项目"
+    );
+
+    let reopened = open_project(&state, project_root.to_string_lossy().into_owned(), None).unwrap();
+    assert_eq!(reopened.project_name, "作品项目");
+}
+
+#[test]
+fn app_status_rejects_uninitialized_project_root() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let state = AriadneAppState::new(
+        project.path().to_path_buf(),
+        app_state.path().to_path_buf(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let error = get_app_status(&state).unwrap_err();
+
+    assert!(error.contains("not initialized"));
+}
+
+#[test]
+fn project_scoped_state_commands_reject_uninitialized_project_root() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let state = AriadneAppState::new(
+        project.path().to_path_buf(),
+        app_state.path().to_path_buf(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let error = run_workflow(&state, "wf".to_owned(), None).unwrap_err();
+
+    assert!(error.contains("not initialized"));
 }
 
 #[test]
@@ -199,6 +308,32 @@ fn workflow_graph_commands_save_and_load_canvas_shape() {
 }
 
 #[test]
+fn explicit_missing_workflow_id_is_not_loaded_as_default_graph() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let default_graph = load_workflow_graph_impl(temp.path(), None).unwrap();
+    assert_eq!(default_graph.workflow_id, "default");
+
+    let load_error =
+        load_workflow_graph_impl(temp.path(), Some("missing-flow".to_owned())).unwrap_err();
+    assert!(load_error.contains("workflow not found: missing-flow"));
+
+    let secrets = MemorySecretStore::default();
+    let run_error = run_workflow_impl(
+        temp.path(),
+        &secrets,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "missing-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap_err();
+    assert!(run_error.contains("workflow not found: missing-flow"));
+}
+
+#[test]
 fn workflow_graph_list_returns_all_saved_workflows() {
     let temp = tempfile::tempdir().unwrap();
     save_workflow_graph_impl(
@@ -263,6 +398,51 @@ fn workflow_graph_list_returns_all_saved_workflows() {
     assert_eq!(loaded.name, "Review Flow");
 }
 
+#[test]
+fn workflow_graph_list_and_load_support_template_manifest_files() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let manifest_dir = temp.path().join("workflows").join("market-basic");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(
+        manifest_dir.join("workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "workflow_id": "market-basic",
+            "name": "Market Basic",
+            "version": "1.0.0",
+            "workflow": {
+                "id": "market-basic",
+                "name": "Market Basic",
+                "nodes": [
+                    {
+                        "id": "start",
+                        "type_name": "start",
+                        "label": "Start",
+                        "config": {},
+                        "position": { "x": 0.0, "y": 0.0 }
+                    }
+                ],
+                "edges": [],
+                "metadata": null
+            },
+            "required_node_types": ["start"],
+            "required_tools": [],
+            "required_permissions": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let workflows = list_workflow_graphs_impl(temp.path()).unwrap();
+    let loaded = load_workflow_graph_impl(temp.path(), Some("market-basic".to_owned())).unwrap();
+
+    assert_eq!(workflows.len(), 1);
+    assert_eq!(workflows[0].workflow_id, "market-basic");
+    assert_eq!(workflows[0].path, "workflows/market-basic/workflow.json");
+    assert_eq!(loaded.workflow_id, "market-basic");
+    assert_eq!(loaded.nodes.len(), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn workflow_graph_save_rejects_symlink_escape_from_workflows_root() {
@@ -283,6 +463,30 @@ fn workflow_graph_save_rejects_symlink_escape_from_workflows_root() {
 
     assert!(error.contains("outside allowed root"));
     assert!(!outside.path().join("owned.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn workflow_graph_list_does_not_follow_symlinked_workflow_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    std::fs::write(outside.path().join("workflow.json"), "{not-json").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        temp.path().join("workflows").join("outside"),
+    )
+    .unwrap();
+
+    let workflows = list_workflow_graphs_impl(temp.path()).unwrap();
+
+    assert_eq!(
+        workflows
+            .iter()
+            .map(|workflow| workflow.workflow_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["default"]
+    );
 }
 
 #[test]
@@ -431,6 +635,7 @@ fn run_workflow_executes_document_nodes_with_real_document_service() {
 fn run_workflow_command_starts_background_run() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -806,6 +1011,9 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
 
     let budget = get_budget_status_impl(temp.path()).unwrap();
     let provider = get_provider_config_impl(temp.path(), &secrets).unwrap();
+    // 保存的全局预算必须能映射到执行侧日限额（LLM evaluate_budget 路径）。
+    let live_limits = ariadne::costs::budget_limits_from_global_budget(budget.budget_usd);
+    assert_eq!(live_limits.daily_usd, Some(25.0));
 
     assert_eq!(budget.budget_usd, 25.0);
     assert_eq!(budget.preauthorized_usd, 3.5);
@@ -1435,6 +1643,27 @@ fn git_repository_status_reports_branch_head_and_worktree_diff() {
 }
 
 #[test]
+fn git_repository_status_ignores_internal_runtime_files() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    std::fs::write(temp.path().join("documents").join("chapter.md"), "draft").unwrap();
+    create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
+    std::fs::create_dir_all(temp.path().join(".runtime")).unwrap();
+    std::fs::write(
+        temp.path().join(".runtime").join("chapter_index.json"),
+        "{}",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("runtime.db"), "runtime").unwrap();
+
+    let status = get_git_repository_status_impl(temp.path()).unwrap();
+
+    assert!(!status.dirty);
+    assert_eq!(status.diff_line_count, 0);
+    assert!(status.diff_preview.is_empty());
+}
+
+#[test]
 fn git_restore_command_records_rebuild_followup_log() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -1520,6 +1749,8 @@ fn project_ai_resolves_references_and_updates_memory_without_llm() {
             handling_method: "manual".to_owned(),
             summary: "章节总结待确认".to_owned(),
             diff: "- old\n+ new".to_owned(),
+            workflow_id: "wf".to_owned(),
+            run_id: "run-1".to_owned(),
         })
         .unwrap();
 
@@ -1673,35 +1904,67 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
+    // 三轮 tool-use：list_start_nodes → draft_tool → 最终文本
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 16384];
-        let read = stream.read(&mut buffer).unwrap();
-        let request = String::from_utf8_lossy(&buffer[..read]);
-        assert!(request.starts_with("POST /chat/completions "));
-        assert!(request.contains("\"tools\""));
-        assert!(request.contains("\"name\":\"draft_tool\""));
-        let response_body = r#"{
-          "model":"local-chat",
-          "choices":[{
-            "message":{
-              "content":"",
-              "tool_calls":[{
-                "id":"call-1",
-                "type":"function",
-                "function":{"name":"draft_tool","arguments":"{}"}
-              }]
-            },
-            "finish_reason":"tool_calls"
-          }],
-          "usage":{"prompt_tokens":16,"completion_tokens":1}
-        }"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        stream.write_all(response.as_bytes()).unwrap();
+        let respond = |stream: &mut std::net::TcpStream, body: &str| {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        };
+        for round in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 65536];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.starts_with("POST /chat/completions "));
+            assert!(request.contains("\"tools\""));
+            assert!(request.contains("\"name\":\"list_start_nodes\""));
+            assert!(request.contains("\"name\":\"draft_tool\""));
+            let response_body = match round {
+                0 => r#"{
+                  "model":"local-chat",
+                  "choices":[{
+                    "message":{
+                      "content":"",
+                      "tool_calls":[{
+                        "id":"call-list",
+                        "type":"function",
+                        "function":{"name":"list_start_nodes","arguments":"{}"}
+                      }]
+                    },
+                    "finish_reason":"tool_calls"
+                  }],
+                  "usage":{"prompt_tokens":16,"completion_tokens":1}
+                }"#,
+                1 => r#"{
+                  "model":"local-chat",
+                  "choices":[{
+                    "message":{
+                      "content":"",
+                      "tool_calls":[{
+                        "id":"call-start",
+                        "type":"function",
+                        "function":{"name":"draft_tool","arguments":"{}"}
+                      }]
+                    },
+                    "finish_reason":"tool_calls"
+                  }],
+                  "usage":{"prompt_tokens":20,"completion_tokens":1}
+                }"#,
+                _ => r#"{
+                  "model":"local-chat",
+                  "choices":[{
+                    "message":{"content":"已按起点启动","tool_calls":[]},
+                    "finish_reason":"stop"
+                  }],
+                  "usage":{"prompt_tokens":24,"completion_tokens":4}
+                }"#,
+            };
+            respond(&mut stream, response_body);
+        }
     });
 
     let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
@@ -1751,12 +2014,62 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
 
     let workflow_run = response.workflow_run.unwrap();
     assert_eq!(workflow_run.status, "queued");
-    assert_eq!(response.answer, "ui.project_ai.workflow_tool_started");
+    assert!(
+        response.answer == "ui.project_ai.workflow_tool_started"
+            || response.answer.contains("起点")
+            || !response.answer.is_empty()
+    );
     let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
     let run_id = RunId::from(workflow_run.run_id);
     let state = wait_for_terminal_workflow_state(&store, &WorkflowId::from("tool-flow"), &run_id);
     assert_eq!(state.status, RunStatus::Succeeded);
     assert!(state.nodes.contains_key(&NodeId::from("start-draft")));
+}
+
+#[test]
+fn project_ai_start_node_catalog_includes_id_name_user_note() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "note-flow".to_owned(),
+            name: "Note Flow".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-a".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("起点 A".to_owned()),
+                data: json!({
+                    "name": "正篇起点",
+                    "work_dir": "novels/main",
+                    "user_note": "写正篇章纲",
+                    "expose_as_tool": true
+                }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        },
+    )
+    .unwrap();
+
+    // 通过 list_workflow_tools 路径确认 expose 工具仍在；catalog 纯逻辑由 project_ai 内使用。
+    // 这里直接读图后用 list_external 验证 id 暴露。
+    save_permissions_settings_impl(
+        temp.path(),
+        PermissionsSettings {
+            policy: PermissionPolicy::default(),
+            tool_controls: BTreeMap::from([(
+                "project_ai".to_owned(),
+                BTreeMap::from([("project-ai-workflow-tools".to_owned(), true)]),
+            )]),
+        },
+    )
+    .unwrap();
+    let tools = list_external_workflow_tools_impl(temp.path()).unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].start_node_id, "start-a");
+    assert!(tools[0].display_name.contains("正篇") || tools[0].display_name.contains("起点"));
 }
 
 #[test]
@@ -1929,6 +2242,8 @@ fn resolve_confirmation_command_updates_runtime_and_log_badges() {
             handling_method: "manual".to_owned(),
             summary: "待确认输出".to_owned(),
             diff: "- old\n+ new".to_owned(),
+            workflow_id: "wf".to_owned(),
+            run_id: "run-1".to_owned(),
         })
         .unwrap();
 

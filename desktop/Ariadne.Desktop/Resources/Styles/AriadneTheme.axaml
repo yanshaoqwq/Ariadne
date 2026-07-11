@@ -5,8 +5,10 @@
     - 设计目标：轻盈、精致、桌面感、阅读舒适，扔掉网页感。
     - 分层而非描边：窗口底为 Mica，内容浮在「层」上，靠极淡背景差 + 发丝边框 + 柔和投影区分。
     - 强调色克制：青绿 teal 仅用于主操作 / 选中指示 / 焦点。
-    - 主题：system/light/dark 由 ThemeDictionaries(Light/Dark) 驱动，跟随系统；
-      其余命名主题见 Palettes.axaml（运行时切换在交互阶段接）。
+    - 主题：system/light/dark 由 ThemeDictionaries(Light/Dark) 驱动，跟随系统。
+      命名主题（ink/azure/rose/…）由 ThemeCatalog + ThemeApplication 在运行时覆盖
+      DynamicResource 笔刷（中性底 + 强调色），对齐 settings-theme-spec §6 调色板。
+    - UI 整体交互权威：指导性文件/ui设计方案.md（Avalonia 桌面，无 WebUI）。
     - 命名约定：颜色 = Ariadne.Color.* ；笔刷 = Ariadne.* （沿用既有 key，旧视图无需改动）。
   -->
   <Styles.Resources>
@@ -20,7 +22,11 @@
           <Color x:Key="Ariadne.Color.BackgroundMain">#F6F8FA</Color>
           <Color x:Key="Ariadne.Color.BackgroundSurface">#FFFFFF</Color>
           <Color x:Key="Ariadne.Color.BackgroundElevated">#FFFFFF</Color>
-          <Color x:Key="Ariadne.Color.MenuBackground">#F2FFFFFF</Color>
+          <!-- Win11 毛玻璃菜单：高透明白 + 微冷灰，靠阴影/圆角成形 -->
+          <Color x:Key="Ariadne.Color.MenuBackground">#D9F7F9FB</Color>
+          <Color x:Key="Ariadne.Color.GlassTint">#E8F4F6F8</Color>
+          <Color x:Key="Ariadne.Color.GlassBorder">#66FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.Scrim">#59000000</Color>
           <Color x:Key="Ariadne.Color.BackgroundSubtle">#EEF2F6</Color>
           <Color x:Key="Ariadne.Color.BackgroundHover">#14000000</Color>
           <Color x:Key="Ariadne.Color.BackgroundPressed">#1F000000</Color>
@@ -80,6 +86,9 @@
           <SolidColorBrush x:Key="Ariadne.BackgroundSurface" Color="{StaticResource Ariadne.Color.BackgroundSurface}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundElevated" Color="{StaticResource Ariadne.Color.BackgroundElevated}" />
           <SolidColorBrush x:Key="Ariadne.MenuBackground" Color="{StaticResource Ariadne.Color.MenuBackground}" />
+          <SolidColorBrush x:Key="Ariadne.GlassTint" Color="{StaticResource Ariadne.Color.GlassTint}" />
+          <SolidColorBrush x:Key="Ariadne.GlassBorder" Color="{StaticResource Ariadne.Color.GlassBorder}" />
+          <SolidColorBrush x:Key="Ariadne.Scrim" Color="{StaticResource Ariadne.Color.Scrim}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundSubtle" Color="{StaticResource Ariadne.Color.BackgroundSubtle}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundHover" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
@@ -134,21 +143,25 @@
           <Color x:Key="Ariadne.Color.BackgroundMain">#17191C</Color>
           <Color x:Key="Ariadne.Color.BackgroundSurface">#212427</Color>
           <Color x:Key="Ariadne.Color.BackgroundElevated">#2A2E31</Color>
-          <!-- 右键菜单背景：91% 深色 + teal 微量，模拟毛玻璃 -->
-          <Color x:Key="Ariadne.Color.MenuBackground">#E81B2025</Color>
+          <!-- 深色毛玻璃菜单 -->
+          <Color x:Key="Ariadne.Color.MenuBackground">#CC1E2328</Color>
+          <Color x:Key="Ariadne.Color.GlassTint">#D01C2126</Color>
+          <Color x:Key="Ariadne.Color.GlassBorder">#33FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.Scrim">#99000000</Color>
           <Color x:Key="Ariadne.Color.BackgroundSubtle">#1D2023</Color>
           <Color x:Key="Ariadne.Color.BackgroundHover">#14FFFFFF</Color>
           <Color x:Key="Ariadne.Color.BackgroundPressed">#22FFFFFF</Color>
           <Color x:Key="Ariadne.Color.BackgroundCode">#1F2327</Color>
           <Color x:Key="Ariadne.Color.TextHeading">#F4F6F8</Color>
           <Color x:Key="Ariadne.Color.TextPrimary">#ECEEF0</Color>
-          <Color x:Key="Ariadne.Color.TextSecondary">#A7AEB2</Color>
-          <Color x:Key="Ariadne.Color.TextSubtle">#717881</Color>
+          <!-- Dark 边色/次级字：提高相对表面对比，避免「线融进底」 -->
+          <Color x:Key="Ariadne.Color.TextSecondary">#B4BBC1</Color>
+          <Color x:Key="Ariadne.Color.TextSubtle">#8A929A</Color>
           <Color x:Key="Ariadne.Color.TextOnAccent">#07110F</Color>
-          <Color x:Key="Ariadne.Color.BorderDefault">#313539</Color>
-          <Color x:Key="Ariadne.Color.BorderMuted">#26292D</Color>
-          <Color x:Key="Ariadne.Color.BorderStrong">#474C50</Color>
-          <Color x:Key="Ariadne.Color.BorderCard">#14FFFFFF</Color>
+          <Color x:Key="Ariadne.Color.BorderDefault">#454B52</Color>
+          <Color x:Key="Ariadne.Color.BorderMuted">#363B41</Color>
+          <Color x:Key="Ariadne.Color.BorderStrong">#606770</Color>
+          <Color x:Key="Ariadne.Color.BorderCard">#22FFFFFF</Color>
           <Color x:Key="Ariadne.Color.FocusRing">#6FB9AD</Color>
           <Color x:Key="Ariadne.Color.AccentPrimary">#6FB9AD</Color>
           <Color x:Key="Ariadne.Color.AccentHover">#82C6BB</Color>
@@ -173,7 +186,7 @@
           <Color x:Key="Ariadne.Color.CanvasBackground">#17191C</Color>
           <Color x:Key="Ariadne.Color.CanvasGrid">#2B3137</Color>
           <Color x:Key="Ariadne.Color.NodeBackground">#212427</Color>
-          <Color x:Key="Ariadne.Color.NodeBorder">#343A40</Color>
+          <Color x:Key="Ariadne.Color.NodeBorder">#4A5159</Color>
           <Color x:Key="Ariadne.Color.NodeSelected">#6FB9AD</Color>
           <Color x:Key="Ariadne.Color.EdgeData">#6FB9AD</Color>
           <Color x:Key="Ariadne.Color.EdgeControl">#8B939D</Color>
@@ -188,6 +201,9 @@
           <SolidColorBrush x:Key="Ariadne.BackgroundSurface" Color="{StaticResource Ariadne.Color.BackgroundSurface}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundElevated" Color="{StaticResource Ariadne.Color.BackgroundElevated}" />
           <SolidColorBrush x:Key="Ariadne.MenuBackground" Color="{StaticResource Ariadne.Color.MenuBackground}" />
+          <SolidColorBrush x:Key="Ariadne.GlassTint" Color="{StaticResource Ariadne.Color.GlassTint}" />
+          <SolidColorBrush x:Key="Ariadne.GlassBorder" Color="{StaticResource Ariadne.Color.GlassBorder}" />
+          <SolidColorBrush x:Key="Ariadne.Scrim" Color="{StaticResource Ariadne.Color.Scrim}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundSubtle" Color="{StaticResource Ariadne.Color.BackgroundSubtle}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundHover" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
           <SolidColorBrush x:Key="Ariadne.BackgroundPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
@@ -256,9 +272,22 @@
       <FontFamily x:Key="Ariadne.Font.Reading">Source Han Serif SC, Noto Serif CJK SC, Songti SC, AR PL UMing CN, Georgia, DejaVu Serif, serif</FontFamily>
       <FontFamily x:Key="Ariadne.Font.Mono">Cascadia Code, JetBrains Mono, Consolas, Sarasa Mono SC, DejaVu Sans Mono, WenQuanYi Zen Hei Mono, monospace</FontFamily>
 
-      <!-- Win11 柔和投影：卡片 / 浮层 -->
-      <BoxShadows x:Key="Ariadne.Shadow.Card">0 1 3 0 #14000000</BoxShadows>
-      <BoxShadows x:Key="Ariadne.Shadow.Flyout">0 8 24 -6 #2E000000</BoxShadows>
+      <!-- Win11 柔和投影：卡片 / 浮层 / 毛玻璃菜单 -->
+      <BoxShadows x:Key="Ariadne.Shadow.Card">0 1 2 0 #10000000, 0 4 12 -2 #12000000</BoxShadows>
+      <BoxShadows x:Key="Ariadne.Shadow.Flyout">0 2 4 0 #0F000000, 0 8 24 -4 #28000000, 0 24 48 -8 #1A000000</BoxShadows>
+      <BoxShadows x:Key="Ariadne.Shadow.Dialog">0 4 8 0 #12000000, 0 16 40 -4 #28000000, 0 32 64 -12 #18000000</BoxShadows>
+
+      <!-- 毛玻璃材料：弹窗/菜单 Tint 用 Color key（ExperimentalAcrylicMaterial 吃 Color） -->
+      <ExperimentalAcrylicMaterial x:Key="Ariadne.Acrylic.Menu"
+                                   BackgroundSource="Digger"
+                                   TintColor="{DynamicResource Ariadne.Color.GlassTint}"
+                                   TintOpacity="0.72"
+                                   MaterialOpacity="0.82" />
+      <ExperimentalAcrylicMaterial x:Key="Ariadne.Acrylic.Dialog"
+                                   BackgroundSource="Digger"
+                                   TintColor="{DynamicResource Ariadne.Color.GlassTint}"
+                                   TintOpacity="0.78"
+                                   MaterialOpacity="0.88" />
 
       <!-- ============================================================
            矢量图标几何（24x24 viewbox）——不依赖任何图标字体，
@@ -310,16 +339,28 @@
     </ResourceDictionary>
   </Styles.Resources>
 
-  <!-- ============================ 全局排版 ============================ -->
+  <!-- ============================ 全局排版（字体统一） ============================ -->
   <Style Selector="Window">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
     <Setter Property="Background" Value="{DynamicResource Ariadne.WindowBase}" />
   </Style>
 
   <Style Selector="TextBlock">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
     <Setter Property="TextWrapping" Value="NoWrap" />
+  </Style>
+
+  <Style Selector="Button, ToggleButton, CheckBox, RadioButton, TextBox, ComboBox, ListBox, MenuItem, TabItem, Label">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
+  </Style>
+
+  <Style Selector="ToolTip">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Caption}" />
   </Style>
 
   <!-- 矢量图标：描边线条，统一 stroke。geometry 见资源区 Ariadne.Icon.* -->
@@ -408,6 +449,20 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.layer.recent-item:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
+  <Style Selector="Border.layer.log-row:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
   </Style>
   <Style Selector="Border.accent-panel">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
@@ -447,10 +502,12 @@
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
   </Style>
   <Style Selector="Border.settings-section">
-    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
-    <Setter Property="BorderThickness" Value="0,0,0,1" />
-    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Card}" />
+    <Setter Property="Margin" Value="0,0,0,4" />
   </Style>
 
   <!-- ============================ 按钮 ============================ -->
@@ -481,6 +538,180 @@
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextOnAccent}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <!-- 欢迎页主操作卡 -->
+  <Style Selector="Button.welcome-action">
+    <Setter Property="MinHeight" Value="72" />
+    <Setter Property="Padding" Value="16,14" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.welcome-action.primary-action">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextOnAccent}" />
+  </Style>
+  <Style Selector="Button.welcome-action.primary-action:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentHover}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentHover}" />
+  </Style>
+  <Style Selector="Button.welcome-action.secondary-action">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+  </Style>
+  <Style Selector="Button.welcome-action.secondary-action:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+  </Style>
+  <Style Selector="Button.welcome-action:pressed">
+    <Setter Property="RenderTransform" Value="scale(0.985)" />
+  </Style>
+  <Style Selector="Button.welcome-recent-item">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+  </Style>
+  <Style Selector="Button.welcome-recent-item:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="Border.welcome-recent">
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
+  </Style>
+
+  <!-- 节点库芯片：可拖到画布 -->
+  <Style Selector="Border.library-chip">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.library-chip:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+  </Style>
+  <Style Selector="Border.library-chip.entry">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
+  <Style Selector="Button.library-chip">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="HorizontalContentAlignment" Value="Left" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Padding" Value="12,8" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.library-chip:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+  </Style>
+  <Style Selector="Button.library-chip.entry">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
+  <Style Selector="Border.exec-start-card">
+    <Setter Property="CornerRadius" Value="10" />
+  </Style>
+
+  <!-- 项目 AI 输入区：一体边框，发送键叠在右下角 -->
+  <Style Selector="Border.ai-composer">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+  </Style>
+  <Style Selector="Border.ai-composer:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+  </Style>
+
+  <!-- 选中节点：边框颜色沿周流动（不旋转整框）；主题色 ↔ 浅主题色 -->
+  <Style Selector="Border.node-flow-ring">
+    <Setter Property="Opacity" Value="1" />
+    <Setter Property="BorderThickness" Value="2" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush">
+      <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
+        <GradientStop Offset="0" Color="#A8D0CB" />
+        <GradientStop Offset="0.45" Color="#6FAEA6" />
+        <GradientStop Offset="1" Color="#A8D0CB" />
+      </LinearGradientBrush>
+    </Setter>
+    <Style.Animations>
+      <!-- 通过切换渐变起止点，让颜色沿边框周向流动 -->
+      <Animation Duration="0:0:2.8" IterationCount="Infinite" Easing="LinearEasing">
+        <KeyFrame Cue="0%">
+          <Setter Property="BorderBrush">
+            <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
+              <GradientStop Offset="0" Color="#A8D0CB" />
+              <GradientStop Offset="0.5" Color="#6FAEA6" />
+              <GradientStop Offset="1" Color="#A8D0CB" />
+            </LinearGradientBrush>
+          </Setter>
+        </KeyFrame>
+        <KeyFrame Cue="25%">
+          <Setter Property="BorderBrush">
+            <LinearGradientBrush StartPoint="50%,0%" EndPoint="50%,100%">
+              <GradientStop Offset="0" Color="#A8D0CB" />
+              <GradientStop Offset="0.5" Color="#6FAEA6" />
+              <GradientStop Offset="1" Color="#A8D0CB" />
+            </LinearGradientBrush>
+          </Setter>
+        </KeyFrame>
+        <KeyFrame Cue="50%">
+          <Setter Property="BorderBrush">
+            <LinearGradientBrush StartPoint="100%,50%" EndPoint="0%,50%">
+              <GradientStop Offset="0" Color="#A8D0CB" />
+              <GradientStop Offset="0.5" Color="#6FAEA6" />
+              <GradientStop Offset="1" Color="#A8D0CB" />
+            </LinearGradientBrush>
+          </Setter>
+        </KeyFrame>
+        <KeyFrame Cue="75%">
+          <Setter Property="BorderBrush">
+            <LinearGradientBrush StartPoint="50%,100%" EndPoint="50%,0%">
+              <GradientStop Offset="0" Color="#A8D0CB" />
+              <GradientStop Offset="0.5" Color="#6FAEA6" />
+              <GradientStop Offset="1" Color="#A8D0CB" />
+            </LinearGradientBrush>
+          </Setter>
+        </KeyFrame>
+        <KeyFrame Cue="100%">
+          <Setter Property="BorderBrush">
+            <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
+              <GradientStop Offset="0" Color="#A8D0CB" />
+              <GradientStop Offset="0.5" Color="#6FAEA6" />
+              <GradientStop Offset="1" Color="#A8D0CB" />
+            </LinearGradientBrush>
+          </Setter>
+        </KeyFrame>
+      </Animation>
+    </Style.Animations>
   </Style>
   <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentHover}" />
@@ -541,25 +772,236 @@
     <Setter Property="Foreground" Value="White" />
   </Style>
 
-  <!-- 导航项：左侧选中 pill + 柔底（Win11 NavigationView 语感） -->
+  <!-- 导航项：左栏满宽横条悬停（左右贴齐、无圆角卡片），渐变沿条横向流动 -->
   <Style Selector="Button.nav">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Padding" Value="10,8" />
-    <Setter Property="MinHeight" Value="38" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Padding" Value="12,9" />
+    <Setter Property="MinHeight" Value="40" />
+    <Setter Property="Margin" Value="0" />
+    <Setter Property="ClipToBounds" Value="True" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.16" />
+        <BrushTransition Property="Foreground" Duration="0:0:0.16" />
+      </Transitions>
+    </Setter>
+    <Setter Property="Template">
+      <ControlTemplate>
+        <!-- 无圆角、铺满整行：悬停条左右贴齐左栏，不随文字缩成卡片 -->
+        <Border x:Name="Root"
+                Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
+                CornerRadius="0"
+                ClipToBounds="True">
+          <Panel>
+            <!-- 满宽横条渐变底（高度=整行，左右贴齐） -->
+            <Border x:Name="GradientWash"
+                    IsHitTestVisible="False"
+                    Opacity="0"
+                    CornerRadius="0"
+                    HorizontalAlignment="Stretch"
+                    VerticalAlignment="Stretch">
+              <Border.Background>
+                <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
+                  <GradientStop Offset="0" Color="#332E726B" />
+                  <GradientStop Offset="0.4" Color="#1A2E726B" />
+                  <GradientStop Offset="1" Color="#0A2E726B" />
+                </LinearGradientBrush>
+              </Border.Background>
+              <Border.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity" Duration="0:0:0.22" Easing="CubicEaseOut" />
+                </Transitions>
+              </Border.Transitions>
+            </Border>
+            <!-- 满高细光带：从左缘无缝扫到右缘 -->
+            <Border x:Name="Shine"
+                    Width="48"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Stretch"
+                    IsHitTestVisible="False"
+                    Opacity="0"
+                    CornerRadius="0">
+              <Border.Background>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                  <GradientStop Offset="0" Color="#00FFFFFF" />
+                  <GradientStop Offset="0.5" Color="#48FFFFFF" />
+                  <GradientStop Offset="1" Color="#00FFFFFF" />
+                </LinearGradientBrush>
+              </Border.Background>
+              <Border.RenderTransform>
+                <TranslateTransform X="-48" />
+              </Border.RenderTransform>
+              <Border.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity" Duration="0:0:0.14" />
+                </Transitions>
+              </Border.Transitions>
+            </Border>
+            <ContentPresenter x:Name="PART_ContentPresenter"
+                              Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              Padding="{TemplateBinding Padding}"
+                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                              RecognizesAccessKey="True"
+                              Background="Transparent" />
+          </Panel>
+        </Border>
+      </ControlTemplate>
+    </Setter>
   </Style>
-  <Style Selector="Button.nav:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  <Style Selector="Button.nav:pointerover">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
   </Style>
-  <Style Selector="Button.nav.selected /template/ ContentPresenter">
+  <Style Selector="Button.nav:pointerover /template/ Border#GradientWash">
+    <Setter Property="Opacity" Value="1" />
+  </Style>
+  <Style Selector="Button.nav:pointerover /template/ Border#Shine">
+    <Setter Property="Opacity" Value="1" />
+    <Style.Animations>
+      <Animation Duration="0:0:1.4" IterationCount="Infinite" Easing="LinearEasing">
+        <KeyFrame Cue="0%">
+          <Setter Property="TranslateTransform.X" Value="-48" />
+        </KeyFrame>
+        <KeyFrame Cue="100%">
+          <Setter Property="TranslateTransform.X" Value="240" />
+        </KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+  <Style Selector="Button.nav.selected">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
   <Style Selector="Button.nav.selected TextBlock">
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="Button.nav.selected Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <Style Selector="Button.nav:pointerover Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+
+  <!-- 空状态面板：插画 + 文案 + 淡入 -->
+  <Style Selector="Border.empty-state">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Padding" Value="28,36" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="Opacity" Value="1" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.22" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.empty-state Path.empty-glyph">
+    <Setter Property="Width" Value="72" />
+    <Setter Property="Height" Value="72" />
+    <Setter Property="Stretch" Value="Uniform" />
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.TextSubtle}" />
+    <Setter Property="StrokeThickness" Value="1.6" />
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Opacity" Value="0.92" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="Margin" Value="0,0,0,14" />
+  </Style>
+  <!-- 分母题空态插画容器 -->
+  <Style Selector="Border.empty-state :is(UserControl)">
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="Margin" Value="0,0,0,12" />
+  </Style>
+  <!-- Logo 容器：位图钢笔由 AppIconPainter 着色；此处只铺底 -->
+  <Style Selector="Border.brand-logo.on-paper">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="Border.brand-logo.on-accent">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="Border.danger-panel">
+    <Setter Property="Background" Value="#18D97706" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusWarning}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="Padding" Value="14,12" />
+  </Style>
+
+  <!-- 个性化调色板卡片：固定比例、选中描边 -->
+  <Style Selector="Button.theme-swatch">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource Ariadne.Radius.Large}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="HorizontalContentAlignment" Value="Left" />
+    <Setter Property="VerticalContentAlignment" Value="Top" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.theme-swatch:pointerover /template/ ContentPresenter">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+  </Style>
+  <Style Selector="Button.theme-swatch.selected">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="BorderThickness" Value="2" />
+  </Style>
+  <!-- 主题三色槽位 -->
+  <Style Selector="Button.theme-color-slot">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+    <Setter Property="Cursor" Value="Hand" />
+  </Style>
+  <Style Selector="Button.theme-color-slot:pointerover /template/ ContentPresenter">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+  </Style>
+  <Style Selector="Button.theme-color-slot.selected">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderThickness" Value="2" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
+  <!-- 个性化色图：色块点选 -->
+  <Style Selector="Button.color-chip">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="VerticalAlignment" Value="Stretch" />
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.10" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.color-chip:pointerover /template/ ContentPresenter">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderStrong}" />
+  </Style>
+  <Style Selector="Button.color-chip.selected">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="BorderThickness" Value="2" />
+  </Style>
+  <Style Selector="Slider">
+    <Setter Property="Minimum" Value="0" />
   </Style>
 
   <!-- 横向标签（配置页顶部分段）：底部下划线指示选中，Win11 pivot 语感 -->
@@ -700,14 +1142,6 @@
   </Style>
 
   <!-- ============================ 动效 ============================ -->
-  <!-- 导航项：选中/hover 背景淡入淡出 -->
-  <Style Selector="Button.nav">
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Background" Duration="0:0:0.14" />
-      </Transitions>
-    </Setter>
-  </Style>
   <!-- 横向 tab：下划线（BorderBrush）淡入淡出 -->
   <Style Selector="Button.tab">
     <Setter Property="Transitions">
@@ -738,32 +1172,101 @@
       </Transitions>
     </Setter>
   </Style>
+  <!-- 卡片/层悬停微抬升 -->
+  <Style Selector="Border.card">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.card:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+  </Style>
 
-  <!-- ============ 右键菜单：Win11 风格（圆角、轻描边、悬浮高亮圆角项）============ -->
-  <!-- ============ 右键菜单（仅限 Classes="ariadne"，不污染 TextBox 内置菜单） ============ -->
-  <!-- 背景用半透明 MenuBackground token 模拟毛玻璃；阴影三层叠加增加悬浮感 -->
+  <!-- ============ Win11 毛玻璃菜单：右键 ContextMenu + 标题栏 MenuFlyout ============ -->
+  <!-- 半透明底 + 亮边 + 多层阴影；菜单项圆角 hover；字体走 Ui 族 -->
+  <Style Selector="ContextMenu">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Padding" Value="6,6" />
+    <Setter Property="MinWidth" Value="208" />
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="FontSize" Value="13" />
+  </Style>
+  <Style Selector="ContextMenu /template/ Border#PART_LayoutRoot">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
   <Style Selector="ContextMenu.ariadne">
     <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="10" />
-    <Setter Property="Padding" Value="5" />
-    <Setter Property="MinWidth" Value="200" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Padding" Value="6,6" />
+    <Setter Property="MinWidth" Value="208" />
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
   </Style>
   <Style Selector="ContextMenu.ariadne /template/ Border#PART_LayoutRoot">
-    <Setter Property="BoxShadow" Value="0 2 6 0 #10000000, 0 8 24 0 #18000000, 0 20 56 0 #12000000" />
-    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="ClipToBounds" Value="True" />
   </Style>
-  <!-- 菜单项：比例舒适、圆角高亮、0.10s 过渡 -->
-  <Style Selector="ContextMenu.ariadne MenuItem">
-    <Setter Property="Padding" Value="12,7" />
-    <Setter Property="MinHeight" Value="32" />
+
+  <!-- MenuFlyoutPresenter：项目菜单等同 ContextMenu 观感 -->
+  <Style Selector="MenuFlyoutPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Padding" Value="6,6" />
+    <Setter Property="MinWidth" Value="220" />
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+    <Setter Property="FontSize" Value="13" />
+  </Style>
+  <Style Selector="MenuFlyoutPresenter /template/ Border#PART_LayoutRoot">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
+  <Style Selector="FlyoutPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Padding" Value="10,8" />
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
+  </Style>
+  <Style Selector="FlyoutPresenter /template/ Border#PART_LayoutRoot">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
+
+  <!-- 菜单项：Win11 圆角块 hover，统一字号 -->
+  <Style Selector="ContextMenu MenuItem, MenuFlyoutPresenter MenuItem">
+    <Setter Property="Padding" Value="12,8" />
+    <Setter Property="MinHeight" Value="34" />
     <Setter Property="Margin" Value="2,1" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="FontSize" Value="13" />
     <Setter Property="CornerRadius" Value="6" />
   </Style>
-  <Style Selector="ContextMenu.ariadne MenuItem /template/ Border#PART_LayoutRoot">
+  <Style Selector="ContextMenu MenuItem /template/ Border#PART_LayoutRoot,
+                   MenuFlyoutPresenter MenuItem /template/ Border#PART_LayoutRoot">
     <Setter Property="CornerRadius" Value="6" />
     <Setter Property="Transitions">
       <Transitions>
@@ -771,23 +1274,35 @@
       </Transitions>
     </Setter>
   </Style>
-  <Style Selector="ContextMenu.ariadne MenuItem:selected /template/ Border#PART_LayoutRoot">
+  <Style Selector="ContextMenu MenuItem:selected /template/ Border#PART_LayoutRoot,
+                   ContextMenu MenuItem:pointerover /template/ Border#PART_LayoutRoot,
+                   MenuFlyoutPresenter MenuItem:selected /template/ Border#PART_LayoutRoot,
+                   MenuFlyoutPresenter MenuItem:pointerover /template/ Border#PART_LayoutRoot">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
   </Style>
-  <Style Selector="ContextMenu.ariadne MenuItem:selected">
+  <Style Selector="ContextMenu MenuItem:selected, MenuFlyoutPresenter MenuItem:selected">
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
-  <!-- 分隔线：只在 ariadne 菜单内生效 -->
-  <Style Selector="ContextMenu.ariadne Separator">
+  <Style Selector="ContextMenu Separator, MenuFlyoutPresenter Separator">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="Height" Value="1" />
-    <Setter Property="Margin" Value="8,3" />
+    <Setter Property="Margin" Value="10,4" />
+    <Setter Property="Opacity" Value="0.85" />
   </Style>
-  <!-- 危险项（删除等） -->
-  <Style Selector="ContextMenu.ariadne MenuItem.danger">
+  <Style Selector="ContextMenu MenuItem.danger, MenuFlyoutPresenter MenuItem.danger">
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
   </Style>
-  <Style Selector="ContextMenu.ariadne MenuItem.danger:selected">
+  <Style Selector="ContextMenu MenuItem.danger:selected, MenuFlyoutPresenter MenuItem.danger:selected">
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+  </Style>
+
+  <!-- 弹窗卡片毛玻璃（ConfirmDialog 等） -->
+  <Style Selector="Border.glass-dialog">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.GlassTint}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Dialog}" />
+    <Setter Property="ClipToBounds" Value="True" />
   </Style>
 </Styles>

@@ -24,6 +24,7 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
 {
     private readonly TaskCompletionSource<int> _completion =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private string _inputText = string.Empty;
 
     public ConfirmDialogViewModel(string title, string message, IReadOnlyList<DialogButton> buttons)
     {
@@ -45,8 +46,27 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
 
     public ObservableCollection<DialogButton> Buttons { get; }
 
+    /// <summary>可选输入框标签；非空时显示输入区（如新建项目名称）。</summary>
+    public string? InputLabel { get; init; }
+
+    public string? InputPlaceholder { get; init; }
+
+    public bool HasInput => !string.IsNullOrWhiteSpace(InputLabel);
+
+    public string InputText
+    {
+        get => _inputText;
+        set => SetProperty(ref _inputText, value ?? string.Empty);
+    }
+
     /// 取消/默认按钮索引：Esc 或点击遮罩时采用；-1 表示无。
     public int CancelResultIndex { get; init; } = -1;
+
+    /// 主按钮（确认）结果索引；有输入时用于「非空才可确认」校验。
+    public int ConfirmResultIndex { get; init; } = 0;
+
+    /// 有输入时是否要求非空才能点确认。
+    public bool RequireNonEmptyInput { get; init; }
 
     /// 弹窗结果任务：值为被点击按钮的 ResultIndex。
     public Task<int> Completion => _completion.Task;
@@ -62,6 +82,14 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
 
     private void Complete(int result)
     {
+        if (RequireNonEmptyInput
+            && result == ConfirmResultIndex
+            && HasInput
+            && string.IsNullOrWhiteSpace(InputText))
+        {
+            return;
+        }
+
         _completion.TrySetResult(result);
     }
 
@@ -81,6 +109,29 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
             buttons)
         {
             CancelResultIndex = (int)UnsavedLeaveChoice.Cancel,
+        };
+    }
+
+    /// 新建项目：输入项目名称后确认。
+    public static ConfirmDialogViewModel CreateProjectName(DisplayNameService names, string? defaultName = null)
+    {
+        var buttons = new[]
+        {
+            new DialogButton(names.Text("ui.dialog.create_project.confirm"), DialogButtonVariant.Primary, 0),
+            new DialogButton(names.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
+        };
+
+        return new ConfirmDialogViewModel(
+            names.Text("ui.dialog.create_project.title"),
+            names.Text("ui.dialog.create_project.message"),
+            buttons)
+        {
+            InputLabel = names.Text("ui.dialog.create_project.name_label"),
+            InputPlaceholder = names.Text("ui.dialog.create_project.name_placeholder"),
+            InputText = defaultName ?? names.Text("ui.dialog.create_project.default_name"),
+            RequireNonEmptyInput = true,
+            ConfirmResultIndex = 0,
+            CancelResultIndex = 1,
         };
     }
 }

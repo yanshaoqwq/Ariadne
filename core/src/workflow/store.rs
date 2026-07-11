@@ -194,6 +194,31 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
     }
 }
 
+impl SqliteWorkflowRuntimeStore {
+    /// 列出尚未终态的运行快照（用于待审确认项聚合）。
+    pub fn list_non_terminal_states(&self) -> CoreResult<Vec<WorkflowRunState>> {
+        let connection = self.connection.lock().map_err(lock_error)?;
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT state_json FROM workflow_runs
+                WHERE status NOT IN ('stopped', 'succeeded', 'failed')
+                ORDER BY updated_at_ms DESC
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sqlite_error)?;
+        let mut states = Vec::new();
+        for row in rows {
+            let state_json = row.map_err(sqlite_error)?;
+            states.push(serde_json::from_str::<WorkflowRunState>(&state_json)?);
+        }
+        Ok(states)
+    }
+}
+
 /// 将运行状态转成数据库索引用字符串。
 fn run_status_name(status: RunStatus) -> &'static str {
     match status {

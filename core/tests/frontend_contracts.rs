@@ -94,6 +94,8 @@ fn confirmation_log_resolves_at_reference_to_diff_and_state() {
             handling_method: "human".to_owned(),
             summary: "改写第一段".to_owned(),
             diff: "- old\n+ new".to_owned(),
+            workflow_id: "wf".to_owned(),
+            run_id: "run-1".to_owned(),
         })
         .unwrap();
 
@@ -116,6 +118,8 @@ fn file_confirmation_log_persists_reference_resolution() {
             handling_method: "pending".to_owned(),
             summary: "等待确认".to_owned(),
             diff: "- a\n+ b".to_owned(),
+            workflow_id: "wf".to_owned(),
+            run_id: "run-1".to_owned(),
         })
         .unwrap();
 
@@ -462,6 +466,9 @@ fn project_registry_initializes_project_and_tracks_recent_projects() {
 
     assert!(report.git_initialized);
     assert!(project.join(".config").is_dir());
+    assert!(project.join(".config/app.yaml").exists());
+    assert!(project.join(".config/providers.yaml").exists());
+    assert!(project.join(".config/auto_mode.yaml").exists());
     assert!(project.join("planning/chapters").is_dir());
     assert!(project.join(".git").is_dir());
     assert_eq!(recent[0].name, "Novel");
@@ -517,6 +524,8 @@ fn project_reference_resolver_handles_confirmation_document_chapter_artifact_and
             handling_method: "human".to_owned(),
             summary: "批准".to_owned(),
             diff: "- a\n+ b".to_owned(),
+            workflow_id: "wf".to_owned(),
+            run_id: "run-1".to_owned(),
         })
         .unwrap();
     let mut runtime = WorkflowRunState::new(WorkflowId::from("wf"), RunId::from("run"));
@@ -592,6 +601,8 @@ fn run_log_store_generates_toasts_filters_logs_and_badges() {
             handling_method: "pending".to_owned(),
             summary: "等待".to_owned(),
             diff: "diff".to_owned(),
+            workflow_id: "wf".to_owned(),
+            run_id: "run-1".to_owned(),
         })
         .unwrap();
     let toast = store

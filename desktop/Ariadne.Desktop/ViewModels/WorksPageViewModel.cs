@@ -25,6 +25,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private string _statusText = string.Empty;
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
+    private readonly List<ProjectAiChatMessage> _projectAiHistory = new();
     private string _quickEditInstruction = string.Empty;
     private string _quickEditDiff = string.Empty;
     private string _exportFormat = "markdown";
@@ -57,11 +58,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         _documentTitle = displayNames.Text("ui.works.no_document_selected");
         WorksTreeNodes = new ObservableCollection<WorksTreeItemViewModel>();
         DocumentBlocks = new ObservableCollection<DocumentBlockViewModel>();
+        ProjectAiBubbles = new ObservableCollection<ChatBubbleViewModel>();
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
         OpenImportPanelCommand = new RelayCommand(OpenImportPanel);
         ToggleImportPanelCommand = new RelayCommand(() => IsImportPanelOpen = !IsImportPanelOpen);
+        BrowseImportSourceCommand = new RelayCommand(() => _ = BrowseImportSourceAsync());
         ImportCommand = new RelayCommand(() => _ = ImportChapterAsync(), CanImportChapter);
         ExportCommand = new RelayCommand(() => _ = ExportAsync(), () => WorksTreeNodes.Count > 0);
         SaveCommand = new RelayCommand(() => _ = SaveAsync(), () => HasCurrentDocument);
@@ -155,6 +158,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public RelayCommand ToggleImportPanelCommand { get; }
 
+    public RelayCommand BrowseImportSourceCommand { get; }
+
+    /// <summary>View 注入：挑选导入源文件路径。</summary>
+    public Func<Task<string?>>? PickImportSourceFile { get; set; }
+
+    /// <summary>View 注入：在文件管理器中打开目录。</summary>
+    public Func<string, Task>? OpenFolderInShell { get; set; }
+
     public RelayCommand ImportCommand { get; }
 
     public RelayCommand ExportCommand { get; }
@@ -186,6 +197,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public ObservableCollection<DocumentBlockViewModel> DocumentBlocks { get; }
     public bool HasDocumentBlocks => DocumentBlocks.Count > 0;
+    public ObservableCollection<ChatBubbleViewModel> ProjectAiBubbles { get; }
+    public bool HasProjectAiBubbles => ProjectAiBubbles.Count > 0;
 
     public ObservableCollection<ExportFormatOption> ExportFormats { get; }
 
@@ -328,6 +341,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     });
 
     public string EmptyIndexText => _displayNames.Text("ui.works.empty_index");
+    public string EmptyIndexTitle => _backend.HasProjectRoot
+        ? _displayNames.Text("ui.empty.works.index.title")
+        : _displayNames.Text("ui.empty.need_project.title");
+    public string EmptyIndexHint => _backend.HasProjectRoot
+        ? _displayNames.Text("ui.empty.works.index.hint")
+        : _displayNames.Text("ui.empty.need_project.hint");
 
     public string QuickAiHint => _displayNames.Text("ui.works.quick_ai_hint");
 
@@ -342,6 +361,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public string ImportTargetPathText => _displayNames.Text("ui.works.import.target_path");
     public string ImportSourcePlaceholder => _displayNames.Text("ui.works.import.source_placeholder");
     public string ImportTargetPlaceholder => _displayNames.Text("ui.works.import.target_placeholder");
+    public string BrowseImportSourceText => _displayNames.Text("ui.works.import.browse_source");
     public string QuickEditTitle => _displayNames.Text("ui.works.quick_edit.title");
     public string QuickEditPlaceholder => _displayNames.Text("ui.works.quick_edit.placeholder");
     public string QuickEditGenerateText => _displayNames.Text("ui.works.quick_edit.generate");
@@ -574,6 +594,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private async Task LoadWorksTreeAsync()
     {
+        if (!_backend.HasProjectRoot)
+        {
+            WorksTreeNodes.Clear();
+            StatusText = string.Empty;
+            OnPropertyChanged(nameof(IsWorksTreeEmpty));
+            OnPropertyChanged(nameof(EmptyIndexTitle));
+            OnPropertyChanged(nameof(EmptyIndexHint));
+            ExportCommand.NotifyCanExecuteChanged();
+            return;
+        }
+
         try
         {
             var tree = await _backend.GetWorksTreeAsync().ConfigureAwait(true);
@@ -584,13 +615,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             }
             StatusText = WorksTreeNodes.Count == 0 ? EmptyIndexText : $"{WorksTreeNodes.Count}";
         }
-        catch (Exception ex)
+        catch
         {
-            StatusText = ex.Message;
+            WorksTreeNodes.Clear();
+            StatusText = string.Empty;
         }
         finally
         {
             OnPropertyChanged(nameof(IsWorksTreeEmpty));
+            OnPropertyChanged(nameof(EmptyIndexTitle));
+            OnPropertyChanged(nameof(EmptyIndexHint));
             ExportCommand.NotifyCanExecuteChanged();
         }
     }
@@ -629,6 +663,46 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             }
             CaptureSnapshot();
             StatusText = _displayNames.Text("ui.common.open");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
+    }
+
+    private async Task BrowseImportSourceAsync()
+    {
+        if (PickImportSourceFile is null)
+        {
+            StatusText = _displayNames.Text("ui.settings.browse_unavailable");
+            return;
+        }
+
+        try
+        {
+            var path = await PickImportSourceFile().ConfigureAwait(true);
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            ImportSourcePath = path;
+            // 从文件名推导 id/标题/目标/排序；已填字段不覆盖
+            var suggestion = WorksImportHelper.SuggestFromSourcePath(path, WorksTreeNodes.Count);
+            var chapterId = ImportChapterId;
+            var chapterTitle = ImportChapterTitle;
+            var targetPath = ImportTargetPath;
+            var order = ImportOrder;
+            WorksImportHelper.ApplySuggestionIfEmpty(
+                suggestion,
+                ref chapterId,
+                ref chapterTitle,
+                ref targetPath,
+                ref order);
+            ImportChapterId = chapterId;
+            ImportChapterTitle = chapterTitle;
+            ImportTargetPath = targetPath;
+            ImportOrder = order;
         }
         catch (Exception ex)
         {
@@ -686,11 +760,47 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         try
         {
             var report = await _backend.ExportChaptersAsync(Array.Empty<string>(), $"combined-{ExportFormat}", ExportFormat).ConfigureAwait(true);
+            var path = string.IsNullOrWhiteSpace(report.StorageUri) ? report.ArtifactId : report.StorageUri;
             StatusText = _displayNames.Format("ui.works.export_done", new Dictionary<string, string>
             {
                 ["format"] = report.Format,
-                ["path"] = report.StorageUri,
+                ["path"] = path,
             });
+            // 成功后弹窗：关闭 + 打开所在文件夹（延后项：reveal 导出路径）
+            var revealDir = ProjectPathHelper.ResolveRevealDirectory(path);
+            var canReveal = !string.IsNullOrWhiteSpace(revealDir) && OpenFolderInShell is not null;
+            var choice = await DialogService.Current.ConfirmAsync(new ConfirmDialogViewModel(
+                _displayNames.Text("ui.works.export_done_title"),
+                _displayNames.Format("ui.works.export_done_message", new Dictionary<string, string>
+                {
+                    ["format"] = report.Format,
+                    ["path"] = path,
+                }),
+                canReveal
+                    ? new[]
+                    {
+                        new DialogButton(_displayNames.Text("ui.works.export_open_folder"), DialogButtonVariant.Primary, 0),
+                        new DialogButton(_displayNames.Text("ui.common.close"), DialogButtonVariant.Subtle, 1),
+                    }
+                    : new[]
+                    {
+                        new DialogButton(_displayNames.Text("ui.common.close"), DialogButtonVariant.Primary, 0),
+                    })
+            {
+                CancelResultIndex = canReveal ? 1 : 0,
+            }).ConfigureAwait(true);
+
+            if (canReveal && choice == 0 && OpenFolderInShell is not null && !string.IsNullOrWhiteSpace(revealDir))
+            {
+                try
+                {
+                    await OpenFolderInShell(revealDir).ConfigureAwait(true);
+                }
+                catch (Exception openEx)
+                {
+                    StatusText = openEx.Message;
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -707,8 +817,24 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 StatusText = ProjectAiPlaceholder;
                 return;
             }
-            var result = await _backend.ProjectAiChatAsync(ProjectAiMessage).ConfigureAwait(true);
+            var result = await _backend.ProjectAiChatAsync(
+                ProjectAiMessage,
+                _projectAiHistory,
+                workflowIdToRun: null).ConfigureAwait(true);
             ProjectAiAnswer = result.Answer;
+            _projectAiHistory.Clear();
+            ProjectAiBubbles.Clear();
+            foreach (var message in result.ChatHistory)
+            {
+                _projectAiHistory.Add(message);
+                ProjectAiBubbles.Add(new ChatBubbleViewModel(message.Role, message.Content));
+            }
+            if (ProjectAiBubbles.Count == 0 && !string.IsNullOrWhiteSpace(result.Answer))
+            {
+                ProjectAiBubbles.Add(new ChatBubbleViewModel("assistant", result.Answer));
+            }
+            OnPropertyChanged(nameof(HasProjectAiBubbles));
+            ProjectAiMessage = string.Empty;
             StatusText = _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
@@ -716,6 +842,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             StatusText = ex.Message;
         }
     }
+
+    /// <summary>测试与调试：当前会话历史条数（用户+助手成对累积）。</summary>
+    internal int ProjectAiHistoryCount => _projectAiHistory.Count;
 
     private void InsertOutlineReference()
     {
@@ -734,6 +863,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         IsRightPanelOpen = true;
         IsNavTreeTab = true;
         IsImportPanelOpen = true;
+        // 打开时若排序仍是默认 0，用树条目数作下一序号（浏览文件时也会再填）
+        if (string.IsNullOrWhiteSpace(ImportOrder) || ImportOrder.Trim() == "0")
+        {
+            ImportOrder = Math.Max(0, WorksTreeNodes.Count).ToString();
+        }
     }
 
     private static GridLength NormalizeRightPanelWidth(GridLength value)
@@ -953,12 +1087,15 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private IEnumerable<WorksTreeItemViewModel> FlattenTree(WorksTreeNode node, int depth)
     {
+        var title = node.Title.StartsWith("ui.", StringComparison.Ordinal)
+            ? _displayNames.Text(node.Title)
+            : node.Title;
         yield return new WorksTreeItemViewModel(
             node.NodeId,
-            node.Title,
+            title,
             node.Path,
             new string(' ', Math.Max(0, depth) * 2),
-            () => _ = LoadDocumentAsync(node.Path, node.Title));
+            () => _ = LoadDocumentAsync(node.Path, title));
         foreach (var child in node.Children)
         {
             foreach (var item in FlattenTree(child, depth + 1))
@@ -973,19 +1110,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         return LoadDocumentAsync(new WorksTreeItemViewModel(string.Empty, title, path, string.Empty, () => { }));
     }
 
-    private static string ProjectRelativePath(string path)
-    {
-        var normalized = path.Replace('\\', '/');
-        foreach (var marker in new[] { "/documents/", "/planning/", "/workflows/" })
-        {
-            var index = normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (index >= 0)
-            {
-                return normalized[(index + 1)..];
-            }
-        }
-        return normalized.TrimStart('/');
-    }
+    private static string ProjectRelativePath(string path) =>
+        ProjectPathHelper.ToProjectRelativePath(path);
 
     private static TextRange Utf8Range(string document, int start, int end)
     {

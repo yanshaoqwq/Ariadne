@@ -1,6 +1,7 @@
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -12,6 +13,32 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Opened += (_, _) =>
+        {
+            RefreshWindowIcon();
+            // 首次打开也写出当前主题色到系统图标目录
+            AppIconDesktopSync.QueueSync();
+        };
+        AppIconPainter.IconColorsChanged += OnIconColorsChanged;
+        Closed += (_, _) => AppIconPainter.IconColorsChanged -= OnIconColorsChanged;
+    }
+
+    private void OnIconColorsChanged()
+    {
+        // 个性化 / 主题切换后，系统窗口图标随 Accent 重绘
+        Dispatcher.UIThread.Post(RefreshWindowIcon, DispatcherPriority.Background);
+    }
+
+    private void RefreshWindowIcon()
+    {
+        try
+        {
+            Icon = AppIconPainter.CreateWindowIcon(256);
+        }
+        catch
+        {
+            // 回退到打包静态 ico（构建时默认青绿）
+        }
     }
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)

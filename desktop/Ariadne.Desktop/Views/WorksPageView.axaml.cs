@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
+using Avalonia.Platform.Storage;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -46,6 +47,8 @@ public partial class WorksPageView : UserControl
             _attachedViewModel.RequestEditorCopy = null;
             _attachedViewModel.RequestEditorSelectAll = null;
             _attachedViewModel.RequestEditorSelection = null;
+            _attachedViewModel.PickImportSourceFile = null;
+            _attachedViewModel.OpenFolderInShell = null;
             _attachedViewModel = null;
         }
 
@@ -65,7 +68,56 @@ public partial class WorksPageView : UserControl
             }
         };
         viewModel.RequestEditorSelection = CurrentEditorSelection;
+        viewModel.PickImportSourceFile = PickImportSourceFileAsync;
+        viewModel.OpenFolderInShell = OpenFolderInShellAsync;
         _attachedViewModel = viewModel;
+    }
+
+    private async Task OpenFolderInShellAsync(string directoryPath)
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null || string.IsNullOrWhiteSpace(directoryPath))
+        {
+            return;
+        }
+
+        var folder = await topLevel.StorageProvider.TryGetFolderFromPathAsync(directoryPath);
+        if (folder is not null)
+        {
+            await topLevel.Launcher.LaunchFileAsync(folder);
+            return;
+        }
+
+        // 回退：用 file URI 打开目录
+        var uri = new Uri(Path.GetFullPath(directoryPath) + Path.DirectorySeparatorChar);
+        await topLevel.Launcher.LaunchUriAsync(uri);
+    }
+
+    private async Task<string?> PickImportSourceFileAsync()
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return null;
+        }
+
+        var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = (DataContext as WorksPageViewModel)?.ImportSourcePathText,
+            AllowMultiple = false,
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("Markdown / Text")
+                {
+                    Patterns = new[] { "*.md", "*.markdown", "*.txt" },
+                },
+                new FilePickerFileType("All")
+                {
+                    Patterns = new[] { "*.*" },
+                },
+            },
+        });
+        return files.FirstOrDefault()?.Path.LocalPath;
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
@@ -75,6 +127,8 @@ public partial class WorksPageView : UserControl
             _attachedViewModel.RequestEditorCopy = null;
             _attachedViewModel.RequestEditorSelectAll = null;
             _attachedViewModel.RequestEditorSelection = null;
+            _attachedViewModel.PickImportSourceFile = null;
+            _attachedViewModel.OpenFolderInShell = null;
             _attachedViewModel = null;
         }
 

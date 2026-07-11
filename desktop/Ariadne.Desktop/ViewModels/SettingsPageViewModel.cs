@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
+using Avalonia.Media;
 using Ariadne.Desktop;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
+
 
 namespace Ariadne.Desktop.ViewModels;
 
@@ -11,7 +13,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private const int SnapshotLocaleIndex = 1;
     private const int SnapshotModelStartIndex = 7;
     private const int SnapshotModelEndIndex = 18;
-    private const int SnapshotOnboardingSeenIndex = 45;
+    // Theme + 三色自定义 + Git 双色 + panel + onboarding：onboarding 在 snapshot 中的下标
+    private const int SnapshotOnboardingSeenIndex = 48;
     private static readonly string[] LocalizedPropertyNames =
     {
         nameof(Title),
@@ -64,11 +67,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         nameof(SavePresetsText),
         nameof(SaveTemplateRepositoryText),
         nameof(BudgetLabel),
+        nameof(BudgetHelpText),
         nameof(PreauthorizedBudgetLabel),
+        nameof(PreauthorizedHelpText),
         nameof(AutoModeLabel),
         nameof(SpentLabel),
         nameof(NormalModeLabel),
         nameof(AutoModePolicyLabel),
+        nameof(ConfirmationPolicyHelpText),
+        nameof(PolicyAllowText),
+        nameof(PolicyReviewText),
+        nameof(BrowseFolderText),
         nameof(WorkflowLimitLabel),
         nameof(WorkflowDefaultTimeoutLabel),
         nameof(MaxLoopIterationsLabel),
@@ -82,11 +91,23 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         nameof(AllowWasmNetworkText),
         nameof(AllowSecretReadText),
         nameof(ToolControlsLabel),
+        nameof(DangerToolsTitle),
+        nameof(DangerToolsHelp),
+        nameof(SafeToolsTitle),
         nameof(ReadableRootsLabel),
         nameof(WritableRootsLabel),
         nameof(PathPlaceholder),
         nameof(SavePermissionsText),
         nameof(ThemeLabel),
+        nameof(ThemePaletteHelpText),
+        nameof(ThemeCustomThreeLabel),
+        nameof(ThemeCustomThreeHint),
+        nameof(ThemeMainColorLabel),
+        nameof(ThemeSurfaceColorLabel),
+        nameof(ThemeBrandColorLabel),
+        nameof(ColorMapHintText),
+        nameof(ShowAllSectionsText),
+        nameof(SectionIndexHintText),
         nameof(GitAutoColorLabel),
         nameof(GitManualColorLabel),
         nameof(ProjectPanelVisibleText),
@@ -123,6 +144,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
     private bool _suppressProviderSelectionChange;
+
     private string _savedSnapshot = string.Empty;
 
     private int _schemaVersion = 1;
@@ -218,18 +240,65 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             "open_ai", "anthropic", "gemini", "open_ai_compatible", "local", "other",
         };
 
-        ThemeOptions = new ObservableCollection<ThemeOption>
-        {
-            new("system", displayNames.Text("ui.settings.personalization.theme.system")),
-            new("light", displayNames.Text("ui.settings.personalization.theme.light")),
-            new("dark", displayNames.Text("ui.settings.personalization.theme.dark")),
-        };
+        ThemeOptions = new ObservableCollection<ThemeOption>(
+            ThemeCatalog.All.Select(palette => CreateThemeOption(palette, displayNames)));
+        ThemeGroups = new ObservableCollection<ThemeGroupViewModel>(
+            ThemeOptions.GroupBy(o => o.GroupTitle)
+                .Select(g => new ThemeGroupViewModel(g.Key, g)));
         ConfirmationPolicies = new ObservableCollection<ConfirmationPolicyViewModel>();
         NodePresets = new ObservableCollection<NodeTypePresetViewModel>();
         ProviderOptions = new ObservableCollection<ProviderOptionViewModel>();
         AvailableModels = new ObservableCollection<ModelOptionViewModel>();
+        AvailableModelIds = new ObservableCollection<string>();
         ToolControlGroups = new ObservableCollection<ToolControlGroupViewModel>();
         SectionIndexItems = new ObservableCollection<SettingsSectionIndexItemViewModel>();
+        // 先建色图集合，再挂编辑器回调（回调里会同步选中态）
+        GitAutoColorSwatches = new ObservableCollection<ColorSwatchItemViewModel>();
+        GitManualColorSwatches = new ObservableCollection<ColorSwatchItemViewModel>();
+        ColorChannelEditor gitAutoEditor = null!;
+        ColorChannelEditor gitManualEditor = null!;
+        gitAutoEditor = new ColorChannelEditor(() =>
+        {
+            OnPropertyChanged(nameof(GitAutoColor));
+            SyncGitColorSwatchSelection(GitAutoColorSwatches, gitAutoEditor.ToHexValue());
+            if (!_suppressDirtyTracking)
+            {
+                HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+            }
+        });
+        gitManualEditor = new ColorChannelEditor(() =>
+        {
+            OnPropertyChanged(nameof(GitManualColor));
+            SyncGitColorSwatchSelection(GitManualColorSwatches, gitManualEditor.ToHexValue());
+            if (!_suppressDirtyTracking)
+            {
+                HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+            }
+        });
+        GitAutoColorEditor = gitAutoEditor;
+        GitManualColorEditor = gitManualEditor;
+        // 个性化色图：色相×深浅点选（非 RGB 滑条）
+        foreach (var item in BuildColorSwatchCollection(hex => GitAutoColor = hex))
+        {
+            GitAutoColorSwatches.Add(item);
+        }
+        foreach (var item in BuildColorSwatchCollection(hex => GitManualColor = hex))
+        {
+            GitManualColorSwatches.Add(item);
+        }
+        SyncGitColorSwatchSelection(GitAutoColorSwatches, gitAutoEditor.ToHexValue());
+        SyncGitColorSwatchSelection(GitManualColorSwatches, gitManualEditor.ToHexValue());
+
+        // 主题三色：主底 / 表面 / 强调 + 共享色图
+        ThemeMainColorEditor = new ColorChannelEditor(() => OnThemeCustomColorChanged(ThemeColorChannel.Main));
+        ThemeSurfaceColorEditor = new ColorChannelEditor(() => OnThemeCustomColorChanged(ThemeColorChannel.Surface));
+        ThemeBrandColorEditor = new ColorChannelEditor(() => OnThemeCustomColorChanged(ThemeColorChannel.Brand));
+        ThemeColorSwatches = new ObservableCollection<ColorSwatchItemViewModel>();
+        foreach (var item in BuildColorSwatchCollection(OnThemeColorSwatchPicked))
+        {
+            ThemeColorSwatches.Add(item);
+        }
+        SeedThemeColorsFromPalette(ThemeCatalog.Resolve(Theme), force: true);
 
         Tabs = new ObservableCollection<SettingsTabViewModel>
         {
@@ -249,6 +318,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         RefreshModelsCommand = new RelayCommand(() => _ = FetchModelsAsync());
         SaveModelCommand = new RelayCommand(() => _ = SaveModelAsync());
         SaveProviderKeyCommand = new RelayCommand(() => _ = SaveProviderKeyAsync());
+        AddProviderCommand = new RelayCommand(AddProviderDraft);
         SavePresetsCommand = new RelayCommand(() => _ = SavePresetsAsync());
         SaveTemplateRepositoryCommand = new RelayCommand(() => _ = SaveTemplateRepositoryAsync());
         OpenTemplateMarketCommand = new RelayCommand(() => _ = OpenTemplateMarketAsync());
@@ -257,8 +327,74 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         SavePersonalizationCommand = new RelayCommand(() => _ = SavePersonalizationAsync());
         SaveMiscCommand = new RelayCommand(() => _ = SaveMiscAsync());
         ResetOnboardingCommand = new RelayCommand(() => _ = ResetOnboardingAsync());
+        BrowseDocumentsDirCommand = new RelayCommand(() => _ = BrowseIntoAsync(value => DocumentsDir = value));
+        BrowseWorkflowsDirCommand = new RelayCommand(() => _ = BrowseIntoAsync(value => WorkflowsDir = value));
+        BrowseSkillsDirCommand = new RelayCommand(() => _ = BrowseIntoAsync(value => SkillsDir = value));
+        BrowseExportsDirCommand = new RelayCommand(() => _ = BrowseIntoAsync(value => ExportsDir = value));
+        BrowseReadableRootsCommand = new RelayCommand(() => _ = BrowseIntoAsync(AppendReadableRoot));
+        BrowseWritableRootsCommand = new RelayCommand(() => _ = BrowseIntoAsync(AppendWritableRoot));
 
         _ = LoadAsync();
+    }
+
+    private void AppendReadableRoot(string path) =>
+        ReadableRootsText = AppendPathLine(ReadableRootsText, path);
+
+    private void AppendWritableRoot(string path) =>
+        WritableRootsText = AppendPathLine(WritableRootsText, path);
+
+    /// <summary>权限根列表：浏览后追加一行，避免作者手敲绝对路径。</summary>
+    public static string AppendPathLine(string existing, string path)
+    {
+        var line = (path ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return existing ?? string.Empty;
+        }
+
+        var current = existing ?? string.Empty;
+        var lines = current
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .ToList();
+        if (lines.Any(l => string.Equals(l, line, StringComparison.OrdinalIgnoreCase)))
+        {
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        lines.Add(line);
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private Func<string?, Task<string?>>? _folderPickerWithTitle;
+
+    public void SetFolderPicker(Func<Task<string?>> picker) =>
+        _folderPickerWithTitle = _ => picker();
+
+    public void SetFolderPicker(Func<string?, Task<string?>> picker) =>
+        _folderPickerWithTitle = picker;
+
+    private async Task BrowseIntoAsync(Action<string> assign)
+    {
+        if (_folderPickerWithTitle is null)
+        {
+            StatusText = _displayNames.Text("ui.settings.browse_unavailable");
+            return;
+        }
+        try
+        {
+            var path = await _folderPickerWithTitle(
+                _displayNames.Text("ui.settings.browse_folder_title")).ConfigureAwait(true);
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                assign(path);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+        }
     }
 
     public string Title => _displayNames.Text("ui.settings.title");
@@ -299,6 +435,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool IsMiscSelected => SelectedTab.Id == "misc";
     public bool IsSectionProjectSelected => IsSectionSelected("project");
     public bool IsSectionDirectoriesSelected => IsSectionSelected("directories");
+    public bool IsSectionProjectMemorySelected => IsSectionSelected("project_memory");
     public bool IsSectionProviderSelected => IsSectionSelected("provider");
     public bool IsSectionAvailableModelsSelected => IsSectionSelected("available");
     public bool IsSectionEmbeddingSelected => IsSectionSelected("embedding");
@@ -322,17 +459,70 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<LanguageOption> LanguageOptions { get; }
     public ObservableCollection<string> ProviderTypeOptions { get; }
     public ObservableCollection<ThemeOption> ThemeOptions { get; }
+    public ObservableCollection<ThemeGroupViewModel> ThemeGroups { get; }
     public ObservableCollection<ConfirmationPolicyViewModel> ConfirmationPolicies { get; }
     public ObservableCollection<NodeTypePresetViewModel> NodePresets { get; }
     public ObservableCollection<ProviderOptionViewModel> ProviderOptions { get; }
     public ObservableCollection<ModelOptionViewModel> AvailableModels { get; }
+    /// <summary>模型 ID 列表，供预设/默认模型 ComboBox 选择；可手填时列表为空。</summary>
+    public ObservableCollection<string> AvailableModelIds { get; }
+    public bool HasAvailableModelChoices => AvailableModelIds.Count > 0;
     public ObservableCollection<ToolControlGroupViewModel> ToolControlGroups { get; }
     public ObservableCollection<SettingsSectionIndexItemViewModel> SectionIndexItems { get; }
+    public ColorChannelEditor GitAutoColorEditor { get; }
+    public ColorChannelEditor GitManualColorEditor { get; }
+    public ColorChannelEditor ThemeMainColorEditor { get; }
+    public ColorChannelEditor ThemeSurfaceColorEditor { get; }
+    public ColorChannelEditor ThemeBrandColorEditor { get; }
+
+    /// <summary>Git 自动色色图（色相×深浅）。</summary>
+    public ObservableCollection<ColorSwatchItemViewModel> GitAutoColorSwatches { get; }
+
+    /// <summary>Git 手动色色图。</summary>
+    public ObservableCollection<ColorSwatchItemViewModel> GitManualColorSwatches { get; }
+
+    /// <summary>主题自定义三色共用色图。</summary>
+    public ObservableCollection<ColorSwatchItemViewModel> ThemeColorSwatches { get; }
+
+    /// <summary>色图列数（色相 + 中性灰列）。</summary>
+    public int ColorMapColumns => ColorPaletteMap.Columns();
+
+    private ThemeColorChannel _activeThemeColorChannel = ThemeColorChannel.Brand;
+
+    public bool IsThemeMainChannelActive => _activeThemeColorChannel == ThemeColorChannel.Main;
+    public bool IsThemeSurfaceChannelActive => _activeThemeColorChannel == ThemeColorChannel.Surface;
+    public bool IsThemeBrandChannelActive => _activeThemeColorChannel == ThemeColorChannel.Brand;
+
+    /// <summary>当前激活的主题色槽（供 PS 式调色板双向绑定）。</summary>
+    public string ActiveThemeColorHex
+    {
+        get => _activeThemeColorChannel switch
+        {
+            ThemeColorChannel.Main => ThemeMainColorEditor.ToHexValue(),
+            ThemeColorChannel.Surface => ThemeSurfaceColorEditor.ToHexValue(),
+            _ => ThemeBrandColorEditor.ToHexValue(),
+        };
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            OnThemeColorSwatchPicked(value);
+            OnPropertyChanged();
+        }
+    }
+
+    public RelayCommand SelectThemeMainChannelCommand => new(() => SetActiveThemeColorChannel(ThemeColorChannel.Main));
+    public RelayCommand SelectThemeSurfaceChannelCommand => new(() => SetActiveThemeColorChannel(ThemeColorChannel.Surface));
+    public RelayCommand SelectThemeBrandChannelCommand => new(() => SetActiveThemeColorChannel(ThemeColorChannel.Brand));
 
     public RelayCommand SaveGeneralCommand { get; }
     public RelayCommand RefreshModelsCommand { get; }
     public RelayCommand SaveModelCommand { get; }
     public RelayCommand SaveProviderKeyCommand { get; }
+    public RelayCommand AddProviderCommand { get; }
     public RelayCommand SavePresetsCommand { get; }
     public RelayCommand SaveTemplateRepositoryCommand { get; }
     public RelayCommand OpenTemplateMarketCommand { get; }
@@ -341,6 +531,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand SavePersonalizationCommand { get; }
     public RelayCommand SaveMiscCommand { get; }
     public RelayCommand ResetOnboardingCommand { get; }
+    public RelayCommand BrowseDocumentsDirCommand { get; }
+    public RelayCommand BrowseWorkflowsDirCommand { get; }
+    public RelayCommand BrowseSkillsDirCommand { get; }
+    public RelayCommand BrowseExportsDirCommand { get; }
+    public RelayCommand BrowseReadableRootsCommand { get; }
+    public RelayCommand BrowseWritableRootsCommand { get; }
 
     public string GeneralTitle => _displayNames.Text("ui.settings.general.title");
     public string ModelsTitle => _displayNames.Text("ui.settings.models.title");
@@ -381,6 +577,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SaveKeyText => _displayNames.Text("ui.settings.models.save_key");
     public string RefreshText => _displayNames.Text("ui.common.refresh");
     public string ProviderStatusLabel => _displayNames.Text("ui.settings.models.status");
+    public string AddProviderText => _displayNames.Text("ui.settings.models.add_provider");
+    public string ProviderListTitle => _displayNames.Text("ui.settings.models.provider_list");
+    public string ProviderEditorTitle => _displayNames.Text("ui.settings.models.provider_editor");
+    public string ColorRgbHintText => _displayNames.Text("ui.settings.personalization.color_rgb_hint");
+    public string ColorMapHintText => _displayNames.Text("ui.settings.personalization.color_map_hint");
+    public string ColorHexSecondaryText => _displayNames.Text("ui.settings.personalization.color_hex_secondary");
 
     public string PresetNodeTypeLabel => _displayNames.Text("ui.settings.presets.node_type");
     public string PresetNodeModelLabel => _displayNames.Text("ui.settings.presets.node_model");
@@ -395,11 +597,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SaveTemplateRepositoryText => _displayNames.Text("ui.settings.presets.save_template_repository");
 
     public string BudgetLabel => _displayNames.Text("ui.settings.automation.global_budget");
+    public string BudgetHelpText => _displayNames.Text("ui.settings.automation.budget_help");
     public string PreauthorizedBudgetLabel => _displayNames.Text("ui.settings.automation.preauthorized_budget");
+    public string PreauthorizedHelpText => _displayNames.Text("ui.settings.automation.preauthorized_help");
     public string AutoModeLabel => _displayNames.Text("ui.settings.automation.auto_mode");
     public string SpentLabel => _displayNames.Text("ui.settings.automation.spent").Replace("{spent}", SpentText);
     public string NormalModeLabel => _displayNames.Text("ui.settings.automation.confirmation.normal_mode");
     public string AutoModePolicyLabel => _displayNames.Text("ui.settings.automation.confirmation.auto_mode_policy");
+    public string ConfirmationPolicyHelpText => _displayNames.Text("ui.settings.automation.confirmation.help");
+    public string PolicyAllowText => _displayNames.Text("ui.settings.automation.confirmation.allow");
+    public string PolicyReviewText => _displayNames.Text("ui.settings.automation.confirmation.review");
+    public string BrowseFolderText => _displayNames.Text("ui.settings.browse_folder");
     public string WorkflowLimitLabel => _displayNames.Text("ui.settings.automation.workflow");
     public string WorkflowDefaultTimeoutLabel => _displayNames.Text("ui.settings.automation.default_timeout_ms");
     public string MaxLoopIterationsLabel => _displayNames.Text("ui.settings.automation.max_loop_iterations");
@@ -414,12 +622,21 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string AllowWasmNetworkText => _displayNames.Text("ui.settings.permissions.allow_wasm_network");
     public string AllowSecretReadText => _displayNames.Text("ui.settings.permissions.allow_secret_read");
     public string ToolControlsLabel => _displayNames.Text("ui.settings.permissions.tool_controls");
+    public string DangerToolsTitle => _displayNames.Text("ui.settings.permissions.danger_tools.title");
+    public string DangerToolsHelp => _displayNames.Text("ui.settings.permissions.danger_tools.help");
+    public string SafeToolsTitle => _displayNames.Text("ui.settings.permissions.safe_tools.title");
     public string ReadableRootsLabel => _displayNames.Text("ui.settings.permissions.read_roots");
     public string WritableRootsLabel => _displayNames.Text("ui.settings.permissions.write_roots");
     public string PathPlaceholder => _displayNames.Text("ui.settings.permissions.path_placeholder");
     public string SavePermissionsText => _displayNames.Text("ui.settings.permissions.save");
 
     public string ThemeLabel => _displayNames.Text("ui.settings.personalization.theme");
+    public string ThemePaletteHelpText => _displayNames.Text("ui.settings.personalization.theme.palette_help");
+    public string ThemeCustomThreeLabel => _displayNames.Text("ui.settings.personalization.theme.custom_three");
+    public string ThemeCustomThreeHint => _displayNames.Text("ui.settings.personalization.theme.custom_three_hint");
+    public string ThemeMainColorLabel => _displayNames.Text("ui.settings.personalization.theme.color_main");
+    public string ThemeSurfaceColorLabel => _displayNames.Text("ui.settings.personalization.theme.color_surface");
+    public string ThemeBrandColorLabel => _displayNames.Text("ui.settings.personalization.theme.color_brand");
     public string GitAutoColorLabel => _displayNames.Text("ui.settings.personalization.git_auto_color");
     public string GitManualColorLabel => _displayNames.Text("ui.settings.personalization.git_manual_color");
     public string ProjectPanelVisibleText => _displayNames.Text("ui.settings.personalization.project_panel");
@@ -473,15 +690,38 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         get => _selectedProviderOption;
         set
         {
-            var previous = _selectedProviderOption;
-            if (SetProperty(ref _selectedProviderOption, value)
-                && value is not null
-                && !_suppressProviderSelectionChange)
+            // 抑制路径（SetSelected/Restore）直接写字段；用户改选走 SelectProviderOptionAsync，
+            // 仅在离开成功后才提交列表选中，避免取消时列表与表单脱节。
+            if (_suppressProviderSelectionChange)
             {
-                _ = SwitchProviderForEditingAsync(value, previous);
+                if (SetProperty(ref _selectedProviderOption, value))
+                {
+                    OnPropertyChanged(nameof(IsSelectedProviderDraft));
+                }
+                return;
             }
+
+            if (value is null)
+            {
+                if (SetProperty(ref _selectedProviderOption, null))
+                {
+                    OnPropertyChanged(nameof(IsSelectedProviderDraft));
+                }
+                return;
+            }
+
+            if (ReferenceEquals(_selectedProviderOption, value)
+                || string.Equals(_selectedProviderOption?.ProviderId, value.ProviderId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _ = SelectProviderOptionAsync(value);
         }
     }
+
+    /// <summary>当前选中供应商是否为未落库草稿（仅草稿可改 ProviderId）。</summary>
+    public bool IsSelectedProviderDraft => SelectedProviderOption?.IsDraft == true;
 
     public string DefaultModelId { get => _defaultModelId; set => SetProperty(ref _defaultModelId, value); }
     public string DefaultTimeoutMs { get => _defaultTimeoutMs; set => SetProperty(ref _defaultTimeoutMs, value); }
@@ -511,10 +751,48 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         get => _theme;
         set
         {
-            if (SetProperty(ref _theme, value))
+            var normalized = ThemeCatalog.Normalize(value);
+            if (SetProperty(ref _theme, normalized))
             {
+                SyncThemeOptionSelection();
                 OnPropertyChanged(nameof(SelectedThemeOption));
+                // 选预设时同步三色到该主题 swatch，再应用
+                SeedThemeColorsFromPalette(ThemeCatalog.Resolve(normalized), force: true);
+                ApplyCurrentThemeColors();
             }
+        }
+    }
+
+    public string ThemeMainColor
+    {
+        get => ThemeMainColorEditor.ToHexValue();
+        set
+        {
+            ThemeMainColorEditor.SetFromHex(value);
+            OnPropertyChanged();
+            SyncActiveThemeSwatchSelection();
+        }
+    }
+
+    public string ThemeSurfaceColor
+    {
+        get => ThemeSurfaceColorEditor.ToHexValue();
+        set
+        {
+            ThemeSurfaceColorEditor.SetFromHex(value);
+            OnPropertyChanged();
+            SyncActiveThemeSwatchSelection();
+        }
+    }
+
+    public string ThemeBrandColor
+    {
+        get => ThemeBrandColorEditor.ToHexValue();
+        set
+        {
+            ThemeBrandColorEditor.SetFromHex(value);
+            OnPropertyChanged();
+            SyncActiveThemeSwatchSelection();
         }
     }
     public ThemeOption? SelectedThemeOption
@@ -528,8 +806,188 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
         }
     }
-    public string GitAutoColor { get => _gitAutoColor; set => SetProperty(ref _gitAutoColor, value); }
-    public string GitManualColor { get => _gitManualColor; set => SetProperty(ref _gitManualColor, value); }
+
+    public IEnumerable<IGrouping<string, ThemeOption>> ThemeOptionGroups =>
+        ThemeOptions.GroupBy(option => option.Group);
+
+    public string GitAutoColor
+    {
+        get => GitAutoColorEditor.ToHexValue();
+        set
+        {
+            GitAutoColorEditor.SetFromHex(value);
+            _gitAutoColor = GitAutoColorEditor.ToHexValue();
+            SyncGitColorSwatchSelection(GitAutoColorSwatches, _gitAutoColor);
+            OnPropertyChanged();
+        }
+    }
+
+    public string GitManualColor
+    {
+        get => GitManualColorEditor.ToHexValue();
+        set
+        {
+            GitManualColorEditor.SetFromHex(value);
+            _gitManualColor = GitManualColorEditor.ToHexValue();
+            SyncGitColorSwatchSelection(GitManualColorSwatches, _gitManualColor);
+            OnPropertyChanged();
+        }
+    }
+
+    private static ObservableCollection<ColorSwatchItemViewModel> BuildColorSwatchCollection(Action<string> select)
+    {
+        var items = ColorPaletteMap.BuildHexMap()
+            .Select(hex => new ColorSwatchItemViewModel(hex, select));
+        return new ObservableCollection<ColorSwatchItemViewModel>(items);
+    }
+
+    private static void SyncGitColorSwatchSelection(
+        ObservableCollection<ColorSwatchItemViewModel> swatches,
+        string? selectedHex)
+    {
+        var normalized = ColorSwatchItemViewModel.NormalizeHex(selectedHex ?? string.Empty);
+        foreach (var swatch in swatches)
+        {
+            swatch.IsSelected = string.Equals(swatch.Hex, normalized, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private void SetActiveThemeColorChannel(ThemeColorChannel channel)
+    {
+        if (_activeThemeColorChannel == channel)
+        {
+            return;
+        }
+
+        _activeThemeColorChannel = channel;
+        OnPropertyChanged(nameof(IsThemeMainChannelActive));
+        OnPropertyChanged(nameof(IsThemeSurfaceChannelActive));
+        OnPropertyChanged(nameof(IsThemeBrandChannelActive));
+        OnPropertyChanged(nameof(ActiveThemeColorHex));
+        SyncActiveThemeSwatchSelection();
+    }
+
+    private void OnThemeColorSwatchPicked(string hex)
+    {
+        switch (_activeThemeColorChannel)
+        {
+            case ThemeColorChannel.Main:
+                ThemeMainColor = hex;
+                break;
+            case ThemeColorChannel.Surface:
+                ThemeSurfaceColor = hex;
+                break;
+            default:
+                ThemeBrandColor = hex;
+                break;
+        }
+
+        ApplyCurrentThemeColors();
+        if (!_suppressDirtyTracking)
+        {
+            HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+        }
+    }
+
+    private void OnThemeCustomColorChanged(ThemeColorChannel channel)
+    {
+        OnPropertyChanged(channel switch
+        {
+            ThemeColorChannel.Main => nameof(ThemeMainColor),
+            ThemeColorChannel.Surface => nameof(ThemeSurfaceColor),
+            _ => nameof(ThemeBrandColor),
+        });
+        if (channel == _activeThemeColorChannel)
+        {
+            SyncActiveThemeSwatchSelection();
+            OnPropertyChanged(nameof(ActiveThemeColorHex));
+        }
+
+        ApplyCurrentThemeColors();
+        if (!_suppressDirtyTracking)
+        {
+            HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot;
+        }
+    }
+
+    private void SyncActiveThemeSwatchSelection()
+    {
+        var hex = _activeThemeColorChannel switch
+        {
+            ThemeColorChannel.Main => ThemeMainColorEditor.ToHexValue(),
+            ThemeColorChannel.Surface => ThemeSurfaceColorEditor.ToHexValue(),
+            _ => ThemeBrandColorEditor.ToHexValue(),
+        };
+        SyncGitColorSwatchSelection(ThemeColorSwatches, hex);
+    }
+
+    private void SeedThemeColorsFromPalette(ThemePalette palette, bool force)
+    {
+        if (!force
+            && ThemeApplication.HasHex(ThemeMainColor)
+            && ThemeApplication.HasHex(ThemeSurfaceColor)
+            && ThemeApplication.HasHex(ThemeBrandColor))
+        {
+            return;
+        }
+
+        var suppress = _suppressDirtyTracking;
+        _suppressDirtyTracking = true;
+        try
+        {
+            ThemeMainColorEditor.SetFromHex(ThemeApplication.ToHex(palette.SwatchMain));
+            ThemeSurfaceColorEditor.SetFromHex(ThemeApplication.ToHex(palette.SwatchSurface));
+            ThemeBrandColorEditor.SetFromHex(ThemeApplication.ToHex(palette.SwatchBrand));
+            OnPropertyChanged(nameof(ThemeMainColor));
+            OnPropertyChanged(nameof(ThemeSurfaceColor));
+            OnPropertyChanged(nameof(ThemeBrandColor));
+            SyncActiveThemeSwatchSelection();
+        }
+        finally
+        {
+            _suppressDirtyTracking = suppress;
+        }
+    }
+
+    private void ApplyCurrentThemeColors()
+    {
+        ThemeApplication.Apply(
+            Theme,
+            ThemeMainColorEditor.ToHexValue(),
+            ThemeSurfaceColorEditor.ToHexValue(),
+            ThemeBrandColorEditor.ToHexValue());
+    }
+
+    private void LoadThemeColorsFromPreferences(UiPreferences prefs)
+    {
+        var palette = ThemeCatalog.Resolve(prefs.Theme);
+        var suppress = _suppressDirtyTracking;
+        _suppressDirtyTracking = true;
+        try
+        {
+            ThemeMainColorEditor.SetFromHex(
+                ThemeApplication.HasHex(prefs.ThemeMainColor)
+                    ? prefs.ThemeMainColor
+                    : ThemeApplication.ToHex(palette.SwatchMain));
+            ThemeSurfaceColorEditor.SetFromHex(
+                ThemeApplication.HasHex(prefs.ThemeSurfaceColor)
+                    ? prefs.ThemeSurfaceColor
+                    : ThemeApplication.ToHex(palette.SwatchSurface));
+            ThemeBrandColorEditor.SetFromHex(
+                ThemeApplication.HasHex(prefs.ThemeBrandColor)
+                    ? prefs.ThemeBrandColor
+                    : ThemeApplication.ToHex(palette.SwatchBrand));
+            OnPropertyChanged(nameof(ThemeMainColor));
+            OnPropertyChanged(nameof(ThemeSurfaceColor));
+            OnPropertyChanged(nameof(ThemeBrandColor));
+            SyncActiveThemeSwatchSelection();
+            ApplyCurrentThemeColors();
+        }
+        finally
+        {
+            _suppressDirtyTracking = suppress;
+        }
+    }
     public bool ProjectPanelVisible { get => _projectPanelVisible; set => SetProperty(ref _projectPanelVisible, value); }
     public bool OnboardingSeen { get => _onboardingSeen; set => SetProperty(ref _onboardingSeen, value); }
 
@@ -668,6 +1126,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         OnSelectedSectionChanged();
     }
 
+    /// <summary>侧栏点目录时请求内容区滚到对应区块（由 View 处理 BringIntoView）。</summary>
+    public Action<string>? RequestScrollToSection { get; set; }
+
     private void SelectSection(SettingsSectionIndexItemViewModel section)
     {
         foreach (var item in SectionIndexItems)
@@ -677,14 +1138,21 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _selectedSection = section;
         _selectedSectionId = section.Id;
         OnSelectedSectionChanged();
+        // 各区块默认始终展示；目录只负责跳转滚动，不再做「只显示一项」切换。
+        RequestScrollToSection?.Invoke(section.Id);
     }
 
-    private bool IsSectionSelected(string id) => _selectedSectionId == id;
+    public string ShowAllSectionsText => _displayNames.Text("ui.settings.show_all_sections");
+    public string SectionIndexHintText => _displayNames.Text("ui.settings.section_index.hint");
+
+    /// <summary>始终展示当前 Tab 下全部区块；侧栏用于跳转而非显隐开关。</summary>
+    private bool IsSectionSelected(string id) => true;
 
     private void OnSelectedSectionChanged()
     {
         OnPropertyChanged(nameof(IsSectionProjectSelected));
         OnPropertyChanged(nameof(IsSectionDirectoriesSelected));
+        OnPropertyChanged(nameof(IsSectionProjectMemorySelected));
         OnPropertyChanged(nameof(IsSectionProviderSelected));
         OnPropertyChanged(nameof(IsSectionAvailableModelsSelected));
         OnPropertyChanged(nameof(IsSectionEmbeddingSelected));
@@ -750,7 +1218,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             ApplyPermissions(permissions);
 
             _uiPreferences = await _backend.GetUiPreferencesAsync().ConfigureAwait(true);
-            Theme = _uiPreferences.Theme;
+            // 不经 Theme setter：避免强制覆盖已保存的三色自定义
+            _theme = ThemeCatalog.Normalize(_uiPreferences.Theme);
+            OnPropertyChanged(nameof(Theme));
+            SyncThemeOptionSelection();
+            OnPropertyChanged(nameof(SelectedThemeOption));
+            LoadThemeColorsFromPreferences(_uiPreferences);
             GitAutoColor = _uiPreferences.GitAutoColor;
             GitManualColor = _uiPreferences.GitManualColor;
             ProjectPanelVisible = _uiPreferences.ProjectPanelVisible;
@@ -799,27 +1272,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             _providerConfig = await _backend.GetProviderConfigAsync().ConfigureAwait(true);
-            ProviderOptions.Clear();
-            foreach (var provider in _providerConfig.Providers)
-            {
-                ProviderOptions.Add(new ProviderOptionViewModel(
-                    provider.Provider,
-                    provider.DisplayName,
-                    provider.HasKey
-                        ? _displayNames.Text("ui.common.configured")
-                        : _displayNames.Text("ui.common.not_configured")));
-            }
-            var selected = _providerConfig.Providers.FirstOrDefault(p => p.Provider == ProviderId)
-                ?? _providerConfig.Providers.FirstOrDefault();
-            if (selected is not null)
-            {
-                ApplyProviderForEditing(selected);
-                _selectedProviderOption = ProviderOptions.FirstOrDefault(option => option.ProviderId == selected.Provider);
-                OnPropertyChanged(nameof(SelectedProviderOption));
-            }
-            ProviderStatus = _providerConfig.Providers.Count == 0
-                ? _displayNames.Text("ui.settings.models.no_provider_status")
-                : string.Join(" / ", _providerConfig.Providers.Select(p => $"{p.DisplayName}:{(p.HasKey ? _displayNames.Text("ui.common.configured") : _displayNames.Text("ui.common.not_configured"))}"));
+            RebuildProviderOptionsFromConfig(preferProviderId: ProviderId);
         }
         catch (Exception ex)
         {
@@ -827,42 +1280,183 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
-    private void SelectProviderForEditing(string providerId)
+    private void RebuildProviderOptionsFromConfig(string? preferProviderId)
     {
-        var selected = _providerConfig?.Providers.FirstOrDefault(p => p.Provider == providerId);
-        if (selected is null)
+        ProviderOptions.Clear();
+        if (_providerConfig is null)
         {
+            ProviderStatus = _displayNames.Text("ui.settings.models.no_provider_status");
             return;
         }
 
-        var wasDirty = HasUnsavedChanges;
-        var wasSuppressing = _suppressDirtyTracking;
-        _suppressDirtyTracking = true;
-        try
+        foreach (var provider in _providerConfig.Providers)
+        {
+            ProviderOptions.Add(CreateProviderOption(
+                provider.Provider,
+                provider.DisplayName,
+                provider.HasKey
+                    ? _displayNames.Text("ui.common.configured")
+                    : _displayNames.Text("ui.common.not_configured"),
+                isDraft: false));
+        }
+
+        var selected = _providerConfig.Providers.FirstOrDefault(p => p.Provider == preferProviderId)
+            ?? _providerConfig.Providers.FirstOrDefault();
+        if (selected is not null)
         {
             ApplyProviderForEditing(selected);
-        }
-        finally
-        {
-            _suppressDirtyTracking = wasSuppressing;
-        }
-        if (wasDirty)
-        {
-            HasUnsavedChanges = true;
+            SetSelectedProviderOption(selected.Provider);
         }
         else
         {
-            CaptureSnapshot();
+            _selectedProviderOption = null;
+            OnPropertyChanged(nameof(SelectedProviderOption));
+        }
+
+        ProviderStatus = _providerConfig.Providers.Count == 0
+            ? _displayNames.Text("ui.settings.models.no_provider_status")
+            : _displayNames.Format("ui.settings.models.provider_count", new Dictionary<string, string>
+            {
+                ["count"] = _providerConfig.Providers.Count.ToString(),
+            });
+    }
+
+    private ProviderOptionViewModel CreateProviderOption(
+        string providerId,
+        string displayName,
+        string keyStatus,
+        bool isDraft)
+    {
+        return new ProviderOptionViewModel(
+            providerId,
+            displayName,
+            keyStatus,
+            option => _ = SelectProviderOptionAsync(option),
+            isDraft);
+    }
+
+    private void SetSelectedProviderOption(string providerId)
+    {
+        foreach (var option in ProviderOptions)
+        {
+            option.IsSelected = string.Equals(option.ProviderId, providerId, StringComparison.Ordinal);
+        }
+
+        _suppressProviderSelectionChange = true;
+        try
+        {
+            _selectedProviderOption = ProviderOptions.FirstOrDefault(option => option.ProviderId == providerId);
+            OnPropertyChanged(nameof(SelectedProviderOption));
+            OnPropertyChanged(nameof(IsSelectedProviderDraft));
+        }
+        finally
+        {
+            _suppressProviderSelectionChange = false;
         }
     }
 
-    private async Task SwitchProviderForEditingAsync(
-        ProviderOptionViewModel target,
-        ProviderOptionViewModel? previous)
+    private async Task SelectProviderOptionAsync(ProviderOptionViewModel option)
     {
-        if (string.Equals(target.ProviderId, ProviderId, StringComparison.Ordinal))
+        // 仅在离开成功时改列表选中；取消/保存失败时保持与编辑器一致。
+        var switched = await SwitchProviderForEditingAsync(option, SelectedProviderOption).ConfigureAwait(true);
+        if (switched)
+        {
+            SetSelectedProviderOption(option.ProviderId);
+        }
+    }
+
+    private async void AddProviderDraft()
+    {
+        await AddProviderDraftAsync().ConfigureAwait(true);
+    }
+
+    private async Task AddProviderDraftAsync()
+    {
+        var previous = SelectedProviderOption;
+        // 与切换供应商同一套未保存确认，避免静默冲掉正在编辑的表单。
+        if (!await TryLeaveCurrentProviderAsync(stashOnSuccess: true).ConfigureAwait(true))
+        {
+            RestoreSelectedProviderOption(previous);
+            return;
+        }
+
+        var id = ProviderIdAllocator.Allocate(ProviderOptions.Select(p => p.ProviderId), "provider");
+        var draftLabel = _displayNames.Text("ui.settings.models.new_provider_name");
+        var draft = CreateProviderOption(
+            id,
+            draftLabel,
+            _displayNames.Text("ui.common.not_configured"),
+            isDraft: true);
+        var blank = CreateBlankDraftSnapshot(id, draftLabel);
+        draft.CaptureForm(blank);
+        ProviderOptions.Add(draft);
+
+        ApplyFormSnapshot(blank);
+        SetSelectedProviderOption(id);
+        HasUnsavedChanges = true;
+        StatusText = _displayNames.Format("ui.settings.models.provider_added", new Dictionary<string, string>
+        {
+            ["id"] = id,
+        });
+    }
+
+    private void SelectProviderForEditing(string providerId)
+    {
+        var option = ProviderOptions.FirstOrDefault(p =>
+            string.Equals(p.ProviderId, providerId, StringComparison.Ordinal));
+        var fromConfig = _providerConfig?.Providers.FirstOrDefault(p =>
+            string.Equals(p.Provider, providerId, StringComparison.Ordinal));
+
+        // leave-save 后快照是最新表单；切勿用过期 _providerConfig 盖掉再写回快照。
+        if (ProviderFormResolver.PreferFormSnapshotOverConfig(option?.HasFormSnapshot == true)
+            && option?.PeekForm() is { } snap)
+        {
+            ApplyFormSnapshot(snap);
+            SetSelectedProviderOption(providerId);
+            CaptureSnapshot();
+            return;
+        }
+
+        if (fromConfig is not null)
+        {
+            var wasSuppressingDirty = _suppressDirtyTracking;
+            _suppressDirtyTracking = true;
+            try
+            {
+                ApplyProviderForEditing(fromConfig);
+            }
+            finally
+            {
+                _suppressDirtyTracking = wasSuppressingDirty;
+            }
+            CaptureCurrentFormToOption(providerId, markDraft: false);
+            SetSelectedProviderOption(providerId);
+            CaptureSnapshot();
+            return;
+        }
+
+        if (option is null)
         {
             return;
+        }
+
+        var blank = CreateBlankDraftSnapshot(option.ProviderId, option.DisplayName);
+        ApplyFormSnapshot(blank);
+        option.CaptureForm(blank);
+        SetSelectedProviderOption(providerId);
+        CaptureSnapshot();
+    }
+
+    /// <summary>
+    /// 处理未保存离开：Save / Discard / Cancel。
+    /// stashOnSuccess：成功离开且应保留当前表单到选项快照时（非 Discard 脏数据）写入。
+    /// </summary>
+    private async Task<bool> TryLeaveCurrentProviderAsync(bool stashOnSuccess)
+    {
+        var previousId = ProviderId;
+        if (string.IsNullOrWhiteSpace(previousId))
+        {
+            return true;
         }
 
         if (HasUnsavedChanges && IsModelsSelected)
@@ -874,33 +1468,70 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                     try
                     {
                         await SaveProviderConnectionAsync().ConfigureAwait(true);
+                        // Save 已刷新 _providerConfig；再把当前表单写入快照，供再选中时优先于缓存。
                         MarkSavedSnapshotRange(SnapshotModelStartIndex, SnapshotModelEndIndex);
+                        if (stashOnSuccess)
+                        {
+                            CaptureCurrentFormToOption(previousId, markDraft: false);
+                        }
+                        return true;
                     }
                     catch (Exception ex)
                     {
                         StatusText = ex.Message;
-                        RestoreSelectedProviderOption(previous);
-                        return;
+                        return false;
                     }
-                    break;
                 case UnsavedLeaveChoice.Discard:
-                    break;
+                    // 丢弃脏编辑：不覆盖草稿快照（保留上次干净快照）。
+                    return true;
                 default:
-                    RestoreSelectedProviderOption(previous);
-                    return;
+                    return false;
             }
+        }
+
+        if (stashOnSuccess)
+        {
+            CaptureCurrentFormToOption(previousId, markDraft: null);
+        }
+        return true;
+    }
+
+    private async Task<bool> SwitchProviderForEditingAsync(
+        ProviderOptionViewModel target,
+        ProviderOptionViewModel? previous)
+    {
+        if (string.Equals(target.ProviderId, ProviderId, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (!await TryLeaveCurrentProviderAsync(stashOnSuccess: true).ConfigureAwait(true))
+        {
+            RestoreSelectedProviderOption(previous);
+            return false;
         }
 
         SelectProviderForEditing(target.ProviderId);
         MarkSavedSnapshotRange(SnapshotModelStartIndex, SnapshotModelEndIndex);
+        return true;
     }
 
     private void RestoreSelectedProviderOption(ProviderOptionViewModel? option)
     {
+        if (option is not null)
+        {
+            SetSelectedProviderOption(option.ProviderId);
+            return;
+        }
+
+        foreach (var item in ProviderOptions)
+        {
+            item.IsSelected = false;
+        }
         _suppressProviderSelectionChange = true;
         try
         {
-            _selectedProviderOption = option;
+            _selectedProviderOption = null;
             OnPropertyChanged(nameof(SelectedProviderOption));
         }
         finally
@@ -908,6 +1539,79 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             _suppressProviderSelectionChange = false;
         }
     }
+
+    private void CaptureCurrentFormToOption(string providerId, bool? markDraft)
+    {
+        var option = ProviderOptions.FirstOrDefault(p =>
+            string.Equals(p.ProviderId, providerId, StringComparison.Ordinal));
+        if (option is null)
+        {
+            return;
+        }
+
+        option.CaptureForm(new ProviderFormSnapshot
+        {
+            ProviderId = ProviderId,
+            ProviderType = ProviderType,
+            DisplayName = ProviderDisplayName,
+            BaseUrl = ProviderBaseUrl,
+            Enabled = ProviderEnabled,
+            MakeDefaultLlm = MakeDefaultLlm,
+            MakeDefaultEmbedding = MakeDefaultEmbedding,
+            MakeDefaultReranker = MakeDefaultReranker,
+            ModelsText = ModelsText,
+            EmbeddingModelId = EmbeddingModelId,
+        });
+        if (markDraft is bool draftFlag)
+        {
+            option.IsDraft = draftFlag;
+        }
+    }
+
+    private void ApplyFormSnapshot(ProviderFormSnapshot snapshot)
+    {
+        var wasSuppressing = _suppressDirtyTracking;
+        _suppressDirtyTracking = true;
+        try
+        {
+            ProviderId = snapshot.ProviderId;
+            ProviderType = snapshot.ProviderType;
+            ProviderDisplayName = snapshot.DisplayName;
+            ProviderBaseUrl = snapshot.BaseUrl;
+            ProviderEnabled = snapshot.Enabled;
+            MakeDefaultLlm = snapshot.MakeDefaultLlm;
+            MakeDefaultEmbedding = snapshot.MakeDefaultEmbedding;
+            MakeDefaultReranker = snapshot.MakeDefaultReranker;
+            ApiKey = string.Empty;
+            ModelsText = snapshot.ModelsText;
+            EmbeddingModelId = snapshot.EmbeddingModelId;
+            AvailableModels.Clear();
+            foreach (var line in ParseModels(ModelsText))
+            {
+                AvailableModels.Add(new ModelOptionViewModel(line.ModelId, line.Capability));
+            }
+            RebuildAvailableModelIds();
+        }
+        finally
+        {
+            _suppressDirtyTracking = wasSuppressing;
+        }
+    }
+
+    private static ProviderFormSnapshot CreateBlankDraftSnapshot(string id, string displayName) =>
+        new()
+        {
+            ProviderId = id,
+            ProviderType = "open_ai_compatible",
+            DisplayName = displayName,
+            BaseUrl = string.Empty,
+            Enabled = true,
+            MakeDefaultLlm = false,
+            MakeDefaultEmbedding = false,
+            MakeDefaultReranker = false,
+            ModelsText = string.Empty,
+            EmbeddingModelId = string.Empty,
+        };
 
     private void ApplyProviderForEditing(ProviderKeyStatus selected)
     {
@@ -927,6 +1631,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             AvailableModels.Add(new ModelOptionViewModel(model.ModelId, model.Capability));
         }
+        RebuildAvailableModelIds();
     }
 
     private async Task FetchModelsAsync()
@@ -945,6 +1650,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 AvailableModels.Add(new ModelOptionViewModel(model.ModelId, model.Capability));
             }
+            RebuildAvailableModelIds();
             await SaveProviderConnectionAsync().ConfigureAwait(true);
             await LoadProviderConfigAsync().ConfigureAwait(true);
             CaptureSnapshot();
@@ -991,12 +1697,71 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             MakeDefaultLlm,
             MakeDefaultEmbedding,
             MakeDefaultReranker);
-        await _backend.SaveProviderSettingsAsync(update).ConfigureAwait(true);
+        // 使用返回值刷新本地缓存，避免 leave-save 后 _providerConfig 仍是旧列表/旧 BaseUrl。
+        var status = await _backend.SaveProviderSettingsAsync(update).ConfigureAwait(true);
         if (!string.IsNullOrWhiteSpace(ApiKey))
         {
             await _backend.SaveProviderKeyAsync(ProviderId, ApiKey).ConfigureAwait(true);
             ApiKey = string.Empty;
+            status = await _backend.GetProviderConfigAsync().ConfigureAwait(true);
         }
+
+        MergeProviderConfigCache(status, preserveFormSnapshots: true);
+    }
+
+    /// <summary>
+    /// 用服务端状态更新 _providerConfig 与列表元数据；不重载当前编辑表单，不抹掉草稿快照。
+    /// </summary>
+    private void MergeProviderConfigCache(ProviderConfigStatus status, bool preserveFormSnapshots)
+    {
+        _providerConfig = status;
+        var savedIds = new HashSet<string>(
+            status.Providers.Select(p => p.Provider),
+            StringComparer.Ordinal);
+
+        foreach (var provider in status.Providers)
+        {
+            var existing = ProviderOptions.FirstOrDefault(o =>
+                string.Equals(o.ProviderId, provider.Provider, StringComparison.Ordinal));
+            var keyStatus = provider.HasKey
+                ? _displayNames.Text("ui.common.configured")
+                : _displayNames.Text("ui.common.not_configured");
+            if (existing is not null)
+            {
+                existing.DisplayName = provider.DisplayName;
+                existing.KeyStatus = keyStatus;
+                existing.IsDraft = false;
+                if (!preserveFormSnapshots)
+                {
+                    existing.ClearFormSnapshot();
+                }
+            }
+            else
+            {
+                ProviderOptions.Add(CreateProviderOption(
+                    provider.Provider,
+                    provider.DisplayName,
+                    keyStatus,
+                    isDraft: false));
+            }
+        }
+
+        // 移除已不在服务端、且非草稿的幽灵项
+        for (var i = ProviderOptions.Count - 1; i >= 0; i--)
+        {
+            var option = ProviderOptions[i];
+            if (!option.IsDraft && !savedIds.Contains(option.ProviderId))
+            {
+                ProviderOptions.RemoveAt(i);
+            }
+        }
+
+        ProviderStatus = status.Providers.Count == 0
+            ? _displayNames.Text("ui.settings.models.no_provider_status")
+            : _displayNames.Format("ui.settings.models.provider_count", new Dictionary<string, string>
+            {
+                ["count"] = status.Providers.Count.ToString(),
+            });
     }
 
     private async Task SaveProviderKeyAsync()
@@ -1090,19 +1855,25 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         await RunWithStatusAsync(async () =>
         {
-            var preferences = new UiPreferences(
-                Theme,
-                GitAutoColor,
-                GitManualColor,
-                ProjectPanelVisible,
-                _uiPreferences?.ProjectPanelPosition,
-                _uiPreferences?.PanelStates ?? new Dictionary<string, bool>(),
-                OnboardingSeen);
+            var preferences = BuildUiPreferences();
             await _backend.SaveUiPreferencesAsync(preferences).ConfigureAwait(true);
-            ThemeApplication.Apply(preferences.Theme);
+            ApplyCurrentThemeColors();
             _uiPreferences = preferences;
         });
     }
+
+    private UiPreferences BuildUiPreferences() =>
+        new(
+            Theme,
+            GitAutoColor,
+            GitManualColor,
+            ProjectPanelVisible,
+            _uiPreferences?.ProjectPanelPosition,
+            _uiPreferences?.PanelStates ?? new Dictionary<string, bool>(),
+            OnboardingSeen,
+            ThemeMainColor,
+            ThemeSurfaceColor,
+            ThemeBrandColor);
 
     private async Task ResetOnboardingAsync()
     {
@@ -1111,16 +1882,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             OnboardingSeen = false;
-            var preferences = new UiPreferences(
-                Theme,
-                GitAutoColor,
-                GitManualColor,
-                ProjectPanelVisible,
-                _uiPreferences?.ProjectPanelPosition,
-                _uiPreferences?.PanelStates ?? new Dictionary<string, bool>(),
-                OnboardingSeen);
+            var preferences = BuildUiPreferences();
             await _backend.SaveUiPreferencesAsync(preferences).ConfigureAwait(true);
-            ThemeApplication.Apply(preferences.Theme);
+            ApplyCurrentThemeColors();
             _uiPreferences = preferences;
             StatusText = _displayNames.Text("ui.common.configured");
             if (wasDirty)
@@ -1205,8 +1969,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                     tool,
                     ToolLabel(scope, tool),
                     enabled,
+                    ToolControlItemViewModel.IsDangerToolId(tool),
                     () => HasUnsavedChanges = CurrentSnapshot() != _savedSnapshot));
             }
+            group.RefreshPartitions();
             ToolControlGroups.Add(group);
         }
     }
@@ -1334,6 +2100,20 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             .ToArray();
     }
 
+    private void RebuildAvailableModelIds()
+    {
+        AvailableModelIds.Clear();
+        foreach (var model in AvailableModels
+                     .Select(item => item.ModelId)
+                     .Where(id => !string.IsNullOrWhiteSpace(id))
+                     .Distinct(StringComparer.Ordinal)
+                     .OrderBy(id => id, StringComparer.Ordinal))
+        {
+            AvailableModelIds.Add(model);
+        }
+        OnPropertyChanged(nameof(HasAvailableModelChoices));
+    }
+
     private static IReadOnlyList<ModelConfig> MergeEmbeddingModel(IReadOnlyList<ModelConfig> models, string embeddingModelId)
     {
         var merged = models
@@ -1372,9 +2152,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             .ToArray();
     }
 
-    private static int ParseInt(string text, int fallback) => int.TryParse(text, out var value) ? value : fallback;
-    private static long ParseLong(string text, long fallback) => long.TryParse(text, out var value) ? value : fallback;
-    private static double ParseDouble(string text, double fallback) => double.TryParse(text, out var value) ? value : fallback;
+    private static int ParseInt(string text, int fallback) => CultureNumberParse.ParseInt(text, fallback);
+    private static long ParseLong(string text, long fallback) => CultureNumberParse.ParseLong(text, fallback);
+    private static double ParseDouble(string text, double fallback) => CultureNumberParse.ParseDouble(text, fallback);
 
     public async Task<bool> ConfirmLeaveIfNeededAsync()
     {
@@ -1441,6 +2221,45 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         _savedSnapshot = CurrentSnapshot();
         HasUnsavedChanges = false;
     }
+
+    private ThemeOption CreateThemeOption(ThemePalette palette, DisplayNameService displayNames)
+    {
+        return new ThemeOption(
+            palette.Id,
+            palette.Group,
+            ThemeGroupTitleFor(palette.Group, displayNames),
+            ThemeLabelFor(palette.Id, displayNames),
+            ThemeDescriptionFor(palette.Id, displayNames),
+            new SolidColorBrush(palette.SwatchMain),
+            new SolidColorBrush(palette.SwatchSurface),
+            new SolidColorBrush(palette.SwatchBrand),
+            option => SelectedThemeOption = option);
+    }
+
+    private void SyncThemeOptionSelection()
+    {
+        foreach (var option in ThemeOptions)
+        {
+            option.IsSelected = string.Equals(option.Code, Theme, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static string ThemeLabelFor(string code, DisplayNameService displayNames)
+    {
+        var key = $"ui.theme.{code}";
+        var text = displayNames.Text(key);
+        return text.StartsWith('[') ? displayNames.Text($"ui.settings.personalization.theme.{code}") : text;
+    }
+
+    private static string ThemeDescriptionFor(string code, DisplayNameService displayNames) =>
+        displayNames.Text($"ui.theme.{code}.desc");
+
+    private static string ThemeGroupTitleFor(string group, DisplayNameService displayNames) => group switch
+    {
+        "light_accent" => displayNames.Text("ui.settings.personalization.theme.group.light_accent"),
+        "dark_accent" => displayNames.Text("ui.settings.personalization.theme.group.dark_accent"),
+        _ => displayNames.Text("ui.settings.personalization.theme.group.base"),
+    };
 
     private async Task PersistLanguageAsync(string language)
     {
@@ -1511,14 +2330,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         foreach (var option in ThemeOptions)
         {
-            option.Label = option.Code switch
-            {
-                "system" => _displayNames.Text("ui.settings.personalization.theme.system"),
-                "light" => _displayNames.Text("ui.settings.personalization.theme.light"),
-                "dark" => _displayNames.Text("ui.settings.personalization.theme.dark"),
-                _ => option.Label,
-            };
+            option.Label = ThemeLabelFor(option.Code, _displayNames);
+            option.Description = ThemeDescriptionFor(option.Code, _displayNames);
+            option.GroupTitle = ThemeGroupTitleFor(option.Group, _displayNames);
         }
+        OnPropertyChanged(nameof(ThemeOptionGroups));
 
         foreach (var tab in Tabs)
         {
@@ -1607,6 +2423,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             WritableRootsText,
             toolControlSnapshot,
             Theme,
+            ThemeMainColor,
+            ThemeSurfaceColor,
+            ThemeBrandColor,
             GitAutoColor,
             GitManualColor,
             ProjectPanelVisible.ToString(),
@@ -1636,7 +2455,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             or nameof(CheckpointEnabled) or nameof(RuntimeAutosaveMs) or nameof(AllowNetwork)
             or nameof(AllowWebSearch) or nameof(AllowHttpSkill) or nameof(AllowWasmNetwork)
             or nameof(AllowSecretRead) or nameof(ReadableRootsText) or nameof(WritableRootsText)
-            or nameof(Theme) or nameof(GitAutoColor) or nameof(GitManualColor)
+            or nameof(Theme) or nameof(ThemeMainColor) or nameof(ThemeSurfaceColor) or nameof(ThemeBrandColor)
+            or nameof(GitAutoColor) or nameof(GitManualColor)
             or nameof(ProjectPanelVisible) or nameof(OnboardingSeen) or nameof(RerankerEnabled)
             or nameof(ChunkSizeChars) or nameof(ChunkOverlapChars) or nameof(TrackDocuments)
             or nameof(TrackWorkflows) or nameof(TrackSkills) or nameof(TrackNonSensitiveConfig)
@@ -1661,15 +2481,44 @@ public sealed class LanguageOption : ViewModelBase
 public sealed class ThemeOption : ViewModelBase
 {
     private string _label;
+    private string _description;
+    private string _groupTitle;
+    private bool _isSelected;
+    private readonly Action<ThemeOption> _select;
 
-    public ThemeOption(string code, string label)
+    public ThemeOption(
+        string code,
+        string group,
+        string groupTitle,
+        string label,
+        string description,
+        IBrush swatchMain,
+        IBrush swatchSurface,
+        IBrush swatchBrand,
+        Action<ThemeOption> select)
     {
         Code = code;
+        Group = group;
+        _groupTitle = groupTitle;
         _label = label;
+        _description = description;
+        SwatchMain = swatchMain;
+        SwatchSurface = swatchSurface;
+        SwatchBrand = swatchBrand;
+        _select = select;
+        SelectCommand = new RelayCommand(() => _select(this));
     }
 
     public string Code { get; }
+    public string Group { get; }
+    public string GroupTitle { get => _groupTitle; set => SetProperty(ref _groupTitle, value); }
     public string Label { get => _label; set => SetProperty(ref _label, value); }
+    public string Description { get => _description; set => SetProperty(ref _description, value); }
+    public IBrush SwatchMain { get; }
+    public IBrush SwatchSurface { get; }
+    public IBrush SwatchBrand { get; }
+    public RelayCommand SelectCommand { get; }
+    public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
 }
 
 public sealed class ToolControlGroupViewModel : ViewModelBase
@@ -1681,11 +2530,36 @@ public sealed class ToolControlGroupViewModel : ViewModelBase
         Scope = scope;
         _displayName = displayName;
         Controls = new ObservableCollection<ToolControlItemViewModel>();
+        SafeControls = new ObservableCollection<ToolControlItemViewModel>();
+        DangerControls = new ObservableCollection<ToolControlItemViewModel>();
     }
 
     public string Scope { get; }
     public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
     public ObservableCollection<ToolControlItemViewModel> Controls { get; }
+    public ObservableCollection<ToolControlItemViewModel> SafeControls { get; }
+    public ObservableCollection<ToolControlItemViewModel> DangerControls { get; }
+    public bool HasSafeControls => SafeControls.Count > 0;
+    public bool HasDangerControls => DangerControls.Count > 0;
+
+    public void RefreshPartitions()
+    {
+        SafeControls.Clear();
+        DangerControls.Clear();
+        foreach (var item in Controls)
+        {
+            if (item.IsDangerous)
+            {
+                DangerControls.Add(item);
+            }
+            else
+            {
+                SafeControls.Add(item);
+            }
+        }
+        OnPropertyChanged(nameof(HasSafeControls));
+        OnPropertyChanged(nameof(HasDangerControls));
+    }
 }
 
 public sealed class ToolControlItemViewModel : ViewModelBase
@@ -1694,16 +2568,39 @@ public sealed class ToolControlItemViewModel : ViewModelBase
     private string _displayName;
     private bool _isEnabled;
 
-    public ToolControlItemViewModel(string toolId, string displayName, bool isEnabled, Action markDirty)
+    public ToolControlItemViewModel(
+        string toolId,
+        string displayName,
+        bool isEnabled,
+        bool isDangerous,
+        Action markDirty)
     {
         ToolId = toolId;
         _displayName = displayName;
         _isEnabled = isEnabled;
+        IsDangerous = isDangerous;
         _markDirty = markDirty;
     }
 
     public string ToolId { get; }
     public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
+    public bool IsDangerous { get; }
+
+    /// <summary>写盘/重写类工具视为危险，与权限页 warning 分组共用。</summary>
+    public static bool IsDangerToolId(string toolId)
+    {
+        var id = (toolId ?? string.Empty).Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(id))
+        {
+            return false;
+        }
+        return id.Contains("rewrite-file", StringComparison.Ordinal)
+               || id.Contains("replace-lines", StringComparison.Ordinal)
+               || id.Contains("insert-lines", StringComparison.Ordinal)
+               || id.Contains("secret", StringComparison.Ordinal)
+               || id.EndsWith("-delete", StringComparison.Ordinal)
+               || id.Contains("delete-file", StringComparison.Ordinal);
+    }
 
     public bool IsEnabled
     {

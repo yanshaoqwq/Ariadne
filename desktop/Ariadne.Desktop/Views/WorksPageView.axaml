@@ -61,9 +61,25 @@
           </ContextMenu>
         </Grid.ContextMenu>
         <Grid MaxWidth="1180" Margin="40,30,40,44" HorizontalAlignment="Stretch" RowDefinitions="Auto,*" RowSpacing="18">
+          <!-- 作品树空：二次元打响指全幅空态，不露出编辑器壳 -->
+          <Border Grid.Row="0" Grid.RowSpan="2" Classes="empty-state"
+                  IsVisible="{Binding IsWorksTreeEmpty}"
+                  VerticalAlignment="Center" HorizontalAlignment="Center"
+                  Padding="40,48">
+            <StackPanel Spacing="14" HorizontalAlignment="Center" MaxWidth="360">
+              <ctl:EmptyStateArt Kind="WorksSnap" Width="160" Height="128" HorizontalAlignment="Center" />
+              <TextBlock Text="{Binding EmptyIndexTitle}" Classes="title" HorizontalAlignment="Center" TextAlignment="Center" />
+              <TextBlock Text="{Binding EmptyIndexHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding EmptyIndexText}" Classes="subtle" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+              <Button Classes="primary" HorizontalAlignment="Center" Margin="0,8,0,0"
+                      Content="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}" />
+            </StackPanel>
+          </Border>
+
           <Border Grid.Row="0"
                   Classes="document-header"
-                  Padding="28,18">
+                  Padding="28,18"
+                  IsVisible="{Binding !IsWorksTreeEmpty}">
             <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto" RowSpacing="8" ColumnSpacing="18">
               <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentTitle}" Classes="title" TextWrapping="Wrap" />
               <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CharacterCountText}" Classes="caption" VerticalAlignment="Center" />
@@ -74,7 +90,8 @@
 
           <Border Grid.Row="1"
                   Classes="document-surface"
-                  Padding="64,52">
+                  Padding="64,52"
+                  IsVisible="{Binding !IsWorksTreeEmpty}">
             <Grid RowDefinitions="*,Auto" RowSpacing="24" MinHeight="640">
               <TextBlock Grid.Row="0"
                          Text="{Binding DocumentBodyText}"
@@ -200,9 +217,12 @@
                     <TextBox Text="{Binding ImportChapterId, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterIdText}" />
                     <TextBox Text="{Binding ImportChapterTitle, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterTitleText}" />
                     <TextBox Text="{Binding ImportOrder, Mode=TwoWay}" PlaceholderText="{Binding ImportOrderText}" />
-                    <TextBox Text="{Binding ImportSourcePath, Mode=TwoWay}" PlaceholderText="{Binding ImportSourcePlaceholder}" />
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                      <TextBox Grid.Column="0" Text="{Binding ImportSourcePath, Mode=TwoWay}" PlaceholderText="{Binding ImportSourcePlaceholder}" />
+                      <Button Grid.Column="1" Classes="secondary" Content="{Binding BrowseImportSourceText}" Command="{Binding BrowseImportSourceCommand}" />
+                    </Grid>
                     <TextBox Text="{Binding ImportTargetPath, Mode=TwoWay}" PlaceholderText="{Binding ImportTargetPlaceholder}" />
-                    <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
+                    <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
                   </StackPanel>
                 </Border>
               </StackPanel>
@@ -221,35 +241,75 @@
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
-                <TextBlock Text="{Binding EmptyIndexText}" Classes="subtle" Margin="12,12,0,0" IsVisible="{Binding IsWorksTreeEmpty}" />
+                <!-- 侧栏索引空：主栏已有打响指全幅空态，此处只保留短提示 -->
+                <Border Classes="empty-state" Padding="12,16" IsVisible="{Binding IsWorksTreeEmpty}">
+                  <StackPanel Spacing="6">
+                    <TextBlock Text="{Binding EmptyIndexTitle}" Classes="subtitle" />
+                    <TextBlock Text="{Binding EmptyIndexHint}" Classes="caption" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Border>
               </StackPanel>
             </ScrollViewer>
           </DockPanel>
 
           <!-- 标签内容 2：项目 AI -->
           <DockPanel IsVisible="{Binding IsProjectAiTab}">
-            <Border DockPanel.Dock="Bottom" Padding="12,8"
+            <Border DockPanel.Dock="Bottom" Padding="12,10"
                     BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,1,0,0">
-              <DockPanel>
-                <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" Margin="0,6,0,0">
-                  <Button Grid.Column="1" Classes="primary" Width="34" Height="34" Padding="0"
+              <!-- 输入框一体：发送键嵌在右下角 -->
+              <Border Classes="ai-composer" MinHeight="96" Padding="12,10,8,10">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                  <TextBox Grid.Column="0"
+                           Text="{Binding ProjectAiMessage, Mode=TwoWay}"
+                           AcceptsReturn="True"
+                           TextWrapping="Wrap"
+                           BorderThickness="0"
+                           Background="Transparent"
+                           FontSize="13"
+                           MinHeight="72"
+                           MaxHeight="140"
+                           Padding="0"
+                           VerticalContentAlignment="Top"
+                           VerticalAlignment="Stretch"
+                           PlaceholderText="{Binding ProjectAiPlaceholder}" />
+                  <Button Grid.Column="1"
+                          Classes="primary"
+                          Width="36" Height="36" Padding="0"
+                          VerticalAlignment="Bottom"
                           Command="{Binding SendProjectAiCommand}"
                           ToolTip.Tip="{Binding ProjectAiText}">
-                    <Path Classes="icon" Width="17" Height="17"
+                    <Path Classes="icon" Width="16" Height="16"
                           Stroke="{DynamicResource Ariadne.TextOnAccent}"
                           Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
                   </Button>
                 </Grid>
-                <TextBox MinHeight="60" MaxHeight="120" FontSize="13"
-                         Text="{Binding ProjectAiMessage, Mode=TwoWay}"
-                         AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0"
-                         Background="Transparent" VerticalContentAlignment="Top"
-                         PlaceholderText="{Binding ProjectAiPlaceholder}" />
-              </DockPanel>
+              </Border>
             </Border>
             <ScrollViewer Margin="12,8">
-              <StackPanel Spacing="12">
-                <TextBlock Text="{Binding ProjectAiAnswer}" Classes="subtle" TextWrapping="Wrap" />
+              <StackPanel Spacing="10">
+                <TextBlock Text="{Binding ProjectAiAnswer}"
+                           Classes="subtle"
+                           TextWrapping="Wrap"
+                           IsVisible="{Binding !HasProjectAiBubbles}" />
+                <ItemsControl ItemsSource="{Binding ProjectAiBubbles}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:ChatBubbleViewModel}">
+                      <Border Background="{Binding BubbleBackground}"
+                              BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                              BorderThickness="1"
+                              CornerRadius="10"
+                              Padding="12,8"
+                              HorizontalAlignment="{Binding HorizontalAlignment}"
+                              MaxWidth="320"
+                              Margin="0,0,0,6">
+                        <StackPanel Spacing="4">
+                          <TextBlock Text="{Binding RoleLabel}" Classes="subtle" FontSize="11" />
+                          <TextBlock Text="{Binding Content}" TextWrapping="Wrap" FontSize="13" />
+                        </StackPanel>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
               </StackPanel>
             </ScrollViewer>
           </DockPanel>

@@ -2,6 +2,7 @@
     x:Class="Ariadne.Desktop.Views.TemplateMarketPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:Name="Root"
     x:DataType="vm:TemplateMarketPageViewModel">
@@ -82,9 +83,11 @@
           </ItemsControl.ItemTemplate>
         </ItemsControl>
 
-        <!-- 空态说明 -->
-        <Border Classes="layer" Padding="32" Margin="8,16" HorizontalAlignment="Stretch">
-          <TextBlock Text="{Binding StatusText}" Classes="secondary" HorizontalAlignment="Center" />
+        <Border Classes="empty-state" Margin="8,24" HorizontalAlignment="Stretch">
+          <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="400">
+            <ctl:EmptyStateArt Kind="Templates" Width="140" Height="100" HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding StatusText}" Classes="secondary" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+          </StackPanel>
         </Border>
 
         <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center" Margin="0,8">

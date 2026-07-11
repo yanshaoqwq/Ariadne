@@ -46,6 +46,7 @@ fn call_params_parse_json_or_default_to_null() {
 fn ipc_run_workflow_starts_background_run_for_tool_callers() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -211,6 +212,7 @@ fn ipc_lists_workflow_tools_for_external_agents() {
 fn ipc_lists_saved_workflow_graphs_for_desktop_selector() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -281,6 +283,7 @@ fn ipc_lists_saved_workflow_graphs_for_desktop_selector() {
 fn ipc_reports_git_repository_status_for_desktop_details() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
     let state = AriadneAppState::new(
         temp.path(),
         app_state.path(),
@@ -299,7 +302,32 @@ fn ipc_reports_git_repository_status_for_desktop_details() {
     let data = response
         .data
         .expect("ipc response should include git repository status");
-    assert_eq!(data["status"], "not_repository");
-    assert_eq!(data["dirty"], false);
+    assert_eq!(data["status"], "degraded");
+    assert_eq!(data["dirty"], true);
     assert_eq!(data["diff_line_count"], 0);
+}
+
+#[test]
+fn ipc_project_scoped_commands_reject_uninitialized_project_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "list_workflow_graphs".to_owned(),
+            params: Value::Null,
+        },
+    );
+
+    assert!(!response.ok);
+    assert!(response
+        .error
+        .expect("ipc response should include project validation error")
+        .contains("not initialized"));
 }

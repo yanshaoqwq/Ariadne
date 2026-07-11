@@ -28,6 +28,19 @@ impl Default for BudgetLimits {
     }
 }
 
+/// 将用户配置的全局预算（美元）映射为执行侧 `BudgetLimits`。
+///
+/// - `budget_usd <= 0`：视为未设置限额，日/月硬上限均为 `None`（与 UI「未设置」一致）。
+/// - `budget_usd > 0`：作为**日限额** `daily_usd` 生效，调用 `evaluate_budget` 时累计超限会 Pause。
+/// - 保留默认 `high_cost_confirmation_usd = 1.0`，非 Auto Mode 下高成本仍可触发确认。
+pub fn budget_limits_from_global_budget(budget_usd: f64) -> BudgetLimits {
+    let mut limits = BudgetLimits::default();
+    if budget_usd.is_finite() && budget_usd > 0.0 {
+        limits.daily_usd = Some(budget_usd);
+    }
+    limits
+}
+
 /// 预算评估后的动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -207,5 +220,57 @@ mod tests {
 
         assert_eq!(decision.action, BudgetAction::RequireConfirmation);
         assert_eq!(decision.run_control, RunControl::Pause);
+    }
+
+    #[test]
+    fn global_budget_zero_maps_to_unlimited_daily() {
+        let limits = budget_limits_from_global_budget(0.0);
+        assert_eq!(limits.daily_usd, None);
+        let decision = evaluate_budget(
+            &limits,
+            &AutoModeConfig::default(),
+            BudgetUsage {
+                requested_usd: 50.0,
+                spent_today_usd: 0.0,
+                spent_this_month_usd: 0.0,
+            },
+        );
+        // 无日限额时，高成本仍走默认 $1 确认阈值。
+        assert_eq!(decision.action, BudgetAction::RequireConfirmation);
+    }
+
+    #[test]
+    fn global_budget_positive_enforced_as_daily_limit_on_evaluate_budget() {
+        let limits = budget_limits_from_global_budget(1.0);
+        assert_eq!(limits.daily_usd, Some(1.0));
+        let decision = evaluate_budget(
+            &limits,
+            &AutoModeConfig::default(),
+            BudgetUsage {
+                requested_usd: 0.40,
+                spent_today_usd: 0.70,
+                spent_this_month_usd: 0.70,
+            },
+        );
+        assert_eq!(decision.action, BudgetAction::Pause);
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some("daily budget limit exceeded")
+        );
+    }
+
+    #[test]
+    fn global_budget_under_limit_allows_when_not_high_cost() {
+        let limits = budget_limits_from_global_budget(5.0);
+        let decision = evaluate_budget(
+            &limits,
+            &AutoModeConfig::default(),
+            BudgetUsage {
+                requested_usd: 0.50,
+                spent_today_usd: 1.0,
+                spent_this_month_usd: 1.0,
+            },
+        );
+        assert_eq!(decision.action, BudgetAction::Allow);
     }
 }

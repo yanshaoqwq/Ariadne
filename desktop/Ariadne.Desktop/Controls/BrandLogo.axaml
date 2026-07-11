@@ -1,0 +1,16 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Ariadne.Desktop.Controls.BrandLogo"
+             Width="28" Height="28">
+  <!-- 绘图模型钢笔母版 + 运行时按 Accent 重着色（无几何堆砌） -->
+  <Border x:Name="RootBorder"
+          Classes="brand-logo on-paper"
+          CornerRadius="7"
+          ClipToBounds="True"
+          Background="Transparent">
+    <Image x:Name="LogoImage"
+           Stretch="Uniform"
+           Margin="0"
+           IsHitTestVisible="False" />
+  </Border>
+</UserControl>

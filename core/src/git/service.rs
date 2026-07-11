@@ -74,7 +74,7 @@ impl GitService {
             .ok()
             .filter(|value| !value.trim().is_empty());
         let dirty = self
-            .run_git(["status", "--porcelain"])
+            .status_with_policy(&GitStagePolicy::default())
             .map(|output| !output.trim().is_empty())
             .unwrap_or(true);
 
@@ -160,6 +160,26 @@ impl GitService {
     /// 返回工作区 diff。
     pub fn diff(&self) -> CoreResult<String> {
         self.run_git(["diff", "--"])
+    }
+
+    /// 按暂存策略返回工作区 diff，和存档/状态展示排除规则保持一致。
+    pub fn diff_with_policy(&self, policy: &GitStagePolicy) -> CoreResult<String> {
+        let mut args = vec!["diff".to_owned(), "--".to_owned(), ".".to_owned()];
+        args.extend(policy.exclude_pathspecs());
+        self.run_git(args)
+    }
+
+    /// 按暂存策略返回 porcelain 状态。
+    pub fn status_with_policy(&self, policy: &GitStagePolicy) -> CoreResult<String> {
+        let mut args = vec![
+            "status".to_owned(),
+            "--porcelain".to_owned(),
+            "--untracked-files=all".to_owned(),
+            "--".to_owned(),
+            ".".to_owned(),
+        ];
+        args.extend(policy.exclude_pathspecs());
+        self.run_git(args)
     }
 
     /// 返回最近 commit 摘要。
@@ -287,7 +307,7 @@ impl GitService {
 
     /// 回档前要求工作区干净，避免覆盖用户未保存改动。
     fn ensure_clean_worktree(&self) -> CoreResult<()> {
-        let status = self.run_git(["status", "--porcelain"])?;
+        let status = self.status_with_policy(&GitStagePolicy::default())?;
         if status.trim().is_empty() {
             Ok(())
         } else {

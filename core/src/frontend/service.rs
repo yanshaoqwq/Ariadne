@@ -8,6 +8,7 @@ use reqwest::{blocking::Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::config::ConfigStore;
 use crate::contracts::{
     ensure_path_under_root, ArtifactKind, CoreError, CoreResult, DocumentPatch, NodeId,
     NodeInstance, PatchHunk, PermissionPolicy, PortEndpoint, PortValue, RunId, TextRange,
@@ -123,6 +124,7 @@ pub fn initialize_project(project_root: impl AsRef<Path>) -> CoreResult<ProjectI
         std::fs::create_dir_all(&path)?;
         created_dirs.push(path);
     }
+    ConfigStore::new(project_root).load_or_create()?;
     let git = GitService::new(project_root);
     git.init_repository()?;
     Ok(ProjectInitReport {
@@ -212,6 +214,12 @@ pub struct ConfirmationLogEntry {
     pub handling_method: String,
     pub summary: String,
     pub diff: String,
+    /// 所属工作流；旧日志可能缺失，审批时应优先用本字段而非会话内存。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workflow_id: String,
+    /// 所属运行；旧日志可能缺失。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_id: String,
 }
 
 /// 确认项引用返回值，不内联完整正文。
@@ -1569,6 +1577,13 @@ pub struct UiPreferences {
     pub theme: String,
     pub git_auto_color: String,
     pub git_manual_color: String,
+    /// 主题自定义三色（主底 / 表面 / 强调）。空字符串 = 使用主题预设 swatch。
+    #[serde(default)]
+    pub theme_main_color: String,
+    #[serde(default)]
+    pub theme_surface_color: String,
+    #[serde(default)]
+    pub theme_brand_color: String,
     pub project_panel_visible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_panel_position: Option<(i32, i32)>,
@@ -1583,6 +1598,9 @@ impl Default for UiPreferences {
             theme: "system".to_owned(),
             git_auto_color: "#8a8f98".to_owned(),
             git_manual_color: "#f59e0b".to_owned(),
+            theme_main_color: String::new(),
+            theme_surface_color: String::new(),
+            theme_brand_color: String::new(),
             project_panel_visible: true,
             project_panel_position: None,
             panel_states: BTreeMap::new(),
@@ -1623,6 +1641,9 @@ impl UiPreferencesStore {
     pub fn write(&self, preferences: &UiPreferences) -> CoreResult<()> {
         validate_color("git_auto_color", &preferences.git_auto_color)?;
         validate_color("git_manual_color", &preferences.git_manual_color)?;
+        validate_optional_color("theme_main_color", &preferences.theme_main_color)?;
+        validate_optional_color("theme_surface_color", &preferences.theme_surface_color)?;
+        validate_optional_color("theme_brand_color", &preferences.theme_brand_color)?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2340,6 +2361,15 @@ fn validate_color(field: &str, value: &str) -> CoreResult<()> {
         Err(CoreError::validation(format!(
             "{field} must be a #RRGGBB color"
         )))
+    }
+}
+
+/// 空字符串表示「跟随主题预设」；非空则须为 #RRGGBB。
+fn validate_optional_color(field: &str, value: &str) -> CoreResult<()> {
+    if value.trim().is_empty() {
+        Ok(())
+    } else {
+        validate_color(field, value.trim())
     }
 }
 

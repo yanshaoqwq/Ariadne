@@ -125,7 +125,11 @@ fn dispatch_rest_route(
         }
         RestRoute::RunWorkflow { workflow_id } => {
             require_method(&request, "POST")?;
-            let payload = parse_json_body::<RunWorkflowBody>(&request)?;
+            let payload = if request.body.is_empty() {
+                RunWorkflowBody::default()
+            } else {
+                parse_json_body::<RunWorkflowBody>(&request)?
+            };
             let request = RunWorkflowRequest {
                 workflow_id: workflow_id.clone(),
                 start_node_id: payload.start_node_id,
@@ -363,8 +367,8 @@ fn authorized(request: &RestRequest, token: &str) -> bool {
     request
         .headers
         .get("authorization")
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|value| value == token)
+        .and_then(|value| value.split_once(char::is_whitespace))
+        .is_some_and(|(scheme, value)| scheme.eq_ignore_ascii_case("bearer") && value == token)
 }
 
 fn require_method(request: &RestRequest, expected: &str) -> Result<(), RestRouteError> {
@@ -735,6 +739,58 @@ mod tests {
             body["data"]["tools"][0]["input_schema"]["properties"]["topic"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn workflow_run_route_accepts_empty_body_for_default_run() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(temp.path()).unwrap();
+        save_workflow_graph_impl(
+            temp.path(),
+            WorkflowGraphData {
+                workflow_id: "empty-run".to_owned(),
+                name: "Empty Run".to_owned(),
+                nodes: vec![CanvasNode {
+                    id: "start-main".to_owned(),
+                    r#type: "start".to_owned(),
+                    label: Some("Start".to_owned()),
+                    data: json!({
+                        "name": "Start",
+                        "work_dir": "main"
+                    }),
+                    position: Value::Null,
+                }],
+                edges: Vec::new(),
+                metadata: Value::Null,
+            },
+        )
+        .unwrap();
+        let state = AriadneAppState::new(
+            temp.path().to_path_buf(),
+            temp.path().join(".app"),
+            Arc::new(MemorySecretStore::default()),
+        );
+        let mut headers = BTreeMap::new();
+        headers.insert("authorization".to_owned(), "bearer test-token".to_owned());
+
+        let response = handle_rest_request(
+            &state,
+            &test_config(),
+            RestRequest {
+                method: "POST".to_owned(),
+                path: "/v1/workflows/empty-run/runs".to_owned(),
+                headers,
+                body: Vec::new(),
+            },
+        );
+        let body = json_body(response.clone());
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(body["data"]["workflow_id"], "empty-run");
+        assert_eq!(body["data"]["status"], "queued");
+        assert!(body["data"]["run_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
     }
 
     #[test]

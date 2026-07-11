@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 系统桌面/任务栏/窗口图标（斜钢笔+波浪线，默认青绿 on 暖纸白） -->
+    <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,5 +20,6 @@
   <ItemGroup>
     <None Include="..\..\core\resources\display_name.json" Link="Resources\display_name.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\core\resources\display_name.*.json" Link="Resources\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
 </Project>

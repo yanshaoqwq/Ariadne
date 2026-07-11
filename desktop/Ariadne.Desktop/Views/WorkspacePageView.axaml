@@ -2,22 +2,25 @@
     x:Class="Ariadne.Desktop.Views.WorkspacePageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:backend="clr-namespace:Ariadne.Desktop.Backend"
     xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:WorkspacePageViewModel">
-  <Grid Background="{DynamicResource Ariadne.BackgroundMain}">
+  <!-- 根 Panel：拖库 ghost 叠在最上层且不裁剪 -->
+  <Panel Background="{DynamicResource Ariadne.BackgroundMain}">
+  <Grid>
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="*" />
       <ColumnDefinition Width="{Binding RightPanelSplitterWidth}" />
-      <ColumnDefinition Width="{Binding RightPanelColumnWidth, Mode=TwoWay}" MinWidth="24" MaxWidth="560" />
+      <!-- MinWidth 随开合：收起为 0，避免残留窄条 + 第二枚展开钮 -->
+      <ColumnDefinition Width="{Binding RightPanelColumnWidth, Mode=TwoWay}" MinWidth="0" MaxWidth="560" />
     </Grid.ColumnDefinitions>
 
     <Grid x:Name="WorkspaceGrid" Grid.Column="0" RowDefinitions="*,Auto,220">
-      <Canvas x:Name="CanvasOverlay" Grid.Row="0"
-              Background="{DynamicResource Ariadne.CanvasBackground}"
-              ClipToBounds="True">
-        <Canvas.ContextMenu>
+      <!-- Grid 宿主：工具栏/空态始终可见；Canvas 只放节点层 -->
+      <Grid x:Name="CanvasHost" Grid.Row="0"
+            Background="{DynamicResource Ariadne.CanvasBackground}"
+            ClipToBounds="True">
+        <Grid.ContextMenu>
           <ContextMenu Classes="ariadne">
             <MenuItem Header="{Binding CtxAddNodeText}" Command="{Binding AddContextNodeCommand}" />
             <Separator />
@@ -32,8 +35,13 @@
             <Separator />
             <MenuItem Header="{Binding CtxDeleteText}" Command="{Binding DeleteSelectedNodeCommand}" />
           </ContextMenu>
-        </Canvas.ContextMenu>
+        </Grid.ContextMenu>
 
+        <!-- 节点/边坐标系：铺满宿主（修复嵌套 Canvas 时 ItemsControl 尺寸为 0） -->
+        <Canvas x:Name="CanvasOverlay"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch"
+                Background="Transparent">
         <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
           <ItemsControl.RenderTransform>
             <TransformGroup>
@@ -48,38 +56,260 @@
           </ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:WorkflowEdgeViewModel}">
-              <Path Stroke="{Binding StrokeBrush}"
-                    StrokeThickness="1.6"
-                    Opacity="0.78"
-                    Fill="Transparent"
-                    Data="{Binding EdgePath}" />
+              <Canvas>
+                <!-- 宽透明命中层：点选边进入属性编辑 -->
+                <Path Stroke="#01000000"
+                      StrokeThickness="14"
+                      Fill="Transparent"
+                      Data="{Binding EdgePath}"
+                      Cursor="Hand"
+                      PointerPressed="OnEdgePointerPressed" />
+                <Path Stroke="{Binding StrokeBrush}"
+                      StrokeThickness="{Binding StrokeThickness}"
+                      Opacity="0.88"
+                      Fill="Transparent"
+                      StrokeLineCap="Round"
+                      Data="{Binding EdgePath}"
+                      IsHitTestVisible="False" />
+                <Border Canvas.Left="{Binding LabelX}"
+                        Canvas.Top="{Binding LabelY}"
+                        Background="{DynamicResource Ariadne.BackgroundSurface}"
+                        BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="5,1"
+                        Opacity="0.92"
+                        Cursor="Hand"
+                        IsVisible="{Binding HasMidpointLabel}"
+                        PointerPressed="OnEdgePointerPressed">
+                  <TextBlock Text="{Binding MidpointLabel}"
+                             Classes="caption"
+                             FontSize="10"
+                             MaxWidth="72"
+                             TextTrimming="CharacterEllipsis" />
+                </Border>
+              </Canvas>
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
 
-        <StackPanel Canvas.Top="12" Canvas.Left="16" Orientation="Horizontal" Spacing="8">
-          <TextBlock Text="{Binding WorkflowSelectorText}" Classes="caption" VerticalAlignment="Center" />
-          <ComboBox ItemsSource="{Binding WorkflowSummaries}"
-                    SelectedValue="{Binding SelectedWorkflowId, Mode=TwoWay}"
-                    SelectedValueBinding="{Binding WorkflowId}"
-                    MinWidth="220"
-                    MaxWidth="320"
-                    ToolTip.Tip="{Binding CurrentWorkflowName}">
-            <ComboBox.ItemTemplate>
-              <DataTemplate DataType="{x:Type backend:WorkflowSummary}">
-                <Grid RowDefinitions="Auto,Auto" MinWidth="190">
-                  <TextBlock Grid.Row="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
-                  <TextBlock Grid.Row="1"
-                             Classes="caption"
-                             Text="{Binding Path}"
-                             TextTrimming="CharacterEllipsis" />
-                </Grid>
-              </DataTemplate>
-            </ComboBox.ItemTemplate>
-          </ComboBox>
-        </StackPanel>
+        <!-- 端口拖线橡皮筋预览（与落点同坐标系） -->
+        <Path x:Name="RubberBandPath"
+              Stroke="{DynamicResource Ariadne.EdgeData}"
+              StrokeThickness="1.8"
+              StrokeDashArray="5,3"
+              Opacity="0.85"
+              IsVisible="False"
+              IsHitTestVisible="False" />
 
-        <StackPanel x:Name="TopToolbar" Canvas.Top="12" Canvas.Right="16" Orientation="Horizontal" Spacing="4">
+        <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}">
+          <ItemsControl.RenderTransform>
+            <TransformGroup>
+              <ScaleTransform ScaleX="{Binding CanvasZoom}" ScaleY="{Binding CanvasZoom}" />
+              <TranslateTransform />
+            </TransformGroup>
+          </ItemsControl.RenderTransform>
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <Canvas />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="{x:Type vm:WorkflowNodeViewModel}">
+              <!--
+                单卡片节点（宽 200）：执行/数据引脚在节点内侧边；
+                通信口在顶中略出框；未连空心 / 已连实心。
+                几何常量见 NodePortSpec（连线必须对齐）。
+              -->
+              <Grid Width="200"
+                    ctl:SelectedClass.IsSelected="{Binding IsSelected}">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="10" />
+                  <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- 通信：顶中悬浮方块（半在卡片外） -->
+                <Border Grid.Row="0"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Bottom"
+                        Width="13" Height="13"
+                        Margin="0,0,0,-6"
+                        CornerRadius="2"
+                        Background="{Binding PortCommunicationFill}"
+                        BorderBrush="{DynamicResource Ariadne.EdgeCommunication}"
+                        BorderThickness="1.5"
+                        Opacity="{Binding PortCommunicationOpacity}"
+                        Cursor="Cross"
+                        Tag="communication|both"
+                        ToolTip.Tip="{Binding $parent[UserControl].DataContext.PortCommunicationTip}"
+                        PointerPressed="OnPortPointerPressed"
+                        PointerMoved="OnPortPointerMoved"
+                        PointerReleased="OnPortPointerReleased"
+                        ZIndex="3" />
+
+                <!-- 选中环贴卡片 -->
+                <Border Grid.Row="1"
+                        Classes="node-flow-ring"
+                        Margin="-3"
+                        CornerRadius="11"
+                        IsHitTestVisible="False"
+                        IsVisible="{Binding IsSelected}" />
+
+                <!-- 整卡：标题 + 内容，引脚都在内侧 -->
+                <Border Grid.Row="1"
+                        Background="{DynamicResource Ariadne.NodeBackground}"
+                        BorderBrush="{Binding NodeBorderBrush}"
+                        BorderThickness="1.4"
+                        CornerRadius="10"
+                        BoxShadow="{DynamicResource Ariadne.Shadow.Card}"
+                        ClipToBounds="True"
+                        PointerPressed="OnNodeSelectPointerPressed">
+                  <DockPanel>
+                    <!-- 标题栏：左执行入 / 文案 / 运行 / 右执行出 -->
+                    <Border DockPanel.Dock="Top"
+                            Background="{DynamicResource Ariadne.AccentLight}"
+                            Padding="6,7"
+                            Cursor="SizeAll"
+                            PointerPressed="OnNodePointerPressed"
+                            PointerMoved="OnNodePointerMoved"
+                            PointerReleased="OnNodePointerReleased">
+                      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" ColumnSpacing="6">
+                        <Border Grid.Column="0"
+                                Width="16" Height="16"
+                                VerticalAlignment="Center"
+                                Background="Transparent"
+                                Opacity="{Binding PortControlInOpacity}"
+                                Cursor="Cross"
+                                Tag="control|in"
+                                ToolTip.Tip="{Binding $parent[UserControl].DataContext.PortControlInTip}"
+                                PointerPressed="OnPortPointerPressed"
+                                PointerMoved="OnPortPointerMoved"
+                                PointerReleased="OnPortPointerReleased">
+                          <Path Width="11" Height="11" Stretch="Uniform"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"
+                                Stroke="{DynamicResource Ariadne.AccentPrimary}"
+                                StrokeThickness="1.5"
+                                Fill="{Binding PortControlInFill}"
+                                Data="M2,2 L12,7 L2,12 Z" />
+                        </Border>
+                        <Border Grid.Column="1" Width="3" Height="14" CornerRadius="1"
+                                Background="{Binding TypeAccentBrush}" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="2"
+                                   Text="{Binding Label}"
+                                   FontWeight="SemiBold" FontSize="12"
+                                   Foreground="{DynamicResource Ariadne.AccentPrimary}"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                        <Button Grid.Column="3" Width="22" Height="20" Padding="0"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                Background="{DynamicResource Ariadne.BackgroundSurface}"
+                                BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                IsVisible="{Binding IsStartNode}"
+                                Command="{Binding RunCommand}">
+                          <Path Width="8" Height="8" Stretch="Uniform"
+                                Fill="{DynamicResource Ariadne.AccentPrimary}"
+                                Data="M9,6 L18,12 L9,18 Z" />
+                        </Button>
+                        <Border Grid.Column="4"
+                                Width="16" Height="16"
+                                VerticalAlignment="Center"
+                                Background="Transparent"
+                                Opacity="{Binding PortControlOutOpacity}"
+                                Cursor="Cross"
+                                Tag="control|out"
+                                ToolTip.Tip="{Binding $parent[UserControl].DataContext.PortControlOutTip}"
+                                PointerPressed="OnPortPointerPressed"
+                                PointerMoved="OnPortPointerMoved"
+                                PointerReleased="OnPortPointerReleased">
+                          <Path Width="11" Height="11" Stretch="Uniform"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"
+                                Stroke="{DynamicResource Ariadne.AccentPrimary}"
+                                StrokeThickness="1.5"
+                                Fill="{Binding PortControlOutFill}"
+                                Data="M2,2 L12,7 L2,12 Z" />
+                        </Border>
+                      </Grid>
+                    </Border>
+
+                    <!-- 内容栏：左数据入 / 状态 / 右数据出 -->
+                    <Border Padding="6,8" MinHeight="44">
+                      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                        <Border Grid.Column="0"
+                                Width="14" Height="14"
+                                VerticalAlignment="Center"
+                                Background="Transparent"
+                                Opacity="{Binding PortDataInOpacity}"
+                                Cursor="Cross"
+                                Tag="data|in"
+                                ToolTip.Tip="{Binding $parent[UserControl].DataContext.PortDataInTip}"
+                                PointerPressed="OnPortPointerPressed"
+                                PointerMoved="OnPortPointerMoved"
+                                PointerReleased="OnPortPointerReleased">
+                          <Ellipse Width="10" Height="10"
+                                   Stroke="{DynamicResource Ariadne.EdgeData}"
+                                   StrokeThickness="1.5"
+                                   Fill="{Binding PortDataInFill}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                          <TextBlock Text="{Binding Name}" Classes="caption" TextTrimming="CharacterEllipsis" />
+                          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                            <Ellipse Grid.Column="0" Width="6" Height="6"
+                                     Fill="{Binding StatusIndicatorBrush}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="{Binding StatusText}"
+                                       Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                          </Grid>
+                        </StackPanel>
+                        <Border Grid.Column="2"
+                                Width="14" Height="14"
+                                VerticalAlignment="Center"
+                                Background="Transparent"
+                                Opacity="{Binding PortDataOutOpacity}"
+                                Cursor="Cross"
+                                Tag="data|out"
+                                ToolTip.Tip="{Binding $parent[UserControl].DataContext.PortDataOutTip}"
+                                PointerPressed="OnPortPointerPressed"
+                                PointerMoved="OnPortPointerMoved"
+                                PointerReleased="OnPortPointerReleased">
+                          <Ellipse Width="10" Height="10"
+                                   Stroke="{DynamicResource Ariadne.EdgeData}"
+                                   StrokeThickness="1.5"
+                                   Fill="{Binding PortDataOutFill}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                      </Grid>
+                    </Border>
+                  </DockPanel>
+                </Border>
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        </Canvas>
+
+        <!-- 空画布提示（有节点时隐藏） -->
+        <Border HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                IsVisible="{Binding !HasNodes}"
+                IsHitTestVisible="False"
+                MaxWidth="360"
+                Padding="20">
+          <StackPanel Spacing="10" HorizontalAlignment="Center">
+            <ctl:EmptyStateArt Kind="Workspace" Width="140" Height="112" HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding EmptyCanvasTitle}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
+            <TextBlock Text="{Binding EmptyCanvasHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Opacity="0.9" />
+          </StackPanel>
+        </Border>
+
+        <!-- 工具栏：右上固定，不依赖 Canvas.Right -->
+        <StackPanel x:Name="TopToolbar"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,12,16,0"
+                    Orientation="Horizontal"
+                    Spacing="4">
           <Button Classes="icon-btn" ToolTip.Tip="{Binding UndoText}" Command="{Binding UndoCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Undo}" />
           </Button>
@@ -106,113 +336,18 @@
             <TextBlock Text="{Binding ZoomInGlyphText}" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
           </Button>
         </StackPanel>
-        <TextBlock Canvas.Left="18" Canvas.Bottom="18" Text="{Binding StatusText}" Classes="caption" />
 
-        <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}">
-          <ItemsControl.RenderTransform>
-            <TransformGroup>
-              <ScaleTransform ScaleX="{Binding CanvasZoom}" ScaleY="{Binding CanvasZoom}" />
-              <TranslateTransform />
-            </TransformGroup>
-          </ItemsControl.RenderTransform>
-          <ItemsControl.ItemsPanel>
-            <ItemsPanelTemplate>
-              <Canvas />
-            </ItemsPanelTemplate>
-          </ItemsControl.ItemsPanel>
-          <ItemsControl.ItemTemplate>
-            <DataTemplate DataType="{x:Type vm:WorkflowNodeViewModel}">
-              <Border Width="202"
-                      Canvas.Left="{Binding X}"
-                      Canvas.Top="{Binding Y}"
-                      Background="{DynamicResource Ariadne.NodeBackground}"
-                      BorderBrush="{Binding NodeBorderBrush}"
-                      BorderThickness="1.8"
-                      CornerRadius="{DynamicResource Ariadne.Radius.Large}"
-                      BoxShadow="{DynamicResource Ariadne.Shadow.Card}"
-                      PointerPressed="OnNodeSelectPointerPressed">
-                <DockPanel>
-                  <Border DockPanel.Dock="Top"
-                          Background="{DynamicResource Ariadne.AccentLight}"
-                          CornerRadius="8,8,0,0"
-                          Padding="9,7"
-                          Cursor="SizeAll"
-                          PointerPressed="OnNodePointerPressed"
-                          PointerMoved="OnNodePointerMoved"
-                          PointerReleased="OnNodePointerReleased">
-                    <Grid ColumnDefinitions="Auto,Auto,*,Auto">
-                      <Ellipse Grid.Column="0"
-                               Width="10"
-                               Height="10"
-                               Fill="{DynamicResource Ariadne.BackgroundSurface}"
-                               Stroke="{DynamicResource Ariadne.AccentPrimary}"
-                               StrokeThickness="1.4"
-                               VerticalAlignment="Center"
-                               ToolTip.Tip="{Binding $parent[UserControl].DataContext.TargetAliasText}" />
-                      <Button Grid.Column="1" Width="26" Height="26" Padding="0"
-                              Margin="8,0,0,0"
-                              HorizontalContentAlignment="Center"
-                              VerticalContentAlignment="Center"
-                              Background="{DynamicResource Ariadne.AccentLight}"
-                              BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
-                              BorderThickness="1.2"
-                              CornerRadius="5"
-                              IsVisible="{Binding IsStartNode}"
-                              Command="{Binding RunCommand}">
-                        <Path Width="10" Height="10" Stretch="Uniform"
-                              HorizontalAlignment="Center" VerticalAlignment="Center"
-                              Fill="{DynamicResource Ariadne.AccentPrimary}"
-                              Data="M9,6 L18,12 L9,18 Z" />
-                      </Button>
-                      <TextBlock Grid.Column="2" Text="{Binding Label}"
-                                 FontWeight="SemiBold" FontSize="12" Margin="8,0,4,0"
-                                 Foreground="{DynamicResource Ariadne.AccentPrimary}"
-                                 VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                      <Border Grid.Column="3"
-                              Width="18"
-                              Height="18"
-                              CornerRadius="9"
-                              Background="{DynamicResource Ariadne.BackgroundSurface}"
-                              BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
-                              BorderThickness="1.4"
-                              Cursor="Cross"
-                              ToolTip.Tip="{Binding $parent[UserControl].DataContext.SourceAliasText}"
-                              PointerPressed="OnOutputPortPointerPressed"
-                              PointerMoved="OnOutputPortPointerMoved"
-                              PointerReleased="OnOutputPortPointerReleased">
-                        <Ellipse Width="6" Height="6" Fill="{DynamicResource Ariadne.AccentPrimary}" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                      </Border>
-                    </Grid>
-                  </Border>
-                  <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
-                  <StackPanel Margin="10,8" Spacing="7">
-                    <StackPanel Spacing="2">
-                      <TextBlock Text="{Binding $parent[UserControl].DataContext.NodeNameLabel}" Classes="subtle" />
-                      <TextBox Text="{Binding Name, Mode=TwoWay}" MinHeight="26" Padding="7,3" FontSize="12"
-                               CornerRadius="{DynamicResource Ariadne.Radius.Small}" />
-                    </StackPanel>
-                    <StackPanel Spacing="2" IsVisible="{Binding IsStartNode}">
-                      <TextBlock Text="{Binding $parent[UserControl].DataContext.WorkDirLabel}" Classes="subtle" />
-                      <TextBox Text="{Binding WorkDir, Mode=TwoWay}" MinHeight="26" Padding="7,3" FontSize="11"
-                               Classes="mono" PlaceholderText="{Binding $parent[UserControl].DataContext.WorkDirPlaceholder}"
-                               CornerRadius="{DynamicResource Ariadne.Radius.Small}" />
-                    </StackPanel>
-                    <CheckBox IsChecked="{Binding ExposedAsTool, Mode=TwoWay}" Margin="0,2,0,0" IsVisible="{Binding IsStartNode}">
-                      <TextBlock Text="{Binding $parent[UserControl].DataContext.ExposeToolLabel}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center" />
-                    </CheckBox>
-                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
-                      <Ellipse Grid.Column="0" Width="7" Height="7" Fill="{Binding StatusIndicatorBrush}" VerticalAlignment="Center" />
-                      <TextBlock Grid.Column="1" Text="{Binding StatusText}" Classes="caption" TextWrapping="Wrap" />
-                    </Grid>
-                  </StackPanel>
-                </DockPanel>
-              </Border>
-            </DataTemplate>
-          </ItemsControl.ItemTemplate>
-        </ItemsControl>
+        <TextBlock HorizontalAlignment="Left"
+                   VerticalAlignment="Bottom"
+                   Margin="18,0,0,18"
+                   Text="{Binding StatusText}"
+                   Classes="caption"
+                   IsHitTestVisible="False" />
 
-        <Border Canvas.Right="16"
-                Canvas.Bottom="34"
+        <Border x:Name="MiniMapHost"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Bottom"
+                Margin="0,0,16,34"
                 Width="156"
                 Height="100"
                 Background="{DynamicResource Ariadne.BackgroundSurface}"
@@ -221,8 +356,10 @@
                 CornerRadius="8"
                 Padding="8"
                 Opacity="0.9"
-                ToolTip.Tip="{Binding MinimapText}">
-          <Canvas ClipToBounds="True">
+                Cursor="Hand"
+                ToolTip.Tip="{Binding MinimapText}"
+                PointerPressed="OnMiniMapPointerPressed">
+          <Canvas x:Name="MiniMapCanvas" ClipToBounds="True">
             <ItemsControl x:Name="MiniMapItemsControl" ItemsSource="{Binding Nodes}">
               <ItemsControl.ItemsPanel>
                 <ItemsPanelTemplate>
@@ -236,52 +373,70 @@
                           Width="10"
                           Height="6"
                           CornerRadius="2"
-                          Background="{Binding NodeBorderBrush}"
+                          Background="{Binding TypeAccentBrush}"
                           BorderBrush="{DynamicResource Ariadne.BackgroundSurface}"
                           BorderThickness="1" />
                 </DataTemplate>
               </ItemsControl.ItemTemplate>
             </ItemsControl>
+            <Border x:Name="MiniMapViewportFrame"
+                    BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
+                    BorderThickness="1.5"
+                    Background="#182E726B"
+                    CornerRadius="2"
+                    IsHitTestVisible="False"
+                    Width="40"
+                    Height="28" />
           </Canvas>
         </Border>
 
-        <Border x:Name="LibraryTogglePill"
-                Canvas.Bottom="0"
-                Width="52"
-                Height="22"
-                Background="{DynamicResource Ariadne.BackgroundSurface}"
-                BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                BorderThickness="1"
-                CornerRadius="6,6,0,0"
-                BoxShadow="0 -2 6 0 #10000000"
-                Cursor="Hand"
-                ToolTip.Tip="{Binding NodeLibraryText}"
-                PointerPressed="OnPillPointerPressed"
-                PointerMoved="OnPillPointerMoved"
-                PointerReleased="OnPillPointerReleased">
-          <Path Classes="icon" Width="14" Height="14"
-                HorizontalAlignment="Center" VerticalAlignment="Center"
-                Data="{StaticResource Ariadne.Icon.ChevronDown}" />
-        </Border>
+        <!-- pill  freelayout：用绝对 Canvas 叠在宿主上 -->
+        <Canvas x:Name="PillLayer" IsHitTestVisible="True">
+          <Border x:Name="LibraryTogglePill"
+                  Canvas.Bottom="0"
+                  Width="52"
+                  Height="22"
+                  Background="{DynamicResource Ariadne.BackgroundSurface}"
+                  BorderBrush="{DynamicResource Ariadne.BorderDefault}"
+                  BorderThickness="1"
+                  CornerRadius="6,6,0,0"
+                  BoxShadow="0 -2 6 0 #10000000"
+                  Cursor="Hand"
+                  ToolTip.Tip="{Binding NodeLibraryText}"
+                  PointerPressed="OnPillPointerPressed"
+                  PointerMoved="OnPillPointerMoved"
+                  PointerReleased="OnPillPointerReleased">
+            <Path Classes="icon" Width="14" Height="14"
+                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Data="{StaticResource Ariadne.Icon.ChevronDown}" />
+          </Border>
 
-        <Border x:Name="WorkspaceRightPill"
-                Canvas.Right="0"
-                Width="22"
-                Height="52"
-                Background="{DynamicResource Ariadne.BackgroundSurface}"
-                BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                BorderThickness="1"
-                CornerRadius="8,0,0,8"
-                Cursor="Hand"
-                ToolTip.Tip="{Binding ToggleRightPanelText}"
-                PointerPressed="OnRightPillPointerPressed"
-                PointerMoved="OnRightPillPointerMoved"
-                PointerReleased="OnRightPillPointerReleased">
-          <Path Classes="icon" Width="14" Height="14"
-                HorizontalAlignment="Center" VerticalAlignment="Center"
-                Data="{StaticResource Ariadne.Icon.ChevronRight}" />
-        </Border>
-      </Canvas>
+          <Border x:Name="WorkspaceRightPill"
+                  Canvas.Right="0"
+                  Width="22"
+                  Height="52"
+                  Background="{DynamicResource Ariadne.BackgroundSurface}"
+                  BorderBrush="{DynamicResource Ariadne.BorderDefault}"
+                  BorderThickness="1"
+                  CornerRadius="8,0,0,8"
+                  Cursor="Hand"
+                  ToolTip.Tip="{Binding ToggleRightPanelText}"
+                  PointerPressed="OnRightPillPointerPressed"
+                  PointerMoved="OnRightPillPointerMoved"
+                  PointerReleased="OnRightPillPointerReleased">
+            <Panel>
+              <Path Classes="icon" Width="14" Height="14"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    IsVisible="{Binding IsRightPanelOpen}"
+                    Data="{StaticResource Ariadne.Icon.ChevronRight}" />
+              <Path Classes="icon" Width="14" Height="14"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    IsVisible="{Binding !IsRightPanelOpen}"
+                    Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
+            </Panel>
+          </Border>
+        </Canvas>
+      </Grid>
 
       <GridSplitter x:Name="LibrarySplitter" Grid.Row="1" Height="5"
                     HorizontalAlignment="Stretch"
@@ -299,107 +454,167 @@
             <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsExecutionPanel}"
                     Content="{Binding ExecutionText}" Command="{Binding ShowExecutionCommand}" />
           </StackPanel>
-          <StackPanel Margin="12,4,12,12" Spacing="8" IsVisible="{Binding IsNodeLibraryPanel}">
-            <TextBlock Text="{Binding EntryNodesText}" Classes="subtle" />
-            <ItemsControl ItemsSource="{Binding EntryNodes}">
-              <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" /></ItemsPanelTemplate>
-              </ItemsControl.ItemsPanel>
-              <ItemsControl.ItemTemplate>
-                <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
-                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}"
-                          PointerPressed="OnNodeLibraryItemPointerPressed"
-                          PointerMoved="OnNodeLibraryItemPointerMoved"
-                          PointerReleased="OnNodeLibraryItemPointerReleased">
-                    <Border Classes="layer" Padding="10,6"
-                            BorderBrush="{DynamicResource Ariadne.AccentPrimary}" BorderThickness="1">
-                      <StackPanel Orientation="Horizontal" Spacing="7">
+          <ScrollViewer Margin="0" IsVisible="{Binding IsNodeLibraryPanel}" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="14,8,14,12" Spacing="10">
+              <TextBlock Text="{Binding LibraryDragHintText}" Classes="caption" Opacity="0.85" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding EntryNodesText}" Classes="subtle" />
+              <ItemsControl ItemsSource="{Binding EntryNodes}">
+                <ItemsControl.ItemsPanel>
+                  <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
+                    <!-- Border：单击/拖到画布均由页级指针手势处理（避免 Button/DnD 吞事件） -->
+                    <Border Classes="library-chip entry"
+                            Margin="0,0,8,8"
+                            Padding="12,8"
+                            Cursor="Hand"
+                            ToolTip.Tip="{Binding Title}"
+                            PointerPressed="OnNodeLibraryItemPointerPressed"
+                            PointerMoved="OnNodeLibraryItemPointerMoved"
+                            PointerReleased="OnNodeLibraryItemPointerReleased"
+                            PointerCaptureLost="OnNodeLibraryItemCaptureLost">
+                      <StackPanel Orientation="Horizontal" Spacing="8" IsHitTestVisible="False">
                         <Path Classes="icon-fill" Width="11" Height="11"
                               Fill="{DynamicResource Ariadne.AccentPrimary}" Data="M8,5 L19,12 L8,19 Z" VerticalAlignment="Center" />
                         <TextBlock Text="{Binding Title}" FontSize="12" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource Ariadne.AccentPrimary}" />
+                                   Foreground="{DynamicResource Ariadne.AccentPrimary}" FontWeight="SemiBold" />
                       </StackPanel>
                     </Border>
-                  </Button>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-            <TextBlock Text="{Binding WritingAgentsText}" Classes="subtle" />
-            <ItemsControl ItemsSource="{Binding WritingAgents}">
-              <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" /></ItemsPanelTemplate>
-              </ItemsControl.ItemsPanel>
-              <ItemsControl.ItemTemplate>
-                <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
-                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}"
-                          PointerPressed="OnNodeLibraryItemPointerPressed"
-                          PointerMoved="OnNodeLibraryItemPointerMoved"
-                          PointerReleased="OnNodeLibraryItemPointerReleased">
-                    <Border Classes="layer" Padding="10,6">
-                      <StackPanel Orientation="Horizontal" Spacing="7">
-                        <Ellipse Width="6" Height="6" Fill="{DynamicResource Ariadne.AccentPrimary}" VerticalAlignment="Center" />
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <TextBlock Text="{Binding WritingAgentsText}" Classes="subtle" />
+              <ItemsControl ItemsSource="{Binding WritingAgents}">
+                <ItemsControl.ItemsPanel>
+                  <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
+                    <Border Classes="library-chip"
+                            Margin="0,0,8,8"
+                            Padding="12,8"
+                            Cursor="Hand"
+                            ToolTip.Tip="{Binding Title}"
+                            PointerPressed="OnNodeLibraryItemPointerPressed"
+                            PointerMoved="OnNodeLibraryItemPointerMoved"
+                            PointerReleased="OnNodeLibraryItemPointerReleased"
+                            PointerCaptureLost="OnNodeLibraryItemCaptureLost">
+                      <StackPanel Orientation="Horizontal" Spacing="8" IsHitTestVisible="False">
+                        <Ellipse Width="7" Height="7" Fill="{DynamicResource Ariadne.AccentPrimary}" VerticalAlignment="Center" />
                         <TextBlock Text="{Binding Title}" FontSize="12" VerticalAlignment="Center" />
                       </StackPanel>
                     </Border>
-                  </Button>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-            <TextBlock Text="{Binding UtilityNodesText}" Classes="subtle" />
-            <ItemsControl ItemsSource="{Binding UtilityNodes}">
-              <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" /></ItemsPanelTemplate>
-              </ItemsControl.ItemsPanel>
-              <ItemsControl.ItemTemplate>
-                <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
-                  <Button Classes="subtle" Margin="0,0,8,8" Padding="0" Command="{Binding AddCommand}"
-                          PointerPressed="OnNodeLibraryItemPointerPressed"
-                          PointerMoved="OnNodeLibraryItemPointerMoved"
-                          PointerReleased="OnNodeLibraryItemPointerReleased">
-                    <Border Classes="layer" Padding="10,6">
-                      <TextBlock Text="{Binding Title}" FontSize="12" />
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <TextBlock Text="{Binding UtilityNodesText}" Classes="subtle" />
+              <ItemsControl ItemsSource="{Binding UtilityNodes}">
+                <ItemsControl.ItemsPanel>
+                  <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="{x:Type vm:NodeLibraryItemViewModel}">
+                    <Border Classes="library-chip"
+                            Margin="0,0,8,8"
+                            Padding="12,8"
+                            Cursor="Hand"
+                            ToolTip.Tip="{Binding Title}"
+                            PointerPressed="OnNodeLibraryItemPointerPressed"
+                            PointerMoved="OnNodeLibraryItemPointerMoved"
+                            PointerReleased="OnNodeLibraryItemPointerReleased"
+                            PointerCaptureLost="OnNodeLibraryItemCaptureLost">
+                      <TextBlock Text="{Binding Title}" FontSize="12" IsHitTestVisible="False" />
                     </Border>
-                  </Button>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-          </StackPanel>
-          <Border Margin="14,8,14,12" Classes="soft-panel" Padding="16" IsVisible="{Binding IsExecutionPanel}">
-            <Grid ColumnDefinitions="*,300" ColumnSpacing="22">
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </ScrollViewer>
+
+          <!-- 执行页：入口卡 + 当前运行控制台 -->
+          <ScrollViewer IsVisible="{Binding IsExecutionPanel}" VerticalScrollBarVisibility="Auto">
+            <Grid Margin="14,10,14,14" ColumnDefinitions="*,18,280" MinHeight="160">
               <StackPanel Grid.Column="0" Spacing="12">
-                <TextBlock Text="{Binding RunFromStartText}" Classes="subtitle" />
+                <StackPanel Spacing="4">
+                  <TextBlock Text="{Binding RunFromStartText}" Classes="subtitle" />
+                  <TextBlock Text="{Binding ExecutionHintText}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                </StackPanel>
                 <ItemsControl ItemsSource="{Binding StartNodes}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:WorkflowNodeViewModel}">
-                      <Border BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" Padding="0,8">
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                          <StackPanel Grid.Column="0" Spacing="2">
+                      <Border Classes="card exec-start-card" Padding="14,12" Margin="0,0,0,10">
+                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14">
+                          <Border Grid.Column="0" Width="36" Height="36" CornerRadius="10"
+                                  Background="{DynamicResource Ariadne.AccentLight}"
+                                  VerticalAlignment="Center">
+                            <Path Width="12" Height="12" Stretch="Uniform"
+                                  Fill="{DynamicResource Ariadne.AccentPrimary}"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                                  Data="M9,6 L18,12 L9,18 Z" />
+                          </Border>
+                          <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
                             <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding WorkDir}" Classes="caption" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding StatusText}" Classes="subtle" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding WorkDir}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                              <Ellipse Width="7" Height="7" Fill="{Binding StatusIndicatorBrush}" VerticalAlignment="Center" />
+                              <TextBlock Text="{Binding StatusText}" Classes="subtle" VerticalAlignment="Center" />
+                            </StackPanel>
                           </StackPanel>
-                          <Button Grid.Column="1" Classes="primary" Content="{Binding $parent[UserControl].DataContext.RunText}" Command="{Binding RunCommand}" />
+                          <Button Grid.Column="2" Classes="primary" MinWidth="88"
+                                  Content="{Binding $parent[UserControl].DataContext.RunText}"
+                                  Command="{Binding RunCommand}"
+                                  VerticalAlignment="Center" />
                         </Grid>
                       </Border>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
-                <TextBlock Text="{Binding NoStartNodesText}" Classes="subtle" IsVisible="{Binding !HasStartNodes}" />
+                <Border Classes="empty-state" Padding="12,16" IsVisible="{Binding !HasStartNodes}">
+                  <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="420">
+                    <ctl:EmptyStateArt Kind="Workspace" Width="140" Height="112" HorizontalAlignment="Center" />
+                    <TextBlock Text="{Binding EmptyStartTitle}" Classes="subtitle" HorizontalAlignment="Center" />
+                    <TextBlock Text="{Binding EmptyStartHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Border>
               </StackPanel>
-              <Border Grid.Column="1" Classes="layer" Padding="14">
-                <StackPanel Spacing="12">
-                  <TextBlock Text="{Binding CurrentRunText}" Classes="subtitle" />
-                  <TextBlock Text="{Binding CurrentRunValueText}" Classes="mono" TextWrapping="Wrap" />
-                  <StackPanel Orientation="Horizontal" Spacing="8">
-                    <Button Classes="secondary" Content="{Binding PauseText}" Command="{Binding PauseWorkflowCommand}" />
-                    <Button Classes="danger" Content="{Binding StopText}" Command="{Binding StopWorkflowCommand}" />
-                    <Button Classes="secondary" Content="{Binding ResumeText}" Command="{Binding ResumeWorkflowCommand}" />
+
+              <Border Grid.Column="2" Classes="card" Padding="16" VerticalAlignment="Stretch">
+                <StackPanel Spacing="14">
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="{Binding CurrentRunText}" Classes="subtitle" />
+                    <TextBlock Text="{Binding CurrentRunValueText}" Classes="mono" TextWrapping="Wrap" FontSize="12" />
+                  </StackPanel>
+                  <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
+                  <StackPanel Spacing="8">
+                    <Button Classes="secondary" HorizontalAlignment="Stretch" Content="{Binding PauseText}" Command="{Binding PauseWorkflowCommand}" />
+                    <Button Classes="secondary" HorizontalAlignment="Stretch" Content="{Binding ResumeText}" Command="{Binding ResumeWorkflowCommand}" />
+                    <Button Classes="danger" HorizontalAlignment="Stretch" Content="{Binding StopText}" Command="{Binding StopWorkflowCommand}" />
                   </StackPanel>
                 </StackPanel>
               </Border>
             </Grid>
-          </Border>
+          </ScrollViewer>
         </DockPanel>
+      </Border>
+
+      <!-- 待审：可收起为顶栏横幅，便于边看画布边批（ui设计方案确认项体验） -->
+      <Border Grid.Row="0"
+              Grid.RowSpan="3"
+              VerticalAlignment="Top"
+              Margin="12,12,12,0"
+              Padding="14,10"
+              Background="{DynamicResource Ariadne.AccentLight}"
+              BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
+              BorderThickness="1"
+              CornerRadius="8"
+              IsVisible="{Binding ShowConfirmationBanner}"
+              ZIndex="20">
+        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
+          <TextBlock Grid.Column="0" Text="{Binding ConfirmationsBannerText}" VerticalAlignment="Center" TextWrapping="Wrap" />
+          <Button Grid.Column="1" Classes="secondary" Content="{Binding ExpandConfirmationsText}" Command="{Binding ToggleConfirmationPanelCommand}" />
+          <Button Grid.Column="2" Classes="secondary" Content="{Binding RefreshConfirmationsText}" Command="{Binding RefreshConfirmationsCommand}" />
+        </Grid>
       </Border>
 
       <Border Grid.Row="0"
@@ -407,14 +622,20 @@
               Background="{DynamicResource Ariadne.BackgroundMain}"
               BorderBrush="{DynamicResource Ariadne.BorderMuted}"
               BorderThickness="0,0,1,0"
-              IsVisible="{Binding HasPendingConfirmations}">
+              IsVisible="{Binding ShowConfirmationFullPanel}"
+              ZIndex="15">
         <Grid Margin="34,28" RowDefinitions="Auto,*" RowSpacing="22">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="16">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
             <StackPanel Grid.Column="0" Spacing="4">
               <TextBlock Text="{Binding ConfirmationsText}" Classes="display" />
               <TextBlock Text="{Binding ConfirmationCountText}" Classes="body secondary" TextWrapping="Wrap" />
             </StackPanel>
             <Button Grid.Column="1"
+                    Classes="secondary"
+                    Content="{Binding CollapseConfirmationsText}"
+                    Command="{Binding ToggleConfirmationPanelCommand}"
+                    VerticalAlignment="Top" />
+            <Button Grid.Column="2"
                     Classes="secondary"
                     Content="{Binding RefreshConfirmationsText}"
                     Command="{Binding RefreshConfirmationsCommand}"
@@ -516,28 +737,67 @@
 
           <Grid>
             <DockPanel IsVisible="{Binding IsProjectAiTab}">
-              <Border DockPanel.Dock="Bottom" Padding="12,8"
-                      BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,1,0,0">
-                <DockPanel>
-                  <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" Margin="0,6,0,0">
-                    <Button Grid.Column="1" Classes="primary" Width="34" Height="34" Padding="0"
-                            Command="{Binding SendProjectAiCommand}"
-                            ToolTip.Tip="{Binding ProjectAiText}">
-                      <Path Classes="icon" Width="17" Height="17"
-                            Stroke="{DynamicResource Ariadne.TextOnAccent}"
-                            Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
-                    </Button>
-                  </Grid>
-                  <TextBox MinHeight="60" MaxHeight="120" FontSize="13"
+              <!-- 单层输入区：底部分割线 + 一体 composer，不再套第二层卡片 -->
+              <Border DockPanel.Dock="Bottom"
+                      Classes="ai-composer"
+                      Margin="12,8,12,12"
+                      MinHeight="96"
+                      Padding="12,10,8,10">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                  <TextBox Grid.Column="0"
                            Text="{Binding ProjectAiMessage, Mode=TwoWay}"
-                           AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0"
-                           Background="Transparent" VerticalContentAlignment="Top"
+                           AcceptsReturn="True"
+                           TextWrapping="Wrap"
+                           BorderThickness="0"
+                           Background="Transparent"
+                           FontSize="13"
+                           MinHeight="72"
+                           MaxHeight="140"
+                           Padding="0"
+                           VerticalContentAlignment="Top"
+                           VerticalAlignment="Stretch"
                            PlaceholderText="{Binding ProjectAiPlaceholder}" />
-                </DockPanel>
+                  <Button Grid.Column="1"
+                          Classes="primary"
+                          Width="36" Height="36" Padding="0"
+                          VerticalAlignment="Bottom"
+                          Command="{Binding SendProjectAiCommand}"
+                          ToolTip.Tip="{Binding ProjectAiText}">
+                    <Path Classes="icon" Width="16" Height="16"
+                          Stroke="{DynamicResource Ariadne.TextOnAccent}"
+                          Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
+                  </Button>
+                </Grid>
               </Border>
               <ScrollViewer Margin="12,10">
-                <StackPanel Spacing="12">
-                  <TextBlock Text="{Binding ProjectAiAnswer}" Classes="caption" TextWrapping="Wrap" />
+                <StackPanel Spacing="10">
+                  <Border Classes="empty-state" Padding="8,16" IsVisible="{Binding !HasProjectAiBubbles}">
+                    <StackPanel Spacing="6">
+                      <ctl:EmptyStateArt Kind="ProjectAi" Width="120" Height="90" HorizontalAlignment="Left" />
+                      <TextBlock Text="{Binding EmptyProjectAiTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding EmptyProjectAiHint}" Classes="caption" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding ProjectAiEmptyText}" Classes="subtle" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                  <ItemsControl ItemsSource="{Binding ProjectAiBubbles}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate DataType="{x:Type vm:ChatBubbleViewModel}">
+                        <Border Background="{Binding BubbleBackground}"
+                                BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                                BorderThickness="1"
+                                CornerRadius="10"
+                                Padding="12,8"
+                                HorizontalAlignment="{Binding HorizontalAlignment}"
+                                MaxWidth="320"
+                                Margin="0,0,0,6">
+                          <StackPanel Spacing="4">
+                            <TextBlock Text="{Binding RoleLabel}" Classes="subtle" FontSize="11" />
+                            <TextBlock Text="{Binding Content}" TextWrapping="Wrap" FontSize="13" />
+                          </StackPanel>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
                 </StackPanel>
               </ScrollViewer>
             </DockPanel>
@@ -557,6 +817,31 @@
                 <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
 
                 <StackPanel IsVisible="{Binding HasSelectedNode}" Spacing="18">
+                  <Border Classes="panel-section" Padding="0,0,0,16">
+                    <StackPanel Spacing="8">
+                      <TextBlock Text="{Binding NodeNameLabel}" Classes="subtitle" />
+                      <TextBox Text="{Binding SelectedNode.Name, Mode=TwoWay}" />
+                      <StackPanel Spacing="4" IsVisible="{Binding IsSelectedStartNode}">
+                        <TextBlock Text="{Binding WorkDirLabel}" Classes="caption" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                          <TextBox Grid.Column="0" Text="{Binding SelectedNode.WorkDir, Mode=TwoWay}" Classes="mono"
+                                   PlaceholderText="{Binding WorkDirPlaceholder}" />
+                          <Button Grid.Column="1" Classes="secondary"
+                                  Content="{Binding BrowseWorkDirText}"
+                                  Command="{Binding BrowseWorkDirCommand}" />
+                        </Grid>
+                        <TextBlock Text="{Binding UserNoteLabel}" Classes="caption" />
+                        <TextBox Text="{Binding SelectedNode.UserNote, Mode=TwoWay}"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 MinHeight="56"
+                                 PlaceholderText="{Binding UserNotePlaceholder}" />
+                        <CheckBox IsChecked="{Binding SelectedNode.ExposedAsTool, Mode=TwoWay}"
+                                  Content="{Binding ExposeToolLabel}" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+
                   <Border Classes="panel-section" Padding="0,0,0,16" IsVisible="{Binding IsSelectedStartNode}">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                       <StackPanel Grid.Column="0" Spacing="3">
@@ -578,17 +863,27 @@
                       <Grid ColumnDefinitions="1.2*,0.8*" ColumnSpacing="10">
                         <StackPanel Grid.Column="0" Spacing="4">
                           <TextBlock Text="{Binding ModelIdText}" Classes="caption" />
-                          <TextBox Text="{Binding SelectedNode.ModelId, Mode=TwoWay}" />
+                          <ComboBox ItemsSource="{Binding AvailableModelIds}"
+                                    IsEditable="True"
+                                    Text="{Binding SelectedNode.ModelId, Mode=TwoWay}"
+                                    HorizontalAlignment="Stretch" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="4">
                           <TextBlock Text="{Binding NodeBudgetText}" Classes="caption" />
-                          <TextBox Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" />
+                          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="4">
+                            <TextBlock Grid.Column="0" Text="$" Classes="caption" VerticalAlignment="Center" />
+                            <TextBox Grid.Column="1" Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}"
+                                     PlaceholderText="{Binding OptionalPlaceholder}" />
+                          </Grid>
                         </StackPanel>
                       </Grid>
                       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
                         <StackPanel Grid.Column="0" Spacing="4">
                           <TextBlock Text="{Binding NodeTimeoutText}" Classes="caption" />
-                          <TextBox Text="{Binding SelectedNode.TimeoutMs, Mode=TwoWay}" />
+                          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                            <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}" />
+                            <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
+                          </Grid>
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Bottom">
                           <CheckBox IsChecked="{Binding SelectedNode.BreakpointEnabled, Mode=TwoWay}" Content="{Binding BreakpointText}" />
@@ -613,7 +908,7 @@
                             <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Command="{Binding SelectCommand}" HorizontalContentAlignment="Stretch">
                               <StackPanel Spacing="2">
                                 <TextBlock Text="{Binding Title}" TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding Kind}" Classes="caption" />
+                                <TextBlock Text="{Binding KindDisplay}" Classes="caption" />
                               </StackPanel>
                             </Button>
                           </DataTemplate>
@@ -692,12 +987,21 @@
           </Grid>
         </DockPanel>
       </Border>
-
-      <Button Classes="panel-float" Command="{Binding ToggleRightPanelCommand}"
-              ToolTip.Tip="{Binding ToggleRightPanelText}"
-              IsVisible="{Binding !IsRightPanelOpen}">
-        <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
-      </Button>
     </Panel>
   </Grid>
+
+  <!-- 节点库拖放 ghost：全页浮层，不被画布 ClipToBounds 裁掉 -->
+  <Canvas x:Name="LibraryDragLayer"
+          IsHitTestVisible="False"
+          ZIndex="200">
+    <Border x:Name="LibraryDragGhost"
+            IsVisible="False"
+            Classes="library-chip"
+            Padding="12,8"
+            Opacity="0.92"
+            BoxShadow="0 4 16 0 #28000000">
+      <TextBlock x:Name="LibraryDragGhostText" FontSize="12" FontWeight="SemiBold" />
+    </Border>
+  </Canvas>
+  </Panel>
 </UserControl>

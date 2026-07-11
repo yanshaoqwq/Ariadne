@@ -3,6 +3,7 @@
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:backend="clr-namespace:Ariadne.Desktop.Backend"
+    xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:RunLogPageViewModel">
   <Grid RowDefinitions="52,*" Background="{DynamicResource Ariadne.BackgroundMain}">
@@ -40,23 +41,30 @@
     </Grid>
 
     <ScrollViewer Grid.Row="1">
-      <StackPanel Margin="18" Spacing="8">
-        <TextBlock Text="{Binding StatusText}" Classes="caption" />
-        <ItemsControl ItemsSource="{Binding Logs}">
+      <StackPanel Margin="20,16" Spacing="10">
+        <TextBlock Text="{Binding StatusText}" Classes="caption" Opacity="0.9" />
+        <ItemsControl ItemsSource="{Binding Logs}" IsVisible="{Binding HasLogs}">
           <ItemsControl.ItemTemplate>
-            <DataTemplate DataType="{x:Type backend:UiRunLogEntry}">
-              <Border Classes="layer" Padding="14,10" Margin="0,0,0,8">
-                <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10">
-                  <TextBlock Grid.Column="0" Text="{Binding TimestampMs}" Classes="mono" Width="112" VerticalAlignment="Center" />
-                  <Border Grid.Column="1" Classes="chip">
-                    <TextBlock Text="{Binding Level}" Classes="caption" />
+            <DataTemplate DataType="{x:Type vm:RunLogItemViewModel}">
+              <Border Classes="layer log-row" Padding="14,11" Margin="0,0,0,8">
+                <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="12">
+                  <TextBlock Grid.Column="0" Text="{Binding TimestampText}" Classes="mono" Width="112" VerticalAlignment="Center" Opacity="0.85" />
+                  <Border Grid.Column="1" Classes="chip" Background="{Binding LevelBackground}" Padding="8,2" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Level}" Classes="caption" Foreground="{Binding LevelForeground}" FontWeight="SemiBold" />
                   </Border>
-                  <TextBlock Grid.Column="2" Text="{Binding Message}" Classes="secondary" VerticalAlignment="Center" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="2" Text="{Binding Message}" Classes="secondary" VerticalAlignment="Center" TextWrapping="Wrap" LineHeight="20" />
                 </Grid>
               </Border>
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
+        <Border Classes="empty-state" IsVisible="{Binding IsLogListEmpty}" Margin="0,40,0,0">
+          <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="380">
+            <ctl:EmptyStateArt Kind="RunLog" Width="140" Height="100" HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding EmptyHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+          </StackPanel>
+        </Border>
       </StackPanel>
     </ScrollViewer>
   </Grid>

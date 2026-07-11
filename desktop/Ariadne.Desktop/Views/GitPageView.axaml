@@ -2,6 +2,7 @@
     x:Class="Ariadne.Desktop.Views.GitPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:GitPageViewModel">
   <Grid ColumnDefinitions="*,Auto" Background="{DynamicResource Ariadne.BackgroundMain}">
@@ -20,7 +21,7 @@
                     HorizontalScrollBarVisibility="Auto"
                     VerticalScrollBarVisibility="Auto">
         <StackPanel Width="780" Margin="24,12" Spacing="10">
-          <ItemsControl ItemsSource="{Binding Commits}">
+          <ItemsControl ItemsSource="{Binding Commits}" IsVisible="{Binding HasCommits}">
             <ItemsControl.ItemTemplate>
               <DataTemplate DataType="{x:Type vm:GitHistoryItemViewModel}">
                 <Border Classes="layer" Padding="14,10" Margin="0,0,0,8"
@@ -50,12 +51,17 @@
               </DataTemplate>
             </ItemsControl.ItemTemplate>
           </ItemsControl>
-          <Border Classes="layer" Padding="24" IsVisible="{Binding !HasSelection}">
-            <TextBlock Text="{Binding EmptyText}" Classes="secondary" HorizontalAlignment="Center" />
+          <Border Classes="empty-state" IsVisible="{Binding IsCommitListEmpty}">
+            <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="360">
+              <ctl:EmptyStateArt Kind="GitRag" Width="140" Height="112" HorizontalAlignment="Center" />
+              <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
+              <TextBlock Text="{Binding EmptyHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
           </Border>
         </StackPanel>
       </ScrollViewer>
 
+      <!-- 右栏唯一开合：画布右缘 pill；收起后不再叠 panel-float -->
       <Border x:Name="GitTogglePill"
               Canvas.Right="0"
               Width="22"
@@ -69,19 +75,26 @@
               PointerPressed="OnPillPointerPressed"
               PointerMoved="OnPillPointerMoved"
               PointerReleased="OnPillPointerReleased">
-        <Path Classes="icon" Width="14" Height="14"
-              HorizontalAlignment="Center" VerticalAlignment="Center"
-              Data="{StaticResource Ariadne.Icon.ChevronRight}" />
+        <Panel>
+          <Path Classes="icon" Width="14" Height="14"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                IsVisible="{Binding IsRightPanelOpen}"
+                Data="{StaticResource Ariadne.Icon.ChevronRight}" />
+          <Path Classes="icon" Width="14" Height="14"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                IsVisible="{Binding !IsRightPanelOpen}"
+                Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
+        </Panel>
       </Border>
     </Canvas>
 
-    <Panel Grid.Column="1">
-      <Border
-          Width="300"
-          Background="{DynamicResource Ariadne.BackgroundSurface}"
-          BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-          BorderThickness="1,0,0,0"
-          IsVisible="{Binding IsRightPanelOpen}">
+    <Border
+        Grid.Column="1"
+        Width="300"
+        Background="{DynamicResource Ariadne.BackgroundSurface}"
+        BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+        BorderThickness="1,0,0,0"
+        IsVisible="{Binding IsRightPanelOpen}">
         <DockPanel>
           <TextBlock DockPanel.Dock="Top" Text="{Binding DetailsText}" Classes="subtitle" Margin="20,16,20,8" />
           <ScrollViewer>
@@ -149,13 +162,6 @@
             </StackPanel>
           </ScrollViewer>
         </DockPanel>
-      </Border>
-
-      <Button Classes="panel-float" Command="{Binding ToggleRightPanelCommand}"
-              ToolTip.Tip="{Binding ToggleRightPanelText}"
-              IsVisible="{Binding !IsRightPanelOpen}">
-        <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
-      </Button>
-    </Panel>
+    </Border>
   </Grid>
 </UserControl>

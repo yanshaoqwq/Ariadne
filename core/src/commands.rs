@@ -21,7 +21,7 @@ use crate::contracts::{
     PermissionPolicy, PortEndpoint, ProviderCapability, ProviderType, RunId, WorkflowDefinition,
     WorkflowEdgeKind, WorkflowId,
 };
-use crate::costs::{CostLedger, CostQuery, SqliteCostLedger};
+use crate::costs::{budget_limits_from_global_budget, CostLedger, CostQuery, SqliteCostLedger};
 use crate::diagnostics::{BackendDiagnosticsReport, DiagnosticItem, DiagnosticStatus};
 use crate::documents::{
     ChapterDocumentIndex, DocumentContent, DocumentReadRequest, DocumentRepository,
@@ -45,10 +45,11 @@ use crate::git::{
     ArchivePoint, BranchGraphNode, GitCommitSummary, GitHealthStatus, GitService, GitStagePolicy,
     RestoreReport,
 };
-use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
+use crate::llm::{tool_result_message, LlmRunRequest, LlmService, LlmServiceConfig, ToolExecutionOutput};
 use crate::providers::{
     ContentPart, LlmMessage, LlmRole, OpenAiCompatibleLlmProvider, ProviderProtocol, ToolDefinition,
 };
+use crate::skills::{WorkflowManifest, WORKFLOW_MANIFEST_FILE};
 use crate::workflow::{
     execute_document_read_node_with_root, execute_llm_node, execute_summarizer_node,
     BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink, RoutedExternalNodeExecutor,
@@ -646,6 +647,7 @@ pub fn create_project(
 ) -> CommandResult<ProjectInitReport> {
     let project_root = PathBuf::from(project_root);
     let report = initialize_project(&project_root).map_err(error_to_string)?;
+    persist_project_name(&project_root, name.as_deref())?;
     state.set_project_root(project_root.clone())?;
     record_recent_project(state.app_state_root(), name, &project_root)?;
     Ok(report)
@@ -658,6 +660,8 @@ pub fn open_project(
 ) -> CommandResult<CurrentProjectStatus> {
     let project_root = PathBuf::from(project_root);
     validate_initialized_project_root(&project_root)?;
+    ensure_project_config(&project_root)?;
+    persist_project_name(&project_root, name.as_deref())?;
     state.set_project_root(project_root.clone())?;
     record_recent_project(state.app_state_root(), name, &project_root)?;
     current_project_status(&project_root)
@@ -686,6 +690,7 @@ pub fn get_sidebar_badges(state: &AriadneAppState) -> CommandResult<SidebarBadge
 pub fn set_project_root(state: &AriadneAppState, project_root: String) -> CommandResult<()> {
     let project_root = PathBuf::from(project_root);
     validate_initialized_project_root(&project_root)?;
+    ensure_project_config(&project_root)?;
     state.set_project_root(project_root)
 }
 
@@ -741,9 +746,11 @@ pub fn save_document_content_with_version(
 
 pub fn import_chapter(
     state: &AriadneAppState,
-    request: ChapterImportRequest,
+    mut request: ChapterImportRequest,
 ) -> CommandResult<ChapterDocumentIndex> {
     let project_root = project_root_from_state(&state, None)?;
+    request.source_path = project_path_buf(&project_root, &request.source_path)?;
+    request.target_path = project_path_buf(&project_root, &request.target_path)?;
     let documents = document_service(&project_root);
     let report = import_chapter_document(&documents, request).map_err(error_to_string)?;
     let mut index = load_chapter_index(&project_root)?;
@@ -1560,9 +1567,7 @@ fn truncate_provider_error(text: &str) -> String {
 
 pub fn list_confirmations(state: &AriadneAppState) -> CommandResult<Vec<ConfirmationLogEntry>> {
     let project_root = project_root_from_state(&state, None)?;
-    FileConfirmationLogStore::default_for_project(&project_root)
-        .read_all()
-        .map_err(error_to_string)
+    list_pending_confirmations_impl(&project_root)
 }
 
 pub fn get_confirmation(
@@ -2034,9 +2039,8 @@ pub fn list_workflow_graphs_impl(project_root: &Path) -> CommandResult<Vec<Workf
     for path in paths {
         ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
         let content = std::fs::read_to_string(&path).map_err(error_to_string)?;
-        let workflow: WorkflowDefinition =
-            serde_json::from_str(&content).map_err(error_to_string)?;
-        let workflow_id = workflow_id_from_path(&workflows_root, &path)?;
+        let workflow = parse_workflow_file(&content)?;
+        let workflow_id = workflow.id.as_str().to_owned();
         summaries.push(WorkflowSummary {
             workflow_id,
             name: workflow.name,
@@ -2741,8 +2745,12 @@ pub fn resolve_confirmation_impl(
         .confirmations
         .get(&request.confirmation_id)
         .ok_or_else(|| format!("confirmation item not found: {}", request.confirmation_id))?;
-    let confirmation =
-        confirmation_log_entry_from_runtime(runtime_confirmation, request.review_reason.as_deref());
+    let confirmation = confirmation_log_entry_from_runtime(
+        runtime_confirmation,
+        request.review_reason.as_deref(),
+        &request.workflow_id,
+        &request.run_id,
+    );
     let confirmation_store = FileConfirmationLogStore::default_for_project(project_root);
     confirmation_store
         .record(confirmation.clone())
@@ -2769,15 +2777,20 @@ pub fn get_git_history_impl(project_root: &Path) -> CommandResult<Vec<GitCommitS
 pub fn get_git_repository_status_impl(project_root: &Path) -> CommandResult<GitRepositoryStatus> {
     validate_project_root(project_root)?;
     let service = GitService::new(project_root);
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let policy = git_stage_policy_from_config(&config.git);
     let health = service.health_check();
-    let diff = service.diff().unwrap_or_default();
+    let status = service.status_with_policy(&policy).unwrap_or_default();
+    let diff = service.diff_with_policy(&policy).unwrap_or_default();
     let diff_line_count = diff.lines().count();
     let diff_preview = diff.chars().take(4000).collect();
     Ok(GitRepositoryStatus {
         status: health.status,
         branch: health.branch,
         head: health.head,
-        dirty: health.dirty || diff_line_count > 0,
+        dirty: !status.trim().is_empty() || diff_line_count > 0,
         reason: health.reason,
         diff_line_count,
         diff_preview,
@@ -3117,6 +3130,8 @@ pub fn resolve_project_references(
         .collect()
 }
 
+const LIST_START_NODES_TOOL: &str = "list_start_nodes";
+
 fn project_ai_answer(
     project_root: &Path,
     secrets: &dyn SecretStore,
@@ -3130,46 +3145,202 @@ fn project_ai_answer(
     let runtime = llm_runtime(project_root, secrets)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
     let service = LlmService::new(&ledger, runtime.auto_mode.clone());
-    let messages = project_ai_llm_messages(project_memory, references, chat_history, message)?;
+    let mut messages = project_ai_llm_messages(project_memory, references, chat_history, message)?;
+    let start_catalog = project_ai_start_node_catalog(project_root)?;
     let tool_definitions = project_ai_tool_definitions(workflow_tools);
-    let report = service
-        .complete_basic(
-            &runtime.provider,
-            LlmRunRequest {
-                config: runtime.config,
-                messages,
-                tools: tool_definitions,
-                workflow_id: None,
-                run_id: None,
-                node_id: None,
-                metadata: json!({ "project_ai": true }),
-            },
-            &crate::contracts::CancellationToken::new(),
-        )
-        .map_err(error_to_string)?;
-    let tool_workflow_run = if let Some((tool, arguments)) =
-        report.response.tool_calls.iter().find_map(|call| {
-            workflow_tools
-                .iter()
-                .find(|tool| tool.tool_name == call.name)
-                .cloned()
-                .map(|tool| (tool, call.arguments.clone()))
-        }) {
-        Some(workflow_runner(RunWorkflowRequest {
-            workflow_id: tool.workflow_id,
-            start_node_id: Some(tool.start_node_id),
-            initial_inputs: workflow_tool_initial_inputs(arguments)?,
-        })?)
-    } else {
-        None
-    };
-    let text = message_text(report.response.message.content);
-    let answer = if text.trim().is_empty() && tool_workflow_run.is_some() {
+    let mut config = runtime.config;
+    if config.max_tool_rounds < 4 {
+        config.max_tool_rounds = 4;
+    }
+
+    // 手写 tool-use 循环：list_start_nodes 至少一次后才允许 start 工具。
+    let mut queried_start_nodes = false;
+    let mut tool_workflow_run: Option<WorkflowRunStarted> = None;
+    let max_rounds = config.max_tool_rounds;
+    let mut final_text = String::new();
+
+    for round in 0..=max_rounds {
+        let report = service
+            .complete_basic(
+                &runtime.provider,
+                LlmRunRequest {
+                    config: config.clone(),
+                    messages: messages.clone(),
+                    tools: tool_definitions.clone(),
+                    workflow_id: None,
+                    run_id: None,
+                    node_id: None,
+                    metadata: json!({ "project_ai": true, "round": round }),
+                },
+                &crate::contracts::CancellationToken::new(),
+            )
+            .map_err(error_to_string)?;
+
+        final_text = message_text(report.response.message.content.clone());
+        if report.response.tool_calls.is_empty() {
+            break;
+        }
+        if round >= max_rounds {
+            return Err("project AI tool-use max rounds exceeded before final answer".to_owned());
+        }
+
+        messages.push(report.response.message.clone());
+        for call in &report.response.tool_calls {
+            let output = project_ai_execute_tool_call(
+                call.name.as_str(),
+                &call.arguments,
+                &start_catalog,
+                workflow_tools,
+                &mut queried_start_nodes,
+                workflow_runner,
+                &mut tool_workflow_run,
+            )?;
+            messages.push(tool_result_message(call, output));
+        }
+    }
+
+    let answer = if final_text.trim().is_empty() && tool_workflow_run.is_some() {
         "ui.project_ai.workflow_tool_started".to_owned()
     } else {
-        text
+        final_text
     };
     Ok((answer, tool_workflow_run))
+}
+
+fn project_ai_execute_tool_call(
+    name: &str,
+    arguments: &Value,
+    start_catalog: &[ProjectAiStartNodeInfo],
+    workflow_tools: &[ProjectWorkflowTool],
+    queried_start_nodes: &mut bool,
+    workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
+    tool_workflow_run: &mut Option<WorkflowRunStarted>,
+) -> CommandResult<ToolExecutionOutput> {
+    if name == LIST_START_NODES_TOOL {
+        *queried_start_nodes = true;
+        let nodes: Vec<Value> = start_catalog
+            .iter()
+            .map(|node| {
+                json!({
+                    "id": node.node_id,
+                    "name": node.name,
+                    "user_note": node.user_note,
+                    "workflow_id": node.workflow_id,
+                    "expose_as_tool": node.expose_as_tool,
+                    "work_dir": node.work_dir,
+                })
+            })
+            .collect();
+        return Ok(ToolExecutionOutput {
+            value: json!({
+                "ok": true,
+                "start_nodes": nodes,
+                "count": nodes.len(),
+                "hint": "Pick a start node by id/name/user_note, then call its workflow start tool if expose_as_tool is true.",
+            }),
+            audit_metadata: json!({ "tool": LIST_START_NODES_TOOL }),
+        });
+    }
+
+    let Some(tool) = workflow_tools
+        .iter()
+        .find(|tool| tool.tool_name == name)
+        .cloned()
+    else {
+        return Ok(ToolExecutionOutput {
+            value: json!({
+                "ok": false,
+                "error": format!("unknown tool: {name}"),
+            }),
+            audit_metadata: json!({ "tool": name, "unknown": true }),
+        });
+    };
+
+    if !*queried_start_nodes {
+        return Ok(ToolExecutionOutput {
+            value: json!({
+                "ok": false,
+                "error": "Must call list_start_nodes once before starting any workflow. Query start node id/name/user_note first.",
+                "required_tool": LIST_START_NODES_TOOL,
+            }),
+            audit_metadata: json!({
+                "tool": name,
+                "rejected": "start_without_list_start_nodes",
+            }),
+        });
+    }
+
+    let initial_inputs = workflow_tool_initial_inputs(arguments.clone())?;
+    let started = workflow_runner(RunWorkflowRequest {
+        workflow_id: tool.workflow_id.clone(),
+        start_node_id: Some(tool.start_node_id.clone()),
+        initial_inputs,
+    })?;
+    *tool_workflow_run = Some(started.clone());
+    Ok(ToolExecutionOutput {
+        value: json!({
+            "ok": true,
+            "workflow_id": tool.workflow_id,
+            "start_node_id": tool.start_node_id,
+            "run_id": started.run_id,
+            "status": started.status,
+        }),
+        audit_metadata: json!({
+            "tool": tool.tool_name,
+            "start_node_id": tool.start_node_id,
+        }),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectAiStartNodeInfo {
+    workflow_id: String,
+    node_id: String,
+    name: String,
+    user_note: String,
+    work_dir: String,
+    expose_as_tool: bool,
+}
+
+/// 扫描全部起始节点（不限于 expose_as_tool），供 list_start_nodes 与测试使用。
+fn project_ai_start_node_catalog(project_root: &Path) -> CommandResult<Vec<ProjectAiStartNodeInfo>> {
+    let workflows_root = absolute_path(&project_root.join("workflows"));
+    reject_symlink_root(&workflows_root)?;
+    if !workflows_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = workflow_json_paths(&workflows_root)?;
+    paths.sort();
+    let mut catalog = Vec::new();
+    for path in paths {
+        ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
+        let content = std::fs::read_to_string(&path).map_err(error_to_string)?;
+        let workflow: WorkflowDefinition =
+            serde_json::from_str(&content).map_err(error_to_string)?;
+        for start_node in workflow.nodes.iter().filter(|node| node.type_name == "start") {
+            catalog.push(ProjectAiStartNodeInfo {
+                workflow_id: workflow.id.as_str().to_owned(),
+                node_id: start_node.id.as_str().to_owned(),
+                name: start_node_tool_display_name(start_node),
+                user_note: start_node
+                    .config
+                    .get("user_note")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+                work_dir: start_node
+                    .config
+                    .get("work_dir")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+                expose_as_tool: start_node_exposes_tool(start_node),
+            });
+        }
+    }
+    Ok(catalog)
 }
 
 fn project_ai_llm_messages(
@@ -3192,7 +3363,9 @@ fn project_ai_llm_messages(
         LlmMessage {
             role: LlmRole::System,
             content: vec![ContentPart::text(
-                "You are the Ariadne Project AI. Only answer based on project memory, explicit references, chat history, and user messages; do not fabricate project facts not provided.",
+                "You are the Ariadne Project AI. Only answer based on project memory, explicit references, chat history, and user messages; do not fabricate project facts not provided. \
+Before starting any workflow tool, you MUST call list_start_nodes once to read every start node's id, name, and user_note, then choose which start tool to run yourself. \
+Do not start a workflow without querying start nodes first.",
             )],
             name: None,
             tool_call_id: None,
@@ -3306,9 +3479,15 @@ fn workflow_json_paths(root: &Path) -> CommandResult<Vec<PathBuf>> {
     for entry in std::fs::read_dir(root).map_err(error_to_string)? {
         let entry = entry.map_err(error_to_string)?;
         let path = entry.path();
-        if path.is_dir() {
+        let file_type = entry.file_type().map_err(error_to_string)?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             paths.extend(workflow_json_paths(&path)?);
-        } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+        } else if file_type.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) == Some("json")
+        {
             paths.push(path);
         }
     }
@@ -3400,20 +3579,30 @@ fn sanitize_tool_name(value: &str) -> String {
 }
 
 fn project_ai_tool_definitions(workflow_tools: &[ProjectWorkflowTool]) -> Vec<ToolDefinition> {
-    workflow_tools
-        .iter()
-        .map(|tool| ToolDefinition {
-            name: tool.tool_name.clone(),
-            description: workflow_tool_description(tool),
-            input_schema: tool.input_schema.clone(),
-        })
-        .collect()
+    // 无启动工具时不暴露工具表（权限关闭 / 无 expose 起点）；有启动工具时强制附带 list_start_nodes。
+    if workflow_tools.is_empty() {
+        return Vec::new();
+    }
+    let mut tools = vec![ToolDefinition {
+        name: LIST_START_NODES_TOOL.to_owned(),
+        description: "List all start nodes (id, name, user_note, work_dir, expose_as_tool). \
+REQUIRED once before calling any workflow start tool. Use this to decide which start node to run."
+            .to_owned(),
+        input_schema: empty_tool_input_schema(),
+    }];
+    tools.extend(workflow_tools.iter().map(|tool| ToolDefinition {
+        name: tool.tool_name.clone(),
+        description: workflow_tool_description(tool),
+        input_schema: tool.input_schema.clone(),
+    }));
+    tools
 }
 
 fn workflow_tool_description(tool: &ProjectWorkflowTool) -> String {
     format!(
-        "Start Ariadne workflow '{}' from start node '{}'.",
-        tool.display_name, tool.start_node_id
+        "Start Ariadne workflow from start node '{}' (id={}, display='{}'). \
+Only call after list_start_nodes has been used once in this turn.",
+        tool.start_node_id, tool.start_node_id, tool.display_name
     )
 }
 
@@ -3472,14 +3661,19 @@ fn record_recent_project(
     name: Option<String>,
     project_root: &Path,
 ) -> CommandResult<Vec<RecentProjectEntry>> {
-    let name = name.unwrap_or_else(|| project_display_name(project_root));
+    let name = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| project_display_name(project_root));
     recent_project_store(app_state_root)
         .record_opened(name, project_root)
         .map_err(error_to_string)
 }
 
 pub fn current_project_status(project_root: &Path) -> CommandResult<CurrentProjectStatus> {
-    validate_project_root(project_root)?;
+    validate_initialized_project_root(project_root)?;
     Ok(CurrentProjectStatus {
         project_root: project_root.to_path_buf(),
         project_name: project_display_name(project_root),
@@ -3487,6 +3681,12 @@ pub fn current_project_status(project_root: &Path) -> CommandResult<CurrentProje
 }
 
 fn project_display_name(project_root: &Path) -> String {
+    if let Ok(config) = ConfigStore::new(project_root).load() {
+        let project_name = config.app.project_name.trim();
+        if !project_name.is_empty() {
+            return project_name.to_owned();
+        }
+    }
     project_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -3495,17 +3695,66 @@ fn project_display_name(project_root: &Path) -> String {
         .to_owned()
 }
 
+fn ensure_project_config(project_root: &Path) -> CommandResult<()> {
+    ConfigStore::new(project_root)
+        .load_or_create()
+        .map(|_| ())
+        .map_err(error_to_string)
+}
+
+fn persist_project_name(project_root: &Path, name: Option<&str>) -> CommandResult<()> {
+    let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
+        return Ok(());
+    };
+    let config_store = ConfigStore::new(project_root);
+    let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    config.app.project_name = name.to_owned();
+    config_store.save(&config).map_err(error_to_string)
+}
+
 pub fn get_sidebar_badges_impl(project_root: &Path) -> CommandResult<SidebarBadgeCounts> {
     let run_logs = UiRunLogStore::default_for_project(project_root);
-    let confirmations = FileConfirmationLogStore::default_for_project(project_root);
-    run_logs
-        .badge_counts(Some(&confirmations), None)
-        .map_err(error_to_string)
+    let mut badges = run_logs.badge_counts(None, None).map_err(error_to_string)?;
+    // 待审数以 runtime 未终态运行为准，避免文件日志历史污染或 pending 未落盘导致徽章失真。
+    let pending = list_pending_confirmations_impl(project_root)?.len();
+    badges.confirmations = u32::try_from(pending).unwrap_or(u32::MAX);
+    Ok(badges)
+}
+
+/// 聚合所有未终态运行中的 pending 确认项（含 workflow_id/run_id）。
+fn list_pending_confirmations_impl(
+    project_root: &Path,
+) -> CommandResult<Vec<ConfirmationLogEntry>> {
+    validate_project_root(project_root)?;
+    let store = match SqliteWorkflowRuntimeStore::open(project_root) {
+        Ok(store) => store,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut pending = Vec::new();
+    for state in store.list_non_terminal_states().map_err(error_to_string)? {
+        let workflow_id = state.workflow_id.as_str().to_owned();
+        let run_id = state.run_id.as_str().to_owned();
+        for confirmation in state.confirmations.values() {
+            if confirmation.state != RuntimeConfirmationState::Pending {
+                continue;
+            }
+            pending.push(confirmation_log_entry_from_runtime(
+                confirmation,
+                None,
+                &workflow_id,
+                &run_id,
+            ));
+        }
+    }
+    pending.sort_by(|left, right| right.timestamp_ms.cmp(&left.timestamp_ms));
+    Ok(pending)
 }
 
 fn confirmation_log_entry_from_runtime(
     confirmation: &RuntimeConfirmation,
     review_reason: Option<&str>,
+    workflow_id: &str,
+    run_id: &str,
 ) -> ConfirmationLogEntry {
     let metadata = &confirmation.metadata;
     let kind = metadata
@@ -3552,6 +3801,8 @@ fn confirmation_log_entry_from_runtime(
         handling_method,
         summary,
         diff,
+        workflow_id: workflow_id.to_owned(),
+        run_id: run_id.to_owned(),
     }
 }
 
@@ -4076,10 +4327,16 @@ fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<
         .transpose()?;
     let provider = OpenAiCompatibleLlmProvider::new(provider_config.clone(), api_key)
         .map_err(error_to_string)?;
+    let budget_config = read_budget_config(project_root)?;
+    let mut config =
+        LlmServiceConfig::new(provider_config.provider_id, model_config.model_id.clone())
+            .with_model_config(&model_config);
+    // 用户配置的全局预算写入执行侧日限额，供 LlmService::evaluate_budget 使用。
+    config.budget_limits = budget_limits_from_global_budget(budget_config.budget_usd);
+    // auto_mode 已含 preauthorized_budget_usd（update_budget_config 写入）。
     Ok(CommandLlmRuntime {
         provider,
-        config: LlmServiceConfig::new(provider_config.provider_id, model_config.model_id.clone())
-            .with_model_config(&model_config),
+        config,
         auto_mode: project_config.auto_mode,
     })
 }
@@ -4147,10 +4404,14 @@ fn project_root_from_state(
     match project_id {
         Some(project_id) if !project_id.trim().is_empty() => {
             let path = PathBuf::from(project_id);
-            validate_project_root(&path)?;
+            validate_initialized_project_root(&path)?;
             Ok(path)
         }
-        _ => state.project_root(),
+        _ => {
+            let path = state.project_root()?;
+            validate_initialized_project_root(&path)?;
+            Ok(path)
+        }
     }
 }
 
@@ -4264,37 +4525,68 @@ fn workflow_path(project_root: &Path, workflow_id: Option<String>) -> CommandRes
     }
 }
 
-fn workflow_id_from_path(workflows_root: &Path, path: &Path) -> CommandResult<String> {
-    let relative = path
-        .strip_prefix(workflows_root)
-        .map_err(error_to_string)?
-        .with_extension("");
-    let id = relative
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
-    if id.trim().is_empty() {
-        Err("workflow path does not contain a workflow id".to_owned())
-    } else {
-        Ok(id)
-    }
+fn workflow_manifest_path(project_root: &Path, workflow_id: &str) -> CommandResult<PathBuf> {
+    let workflows_root = absolute_path(&project_root.join("workflows"));
+    reject_symlink_root(&workflows_root)?;
+    let path = project_path(&workflows_root, workflow_id)?.join(WORKFLOW_MANIFEST_FILE);
+    ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
+    Ok(path)
 }
 
 fn load_workflow_definition(
     project_root: &Path,
     workflow_id: Option<String>,
 ) -> CommandResult<WorkflowDefinition> {
+    let requested_workflow_id = workflow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|workflow_id| !workflow_id.is_empty())
+        .map(str::to_owned);
+    let manifest_path = workflow_id
+        .as_deref()
+        .filter(|workflow_id| !workflow_id.trim().is_empty())
+        .map(|workflow_id| workflow_manifest_path(project_root, workflow_id))
+        .transpose()?;
     let path = workflow_path(project_root, workflow_id)?;
     if !path.exists() {
-        return Ok(WorkflowDefinition {
-            id: WorkflowId::from("default"),
-            name: "Default Workflow".to_owned(),
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            metadata: Value::Null,
-        });
+        if let Some(manifest_path) = manifest_path.filter(|path| path.exists()) {
+            let content = std::fs::read_to_string(manifest_path).map_err(error_to_string)?;
+            return parse_workflow_file(&content);
+        }
+        if let Some(workflow_id) = requested_workflow_id
+            .as_deref()
+            .filter(|id| *id != "default")
+        {
+            return Err(format!("workflow not found: {workflow_id}"));
+        }
+        return Ok(default_workflow_definition());
     }
     let content = std::fs::read_to_string(path).map_err(error_to_string)?;
-    serde_json::from_str(&content).map_err(error_to_string)
+    parse_workflow_file(&content)
+}
+
+fn default_workflow_definition() -> WorkflowDefinition {
+    WorkflowDefinition {
+        id: WorkflowId::from("default"),
+        name: "Default Workflow".to_owned(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        metadata: Value::Null,
+    }
+}
+
+fn parse_workflow_file(content: &str) -> CommandResult<WorkflowDefinition> {
+    match serde_json::from_str::<WorkflowDefinition>(content) {
+        Ok(workflow) => Ok(workflow),
+        Err(workflow_error) => {
+            let manifest = serde_json::from_str::<WorkflowManifest>(content).map_err(|error| {
+                format!(
+                    "invalid workflow JSON: {workflow_error}; invalid workflow manifest: {error}"
+                )
+            })?;
+            manifest.import_definition().map_err(error_to_string)
+        }
+    }
 }
 
 fn workflow_to_graph(workflow: WorkflowDefinition) -> WorkflowGraphData {
@@ -4587,9 +4879,13 @@ fn validate_money(field: &str, value: f64) -> CommandResult<()> {
 }
 
 fn project_path(root: &Path, input: &str) -> CommandResult<PathBuf> {
-    let raw = PathBuf::from(input);
+    project_path_buf(root, Path::new(input))
+}
+
+fn project_path_buf(root: &Path, input: &Path) -> CommandResult<PathBuf> {
+    let raw = input;
     let path = if raw.is_absolute() {
-        raw
+        raw.to_path_buf()
     } else {
         root.join(raw)
     };

@@ -87,6 +87,14 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     }
 
     public bool HasSelection => SelectedCommit is not null;
+    public bool HasCommits => Commits.Count > 0;
+    public bool IsCommitListEmpty => Commits.Count == 0;
+    public string EmptyTitle => _backend.HasProjectRoot
+        ? _displayNames.Text("ui.empty.git.title")
+        : _displayNames.Text("ui.empty.need_project.title");
+    public string EmptyHint => _backend.HasProjectRoot
+        ? _displayNames.Text("ui.empty.git.hint")
+        : _displayNames.Text("ui.empty.need_project.hint");
     public string SelectedSummary => SelectedCommit?.Summary ?? NoSelectionText;
     public string SelectedCommitId => SelectedCommit?.CommitId ?? _displayNames.Text("ui.common.none");
     public string SelectedKind => SelectedCommit?.KindText ?? _displayNames.Text("ui.common.none");
@@ -125,6 +133,25 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
 
     private async Task RefreshAsync()
     {
+        if (!_backend.HasProjectRoot)
+        {
+            Commits.Clear();
+            SelectedCommit = null;
+            StatusText = string.Empty;
+            RepositoryStatusText = string.Empty;
+            CurrentBranchText = _displayNames.Text("ui.common.none");
+            HeadText = _displayNames.Text("ui.common.none");
+            DirtyStateText = _displayNames.Text("ui.common.none");
+            RepositoryReasonText = string.Empty;
+            DiffSummaryText = _displayNames.Text("ui.common.none");
+            DiffPreviewText = string.Empty;
+            OnPropertyChanged(nameof(HasCommits));
+            OnPropertyChanged(nameof(IsCommitListEmpty));
+            OnPropertyChanged(nameof(EmptyTitle));
+            OnPropertyChanged(nameof(EmptyHint));
+            return;
+        }
+
         try
         {
             await RefreshRepositoryStatusAsync().ConfigureAwait(true);
@@ -152,6 +179,10 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
                 SelectedCommit.IsSelected = true;
             }
             StatusText = Commits.Count == 0 ? EmptyText : $"{Commits.Count}";
+            OnPropertyChanged(nameof(HasCommits));
+            OnPropertyChanged(nameof(IsCommitListEmpty));
+            OnPropertyChanged(nameof(EmptyTitle));
+            OnPropertyChanged(nameof(EmptyHint));
         }
         catch
         {
@@ -218,10 +249,14 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
                 SelectedCommit.IsSelected = true;
             }
             StatusText = Commits.Count == 0 ? EmptyText : $"{Commits.Count}";
+            OnPropertyChanged(nameof(HasCommits));
+            OnPropertyChanged(nameof(IsCommitListEmpty));
         }
         catch (Exception ex)
         {
             StatusText = ex.Message;
+            OnPropertyChanged(nameof(HasCommits));
+            OnPropertyChanged(nameof(IsCommitListEmpty));
         }
     }
 

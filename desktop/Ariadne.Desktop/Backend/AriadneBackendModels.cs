@@ -23,7 +23,13 @@ public sealed record UiPreferences(
     [property: JsonPropertyName("project_panel_visible")] bool ProjectPanelVisible,
     [property: JsonPropertyName("project_panel_position")] int[]? ProjectPanelPosition,
     [property: JsonPropertyName("panel_states")] Dictionary<string, bool> PanelStates,
-    [property: JsonPropertyName("onboarding_seen")] bool OnboardingSeen);
+    [property: JsonPropertyName("onboarding_seen")] bool OnboardingSeen,
+    /// 主题主底色；空/缺省 = 用主题预设。
+    [property: JsonPropertyName("theme_main_color")] string? ThemeMainColor = null,
+    /// 主题表面色。
+    [property: JsonPropertyName("theme_surface_color")] string? ThemeSurfaceColor = null,
+    /// 主题强调色（品牌/Accent）。
+    [property: JsonPropertyName("theme_brand_color")] string? ThemeBrandColor = null);
 
 public sealed record AppStatus(
     [property: JsonPropertyName("current_project")] CurrentProjectStatus CurrentProject,
@@ -416,7 +422,9 @@ public sealed record ConfirmationLogEntry(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("handling_method")] string HandlingMethod,
     [property: JsonPropertyName("summary")] string Summary,
-    [property: JsonPropertyName("diff")] string Diff);
+    [property: JsonPropertyName("diff")] string Diff,
+    [property: JsonPropertyName("workflow_id")] string? WorkflowId = null,
+    [property: JsonPropertyName("run_id")] string? RunId = null);
 
 public sealed record ResolveConfirmationResult(
     [property: JsonPropertyName("workflow")] WorkflowActionResult Workflow,
