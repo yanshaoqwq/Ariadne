@@ -5,11 +5,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::contracts::{CoreError, CoreResult};
 use crate::retrieval::memory::sort_and_limit;
-use crate::retrieval::query::sqlite_fts_literal_query;
 use crate::retrieval::models::{
     ChunkDocument, FullTextRecord, FullTextSearchRequest, RebuildReport, RebuildStatus,
     RetrievalResult, RetrievalSource, StoreHealth,
 };
+use crate::retrieval::query::sqlite_fts_literal_query;
 use crate::retrieval::traits::FullTextStore;
 
 const SCHEMA_VERSION: i64 = 1;

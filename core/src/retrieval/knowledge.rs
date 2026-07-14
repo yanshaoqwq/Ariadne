@@ -7,11 +7,12 @@ use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::contracts::{CoreError, CoreResult};
+use crate::contracts::{CoreError, CoreResult, ExecutionCancellation};
 use crate::providers::ProviderCallContext;
 use crate::rag::{KnowledgeRetrievalSnapshot, SqliteWritingKnowledgeStore};
 use crate::retrieval::{
-    ChunkDocument, FullTextRecord, FullTextStore, TextEmbedder, VectorRecord, VectorStore,
+    ChunkDocument, FullTextRecord, FullTextStore, StoreHealth, TextEmbedder, VectorRecord,
+    VectorStore,
 };
 
 const KNOWLEDGE_INDEX_SCHEMA_VERSION: u32 = 1;
@@ -71,17 +72,17 @@ impl KnowledgeIndexSynchronizer {
         vector: Option<&Arc<dyn VectorStore>>,
         embedder: Option<&Arc<dyn TextEmbedder>>,
         vector_signature: Option<&str>,
+        cancellation: Option<&ExecutionCancellation>,
     ) -> CoreResult<KnowledgeIndexSyncReport> {
-        if vector.is_some() != embedder.is_some()
-            || vector.is_some() != vector_signature.is_some()
+        if vector.is_some() != embedder.is_some() || vector.is_some() != vector_signature.is_some()
         {
             return Err(CoreError::validation(
                 "knowledge index vector store, embedder and signature must be configured together",
             ));
         }
 
-        let snapshot = SqliteWritingKnowledgeStore::open(&self.project_root)?
-            .load_retrieval_snapshot()?;
+        let snapshot =
+            SqliteWritingKnowledgeStore::open(&self.project_root)?.load_retrieval_snapshot()?;
         let records = records_from_snapshot(&snapshot)?;
         let document_ids = records
             .iter()
@@ -106,7 +107,8 @@ impl KnowledgeIndexSynchronizer {
         }
 
         // 远端 embedding 在任何索引破坏前完成；失败时旧 generation 仍完整可用。
-        let vectors = embed_knowledge_records(&snapshot.revision, &records, embedder)?;
+        let vectors =
+            embed_knowledge_records(&snapshot.revision, &records, embedder, cancellation)?;
         let _mutation_lock = acquire_retrieval_index_lock(&self.mutation_lock_path)?;
         crate::config::store::atomic_write(
             &self.marker_path,
@@ -160,6 +162,38 @@ impl KnowledgeIndexSynchronizer {
             changed: true,
         })
     }
+
+    pub fn health_check(&self, vector_signature: Option<&str>) -> CoreResult<StoreHealth> {
+        if read_marker(&self.marker_path)?.is_some() {
+            return Ok(StoreHealth::rebuild_required(
+                "knowledge_retrieval_index",
+                "knowledge index rebuild marker is present",
+            ));
+        }
+        let snapshot =
+            SqliteWritingKnowledgeStore::open(&self.project_root)?.load_retrieval_snapshot()?;
+        let expected_documents = records_from_snapshot(&snapshot)?
+            .into_iter()
+            .map(|record| record.chunk.document_id)
+            .collect::<Vec<_>>();
+        let Some(manifest) = read_manifest(&self.manifest_path)? else {
+            return Ok(StoreHealth::rebuild_required(
+                "knowledge_retrieval_index",
+                "knowledge index manifest is missing",
+            ));
+        };
+        if manifest.schema_version != KNOWLEDGE_INDEX_SCHEMA_VERSION
+            || manifest.revision != snapshot.revision
+            || manifest.vector_signature != vector_signature.map(str::to_owned)
+            || manifest.document_ids != expected_documents
+        {
+            return Ok(StoreHealth::rebuild_required(
+                "knowledge_retrieval_index",
+                "knowledge index manifest does not match metadata.db",
+            ));
+        }
+        Ok(StoreHealth::healthy("knowledge_retrieval_index"))
+    }
 }
 
 pub(crate) fn records_from_project(
@@ -191,10 +225,7 @@ fn records_from_snapshot(snapshot: &KnowledgeRetrievalSnapshot) -> CoreResult<Ve
             })?;
             metadata.insert("knowledge_layer".to_owned(), json!(entry.layer));
             metadata.insert("knowledge_entity_id".to_owned(), json!(entry.entity_id));
-            metadata.insert(
-                "knowledge_revision".to_owned(),
-                json!(snapshot.revision),
-            );
+            metadata.insert("knowledge_revision".to_owned(), json!(snapshot.revision));
             metadata.insert(
                 "ariadne_retrieval".to_owned(),
                 json!({
@@ -204,10 +235,7 @@ fn records_from_snapshot(snapshot: &KnowledgeRetrievalSnapshot) -> CoreResult<Ve
                     "knowledge_revision": snapshot.revision,
                 }),
             );
-            let document_id = format!(
-                "ariadne-knowledge://{}/{}",
-                entry.layer, entry.entity_id
-            );
+            let document_id = format!("ariadne-knowledge://{}/{}", entry.layer, entry.entity_id);
             Ok(FullTextRecord {
                 chunk: ChunkDocument {
                     chunk_id: format!("knowledge:{}:{}", entry.layer, entry.entity_id),
@@ -225,6 +253,7 @@ fn embed_knowledge_records(
     revision: &str,
     records: &[FullTextRecord],
     embedder: Option<&Arc<dyn TextEmbedder>>,
+    cancellation: Option<&ExecutionCancellation>,
 ) -> CoreResult<Option<Vec<VectorRecord>>> {
     let Some(embedder) = embedder else {
         return Ok(None);
@@ -232,6 +261,9 @@ fn embed_knowledge_records(
     let mut vectors = Vec::with_capacity(records.len());
     for (batch_index, batch) in records.chunks(KNOWLEDGE_EMBEDDING_BATCH_SIZE).enumerate() {
         let mut context = ProviderCallContext::new(embedder.provider_id());
+        if let Some(cancellation) = cancellation {
+            context.cancellation = cancellation.clone();
+        }
         context.operation_id = Some(format!(
             "knowledge-index-embedding:{revision}:{batch_index}"
         ));
@@ -249,12 +281,15 @@ fn embed_knowledge_records(
                 batch.len()
             )));
         }
-        vectors.extend(batch.iter().zip(embeddings).map(|(record, embedding)| {
-            VectorRecord {
-                chunk: record.chunk.clone(),
-                embedding,
-            }
-        }));
+        vectors.extend(
+            batch
+                .iter()
+                .zip(embeddings)
+                .map(|(record, embedding)| VectorRecord {
+                    chunk: record.chunk.clone(),
+                    embedding,
+                }),
+        );
     }
     Ok(Some(vectors))
 }

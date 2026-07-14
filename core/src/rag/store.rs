@@ -1867,7 +1867,10 @@ impl SqliteWritingKnowledgeStore {
                         layer: "chapter_summary".to_owned(),
                         text: summary,
                         sources: dedupe_sources(
-                            chapter_sources.get(&chapter_id).cloned().unwrap_or_default(),
+                            chapter_sources
+                                .get(&chapter_id)
+                                .cloned()
+                                .unwrap_or_default(),
                         ),
                         metadata: json!({
                             "chapter_id": chapter_id,

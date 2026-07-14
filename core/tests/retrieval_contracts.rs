@@ -4,15 +4,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use ariadne::contracts::CoreResult;
+use ariadne::contracts::{CoreResult, SourceSpan, TextRange};
 use ariadne::documents::IndexInvalidationOutbox;
 use ariadne::providers::ProviderCallContext;
+use ariadne::rag::{
+    MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, StoryEvent, StoryEventStatus,
+    StorySegment,
+};
 use ariadne::retrieval::{
     recover_retrieval_components, select_available_port, ChunkDocument, FullTextRecord,
     FullTextSearchRequest, HybridSearchEngine, HybridSearchRequest, IndexingWorker,
-    MemoryFullTextStore, MemoryVectorStore, RebuildStatus, RetrievalRecoveryAction,
-    RetrievalSource, SidecarState, SqliteFullTextStore, StoreHealth, StoreStatus,
-    TantivyFullTextStore, TextEmbedder, ThreeWayHybridSearchEngine, VectorRecord,
+    KnowledgeIndexSynchronizer, MemoryFullTextStore, MemoryVectorStore, RebuildStatus,
+    RetrievalRecoveryAction, RetrievalSource, SidecarState, SqliteFullTextStore, StoreHealth,
+    StoreStatus, TantivyFullTextStore, TextEmbedder, ThreeWayHybridSearchEngine, VectorRecord,
     VectorSearchRequest, MAX_HYBRID_SEARCH_LIMIT,
 };
 use ariadne::retrieval::{
@@ -238,6 +242,103 @@ fn indexing_worker_upserts_vector_store_when_configured() {
         IndexingWorker::new(outbox, tantivy, Arc::new(MemoryFullTextStore::new()), 32, 4).unwrap();
     let report_ft = worker_ft.process_next().unwrap().unwrap();
     assert!(!report_ft.vector_indexed);
+}
+
+#[test]
+fn confirmed_four_layer_knowledge_is_versioned_into_full_text_and_vector_indexes() {
+    let project = tempfile::tempdir().unwrap();
+    let chapter_path = project.path().join("documents").join("chapter.md");
+    std::fs::create_dir_all(chapter_path.parent().unwrap()).unwrap();
+    std::fs::write(&chapter_path, "原文没有量子回声这个词").unwrap();
+    let chapter_document_id = chapter_path.to_string_lossy().into_owned();
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    knowledge
+        .upsert_segment(StorySegment {
+            segment_id: "segment-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "chapter-1".to_owned(),
+            summary: "角色听见量子回声".to_owned(),
+            source: SourceSpan {
+                document_id: chapter_document_id,
+                range: TextRange::new(0, 6).unwrap(),
+                version: Some("chapter-v1".to_owned()),
+            },
+            metadata: serde_json::Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_event(StoryEvent {
+            event_id: "event-1".to_owned(),
+            summary: "量子回声揭示旧城真相".to_owned(),
+            status: StoryEventStatus::Ongoing,
+            segment_ids: vec!["segment-1".to_owned()],
+            chapter_ids: vec!["chapter-1".to_owned()],
+            metadata: serde_json::Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_chapter_summary("chapter-1", "本章围绕量子回声推进")
+        .unwrap();
+    knowledge
+        .upsert_stage_summary("stage-1", "本阶段解开量子回声来源")
+        .unwrap();
+    knowledge
+        .link_chapter_stage("chapter-1", "stage-1")
+        .unwrap();
+    SqliteWritingKnowledgeStore::open(project.path())
+        .unwrap()
+        .save_knowledge(&knowledge)
+        .unwrap();
+
+    let tantivy: Arc<dyn FullTextStore> = Arc::new(MemoryFullTextStore::new());
+    let sqlite: Arc<dyn FullTextStore> = Arc::new(MemoryFullTextStore::new());
+    let vector: Arc<dyn VectorStore> = Arc::new(MemoryVectorStore::new());
+    let embedder: Arc<dyn TextEmbedder> = Arc::new(TestTextEmbedder {
+        calls: Arc::new(AtomicUsize::new(0)),
+        dimensions: 8,
+    });
+    let synchronizer = KnowledgeIndexSynchronizer::new(project.path()).unwrap();
+
+    let report = synchronizer
+        .sync(
+            &tantivy,
+            &sqlite,
+            Some(&vector),
+            Some(&embedder),
+            Some("test-vector-v1"),
+            None,
+        )
+        .unwrap();
+
+    assert!(report.changed);
+    assert_eq!(report.indexed_records, 4);
+    let text_results = tantivy
+        .search(FullTextSearchRequest::new("量子回声", 10))
+        .unwrap();
+    assert_eq!(text_results.len(), 4);
+    assert!(text_results.iter().all(|result| {
+        result.metadata["confirmed"] == serde_json::json!(true)
+            && result.metadata["knowledge_revision"] == serde_json::json!(report.revision)
+    }));
+    let vector_results = vector
+        .search(VectorSearchRequest::new(
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            10,
+        ))
+        .unwrap();
+    assert_eq!(vector_results.len(), 4);
+
+    let unchanged = synchronizer
+        .sync(
+            &tantivy,
+            &sqlite,
+            Some(&vector),
+            Some(&embedder),
+            Some("test-vector-v1"),
+            None,
+        )
+        .unwrap();
+    assert!(!unchanged.changed);
 }
 
 fn test_content_version(bytes: &[u8]) -> String {

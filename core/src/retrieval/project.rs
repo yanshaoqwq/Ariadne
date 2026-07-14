@@ -19,12 +19,13 @@ use crate::providers::{
 };
 use crate::retrieval::reranker::apply_rerank_results;
 use crate::retrieval::{
-    ensure_search_not_blocked_by_pending_index, filter_fresh_retrieval_results, FullTextStore,
-    HybridSearch, HybridSearchRequest, IndexingWorker, QdrantSidecarConfig,
+    ensure_search_not_blocked_by_pending_index,
+    filter_fresh_retrieval_results_with_knowledge_revision, validate_product_search_limit,
+    validate_product_search_result_budget, FullTextStore, HybridSearch, HybridSearchRequest,
+    IndexingWorker, KnowledgeIndexSyncReport, KnowledgeIndexSynchronizer, QdrantSidecarConfig,
     QdrantSidecarSupervisor, QdrantVectorStore, RetrievalResult, SidecarState, SqliteFullTextStore,
     StoreHealth, TantivyFullTextStore, TextEmbedder, ThreeWayHybridSearchEngine, VectorStore,
-    MAX_HYBRID_SEARCH_LIMIT, validate_product_search_limit,
-    validate_product_search_result_budget,
+    MAX_HYBRID_SEARCH_LIMIT,
 };
 
 struct ProjectReranker {
@@ -46,6 +47,8 @@ pub struct ProjectRetrievalRuntime {
     vector: Option<Arc<dyn VectorStore>>,
     embedder: Option<Arc<dyn TextEmbedder>>,
     reranker: Option<ProjectReranker>,
+    knowledge_index: KnowledgeIndexSynchronizer,
+    vector_signature: Option<String>,
     sidecar: Option<Arc<QdrantSidecarSupervisor>>,
     chunk_size_chars: usize,
     chunk_overlap_chars: usize,
@@ -210,6 +213,13 @@ impl ProjectRetrievalRuntime {
             ));
         }
 
+        let vector_signature = match (&vector, &embedder) {
+            (Some(_), Some(embedder)) => Some(vector_index_signature(config, embedder.as_ref())?),
+            (None, None) => None,
+            _ => unreachable!("partial vector configuration rejected above"),
+        };
+        let knowledge_index = KnowledgeIndexSynchronizer::new(&project_root)?;
+
         Ok(Self {
             project_root: project_root.clone(),
             config: config.clone(),
@@ -223,6 +233,8 @@ impl ProjectRetrievalRuntime {
             vector,
             embedder,
             reranker,
+            knowledge_index,
+            vector_signature,
             sidecar,
             chunk_size_chars: config.rag.chunk_size_chars as usize,
             chunk_overlap_chars: config.rag.chunk_overlap_chars as usize,
@@ -243,6 +255,49 @@ impl ProjectRetrievalRuntime {
 
     pub fn uses_vector_config(&self, config: &VectorStoreConfig) -> bool {
         &self.config.rag.vector_store == config
+    }
+
+    /// 判断候选配置是否仍使用同一向量空间与后端；embedding provider/model 也在边界内。
+    pub fn uses_vector_pipeline_config(&self, config: &ProjectConfig) -> bool {
+        vector_pipeline_config_matches(&self.config, config)
+    }
+
+    /// chunk、全文目录或任一向量空间变化都要求完整重建，禁止新查询打旧索引。
+    pub fn index_configuration_changed(
+        previous: &ProjectConfig,
+        candidate: &ProjectConfig,
+    ) -> bool {
+        previous.rag.chunk_size_chars != candidate.rag.chunk_size_chars
+            || previous.rag.chunk_overlap_chars != candidate.rag.chunk_overlap_chars
+            || previous.rag.full_text_store != candidate.rag.full_text_store
+            || !vector_pipeline_config_matches(previous, candidate)
+    }
+
+    pub fn index_configuration_revision(config: &ProjectConfig) -> CoreResult<String> {
+        let bytes = serde_json::to_vec(&(
+            &config.rag.chunk_size_chars,
+            &config.rag.chunk_overlap_chars,
+            &config.rag.full_text_store,
+            vector_pipeline_descriptor(config),
+        ))?;
+        Ok(crate::contracts::content_version_for_bytes(&bytes))
+    }
+
+    /// 配置 generation 提交后幂等入队完整重建；pending 事件本身就是搜索门禁。
+    pub fn enqueue_configuration_rebuild(&self) -> CoreResult<Option<String>> {
+        if self.outbox.has_incomplete_full_rebuild()? {
+            return Ok(None);
+        }
+        let revision = Self::index_configuration_revision(&self.config)?;
+        let document_id = self.project_root.to_string_lossy().into_owned();
+        let event_id = self.outbox.prepare(
+            &document_id,
+            "retrieval_configuration_changed",
+            &revision,
+            true,
+        )?;
+        self.outbox.activate(&event_id)?;
+        Ok(Some(event_id))
     }
 
     /// 创建与本运行时共享后端和 provider 的 outbox worker。
@@ -282,6 +337,21 @@ impl ProjectRetrievalRuntime {
         }
     }
 
+    /// 将 metadata.db 的四层已确认知识同步到正式全文/向量索引。
+    pub fn sync_knowledge_index(
+        &self,
+        cancellation: Option<&crate::contracts::ExecutionCancellation>,
+    ) -> CoreResult<KnowledgeIndexSyncReport> {
+        self.knowledge_index.sync(
+            &self.tantivy,
+            &self.sqlite,
+            self.vector.as_ref(),
+            self.embedder.as_ref(),
+            self.vector_signature.as_deref(),
+            cancellation,
+        )
+    }
+
     /// 产品搜索入口：一次授权后生成查询向量、三路召回、磁盘新鲜度过滤和可选 rerank。
     pub fn search(
         &self,
@@ -297,6 +367,13 @@ impl ProjectRetrievalRuntime {
         }
         validate_product_search_limit(limit)?;
         ensure_search_not_blocked_by_pending_index(&self.outbox)?;
+        if context.cancellation.is_cancelled() {
+            return Err(CoreError::external_cancelled(
+                "project_retrieval",
+                ExternalDispatchOutcome::NotDispatched,
+            ));
+        }
+        let knowledge = self.sync_knowledge_index(Some(&context.cancellation))?;
         if context.cancellation.is_cancelled() {
             return Err(CoreError::external_cancelled(
                 "project_retrieval",
@@ -348,7 +425,10 @@ impl ProjectRetrievalRuntime {
             query_embedding,
             candidate_limit,
         ))?;
-        results = filter_fresh_retrieval_results(results)?;
+        results = filter_fresh_retrieval_results_with_knowledge_revision(
+            results,
+            Some(&knowledge.revision),
+        )?;
 
         if let Some(reranker) = &self.reranker {
             if !results.is_empty() {
@@ -397,6 +477,10 @@ impl ProjectRetrievalRuntime {
                 reranker.provider.health_check()?,
             ));
         }
+        health.push(
+            self.knowledge_index
+                .health_check(self.vector_signature.as_deref())?,
+        );
         health.push(self.tantivy.health_check()?);
         health.push(self.sqlite.health_check()?);
         Ok(health)
@@ -508,6 +592,40 @@ fn provider_health(component: &str, provider_id: &str, health: ProviderHealth) -
         ProviderHealth::Degraded { reason } => StoreHealth::degraded(component, reason),
         ProviderHealth::Unhealthy { reason } => StoreHealth::unavailable(component, reason),
     }
+}
+
+fn vector_index_signature(
+    config: &ProjectConfig,
+    embedder: &dyn TextEmbedder,
+) -> CoreResult<String> {
+    let bytes = serde_json::to_vec(&(
+        &config.rag.vector_store,
+        embedder.provider_id(),
+        embedder.model_id(),
+        embedder.dimensions(),
+    ))?;
+    Ok(crate::contracts::content_version_for_bytes(&bytes))
+}
+
+fn vector_pipeline_config_matches(left: &ProjectConfig, right: &ProjectConfig) -> bool {
+    vector_pipeline_descriptor(left) == vector_pipeline_descriptor(right)
+}
+
+fn vector_pipeline_descriptor(
+    config: &ProjectConfig,
+) -> Option<(&VectorStoreConfig, Option<&str>, Option<&ProviderConfig>)> {
+    if !config.rag.vector_store.enabled {
+        return None;
+    }
+    let provider_id = config.providers.default_embedding_provider_id.as_deref();
+    let provider = provider_id.and_then(|provider_id| {
+        config
+            .providers
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == provider_id)
+    });
+    Some((&config.rag.vector_store, provider_id, provider))
 }
 
 fn resolve_project_path(project_root: &Path, configured: &Path) -> CoreResult<PathBuf> {

@@ -205,16 +205,19 @@ impl AriadneAppState {
             .retrieval_runtime
             .lock()
             .map_err(|_| "retrieval runtime lock poisoned".to_owned())?;
+        let index_changed = runtime_slot.as_ref().is_some_and(|runtime| {
+            ProjectRetrievalRuntime::index_configuration_changed(runtime.config(), &config)
+        });
         let vector_changed = runtime_slot
             .as_ref()
-            .is_some_and(|runtime| !runtime.uses_vector_config(&config.rag.vector_store));
-        if vector_changed
+            .is_some_and(|runtime| !runtime.uses_vector_pipeline_config(&config));
+        if index_changed
             && runtime_slot
                 .as_ref()
                 .is_some_and(|runtime| Arc::strong_count(runtime) > 1)
         {
             return Err(
-                "cannot reload changed vector infrastructure while retrieval operations are active"
+                "cannot reload changed retrieval index configuration while retrieval operations are active"
                     .to_owned(),
             );
         }
@@ -244,6 +247,20 @@ impl AriadneAppState {
                 return Err(error_to_string(error));
             }
         };
+        if index_changed {
+            if let Err(error) = runtime.enqueue_configuration_rebuild() {
+                drop(runtime);
+                if let Some(previous_config) = previous_config {
+                    restore_retrieval_runtime(
+                        &mut runtime_slot,
+                        &project_root,
+                        self.secret_store.as_ref(),
+                        &previous_config,
+                    )?;
+                }
+                return Err(error_to_string(error));
+            }
+        }
         let previous = runtime_slot.replace(Arc::clone(&runtime));
         drop(previous);
         Ok(runtime)
@@ -267,16 +284,18 @@ impl AriadneAppState {
             return Err("project configuration changed concurrently; reload and retry".to_owned());
         }
 
+        let index_changed =
+            ProjectRetrievalRuntime::index_configuration_changed(expected, &candidate);
         let vector_changed = runtime_slot
             .as_ref()
-            .is_some_and(|runtime| !runtime.uses_vector_config(&candidate.rag.vector_store));
-        if vector_changed
+            .is_some_and(|runtime| !runtime.uses_vector_pipeline_config(&candidate));
+        if index_changed
             && runtime_slot
                 .as_ref()
                 .is_some_and(|runtime| Arc::strong_count(runtime) > 1)
         {
             return Err(
-                "cannot change vector infrastructure while retrieval operations are active"
+                "cannot change retrieval index configuration while retrieval operations are active"
                     .to_owned(),
             );
         }
@@ -316,6 +335,25 @@ impl AriadneAppState {
                 ),
                 None => error_to_string(error),
             });
+        }
+
+        if index_changed {
+            if let Err(error) = runtime.enqueue_configuration_rebuild() {
+                drop(runtime);
+                let rollback_error = config_store.save(expected).err();
+                restore_retrieval_runtime(
+                    &mut runtime_slot,
+                    &project_root,
+                    self.secret_store.as_ref(),
+                    expected,
+                )?;
+                return Err(match rollback_error {
+                    Some(rollback_error) => format!(
+                        "failed to enqueue retrieval rebuild: {error}; config rollback also failed: {rollback_error}"
+                    ),
+                    None => error_to_string(error),
+                });
+            }
         }
 
         let previous = runtime_slot.replace(Arc::clone(&runtime));
@@ -1672,6 +1710,7 @@ pub fn save_rag_settings(
     candidate.rag = settings.rag;
     let saved = candidate.rag.clone();
     state.commit_retrieval_config(&expected, candidate)?;
+    spawn_indexing_worker_for_state(state)?;
     Ok(RagSettings { rag: saved })
 }
 
@@ -2293,7 +2332,10 @@ pub fn save_provider_key(
         .set_provider_secret(&provider, SecretValue::new(key))
         .map_err(error_to_string)?;
     match state.commit_retrieval_config(&expected, candidate) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            spawn_indexing_worker_for_state(state)?;
+            Ok(())
+        }
         Err(error) => {
             restore_provider_secret(&credentials, &provider, previous_secret)
                 .map_err(|rollback| format!("{error}; provider key rollback failed: {rollback}"))?;
@@ -2331,6 +2373,7 @@ pub fn save_provider_settings(
     let mut candidate = expected.clone();
     apply_provider_settings_update(&mut candidate, update)?;
     state.commit_retrieval_config(&expected, candidate)?;
+    spawn_indexing_worker_for_state(state)?;
     get_provider_config_impl(&project_root, state.secret_store.as_ref())
 }
 

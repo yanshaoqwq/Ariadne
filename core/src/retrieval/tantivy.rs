@@ -12,11 +12,11 @@ use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
 
 use crate::contracts::{CoreError, CoreResult};
 use crate::retrieval::memory::sort_and_limit;
-use crate::retrieval::query::tantivy_literal_query;
 use crate::retrieval::models::{
     ChunkDocument, FullTextRecord, FullTextSearchRequest, RebuildReport, RebuildStatus,
     RetrievalResult, RetrievalSource, StoreHealth,
 };
+use crate::retrieval::query::tantivy_literal_query;
 use crate::retrieval::traits::FullTextStore;
 
 const ARIADNE_TEXT_TOKENIZER: &str = "ariadne_cjk_ngram";

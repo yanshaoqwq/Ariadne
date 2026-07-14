@@ -199,9 +199,8 @@ impl IndexingWorker {
             .collect::<Vec<_>>();
         // 远端 embedding 先完成，再修改任一索引；失败时旧索引保持原状。
         let vectors = self.embed_records(event, &records)?;
-        let _index_lock = crate::retrieval::knowledge::acquire_retrieval_index_lock(
-            &self.mutation_lock_path,
-        )?;
+        let _index_lock =
+            crate::retrieval::knowledge::acquire_retrieval_index_lock(&self.mutation_lock_path)?;
         self.tantivy.delete_document(&event.document_id)?;
         self.sqlite.delete_document(&event.document_id)?;
         if let Some(vector) = &self.vector {
@@ -272,13 +271,12 @@ impl IndexingWorker {
 
 fn retrieval_index_lock_path(outbox: &IndexInvalidationOutbox) -> PathBuf {
     let database_parent = outbox.path().parent().unwrap_or_else(|| Path::new("."));
-    let project_root = if database_parent.file_name().and_then(|value| value.to_str())
-        == Some(".runtime")
-    {
-        database_parent.parent().unwrap_or(database_parent)
-    } else {
-        database_parent
-    };
+    let project_root =
+        if database_parent.file_name().and_then(|value| value.to_str()) == Some(".runtime") {
+            database_parent.parent().unwrap_or(database_parent)
+        } else {
+            database_parent
+        };
     project_root.join(".indexes").join("retrieval-index.lock")
 }
 

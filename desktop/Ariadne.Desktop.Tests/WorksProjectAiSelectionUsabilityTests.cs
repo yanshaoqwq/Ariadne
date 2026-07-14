@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 using Ariadne.Desktop.ViewModels;
@@ -145,6 +146,70 @@ public sealed class WorksProjectAiSelectionUsabilityTests
         Assert.True(cleared >= 2, "document switch must clear sticky again");
     }
 
+    [Fact]
+    public async Task ChapterSummary_LoadsFormalProjection_AndRevealRejectsDirtySource()
+    {
+        var backend = RecordingBackend.Create();
+        var names = DisplayNameService.LoadDefault();
+        var vm = new WorksPageViewModel(names, (IAriadneBackendClient)(object)backend);
+        backend.Host = vm;
+        const string document = "甲😀乙";
+        backend.NextSummary = new ChapterSummaryView(
+            "chapter-1",
+            "章节正式总结",
+            new ChapterStageSummaryView("stage-main", "阶段正式总结", new[] { "chapter-1" }),
+            new[]
+            {
+                new StorySegmentView(
+                    "chapter-1::seg-1",
+                    "1",
+                    "chapter-1",
+                    "表情所在故事段",
+                    new WritingSourceSpan(
+                        "documents/chapter-1.md",
+                        new TextRange(3, 7),
+                        "v1")),
+            },
+            Array.Empty<StoryEventView>(),
+            new[]
+            {
+                new RegisteredChangeView(
+                    "change-1",
+                    "character_trait",
+                    "realized",
+                    JsonDocument.Parse("""{"kind":"character_trait","content":{"character":"阿青","to_value":"坚定"}}""").RootElement.Clone(),
+                    new[] { "chapter-1::seg-1" }),
+            },
+            Array.Empty<ForeshadowingView>(),
+            new[]
+            {
+                new ChapterSummaryConfirmationView("confirm-1", "chapter_summary", "approved", "rev-1"),
+            });
+
+        vm.SeedOpenDocumentForTests("documents/chapter-1.md", "v1", document);
+        var revealed = new List<(int Start, int End)>();
+        vm.RequestRevealEditorRange = (start, end) => revealed.Add((start, end));
+
+        await vm.LoadChapterSummaryForTests("chapter-1").ConfigureAwait(true);
+
+        Assert.True(vm.ShowSummaryContent);
+        Assert.Equal("章节正式总结", vm.ChapterSummaryText);
+        Assert.Equal("stage-main", vm.SummaryStageId);
+        Assert.Single(vm.SummarySegments);
+        Assert.Single(vm.SummaryChanges);
+        Assert.Single(vm.SummaryConfirmations);
+        Assert.True(vm.SummarySegments[0].IsSourceFresh);
+
+        vm.SummarySegments[0].RevealCommand.Execute(null);
+        Assert.Equal((1, 3), Assert.Single(revealed));
+
+        vm.DocumentContent = document + "改";
+        Assert.False(vm.SummarySegments[0].IsSourceFresh);
+        vm.SummarySegments[0].RevealCommand.Execute(null);
+        Assert.Single(revealed);
+        Assert.Equal(names.Text("ui.works.summary.source_unsaved"), vm.StatusText);
+    }
+
     private static string ResolveSource(params string[] parts)
     {
         var walk = new DirectoryInfo(AppContext.BaseDirectory);
@@ -173,6 +238,15 @@ public sealed class WorksProjectAiSelectionUsabilityTests
         public QuickEditResult NextQuickEdit { get; set; } = new("x", "y", "d");
         public ProjectAiResponse NextChat { get; set; } =
             new("ok", Array.Empty<ProjectAiChatMessage>(), null, "");
+        public ChapterSummaryView NextSummary { get; set; } = new(
+            "chapter-1",
+            null,
+            null,
+            Array.Empty<StorySegmentView>(),
+            Array.Empty<StoryEventView>(),
+            Array.Empty<RegisteredChangeView>(),
+            Array.Empty<ForeshadowingView>(),
+            Array.Empty<ChapterSummaryConfirmationView>());
         public Action<WorksPageViewModel>? MutateDocumentBeforeReturn { get; set; }
         public WorksPageViewModel? Host { get; set; }
 
@@ -211,6 +285,11 @@ public sealed class WorksProjectAiSelectionUsabilityTests
             {
                 ProjectAiChatCalled = true;
                 return Task.FromResult(NextChat);
+            }
+
+            if (name == nameof(IAriadneBackendClient.GetChapterSummaryViewAsync))
+            {
+                return Task.FromResult(NextSummary);
             }
 
             if (targetMethod.ReturnType == typeof(void) || targetMethod.ReturnType == typeof(Task))
