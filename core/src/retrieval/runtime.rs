@@ -7,7 +7,12 @@ use serde_json::json;
 
 use crate::contracts::{CoreError, CoreResult, SourceSpan, TextRange};
 use crate::documents::{IndexInvalidationEvent, IndexInvalidationOutbox};
+use crate::providers::ProviderCallContext;
+use crate::retrieval::models::VectorRecord;
+use crate::retrieval::traits::{TextEmbedder, VectorStore};
 use crate::retrieval::{ChunkDocument, FullTextRecord, FullTextStore};
+
+const EMBEDDING_BATCH_SIZE: usize = 64;
 
 /// 单次索引 worker 执行结果，供诊断和后台调度记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,13 +22,21 @@ pub struct IndexingWorkerReport {
     pub source_version: String,
     pub indexed_chunks: usize,
     pub superseded: bool,
+    /// 是否对本事件执行了向量 upsert（未配置向量后端时为 false）。
+    #[serde(default)]
+    pub vector_indexed: bool,
 }
 
-/// 消费文档 outbox，并同步写入 Tantivy 与 SQLite FTS。
+/// 消费文档 outbox，写入 Tantivy + SQLite FTS，可选同步 VectorStore。
 pub struct IndexingWorker {
     outbox: IndexInvalidationOutbox,
     tantivy: Arc<dyn FullTextStore>,
     sqlite: Arc<dyn FullTextStore>,
+    /// F1：配置可达时注入；None 表示仅全文（明确不写向量）。
+    vector: Option<Arc<dyn VectorStore>>,
+    /// 与 vector 成对存在；生产向量只能来自真实 EmbeddingProvider。
+    embedder: Option<Arc<dyn TextEmbedder>>,
+    mutation_lock_path: PathBuf,
     chunk_size_chars: usize,
     chunk_overlap_chars: usize,
 }
@@ -36,6 +49,47 @@ impl IndexingWorker {
         chunk_size_chars: usize,
         chunk_overlap_chars: usize,
     ) -> CoreResult<Self> {
+        Self::build(
+            outbox,
+            tantivy,
+            sqlite,
+            None,
+            None,
+            chunk_size_chars,
+            chunk_overlap_chars,
+        )
+    }
+
+    /// F1：真实向量构造入口；VectorStore 与 TextEmbedder 必须成对注入。
+    pub fn with_vector_store(
+        outbox: IndexInvalidationOutbox,
+        tantivy: Arc<dyn FullTextStore>,
+        sqlite: Arc<dyn FullTextStore>,
+        vector: Arc<dyn VectorStore>,
+        embedder: Arc<dyn TextEmbedder>,
+        chunk_size_chars: usize,
+        chunk_overlap_chars: usize,
+    ) -> CoreResult<Self> {
+        Self::build(
+            outbox,
+            tantivy,
+            sqlite,
+            Some(vector),
+            Some(embedder),
+            chunk_size_chars,
+            chunk_overlap_chars,
+        )
+    }
+
+    fn build(
+        outbox: IndexInvalidationOutbox,
+        tantivy: Arc<dyn FullTextStore>,
+        sqlite: Arc<dyn FullTextStore>,
+        vector: Option<Arc<dyn VectorStore>>,
+        embedder: Option<Arc<dyn TextEmbedder>>,
+        chunk_size_chars: usize,
+        chunk_overlap_chars: usize,
+    ) -> CoreResult<Self> {
         if chunk_size_chars == 0 {
             return Err(CoreError::validation("chunk_size_chars must be positive"));
         }
@@ -44,10 +98,27 @@ impl IndexingWorker {
                 "chunk_overlap_chars must be smaller than chunk_size_chars",
             ));
         }
+        if vector.is_some() != embedder.is_some() {
+            return Err(CoreError::validation(
+                "vector store and text embedder must be configured together",
+            ));
+        }
+        if embedder
+            .as_ref()
+            .is_some_and(|value| value.dimensions() == 0)
+        {
+            return Err(CoreError::validation(
+                "embedding dimensions must be positive",
+            ));
+        }
+        let mutation_lock_path = retrieval_index_lock_path(&outbox);
         Ok(Self {
             outbox,
             tantivy,
             sqlite,
+            vector,
+            embedder,
+            mutation_lock_path,
             chunk_size_chars,
             chunk_overlap_chars,
         })
@@ -80,14 +151,25 @@ impl IndexingWorker {
                 self.chunk_overlap_chars,
             )?;
             let indexed_chunks = records.len();
+            let vectors = self.embed_records(event, &records)?;
+            let _index_lock = crate::retrieval::knowledge::acquire_retrieval_index_lock(
+                &self.mutation_lock_path,
+            )?;
             self.tantivy.rebuild_from_records(records.clone())?;
             self.sqlite.rebuild_from_records(records)?;
+            let vector_indexed = if let (Some(vector), Some(vectors)) = (&self.vector, vectors) {
+                vector.rebuild_from_records(vectors)?;
+                true
+            } else {
+                false
+            };
             return Ok(IndexingWorkerReport {
                 event_id: event.event_id.clone(),
                 document_id: event.document_id.clone(),
                 source_version: event.source_version.clone(),
                 indexed_chunks,
                 superseded: false,
+                vector_indexed,
             });
         }
         let content = fs::read_to_string(&event.document_id)?;
@@ -100,6 +182,7 @@ impl IndexingWorker {
                 source_version: event.source_version.clone(),
                 indexed_chunks: 0,
                 superseded: true,
+                vector_indexed: false,
             });
         }
         let chunks = chunk_document(
@@ -109,23 +192,94 @@ impl IndexingWorker {
             self.chunk_size_chars,
             self.chunk_overlap_chars,
         )?;
-        self.tantivy.delete_document(&event.document_id)?;
-        self.sqlite.delete_document(&event.document_id)?;
         let records = chunks
             .iter()
             .cloned()
             .map(|chunk| FullTextRecord { chunk })
             .collect::<Vec<_>>();
+        // 远端 embedding 先完成，再修改任一索引；失败时旧索引保持原状。
+        let vectors = self.embed_records(event, &records)?;
+        let _index_lock = crate::retrieval::knowledge::acquire_retrieval_index_lock(
+            &self.mutation_lock_path,
+        )?;
+        self.tantivy.delete_document(&event.document_id)?;
+        self.sqlite.delete_document(&event.document_id)?;
+        if let Some(vector) = &self.vector {
+            vector.delete_document(&event.document_id)?;
+        }
         self.tantivy.upsert(records.clone())?;
-        self.sqlite.upsert(records)?;
+        self.sqlite.upsert(records.clone())?;
+        let vector_indexed = if let (Some(vector), Some(vectors)) = (&self.vector, vectors) {
+            vector.upsert(vectors).map_err(|error| {
+                CoreError::validation(format!(
+                    "vector index upsert failed after full-text write for {}: {error}",
+                    event.document_id
+                ))
+            })?;
+            true
+        } else {
+            false
+        };
         Ok(IndexingWorkerReport {
             event_id: event.event_id.clone(),
             document_id: event.document_id.clone(),
             source_version: event.source_version.clone(),
             indexed_chunks: chunks.len(),
             superseded: false,
+            vector_indexed,
         })
     }
+
+    fn embed_records(
+        &self,
+        event: &IndexInvalidationEvent,
+        records: &[FullTextRecord],
+    ) -> CoreResult<Option<Vec<VectorRecord>>> {
+        let Some(embedder) = &self.embedder else {
+            return Ok(None);
+        };
+        let mut vector_records = Vec::with_capacity(records.len());
+        for (batch_index, batch) in records.chunks(EMBEDDING_BATCH_SIZE).enumerate() {
+            let mut context = ProviderCallContext::new(embedder.provider_id());
+            context.operation_id = Some(format!(
+                "retrieval-index-embedding:{}:{}:{batch_index}",
+                event.event_id, event.source_version
+            ));
+            let embeddings = embedder.embed(
+                context,
+                batch
+                    .iter()
+                    .map(|record| record.chunk.text.clone())
+                    .collect(),
+            )?;
+            if embeddings.len() != batch.len() {
+                return Err(CoreError::validation(format!(
+                    "embedding provider returned {} vectors for {} chunks",
+                    embeddings.len(),
+                    batch.len()
+                )));
+            }
+            vector_records.extend(batch.iter().zip(embeddings).map(|(record, embedding)| {
+                VectorRecord {
+                    chunk: record.chunk.clone(),
+                    embedding,
+                }
+            }));
+        }
+        Ok(Some(vector_records))
+    }
+}
+
+fn retrieval_index_lock_path(outbox: &IndexInvalidationOutbox) -> PathBuf {
+    let database_parent = outbox.path().parent().unwrap_or_else(|| Path::new("."));
+    let project_root = if database_parent.file_name().and_then(|value| value.to_str())
+        == Some(".runtime")
+    {
+        database_parent.parent().unwrap_or(database_parent)
+    } else {
+        database_parent
+    };
+    project_root.join(".indexes").join("retrieval-index.lock")
 }
 
 fn collect_project_full_text_records(
@@ -159,6 +313,10 @@ fn collect_project_full_text_records(
             .map(|chunk| FullTextRecord { chunk }),
         );
     }
+    // F2-c：full rebuild 必须与增量知识同步包含同一四层已确认知识，
+    // 否则 Git restore / 配置重建会把知识候选从正式索引中抹掉。
+    let (_, knowledge_records) = crate::retrieval::knowledge::records_from_project(project_root)?;
+    records.extend(knowledge_records);
     Ok(records)
 }
 
@@ -230,10 +388,10 @@ fn chunk_document(
 }
 
 fn content_version(bytes: &[u8]) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
+    content_version_for_bytes(bytes)
+}
+
+/// 与索引 chunk / outbox `source_version` 同一算法（F2-b 新鲜度比对）。
+pub fn content_version_for_bytes(bytes: &[u8]) -> String {
+    crate::contracts::content_version_for_bytes(bytes)
 }

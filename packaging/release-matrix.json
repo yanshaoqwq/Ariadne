@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "rid": "linux-x64",
+      "rust_target": "x86_64-unknown-linux-gnu",
+      "artifact": "deb",
+      "signing_input": "ARIADNE_LINUX_SIGNING_KEY"
+    },
+    {
+      "rid": "linux-arm64",
+      "rust_target": "aarch64-unknown-linux-gnu",
+      "artifact": "deb",
+      "signing_input": "ARIADNE_LINUX_SIGNING_KEY"
+    },
+    {
+      "rid": "win-x64",
+      "rust_target": "x86_64-pc-windows-msvc",
+      "artifact": "inno-setup",
+      "signing_input": "ARIADNE_WINDOWS_SIGNTOOL"
+    },
+    {
+      "rid": "osx-x64",
+      "rust_target": "x86_64-apple-darwin",
+      "artifact": "pkg+dmg",
+      "signing_input": "ARIADNE_MACOS_SIGNING_IDENTITY",
+      "notarization_inputs": [
+        "ARIADNE_MACOS_NOTARY_APPLE_ID",
+        "ARIADNE_MACOS_NOTARY_TEAM_ID",
+        "ARIADNE_MACOS_NOTARY_PASSWORD"
+      ]
+    },
+    {
+      "rid": "osx-arm64",
+      "rust_target": "aarch64-apple-darwin",
+      "artifact": "pkg+dmg",
+      "signing_input": "ARIADNE_MACOS_SIGNING_IDENTITY",
+      "notarization_inputs": [
+        "ARIADNE_MACOS_NOTARY_APPLE_ID",
+        "ARIADNE_MACOS_NOTARY_TEAM_ID",
+        "ARIADNE_MACOS_NOTARY_PASSWORD"
+      ]
+    }
+  ]
+}

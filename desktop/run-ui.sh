@@ -62,7 +62,7 @@ case "$MODE" in
     DISPLAY="$REAL_DISPLAY" ARIADNE_BACKEND_IPC="$BACKEND_IPC" dotnet run --project "$CSPROJ/Ariadne.Desktop.csproj" -v quiet --nologo
     ;;
 
-  install-desktop)
+  install-dev-desktop)
     # .desktop 使用 Icon=ariadne；运行时 AppIconDesktopSync 会按个性化写入
     # ~/.local/share/icons/hicolor/*/apps/ariadne.png 并刷新缓存
     build
@@ -96,8 +96,8 @@ EOF
     chmod +x "$OUT_DIR/ariadne.desktop" 2>/dev/null || true
     gtk-update-icon-cache -f -t "$HICOLOR" 2>/dev/null || true
     xdg-desktop-menu forceupdate 2>/dev/null || true
-    echo "[install-desktop] 已写入 $OUT_DIR/ariadne.desktop (Icon=ariadne)"
-    echo "[install-desktop] hicolor 图标已安装；改主题后由应用自动重写着色"
+    echo "[install-dev-desktop] 仅开发机使用：已写入 $OUT_DIR/ariadne.desktop (Icon=ariadne)"
+    echo "[install-dev-desktop] 正式安装请使用 packaging/ 生成的发行包"
     ;;
 
   shot)
@@ -165,7 +165,7 @@ EOF
     ;;
 
   *)
-    echo "用法: $0 [run|shot|build]"
+    echo "用法: $0 [run|shot|build|install-dev-desktop]"
     exit 2
     ;;
 esac

@@ -1,8 +1,10 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use fs4::FileExt;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use yaml_serde::Value;
 
 use crate::config::migration::{migrate_yaml_value, MigrationReport};
@@ -18,13 +20,27 @@ use crate::contracts::{CoreError, CoreResult};
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     project_root: PathBuf,
+    app_state_root: PathBuf,
 }
 
 impl ConfigStore {
     /// 创建配置存储。
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
+        let project_root = project_root.into();
+        Self {
+            app_state_root: crate::config::trusted_app_state_for_project(&project_root),
+            project_root,
+        }
+    }
+
+    /// 使用调用方可信应用状态目录构造配置存储。
+    pub fn with_app_state(
+        project_root: impl Into<PathBuf>,
+        app_state_root: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             project_root: project_root.into(),
+            app_state_root: app_state_root.into(),
         }
     }
 
@@ -41,13 +57,39 @@ impl ConfigStore {
     /// 加载配置；缺失时先创建默认文件，再执行迁移。
     pub fn load_or_create(&self) -> CoreResult<ProjectConfig> {
         self.ensure_config_dir()?;
+        self.recover_pending_commit()?;
         self.create_missing_defaults()?;
         self.migrate_all()?;
-        self.load()
+        self.load_internal(true)
+    }
+
+    /// 只供“用户重新输入 Provider 密钥”流程读取旧配置。
+    /// 该入口会一次性移除全部旧 `api_key` 引用；调用方只能写入可信项目作用域。
+    pub fn load_or_create_for_credential_rebind(&self) -> CoreResult<ProjectConfig> {
+        self.ensure_config_dir()?;
+        self.recover_pending_commit()?;
+        self.create_missing_defaults()?;
+        self.migrate_all()?;
+        let mut config = self.load_internal(false)?;
+        clear_project_owned_secret_refs(&mut config);
+        Ok(config)
     }
 
     /// 加载所有配置文件并执行整体验证。
     pub fn load(&self) -> CoreResult<ProjectConfig> {
+        self.recover_pending_commit()?;
+        self.load_internal(true)
+    }
+
+    /// 严格只读加载既有配置，不创建默认值、不迁移，也不恢复待提交事务。
+    ///
+    /// 仅供 maintenance 期间仍需可读的状态查询使用；普通业务读取仍应走
+    /// `load`/`load_or_create`，并在调用侧持有项目 mutation fence。
+    pub fn load_read_only(&self) -> CoreResult<ProjectConfig> {
+        self.load_internal(true)
+    }
+
+    fn load_internal(&self, reject_project_secret_refs: bool) -> CoreResult<ProjectConfig> {
         let config = ProjectConfig {
             app: self.read_config(APP_CONFIG_FILE)?,
             providers: self.read_config(PROVIDERS_CONFIG_FILE)?,
@@ -58,22 +100,78 @@ impl ConfigStore {
             auto_mode: self.read_config(AUTO_MODE_CONFIG_FILE)?,
         };
 
+        if reject_project_secret_refs {
+            reject_project_owned_secret_refs(&config)?;
+        }
         config.validate()?;
         Ok(config)
     }
 
     /// 保存完整项目配置。
+    ///
+    /// D4-a：经 `atomic_commit::commit_files` 写入——唯一 transaction stage、fsync、
+    /// 相对路径 containment；不再使用固定 `.stage-save` 目录（并发同 target 会互踩）。
     pub fn save(&self, config: &ProjectConfig) -> CoreResult<()> {
+        reject_project_owned_secret_refs(config)?;
         config.validate()?;
         self.ensure_config_dir()?;
-        self.write_config(APP_CONFIG_FILE, &config.app)?;
-        self.write_config(PROVIDERS_CONFIG_FILE, &config.providers)?;
-        self.write_config(PERMISSIONS_CONFIG_FILE, &config.permissions)?;
-        self.write_config(RAG_CONFIG_FILE, &config.rag)?;
-        self.write_config(WORKFLOW_CONFIG_FILE, &config.workflow)?;
-        self.write_config(GIT_CONFIG_FILE, &config.git)?;
-        self.write_config(AUTO_MODE_CONFIG_FILE, &config.auto_mode)?;
+        let pairs: [(&str, String); 7] = [
+            (
+                APP_CONFIG_FILE,
+                yaml_serde::to_string(&yaml_serde::to_value(&config.app)?)?,
+            ),
+            (
+                PROVIDERS_CONFIG_FILE,
+                yaml_serde::to_string(&yaml_serde::to_value(&config.providers)?)?,
+            ),
+            (
+                PERMISSIONS_CONFIG_FILE,
+                yaml_serde::to_string(&yaml_serde::to_value(&config.permissions)?)?,
+            ),
+            (
+                RAG_CONFIG_FILE,
+                yaml_serde::to_string(&yaml_serde::to_value(&config.rag)?)?,
+            ),
+            (
+                WORKFLOW_CONFIG_FILE,
+                yaml_serde::to_string(&yaml_serde::to_value(&config.workflow)?)?,
+            ),
+            (
+                GIT_CONFIG_FILE,
+                yaml_serde::to_string(&yaml_serde::to_value(&config.git)?)?,
+            ),
+            (
+                AUTO_MODE_CONFIG_FILE,
+                yaml_serde::to_string(&yaml_serde::to_value(&config.auto_mode)?)?,
+            ),
+        ];
+        let files: Vec<(crate::config::AtomicCommitTarget, Vec<u8>)> = pairs
+            .iter()
+            .zip([
+                crate::config::AtomicCommitTarget::App,
+                crate::config::AtomicCommitTarget::Providers,
+                crate::config::AtomicCommitTarget::Permissions,
+                crate::config::AtomicCommitTarget::Rag,
+                crate::config::AtomicCommitTarget::Workflow,
+                crate::config::AtomicCommitTarget::Git,
+                crate::config::AtomicCommitTarget::AutoMode,
+            ])
+            .map(|((_, raw), target)| (target, raw.as_bytes().to_vec()))
+            .collect();
+        crate::config::atomic_commit::commit_files(
+            &self.project_root,
+            &self.app_state_root,
+            crate::config::AtomicCommitProfile::ProjectConfig,
+            &files,
+        )?;
         Ok(())
+    }
+
+    fn recover_pending_commit(&self) -> CoreResult<()> {
+        crate::config::atomic_commit::recover_pending_commit(
+            &self.project_root,
+            &self.app_state_root,
+        )
     }
 
     /// 对所有已存在配置文件执行幂等迁移。
@@ -153,9 +251,171 @@ impl ConfigStore {
     fn write_yaml_value(&self, file_name: &str, value: &Value) -> CoreResult<()> {
         let path = self.config_dir().join(file_name);
         let raw = yaml_serde::to_string(value)?;
-        fs::write(path, raw)?;
+        atomic_write(&path, raw.as_bytes())?;
         Ok(())
     }
+}
+
+fn reject_project_owned_secret_refs(config: &ProjectConfig) -> CoreResult<()> {
+    if let Some(provider) = config
+        .providers
+        .providers
+        .iter()
+        .find(|provider| provider.api_key.is_some())
+    {
+        return Err(CoreError::validation(format!(
+            "provider '{}' contains an untrusted project SecretRef; re-enter the credential to bind it in trusted app state",
+            provider.provider_id
+        )));
+    }
+    Ok(())
+}
+
+fn clear_project_owned_secret_refs(config: &mut ProjectConfig) {
+    for provider in &mut config.providers.providers {
+        provider.api_key = None;
+    }
+}
+
+/// Write via temp file + rename (best-effort atomic replace on POSIX).
+///
+/// D4-a：临时名含 PID + 纳秒，避免同进程并发写同一固定 temp；写后尽力 fsync。
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        nanos
+    ));
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        let _ = file.sync_all();
+    }
+    fs::rename(&tmp, path)?;
+    // Best-effort directory fsync so rename is durable on crash.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Exclusive write lock for a document path (D1-a CAS window / D1-b lifecycle).
+///
+/// 锁文件位于项目树外并保持稳定；所有权由内核 advisory lock 管理，进程退出自动释放，
+/// 避免 PID/TTL 猜测以及删除旧 inode 后两个写者分别持锁。
+pub struct PathWriteLock {
+    lock_file: File,
+    lock_path: PathBuf,
+}
+
+impl PathWriteLock {
+    pub fn acquire(target: &Path) -> CoreResult<Self> {
+        let lock_path = document_write_lock_path(target)?;
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        for attempt in 0..400 {
+            match FileExt::try_lock_exclusive(&lock_file) {
+                Ok(()) => {
+                    return Ok(Self {
+                        lock_file,
+                        lock_path,
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if attempt == 399 {
+                        return Err(crate::contracts::CoreError::validation(format!(
+                            "timed out waiting for document write lock: {}",
+                            lock_path.display()
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(crate::contracts::CoreError::validation(
+            "document write lock acquisition failed",
+        ))
+    }
+
+    /// Test / diagnostics: lock file is never under the document directory.
+    pub fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+}
+
+impl Drop for PathWriteLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.lock_file);
+    }
+}
+
+fn document_write_lock_path(target: &Path) -> CoreResult<PathBuf> {
+    let canonical = canonical_document_identity(target)?;
+    let mut digest = Sha256::new();
+    digest.update(b"ariadne-document-write-v2\0");
+    digest.update(document_path_identity_bytes(&canonical));
+    let encoded = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(std::env::temp_dir()
+        .join("ariadne-document-write-locks")
+        .join(format!("{encoded}.lock")))
+}
+
+fn canonical_document_identity(target: &Path) -> CoreResult<PathBuf> {
+    if let Ok(canonical) = target.canonicalize() {
+        return Ok(canonical);
+    }
+    if let (Some(parent), Some(file_name)) = (target.parent(), target.file_name()) {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            return Ok(canonical_parent.join(file_name));
+        }
+    }
+    if target.is_absolute() {
+        Ok(target.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(target))
+    }
+}
+
+#[cfg(unix)]
+fn document_path_identity_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bytes = b"unix\0".to_vec();
+    bytes.extend_from_slice(path.as_os_str().as_bytes());
+    bytes
+}
+
+#[cfg(windows)]
+fn document_path_identity_bytes(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut bytes = b"windows\0".to_vec();
+    for unit in path.as_os_str().encode_wide() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
 }
 
 /// 返回当前分文件配置清单。

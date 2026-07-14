@@ -45,6 +45,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<SidebarBadgeCounts>("get_sidebar_badges", null, cancellationToken);
     }
 
+    public Task<ProjectMaintenanceState?> GetProjectMaintenanceAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeAsync<ProjectMaintenanceState>("get_project_maintenance", null, cancellationToken);
+    }
+
     public Task<CurrentProjectStatus?> GetCurrentProjectAsync(CancellationToken cancellationToken = default)
     {
         return InvokeAsync<CurrentProjectStatus>("get_current_project", null, cancellationToken);
@@ -247,6 +252,26 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
+    public Task<IReadOnlyList<WorkflowOperation>> ListInDoubtOperationsAsync(string workflowId, string runId, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredListAsync<WorkflowOperation>("list_in_doubt_operations", new
+        {
+            workflow_id = workflowId,
+            run_id = runId,
+        }, cancellationToken);
+    }
+
+    public Task<ResolveInDoubtOperationResult> ResolveInDoubtOperationAsync(string operationId, string decision, object? response = null, string? reason = null, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ResolveInDoubtOperationResult>("resolve_workflow_operation_in_doubt", new
+        {
+            operation_id = operationId,
+            decision,
+            response,
+            reason,
+        }, cancellationToken);
+    }
+
     public Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default)
     {
         return ProjectAiChatAsync(message, Array.Empty<ProjectAiChatMessage>(), workflowIdToRun, cancellationToken);
@@ -301,9 +326,9 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<WorkflowGraphData>("load_workflow_graph", new { workflow_id = workflowId }, cancellationToken);
     }
 
-    public Task SaveWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default)
+    public Task<WorkflowGraphData> SaveWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default)
     {
-        return InvokeCommandAsync("save_workflow_graph", new { graph_data = graphData }, cancellationToken);
+        return InvokeRequiredAsync<WorkflowGraphData>("save_workflow_graph", new { graph_data = graphData }, cancellationToken);
     }
 
     public Task ValidateWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default)
@@ -349,6 +374,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     public Task<WorksTreeNode> GetWorksTreeAsync(CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<WorksTreeNode>("get_works_tree", null, cancellationToken);
+    }
+
+    public Task<ChapterSummaryView> GetChapterSummaryViewAsync(string chapterId, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ChapterSummaryView>("get_chapter_summary_view", new { chapter_id = chapterId }, cancellationToken);
     }
 
     public Task<DocumentTreeNode> GetDocumentTreeAsync(string? projectId = null, CancellationToken cancellationToken = default)
@@ -556,11 +586,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     {
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
-            throw new InvalidOperationException("backend ipc command not found");
+            throw BackendException.Transport("ipc", "backend ipc command not found");
         }
         var data = await SendRequestAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
         return data is null
-            ? throw new InvalidOperationException("backend command returned empty data")
+            ? throw BackendException.Transport("ipc", "backend command returned empty data")
             : data;
     }
 
@@ -571,7 +601,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     {
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
-            throw new InvalidOperationException("backend ipc command not found");
+            throw BackendException.Transport("ipc", "backend ipc command not found");
         }
         await SendRequestAsync<object>(method, parameters, cancellationToken).ConfigureAwait(false);
     }
@@ -587,7 +617,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             EnsureBackendProcess();
             if (_backendInput is null || _backendOutput is null)
             {
-                throw new InvalidOperationException("backend ipc process is not connected");
+                throw BackendException.Transport("ipc", "backend ipc process is not connected");
             }
 
             var request = JsonSerializer.Serialize(new { method, @params = parameters ?? new { } }, _jsonOptions);
@@ -599,16 +629,19 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             {
                 ResetBackendProcess();
                 var stderr = CurrentBackendStderr();
-                throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr)
-                    ? "backend ipc returned no response"
-                    : stderr);
+                throw BackendException.Transport(
+                    "ipc",
+                    string.IsNullOrWhiteSpace(stderr) ? "backend ipc returned no response" : stderr);
             }
 
             var result = JsonSerializer.Deserialize<BackendResult<T>>(output, _jsonOptions)
-                ?? throw new InvalidOperationException("backend ipc returned invalid json");
+                ?? throw BackendException.Transport("ipc", "backend ipc returned invalid json");
             if (!result.Ok)
             {
-                throw new InvalidOperationException(result.Error ?? "backend command failed");
+                throw BackendException.FromIpcPayload(
+                    result.ErrorCode,
+                    result.Error ?? "backend command failed",
+                    result.ErrorKey);
             }
             return result.Data;
         }
@@ -635,12 +668,14 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         ResetBackendProcess();
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
-            throw new InvalidOperationException("backend ipc command not found");
+            throw BackendException.Transport("ipc", "backend ipc command not found");
         }
 
         var startInfo = new ProcessStartInfo
         {
-            FileName = ResolveCommandFileName(_backendCommand),
+            // ARIADNE_BACKEND_IPC 与发布目录中的 sidecar 都是可执行文件路径。
+            // 路径可能包含空格，禁止再按命令行字符串拆分。
+            FileName = _backendCommand,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -650,13 +685,9 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             StandardErrorEncoding = Encoding.UTF8,
         };
         ApplyProjectEnvironment(startInfo);
-        foreach (var argument in ResolveCommandArguments(_backendCommand))
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
 
         _backendProcess = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("failed to start backend ipc process");
+            ?? throw BackendException.Transport("ipc", "failed to start backend ipc process");
         _backendInput = _backendProcess.StandardInput;
         _backendOutput = _backendProcess.StandardOutput;
         _stderrBuffer.Clear();
@@ -751,11 +782,22 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
 
     private static string? DiscoverBackendCommand()
     {
+        return DiscoverBackendCommand(AppContext.BaseDirectory, Environment.CurrentDirectory);
+    }
+
+    internal static string? DiscoverBackendCommand(string appBaseDirectory, string currentDirectory)
+    {
+        var packaged = FindPackagedBackendCommand(appBaseDirectory);
+        if (packaged is not null)
+        {
+            return packaged;
+        }
+
         var executableNames = OperatingSystem.IsWindows()
             ? new[] { "ariadne-ipc.exe", "ariadne-ipc" }
             : new[] { "ariadne-ipc" };
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var root in CandidateBackendRoots())
+        foreach (var root in CandidateBackendRoots(appBaseDirectory, currentDirectory))
         {
             foreach (var executableName in executableNames)
             {
@@ -777,27 +819,44 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return null;
     }
 
-    private static IEnumerable<string> CandidateBackendRoots()
+    internal static string? FindPackagedBackendCommand(string appBaseDirectory)
     {
-        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
+        var executableNames = OperatingSystem.IsWindows()
+            ? new[] { "ariadne-ipc.exe", "ariadne-ipc" }
+            : new[] { "ariadne-ipc" };
+        foreach (var executableName in executableNames)
+        {
+            foreach (var relativePath in new[]
+                     {
+                         Path.Combine("Backend", executableName),
+                         executableName,
+                     })
+            {
+                var candidate = Path.GetFullPath(Path.Combine(appBaseDirectory, relativePath));
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> CandidateBackendRoots(params string[] starts)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var start in starts)
         {
             var directory = new DirectoryInfo(Path.GetFullPath(start));
             for (var depth = 0; directory is not null && depth < 8; depth++)
             {
-                yield return directory.FullName;
+                if (seen.Add(directory.FullName))
+                {
+                    yield return directory.FullName;
+                }
                 directory = directory.Parent;
             }
         }
-
-    }
-
-    private static string ResolveCommandFileName(string command)
-    {
-        return command.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? command;
-    }
-
-    private static IEnumerable<string> ResolveCommandArguments(string command)
-    {
-        return command.Split(' ', StringSplitOptions.RemoveEmptyEntries).Skip(1);
     }
 }

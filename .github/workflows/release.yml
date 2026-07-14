@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tags while any release blocker remains
+        run: python3 scripts/check-release-readiness.py --tag '${{ github.ref_name }}'
+
+  quality:
+    needs: gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - run: dotnet restore desktop/Ariadne.slnx
+      - run: dotnet test desktop/Ariadne.slnx --configuration Release --no-restore
+      - run: |
+          dotnet run --project tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj -- licenses --root . --output /tmp/THIRD_PARTY_NOTICES.md
+          diff -u THIRD_PARTY_NOTICES.md /tmp/THIRD_PARTY_NOTICES.md
+
+  package:
+    needs: [gate, quality]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            rid: linux-x64
+          - runner: ubuntu-24.04-arm
+            rid: linux-arm64
+          - runner: windows-2025
+            rid: win-x64
+          - runner: macos-15-intel
+            rid: osx-x64
+          - runner: macos-15
+            rid: osx-arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARIADNE_REQUIRE_SIGNED_RELEASE: '1'
+      ARIADNE_LINUX_SIGNING_KEY: ${{ secrets.ARIADNE_LINUX_SIGNING_KEY }}
+      ARIADNE_WINDOWS_SIGNTOOL: ${{ secrets.ARIADNE_WINDOWS_SIGNTOOL }}
+      ARIADNE_MACOS_SIGNING_IDENTITY: ${{ secrets.ARIADNE_MACOS_SIGNING_IDENTITY }}
+      ARIADNE_MACOS_INSTALLER_IDENTITY: ${{ secrets.ARIADNE_MACOS_INSTALLER_IDENTITY }}
+      ARIADNE_MACOS_NOTARY_APPLE_ID: ${{ secrets.ARIADNE_MACOS_NOTARY_APPLE_ID }}
+      ARIADNE_MACOS_NOTARY_TEAM_ID: ${{ secrets.ARIADNE_MACOS_NOTARY_TEAM_ID }}
+      ARIADNE_MACOS_NOTARY_PASSWORD: ${{ secrets.ARIADNE_MACOS_NOTARY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - name: Install Windows packaging tool
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Import Linux signing key
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ARIADNE_LINUX_SIGNING_PRIVATE_KEY: ${{ secrets.ARIADNE_LINUX_SIGNING_PRIVATE_KEY }}
+        run: |
+          test -n "$ARIADNE_LINUX_SIGNING_PRIVATE_KEY"
+          printf '%s' "$ARIADNE_LINUX_SIGNING_PRIVATE_KEY" | base64 --decode | gpg --batch --import
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          ARIADNE_MACOS_CERTIFICATE_P12: ${{ secrets.ARIADNE_MACOS_CERTIFICATE_P12 }}
+          ARIADNE_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.ARIADNE_MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          test -n "$ARIADNE_MACOS_CERTIFICATE_P12"
+          certificate="$RUNNER_TEMP/ariadne-signing.p12"
+          keychain="$RUNNER_TEMP/ariadne-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$ARIADNE_MACOS_CERTIFICATE_P12" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$ARIADNE_MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+      - name: Build release layout
+        shell: bash
+        run: bash scripts/build-release.sh '${{ matrix.rid }}'
+      - name: Linux installer
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash packaging/linux/build-deb.sh "artifacts/staging/ariadne-${{ matrix.rid }}" artifacts
+          bash packaging/linux/smoke-deb.sh "$(find artifacts -maxdepth 1 -name 'Ariadne_*.deb' -print -quit)"
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = packaging/windows/build-installer.ps1 -PackageDirectory "artifacts/staging/ariadne-${{ matrix.rid }}" -OutputDirectory artifacts
+          packaging/windows/smoke-installer.ps1 -Installer $installer
+      - name: macOS installer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          pkg="$(bash packaging/macos/build-installer.sh "artifacts/staging/ariadne-${{ matrix.rid }}" artifacts)"
+          bash packaging/macos/smoke-installer.sh "$pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ariadne-${{ matrix.rid }}
+          path: artifacts/
+
+  publish:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/**/*.deb
+            release-assets/**/*.asc
+            release-assets/**/*.exe
+            release-assets/**/*.pkg
+            release-assets/**/*.dmg

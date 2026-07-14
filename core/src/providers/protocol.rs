@@ -55,15 +55,20 @@ impl ProviderProtocol {
     }
 }
 
-/// 解析 provider base URL；OpenAI-compatible 必须显式配置。
+/// 解析 provider base URL；兼容和本地 provider 必须显式配置，避免误发往公共端点。
 pub fn resolve_base_url(config: &ProviderConfig) -> CoreResult<String> {
     let protocol = ProviderProtocol::from_provider_type(&config.provider_type)?;
-    if matches!(config.provider_type, ProviderType::OpenAiCompatible) {
+    if matches!(
+        config.provider_type,
+        ProviderType::OpenAiCompatible | ProviderType::Local
+    ) {
         return config
             .base_url
             .clone()
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| CoreError::validation("open_ai_compatible provider requires base_url"));
+            .ok_or_else(|| {
+                CoreError::validation("open_ai_compatible and local providers require base_url")
+            });
     }
 
     Ok(config

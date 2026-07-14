@@ -123,7 +123,7 @@
                     BorderThickness="1" />
             <StackPanel Grid.Column="1" Spacing="8">
               <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-                <TextBlock Text="Hex" Classes="caption" VerticalAlignment="Center" Width="28" />
+                <TextBlock Text="#" Classes="caption" VerticalAlignment="Center" Width="28" />
                 <TextBox x:Name="HexBox"
                          Grid.Column="1"
                          Classes="mono"
@@ -140,17 +140,17 @@
                            TextAlignment="Right" />
               </Grid>
               <Grid ColumnDefinitions="Auto,*,36" ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto" RowSpacing="4">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="R" Classes="caption" VerticalAlignment="Center" Width="14" />
+                <TextBlock x:Name="RLabel" Grid.Row="0" Grid.Column="0" Classes="caption" VerticalAlignment="Center" Width="14" />
                 <Slider x:Name="RSlider" Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="255"
                         ValueChanged="OnRgbSliderChanged" />
                 <TextBlock x:Name="RValue" Grid.Row="0" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />
 
-                <TextBlock Grid.Row="1" Grid.Column="0" Text="G" Classes="caption" VerticalAlignment="Center" Width="14" />
+                <TextBlock x:Name="GLabel" Grid.Row="1" Grid.Column="0" Classes="caption" VerticalAlignment="Center" Width="14" />
                 <Slider x:Name="GSlider" Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="255"
                         ValueChanged="OnRgbSliderChanged" />
                 <TextBlock x:Name="GValue" Grid.Row="1" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />
 
-                <TextBlock Grid.Row="2" Grid.Column="0" Text="B" Classes="caption" VerticalAlignment="Center" Width="14" />
+                <TextBlock x:Name="BLabel" Grid.Row="2" Grid.Column="0" Classes="caption" VerticalAlignment="Center" Width="14" />
                 <Slider x:Name="BSlider" Grid.Row="2" Grid.Column="1" Minimum="0" Maximum="255"
                         ValueChanged="OnRgbSliderChanged" />
                 <TextBlock x:Name="BValue" Grid.Row="2" Grid.Column="2" Classes="caption mono" VerticalAlignment="Center" Text="0" />

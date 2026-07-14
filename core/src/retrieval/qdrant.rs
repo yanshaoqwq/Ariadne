@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -17,6 +18,7 @@ pub struct QdrantVectorStore {
     collection: String,
     vector_size: usize,
     client: Client,
+    rebuild_marker: Option<PathBuf>,
 }
 
 impl QdrantVectorStore {
@@ -42,7 +44,25 @@ impl QdrantVectorStore {
             collection,
             vector_size,
             client,
+            rebuild_marker: None,
         })
+    }
+
+    /// 绑定项目内持久化 rebuild marker；诊断、重启和重建共用同一事实源。
+    pub fn with_rebuild_marker(mut self, path: impl Into<PathBuf>) -> CoreResult<Self> {
+        let path = path.into();
+        if path.as_os_str().is_empty() {
+            return Err(CoreError::validation(
+                "qdrant rebuild marker path cannot be empty",
+            ));
+        }
+        self.rebuild_marker = Some(path);
+        Ok(self)
+    }
+
+    /// 初始化或校验 collection；项目组合根在接收索引任务前调用。
+    pub fn initialize(&self) -> CoreResult<()> {
+        self.ensure_collection()
     }
 
     fn collection_url(&self, suffix: &str) -> String {
@@ -61,7 +81,21 @@ impl QdrantVectorStore {
             .send()
             .map_err(qdrant_error)?;
         if existing.status().is_success() {
+            let value = existing.json::<Value>().map_err(qdrant_error)?;
+            let actual_size = collection_vector_size(&value)?;
+            if actual_size != self.vector_size {
+                return Err(CoreError::validation(format!(
+                    "qdrant collection {} vector dimension {actual_size} does not match configured dimension {}",
+                    self.collection, self.vector_size
+                )));
+            }
             return Ok(());
+        }
+        if existing.status() != reqwest::StatusCode::NOT_FOUND {
+            return Err(qdrant_error(format!(
+                "inspect collection returned {}",
+                existing.status()
+            )));
         }
 
         let body = json!({
@@ -188,11 +222,33 @@ impl VectorStore for QdrantVectorStore {
 
     /// 返回 Qdrant collection 健康状态。
     fn health_check(&self) -> CoreResult<StoreHealth> {
+        if let Some(reason) = self.rebuild_reason()? {
+            return Ok(StoreHealth::rebuild_required("qdrant_vector_store", reason));
+        }
         let response = self.client.get(self.collection_url("")).send();
         match response {
-            Ok(response) if response.status().is_success() => {
-                Ok(StoreHealth::healthy("qdrant_vector_store"))
-            }
+            Ok(response) if response.status().is_success() => match response.json::<Value>() {
+                Ok(value) => match collection_vector_size(&value) {
+                    Ok(actual_size) if actual_size == self.vector_size => {
+                        Ok(StoreHealth::healthy("qdrant_vector_store"))
+                    }
+                    Ok(actual_size) => Ok(StoreHealth::unavailable(
+                        "qdrant_vector_store",
+                        format!(
+                            "collection vector dimension {actual_size} does not match configured dimension {}",
+                            self.vector_size
+                        ),
+                    )),
+                    Err(error) => Ok(StoreHealth::unavailable(
+                        "qdrant_vector_store",
+                        error.to_string(),
+                    )),
+                },
+                Err(error) => Ok(StoreHealth::unavailable(
+                    "qdrant_vector_store",
+                    error.to_string(),
+                )),
+            },
             Ok(response) => Ok(StoreHealth::unavailable(
                 "qdrant_vector_store",
                 format!("collection status {}", response.status()),
@@ -204,22 +260,88 @@ impl VectorStore for QdrantVectorStore {
         }
     }
 
-    /// Qdrant 索引可从源记录重建；这里仅保留健康标记接口。
-    fn mark_rebuild_required(&self, _reason: &str) -> CoreResult<()> {
-        Ok(())
+    /// 持久化标记索引需要重建；未绑定 marker 路径时必须 fail-loud。
+    fn mark_rebuild_required(&self, reason: &str) -> CoreResult<()> {
+        validate_non_empty("rebuild reason", reason)?;
+        let marker = self
+            .rebuild_marker
+            .as_deref()
+            .ok_or_else(|| CoreError::validation("qdrant rebuild marker path is not configured"))?;
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::config::store::atomic_write(
+            marker,
+            &serde_json::to_vec_pretty(&json!({ "reason": reason }))?,
+        )
     }
 
-    /// 删除后重新写入源记录。
+    /// 删除 collection 后重建，保证源记录已删除的 stale points 不会残留。
     fn rebuild_from_records(&self, records: Vec<VectorRecord>) -> CoreResult<RebuildReport> {
         let processed_items = records.len() as u64;
+        for record in &records {
+            validate_vector_record(record, self.vector_size)?;
+        }
+        let response = self
+            .client
+            .delete(self.collection_url(""))
+            .send()
+            .map_err(qdrant_error)?;
+        if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
+            return Err(qdrant_error(format!(
+                "delete collection for rebuild returned {}",
+                response.status()
+            )));
+        }
         self.ensure_collection()?;
-        self.upsert(records)?;
+        if !records.is_empty() {
+            self.upsert(records)?;
+        }
+        self.clear_rebuild_marker()?;
         Ok(RebuildReport {
             component: "qdrant_vector_store".to_owned(),
             status: RebuildStatus::Completed,
             processed_items,
             error: None,
         })
+    }
+}
+
+impl QdrantVectorStore {
+    fn rebuild_reason(&self) -> CoreResult<Option<String>> {
+        let Some(marker) = self.rebuild_marker.as_deref() else {
+            return Ok(None);
+        };
+        let bytes = match std::fs::read(marker) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let value = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+            CoreError::validation(format!(
+                "invalid qdrant rebuild marker {}: {error}",
+                marker.display()
+            ))
+        })?;
+        Ok(Some(
+            value
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.trim().is_empty())
+                .unwrap_or("qdrant rebuild marker is present")
+                .to_owned(),
+        ))
+    }
+
+    fn clear_rebuild_marker(&self) -> CoreResult<()> {
+        let Some(marker) = self.rebuild_marker.as_deref() else {
+            return Ok(());
+        };
+        match std::fs::remove_file(marker) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -261,6 +383,18 @@ fn qdrant_hit_to_result(hit: &Value) -> CoreResult<RetrievalResult> {
         score,
         RetrievalSource::Vector,
     ))
+}
+
+fn collection_vector_size(value: &Value) -> CoreResult<usize> {
+    let vectors = value
+        .pointer("/result/config/params/vectors")
+        .ok_or_else(|| qdrant_error("collection response missing vector configuration"))?;
+    let size = vectors.get("size").and_then(Value::as_u64).ok_or_else(|| {
+        qdrant_error(
+            "collection uses named or invalid vectors; Ariadne requires one unnamed vector",
+        )
+    })?;
+    usize::try_from(size).map_err(qdrant_error)
 }
 
 fn string_field(value: &Value, key: &str) -> CoreResult<String> {

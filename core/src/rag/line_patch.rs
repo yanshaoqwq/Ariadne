@@ -182,29 +182,30 @@ pub fn replace_lines_to_patch(
     request: WriterReplaceLines,
 ) -> CoreResult<DocumentPatch> {
     validate_document_id(&request.document_id)?;
-    let ranges = line_ranges(original);
-    if request.start_line == 0 || request.end_line == 0 || request.start_line > request.end_line {
-        return Err(CoreError::validation(
-            "replace line range must be a 1-based closed interval",
-        ));
-    }
-    if request.end_line as usize > ranges.len() {
-        return Err(CoreError::validation(format!(
-            "end_line {} is outside document line range 1..={}",
-            request.end_line,
-            ranges.len()
-        )));
-    }
-
-    let start = ranges[(request.start_line - 1) as usize].0;
-    let end = ranges[(request.end_line - 1) as usize].1;
+    let range = line_range_to_text_range(original, request.start_line, request.end_line)?;
     patch_for_range(
         request.document_id,
         request.base_version,
-        start,
-        end,
+        range.start as usize,
+        range.end as usize,
         request.text,
     )
+}
+
+/// 把 1-based 闭区间行号转换为 UTF-8 byte offset 半开区间。
+///
+/// Writer patch 与 Summarizer SourceSpan 共用此函数，避免把“行号”误写成
+/// 通用 `TextRange` 的 byte offset。
+pub fn line_range_to_text_range(
+    text: &str,
+    start_line: u64,
+    end_line: u64,
+) -> CoreResult<TextRange> {
+    let ranges = line_ranges(text);
+    validate_replace_lines(start_line, end_line, ranges.len())?;
+    let start = ranges[(start_line - 1) as usize].0 as u64;
+    let end = ranges[(end_line - 1) as usize].1 as u64;
+    TextRange::new(start, end)
 }
 
 /// 将整文件重写转换成单 hunk patch；用于短纲领文件，不用于正文默认重写。
@@ -267,10 +268,9 @@ fn apply_line_operation(original: &str, operation: &LinePatchOperation) -> CoreR
             end_line,
             text,
         } => {
-            let ranges = line_ranges(original);
-            validate_replace_lines(*start_line, *end_line, ranges.len())?;
-            let start = ranges[(*start_line - 1) as usize].0;
-            let end = ranges[(*end_line - 1) as usize].1;
+            let range = line_range_to_text_range(original, *start_line, *end_line)?;
+            let start = range.start as usize;
+            let end = range.end as usize;
             let mut next = String::with_capacity(original.len() + text.len());
             next.push_str(&original[..start]);
             next.push_str(text);

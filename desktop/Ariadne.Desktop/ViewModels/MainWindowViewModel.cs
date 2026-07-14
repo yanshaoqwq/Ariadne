@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Reflection;
 using Ariadne.Desktop;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
@@ -7,7 +8,12 @@ namespace Ariadne.Desktop.ViewModels;
 
 public sealed class MainWindowViewModel : ViewModelBase
 {
-    private const string AppVersion = "0.1.0";
+    private static readonly string AppVersion =
+        typeof(MainWindowViewModel).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion
+        ?? typeof(MainWindowViewModel).Assembly.GetName().Version?.ToString(3)
+        ?? "0.0.0";
     private static readonly string[] ProjectScopedPageIds = { "workspace", "works", "git", "run_logs", "settings" };
     private static readonly string[] PreloadedProjectPageIds = { "workspace", "works", "git" };
     /// <summary>无项目时也可进入的页面（侧栏跳过开始页）。</summary>
@@ -27,6 +33,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     private bool _sidebarExpanded = true;
     private bool _hasOpenProject;
     private string? _lastNavId;
+    private string _maintenanceBannerText = string.Empty;
+    private bool _isMaintenanceBlocking;
     private readonly Dictionary<string, object> _pageCache = new();
 
     public MainWindowViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
@@ -98,6 +106,79 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public string LeaveProjectText => _displayNames.Text("ui.layout.leave_project");
 
+    /// <summary>D3：维护中/失败时的标题栏横幅文案；空表示无门禁。</summary>
+    public string MaintenanceBannerText
+    {
+        get => _maintenanceBannerText;
+        private set => SetProperty(ref _maintenanceBannerText, value);
+    }
+
+    public bool IsMaintenanceBlocking
+    {
+        get => _isMaintenanceBlocking;
+        private set => SetProperty(ref _isMaintenanceBlocking, value);
+    }
+
+    /// <summary>测试/刷新入口：从后端拉取维护状态并更新横幅。</summary>
+    public async Task RefreshMaintenanceStatusAsync()
+    {
+        if (!_backend.HasProjectRoot)
+        {
+            ClearMaintenanceBanner();
+            return;
+        }
+
+        try
+        {
+            var state = await _backend.GetProjectMaintenanceAsync().ConfigureAwait(true);
+            ApplyMaintenanceState(state);
+        }
+        catch
+        {
+            // 查询失败不阻塞主 UI；写路径仍由后端门禁拒绝。
+            ClearMaintenanceBanner();
+        }
+    }
+
+    internal void ApplyMaintenanceState(Backend.ProjectMaintenanceState? state)
+    {
+        if (state is null
+            || string.IsNullOrWhiteSpace(state.Status)
+            || (state.Status != "active" && state.Status != "failed"))
+        {
+            ClearMaintenanceBanner();
+            return;
+        }
+
+        IsMaintenanceBlocking = true;
+        var kind = string.IsNullOrWhiteSpace(state.Kind) ? "maintenance" : state.Kind;
+        var phase = string.IsNullOrWhiteSpace(state.Phase) ? state.Status : state.Phase;
+        var error = string.IsNullOrWhiteSpace(state.Error) ? string.Empty : state.Error;
+        MaintenanceBannerText = state.Status == "failed"
+            ? _displayNames.Format(
+                "ui.maintenance.banner_failed",
+                new Dictionary<string, string>
+                {
+                    ["kind"] = kind,
+                    ["phase"] = phase,
+                    ["error"] = error,
+                })
+            : _displayNames.Format(
+                "ui.maintenance.banner_active",
+                new Dictionary<string, string>
+                {
+                    ["kind"] = kind,
+                    ["phase"] = phase,
+                });
+        NotificationText = MaintenanceBannerText;
+    }
+
+    private void ClearMaintenanceBanner()
+    {
+        IsMaintenanceBlocking = false;
+        MaintenanceBannerText = string.Empty;
+    }
+
     public string FeedbackText => _displayNames.Text("ui.layout.feedback");
 
     public string VersionText => _displayNames.Format("ui.layout.version_value", new Dictionary<string, string>
@@ -157,11 +238,18 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (SetProperty(ref _sidebarExpanded, value))
             {
                 OnPropertyChanged(nameof(SidebarWidth));
+                OnPropertyChanged(nameof(SidebarCollapsed));
+                foreach (var nav in AllNavigationItems())
+                {
+                    nav.SidebarExpanded = value;
+                }
             }
         }
     }
 
-    public double SidebarWidth => SidebarExpanded ? 204 : 44;
+    public bool SidebarCollapsed => !SidebarExpanded;
+
+    public double SidebarWidth => SidebarExpanded ? 204 : 52;
 
     public object CurrentPage
     {
@@ -261,6 +349,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         BackendStatus = _displayNames.Text("ui.status.healthy");
         NotificationText = string.Empty;
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
+        await RefreshMaintenanceStatusAsync().ConfigureAwait(true);
 
         var targetId = !string.IsNullOrWhiteSpace(_lastNavId) && AlwaysAvailablePageIds.Contains(_lastNavId)
             ? _lastNavId!
@@ -504,17 +593,72 @@ public sealed class MainWindowViewModel : ViewModelBase
                || await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// 离开项目/切换/回档前：只读收集全部 dirty 页，一次确认后统一保存或丢弃（U65）。
+    /// 任一步保存失败则中止并保持当前项目，不再边问边改。
+    /// </summary>
     private async Task<bool> ConfirmCachedProjectPagesLeaveAsync()
     {
-        foreach (var page in _pageCache.Values)
+        var dirty = _pageCache.Values
+            .OfType<IUnsavedChangesGuard>()
+            .Where(g => g.HasUnsavedChanges)
+            .ToList();
+        if (dirty.Count == 0)
         {
-            if (page is IUnsavedChangesGuard guard
-                && !await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+            return true;
+        }
+
+        var titles = dirty.Select(g => g.UnsavedChangesPageTitle).ToList();
+        var choice = await DialogService.Current.ConfirmUnsavedLeaveManyAsync(titles).ConfigureAwait(true);
+        switch (choice)
+        {
+            case UnsavedLeaveChoice.Save:
             {
+                // U65: prepare all (no durable write) → journaled commit each page.
+                var pages = dirty
+                    .Select(g => (
+                        Title: g.UnsavedChangesPageTitle,
+                        Prepare: (Func<Task<bool>>)(() => g.PrepareUnsavedChangesAsync()),
+                        Commit: (Func<Task<bool>>)(() => g.CommitPreparedUnsavedChangesAsync())))
+                    .ToList();
+                var journalPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Ariadne",
+                    "leave-save.journal.json");
+                var result = await BatchLeaveSaveCoordinator.ExecuteAsync(pages, journalPath).ConfigureAwait(true);
+                if (result.AllSucceeded)
+                {
+                    return true;
+                }
+
+                if (result.CommittedPages.Count > 0)
+                {
+                    NotificationText = _displayNames.Format(
+                        "ui.dialog.unsaved.save_partial",
+                        new Dictionary<string, string>
+                        {
+                            ["page"] = result.FailedPage ?? "?",
+                            ["done"] = string.Join("、", result.CommittedPages),
+                        });
+                }
+                else
+                {
+                    NotificationText = _displayNames.Format(
+                        "ui.dialog.unsaved.save_failed",
+                        new Dictionary<string, string> { ["page"] = result.FailedPage ?? "?" });
+                }
+
                 return false;
             }
+            case UnsavedLeaveChoice.Discard:
+                foreach (var guard in dirty)
+                {
+                    await guard.DiscardUnsavedChangesAsync().ConfigureAwait(true);
+                }
+                return true;
+            default:
+                return false;
         }
-        return true;
     }
 
     private async Task ReloadCachedProjectPagesAsync()
@@ -623,7 +767,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            BudgetStatusText = ex.Message;
+            BudgetStatusText = UserFacingError.Short(ex, _displayNames, "ui.error.budget");
             BudgetUsagePercent = 0;
         }
     }

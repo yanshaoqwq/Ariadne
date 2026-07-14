@@ -2,10 +2,12 @@ use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::contracts::artifacts::{ArtifactDescriptor, DocumentPatch};
 use crate::contracts::permissions::{PermissionPolicy, PermissionRequest};
 use crate::contracts::ports::PortValue;
-use crate::contracts::{CoreError, CoreResult};
+use crate::contracts::{CancellationToken, CoreError, CoreResult};
 use crate::documents::models::{
     ArtifactWriteReport, ArtifactWriteRequest, DocumentContent, DocumentFormat, DocumentId,
     DocumentMetadata, DocumentReadRequest, DocumentRepository, DocumentWriteReport,
@@ -14,6 +16,17 @@ use crate::documents::models::{
 };
 use crate::documents::IndexInvalidationOutbox;
 use crate::git::GitService;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ArtifactOperationReceipt {
+    operation_id: String,
+    artifact_id: String,
+    kind: crate::contracts::ArtifactKind,
+    media_type: String,
+    checksum: String,
+    metadata_checksum: String,
+    size_bytes: u64,
+}
 
 /// 文档和 Artifact 的文件系统服务。
 #[derive(Debug, Clone)]
@@ -67,7 +80,29 @@ impl FileDocumentService {
         git: Option<&GitService>,
         checkpoint_request: Option<&PatchCheckpointRequest>,
     ) -> CoreResult<PatchApplyReport> {
+        self.apply_patch_with_cancellation(
+            patch,
+            git,
+            checkpoint_request,
+            &CancellationToken::new(),
+        )
+    }
+
+    /// 应用 patch，并在正文替换、Git checkpoint 与 outbox 提交边界响应取消。
+    pub fn apply_patch_with_cancellation(
+        &self,
+        patch: &DocumentPatch,
+        git: Option<&GitService>,
+        checkpoint_request: Option<&PatchCheckpointRequest>,
+        cancellation: &CancellationToken,
+    ) -> CoreResult<PatchApplyReport> {
+        cancellation.check()?;
         let path = PathBuf::from(&patch.document_id);
+        let _project_mutation = self
+            .invalidation_outbox
+            .acquire_project_mutation("document_patch")?;
+        // D1-a：校验与替换在独占写锁下完成，避免 TOCTOU 静默覆盖并发新写。
+        let _write_lock = crate::config::store::PathWriteLock::acquire(&path)?;
         let original = self.open_document(DocumentReadRequest {
             path: path.clone(),
             format: None,
@@ -75,6 +110,7 @@ impl FileDocumentService {
         validate_base_version(patch, &original.metadata.version)?;
 
         let patched = apply_patch_to_string(&original.content, patch)?;
+        cancellation.check()?;
         let preview = preview_from_contents(
             &original.metadata.document_id,
             &original.metadata.version,
@@ -85,6 +121,12 @@ impl FileDocumentService {
 
         self.ensure_write(&path)?;
         validate_content_format(&patched, original.metadata.format)?;
+        // Re-validate under lock after compute (second reader may have raced before lock).
+        let still = self.open_document(DocumentReadRequest {
+            path: path.clone(),
+            format: None,
+        })?;
+        validate_base_version(patch, &still.metadata.version)?;
         let result_version = content_version(patched.as_bytes());
         let outbox_event = self.invalidation_outbox.prepare(
             &original.metadata.document_id,
@@ -92,9 +134,24 @@ impl FileDocumentService {
             &result_version,
             false,
         )?;
-        if let Err(error) = fs::write(&path, patched.as_bytes()) {
+        if let Err(error) = cancellation.check() {
             let _ = self.invalidation_outbox.cancel(&outbox_event);
-            return Err(error.into());
+            return Err(error);
+        }
+        if let Err(error) = crate::config::store::atomic_write(&path, patched.as_bytes()) {
+            let _ = self.invalidation_outbox.cancel(&outbox_event);
+            return Err(error);
+        }
+
+        if let Err(error) = cancellation.check() {
+            // D1-a：仅当磁盘仍是本 operation 写出的 result_version 才回滚。
+            restore_previous_file_if_result(
+                &path,
+                Some(original.content.as_bytes()),
+                &result_version,
+            )?;
+            let _ = self.invalidation_outbox.cancel(&outbox_event);
+            return Err(error);
         }
 
         let checkpoint = match (git, checkpoint_request) {
@@ -102,7 +159,11 @@ impl FileDocumentService {
                 match git.create_checkpoint(&request.node_id, request.message.as_deref()) {
                     Ok(checkpoint) => Some(checkpoint),
                     Err(checkpoint_error) => {
-                        if let Err(rollback_error) = fs::write(&path, original.content.as_bytes()) {
+                        if let Err(rollback_error) = restore_previous_file_if_result(
+                            &path,
+                            Some(original.content.as_bytes()),
+                            &result_version,
+                        ) {
                             return Err(CoreError::External {
                             service: "document_patch_transaction".to_owned(),
                             message: format!(
@@ -137,25 +198,119 @@ impl FileDocumentService {
 
     /// 写入 Artifact 文件并返回可传递的 artifact 描述。
     pub fn write_artifact(&self, request: ArtifactWriteRequest) -> CoreResult<ArtifactWriteReport> {
-        validate_artifact_id(&request.artifact_id)?;
-        let path = self.artifact_root.join(&request.artifact_id);
+        self.write_artifact_with_cancellation(request, &CancellationToken::new())
+    }
+
+    /// 写入 artifact；operation receipt 使文件已替换后的取消仍可确定性恢复。
+    pub fn write_artifact_with_cancellation(
+        &self,
+        request: ArtifactWriteRequest,
+        cancellation: &CancellationToken,
+    ) -> CoreResult<ArtifactWriteReport> {
+        cancellation.check()?;
+        let _project_mutation = self
+            .invalidation_outbox
+            .acquire_project_mutation("artifact_write")?;
+        let ArtifactWriteRequest {
+            artifact_id,
+            kind,
+            media_type,
+            bytes,
+            operation_id,
+            metadata,
+        } = request;
+        validate_artifact_id(&artifact_id)?;
+        let path = self.artifact_root.join(&artifact_id);
         self.ensure_write(&path)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let checksum = content_version(&bytes);
+        let metadata_checksum = content_version(&serde_json::to_vec(&metadata)?);
+        let had_operation_id = operation_id.is_some();
+        let normalized_operation_id = operation_id
+            .map(|operation_id| operation_id.trim().to_owned())
+            .filter(|operation_id| !operation_id.is_empty());
+        if had_operation_id && normalized_operation_id.is_none() {
+            return Err(CoreError::validation(
+                "artifact operation_id cannot be blank",
+            ));
         }
-        fs::write(&path, &request.bytes)?;
+        let receipt =
+            normalized_operation_id
+                .as_ref()
+                .map(|operation_id| ArtifactOperationReceipt {
+                    operation_id: operation_id.clone(),
+                    artifact_id: artifact_id.clone(),
+                    kind: kind.clone(),
+                    media_type: media_type.clone(),
+                    checksum: checksum.clone(),
+                    metadata_checksum: metadata_checksum.clone(),
+                    size_bytes: bytes.len() as u64,
+                });
+        let receipt_path = receipt.as_ref().map(|receipt| {
+            self.artifact_root.join(".operations").join(format!(
+                "{}.json",
+                content_version(receipt.operation_id.as_bytes())
+            ))
+        });
+
+        if let (Some(expected), Some(receipt_path)) = (&receipt, &receipt_path) {
+            self.ensure_write(receipt_path)?;
+            if receipt_path.exists() {
+                self.ensure_read(receipt_path)?;
+                let persisted =
+                    serde_json::from_slice::<ArtifactOperationReceipt>(&fs::read(receipt_path)?)?;
+                if persisted != *expected {
+                    return Err(CoreError::validation(format!(
+                        "artifact operation_id reused with a different payload: {}",
+                        expected.operation_id
+                    )));
+                }
+                if path.exists() {
+                    self.ensure_read(&path)?;
+                    if content_version(&fs::read(&path)?) != checksum {
+                        return Err(CoreError::validation(format!(
+                            "artifact content conflicts with committed operation: {}",
+                            expected.operation_id
+                        )));
+                    }
+                } else {
+                    cancellation.check()?;
+                    crate::config::store::atomic_write(&path, &bytes)?;
+                }
+                return Ok(ArtifactWriteReport {
+                    descriptor: ArtifactDescriptor {
+                        artifact_id,
+                        kind,
+                        media_type,
+                        storage_uri: format!("file://{}", path.display()),
+                        size_bytes: Some(bytes.len() as u64),
+                        checksum: Some(checksum),
+                        created_by_run: None,
+                        created_by_node: None,
+                        sources: Vec::new(),
+                        metadata,
+                    },
+                });
+            }
+        }
+
+        cancellation.check()?;
+        crate::config::store::atomic_write(&path, &bytes)?;
+        if let (Some(receipt), Some(receipt_path)) = (&receipt, &receipt_path) {
+            cancellation.check()?;
+            crate::config::store::atomic_write(receipt_path, &serde_json::to_vec_pretty(receipt)?)?;
+        }
 
         let descriptor = ArtifactDescriptor {
-            artifact_id: request.artifact_id,
-            kind: request.kind,
-            media_type: request.media_type,
+            artifact_id,
+            kind,
+            media_type,
             storage_uri: format!("file://{}", path.display()),
-            size_bytes: Some(request.bytes.len() as u64),
-            checksum: Some(content_version(&request.bytes)),
+            size_bytes: Some(bytes.len() as u64),
+            checksum: Some(checksum),
             created_by_run: None,
             created_by_node: None,
             sources: Vec::new(),
-            metadata: request.metadata,
+            metadata,
         };
 
         Ok(ArtifactWriteReport { descriptor })
@@ -212,7 +367,28 @@ impl DocumentRepository for FileDocumentService {
 
     /// 保存完整文档内容，并返回索引失效通知。
     fn save_document(&self, request: DocumentWriteRequest) -> CoreResult<DocumentWriteReport> {
+        self.save_document_with_cancellation(request, &CancellationToken::new())
+    }
+
+    /// 保存文档，并在正文替换与 outbox 激活边界响应取消。
+    fn preview_patch(&self, patch: &DocumentPatch) -> CoreResult<PatchPreview> {
+        self.preview_patch_impl(patch)
+    }
+}
+
+impl FileDocumentService {
+    pub fn save_document_with_cancellation(
+        &self,
+        request: DocumentWriteRequest,
+        cancellation: &CancellationToken,
+    ) -> CoreResult<DocumentWriteReport> {
+        cancellation.check()?;
         self.ensure_write(&request.path)?;
+        let _project_mutation = self
+            .invalidation_outbox
+            .acquire_project_mutation("document_save")?;
+        // D1-a：base_version 校验与替换在独占锁下，防止并发保存静默丢写。
+        let _write_lock = crate::config::store::PathWriteLock::acquire(&request.path)?;
         let format = resolve_format(&request.path, request.format)?;
         validate_content_format(&request.content, format)?;
         validate_write_base_version(
@@ -221,11 +397,25 @@ impl DocumentRepository for FileDocumentService {
             Some(format),
             request.base_version.as_deref(),
         )?;
+        cancellation.check()?;
         if let Some(parent) = request.path.parent() {
             fs::create_dir_all(parent)?;
         }
         let previous = fs::read(&request.path).ok();
-        fs::write(&request.path, request.content.as_bytes())?;
+        // Re-check version under lock immediately before replace.
+        validate_write_base_version(
+            self,
+            &request.path,
+            Some(format),
+            request.base_version.as_deref(),
+        )?;
+        let result_version = content_version(request.content.as_bytes());
+        crate::config::store::atomic_write(&request.path, request.content.as_bytes())?;
+
+        if let Err(error) = cancellation.check() {
+            restore_previous_file_if_result(&request.path, previous.as_deref(), &result_version)?;
+            return Err(error);
+        }
 
         let metadata = self.metadata_for_path(&request.path, Some(format))?;
         let outbox_event = match self.invalidation_outbox.prepare(
@@ -236,12 +426,21 @@ impl DocumentRepository for FileDocumentService {
         ) {
             Ok(event) => event,
             Err(error) => {
-                restore_previous_file(&request.path, previous.as_deref())?;
+                restore_previous_file_if_result(
+                    &request.path,
+                    previous.as_deref(),
+                    &result_version,
+                )?;
                 return Err(error);
             }
         };
+        if let Err(error) = cancellation.check() {
+            restore_previous_file_if_result(&request.path, previous.as_deref(), &result_version)?;
+            let _ = self.invalidation_outbox.cancel(&outbox_event);
+            return Err(error);
+        }
         if let Err(error) = self.invalidation_outbox.activate(&outbox_event) {
-            restore_previous_file(&request.path, previous.as_deref())?;
+            restore_previous_file_if_result(&request.path, previous.as_deref(), &result_version)?;
             let _ = self.invalidation_outbox.cancel(&outbox_event);
             return Err(error);
         }
@@ -252,7 +451,7 @@ impl DocumentRepository for FileDocumentService {
     }
 
     /// 预览 patch 结果，不写入文件。
-    fn preview_patch(&self, patch: &DocumentPatch) -> CoreResult<PatchPreview> {
+    fn preview_patch_impl(&self, patch: &DocumentPatch) -> CoreResult<PatchPreview> {
         let path = PathBuf::from(&patch.document_id);
         let original = self.open_document(DocumentReadRequest { path, format: None })?;
         validate_base_version(patch, &original.metadata.version)?;
@@ -270,11 +469,28 @@ impl DocumentRepository for FileDocumentService {
 
 fn restore_previous_file(path: &Path, previous: Option<&[u8]>) -> CoreResult<()> {
     match previous {
-        Some(bytes) => fs::write(path, bytes)?,
+        Some(bytes) => crate::config::store::atomic_write(path, bytes)?,
         None if path.exists() => fs::remove_file(path)?,
         None => {}
     }
     Ok(())
+}
+
+/// D1-a：回滚仅在当前正文仍是本 operation 的 result_version 时执行，
+/// 避免 B 成功写新正文后 A 失败回滚覆盖新写。
+fn restore_previous_file_if_result(
+    path: &Path,
+    previous: Option<&[u8]>,
+    result_version: &str,
+) -> CoreResult<()> {
+    let Ok(current) = fs::read(path) else {
+        return restore_previous_file(path, previous);
+    };
+    if content_version(&current) != result_version {
+        // Concurrent writer advanced past this operation — do not clobber.
+        return Ok(());
+    }
+    restore_previous_file(path, previous)
 }
 
 /// 解析文档格式，拒绝不支持的文件扩展名。
@@ -415,12 +631,7 @@ fn index_invalidation(document_id: &str, reason: &str) -> IndexInvalidation {
 
 /// 轻量内容版本，使用固定 FNV-1a 哈希，避免新增依赖和随机种子差异。
 fn content_version(bytes: &[u8]) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
+    crate::contracts::content_version_for_bytes(bytes)
 }
 
 /// 为 UI 预览生成首个变更窗口，而不是返回完整 diff。

@@ -47,7 +47,7 @@ fn git_stdout<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String
 fn git_service_initializes_and_reports_health() {
     let (_temp_dir, service) = init_test_repo();
 
-    let health = service.health_check();
+    let health = service.health_check().expect("health");
 
     assert_eq!(health.status, GitHealthStatus::Degraded);
     assert!(health.reason.unwrap().contains("no commits"));

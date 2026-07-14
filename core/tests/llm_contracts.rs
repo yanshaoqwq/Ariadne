@@ -106,6 +106,7 @@ fn run_request() -> LlmRunRequest {
         run_id: Some(RunId::new("run-llm")),
         node_id: None,
         metadata: Value::Null,
+        dispatch_authorization: Default::default(),
     }
 }
 

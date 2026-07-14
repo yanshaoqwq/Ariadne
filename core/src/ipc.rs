@@ -15,14 +15,21 @@ pub struct IpcRequest {
     pub params: Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IpcResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+    /// Free-form diagnostic for logs/tools. Not the author-facing primary string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Stable failure identity for UI localization (U1). Always set when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Localization key (`ui.error.*`). Desktop prefers this over inventing keys from diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_key: Option<String>,
 }
 
 impl IpcResponse {
@@ -31,17 +38,25 @@ impl IpcResponse {
             ok: true,
             data: Some(serde_json::to_value(data).unwrap_or(Value::Null)),
             error: None,
+            error_code: None,
+            error_key: None,
         }
     }
 
-    fn error(error: impl Into<String>) -> Self {
+    fn error(error: impl Into<crate::command_error::CommandError>) -> Self {
+        let error = error.into();
         Self {
             ok: false,
             data: None,
-            error: Some(error.into()),
+            error: error.diagnostic.clone(),
+            error_code: Some(error.code),
+            error_key: Some(error.message_key),
         }
     }
 }
+
+/// Legacy free-form → code (IPC protocol adapter only). Prefer structured [`CommandError`].
+pub use crate::command_error::classify_legacy_message as classify_ipc_error;
 
 pub fn handle_request(state: &AriadneAppState, request: IpcRequest) -> IpcResponse {
     match dispatch_request(state, request) {
@@ -175,6 +190,13 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             ok(commands::set_project_root(state, params.project_root)?)
         }
         "get_works_tree" => ok(commands::get_works_tree(state)?),
+        "get_chapter_summary_view" => {
+            let params: ChapterIdParams = params(request.params)?;
+            ok(commands::get_chapter_summary_view(
+                state,
+                params.chapter_id,
+            )?)
+        }
         "get_document_tree" => {
             let params: DocumentTreeParams = params(request.params)?;
             ok(commands::get_document_tree(state, params.project_id)?)
@@ -266,12 +288,43 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "pack_workflow_selection" => {
             let params: PackWorkflowSelectionParams = params(request.params)?;
-            ok(commands::pack_workflow_selection(
+            ok(commands::pack_workflow_selection_with_revision(
                 state,
                 params.workflow_id,
                 params.selected_node_ids,
                 params.subworkflow_node_id,
                 params.title,
+                params.expected_revision,
+            )?)
+        }
+        "get_pack_operation" => {
+            let params: PackOperationParams = params(request.params)?;
+            ok(commands::get_pack_operation(state, params.operation_id)?)
+        }
+        "list_in_doubt_operations" => {
+            let params: RunControlParams = params(request.params)?;
+            ok(commands::list_in_doubt_operations(
+                state,
+                params.workflow_id,
+                params.run_id,
+            )?)
+        }
+        "get_project_maintenance" => ok(commands::get_project_maintenance(state)?),
+        "list_index_dead_letters" => ok(commands::list_index_dead_letters(state)?),
+        "requeue_index_dead_letter" => {
+            let params: RequeueIndexDeadLetterParams = params(request.params)?;
+            ok(commands::requeue_index_dead_letter(state, params.event_id)?)
+        }
+        "resolve_workflow_operation_in_doubt" => {
+            let params: ResolveInDoubtParams = params(request.params)?;
+            ok(commands::resolve_workflow_operation_in_doubt(
+                state,
+                commands::ResolveInDoubtOperationRequest {
+                    operation_id: params.operation_id,
+                    decision: params.decision,
+                    response: params.response,
+                    reason: params.reason,
+                },
             )?)
         }
         "run_workflow" => {
@@ -461,6 +514,15 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
                 params.key,
             )?)
         }
+        "rebind_project_provider_key" => {
+            let params: RebindProviderKeyParams = params(request.params)?;
+            ok(commands::rebind_project_provider_key(
+                state,
+                params.project_root,
+                params.provider,
+                params.key,
+            )?)
+        }
         "save_provider_settings" => {
             let params: UpdateParam<commands::ProviderSettingsUpdate> = params(request.params)?;
             ok(commands::save_provider_settings(state, params.update)?)
@@ -492,6 +554,14 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
                 params.text,
                 params.range,
                 params.result,
+            )?)
+        }
+        "search_project_documents" => {
+            let params: SearchProjectDocumentsParams = params(request.params)?;
+            ok(commands::search_project_documents(
+                state,
+                params.query,
+                params.limit.unwrap_or(20),
             )?)
         }
         "project_ai_chat" => {
@@ -536,6 +606,8 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         "backend_info" => Ok(json!({
             "project_root": commands::default_project_root(),
             "app_state_root": commands::default_app_state_root(),
+            "product_version": crate::PRODUCT_VERSION,
+            "ipc_schema_version": crate::IPC_SCHEMA_VERSION,
         })),
         other => Err(format!("unsupported ipc method: {other}")),
     }
@@ -560,6 +632,11 @@ struct ProjectSelectionParams {
 #[derive(Debug, Deserialize)]
 struct ProjectRootParams {
     project_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChapterIdParams {
+    chapter_id: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -674,6 +751,28 @@ struct PackWorkflowSelectionParams {
     subworkflow_node_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackOperationParams {
+    operation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveInDoubtParams {
+    operation_id: String,
+    decision: commands::InDoubtDecision,
+    #[serde(default)]
+    response: Option<serde_json::Value>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequeueIndexDeadLetterParams {
+    event_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -746,6 +845,13 @@ struct SaveProviderKeyParams {
     key: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RebindProviderKeyParams {
+    project_root: String,
+    provider: String,
+    key: String,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RunLogFilterParams {
     #[serde(default)]
@@ -765,6 +871,13 @@ struct ApplyQuickEditParams {
     text: String,
     range: crate::contracts::TextRange,
     result: crate::frontend::QuickEditResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchProjectDocumentsParams {
+    query: String,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,9 +1,18 @@
 using System.Collections.ObjectModel;
-using Avalonia.Media;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
+
+/// <summary>Mutually exclusive list load states (U72 / 00A).</summary>
+public enum PageLoadState
+{
+    IdleNeedProject,
+    Loading,
+    Error,
+    Empty,
+    Content,
+}
 
 public sealed class RunLogPageViewModel : ViewModelBase
 {
@@ -12,6 +21,9 @@ public sealed class RunLogPageViewModel : ViewModelBase
     private string _searchQuery = string.Empty;
     private string _selectedLevel = string.Empty;
     private string _statusText = string.Empty;
+    private PageLoadState _loadState = PageLoadState.Loading;
+    private string _errorText = string.Empty;
+    private int _loadGeneration;
 
     public RunLogPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -44,14 +56,21 @@ public sealed class RunLogPageViewModel : ViewModelBase
     public string MarkReadText => _displayNames.Text("ui.run_log.mark_read");
 
     public string EmptyText => _displayNames.Text("ui.run_log.empty");
-    public string EmptyTitle => _backend.HasProjectRoot
-        ? _displayNames.Text("ui.empty.run_log.title")
-        : _displayNames.Text("ui.empty.need_project.title");
-    public string EmptyHint => _backend.HasProjectRoot
-        ? _displayNames.Text("ui.empty.run_log.hint")
-        : _displayNames.Text("ui.empty.need_project.hint");
-    public bool HasLogs => Logs.Count > 0;
-    public bool IsLogListEmpty => Logs.Count == 0;
+    public string EmptyTitle => _loadState == PageLoadState.IdleNeedProject
+        ? _displayNames.Text("ui.empty.need_project.title")
+        : _displayNames.Text("ui.empty.run_log.title");
+    public string EmptyHint => _loadState == PageLoadState.IdleNeedProject
+        ? _displayNames.Text("ui.empty.need_project.hint")
+        : _displayNames.Text("ui.empty.run_log.hint");
+    public string ErrorTitle => _displayNames.Text("ui.run_log.error.title");
+    public string LoadingText => _displayNames.Text("ui.common.loading");
+
+    public bool HasLogs => _loadState == PageLoadState.Content && Logs.Count > 0;
+    public bool IsLogListEmpty => _loadState == PageLoadState.Empty || _loadState == PageLoadState.IdleNeedProject;
+    public bool IsLoading => _loadState == PageLoadState.Loading;
+    public bool IsError => _loadState == PageLoadState.Error;
+    public bool ShowEmpty => IsLogListEmpty && !IsLoading && !IsError;
+    public bool ShowContent => HasLogs;
 
     public string LevelInfoText => _displayNames.Text("ui.level.info");
 
@@ -93,38 +112,83 @@ public sealed class RunLogPageViewModel : ViewModelBase
         set => SetProperty(ref _statusText, value);
     }
 
+    public string ErrorText
+    {
+        get => _errorText;
+        private set => SetProperty(ref _errorText, value);
+    }
+
+    public PageLoadState LoadState
+    {
+        get => _loadState;
+        private set
+        {
+            if (SetProperty(ref _loadState, value))
+            {
+                OnPropertyChanged(nameof(HasLogs));
+                OnPropertyChanged(nameof(IsLogListEmpty));
+                OnPropertyChanged(nameof(IsLoading));
+                OnPropertyChanged(nameof(IsError));
+                OnPropertyChanged(nameof(ShowEmpty));
+                OnPropertyChanged(nameof(ShowContent));
+                OnPropertyChanged(nameof(EmptyTitle));
+                OnPropertyChanged(nameof(EmptyHint));
+            }
+        }
+    }
+
     private async Task RefreshAsync()
     {
+        var gen = ++_loadGeneration;
         if (!_backend.HasProjectRoot)
         {
             Logs.Clear();
+            ErrorText = string.Empty;
             StatusText = string.Empty;
-            OnPropertyChanged(nameof(HasLogs));
-            OnPropertyChanged(nameof(IsLogListEmpty));
-            OnPropertyChanged(nameof(EmptyTitle));
-            OnPropertyChanged(nameof(EmptyHint));
+            LoadState = PageLoadState.IdleNeedProject;
             return;
         }
 
+        LoadState = PageLoadState.Loading;
+        StatusText = LoadingText;
         try
         {
             var level = string.IsNullOrWhiteSpace(SelectedLevel) ? null : SelectedLevel;
             var logs = await _backend.QueryRunLogsAsync(level, SearchQuery).ConfigureAwait(true);
+            if (gen != _loadGeneration)
+            {
+                return;
+            }
+
             Logs.Clear();
             foreach (var log in logs)
             {
                 Logs.Add(new RunLogItemViewModel(log));
             }
-            StatusText = Logs.Count == 0 ? EmptyText : $"{Logs.Count}";
-            OnPropertyChanged(nameof(HasLogs));
-            OnPropertyChanged(nameof(IsLogListEmpty));
+            ErrorText = string.Empty;
+            if (Logs.Count == 0)
+            {
+                LoadState = PageLoadState.Empty;
+                StatusText = EmptyText;
+            }
+            else
+            {
+                LoadState = PageLoadState.Content;
+                StatusText = $"{Logs.Count}";
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            Logs.Clear();
-            StatusText = string.Empty;
-            OnPropertyChanged(nameof(HasLogs));
-            OnPropertyChanged(nameof(IsLogListEmpty));
+            if (gen != _loadGeneration)
+            {
+                return;
+            }
+
+            // U72: keep previous content when possible; never demote errors to Empty.
+            ErrorText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ErrorText;
+            LoadState = PageLoadState.Error;
+            // Do not Logs.Clear() — preserve last good snapshot for diagnosis.
         }
     }
 
@@ -137,7 +201,9 @@ public sealed class RunLogPageViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
+            ErrorText = StatusText;
+            LoadState = PageLoadState.Error;
         }
     }
 }
@@ -146,13 +212,6 @@ public sealed record RunLogLevelOption(string Value, string Label);
 
 public sealed class RunLogItemViewModel
 {
-    private static readonly IBrush ErrorBrush = new SolidColorBrush(Color.Parse("#DC2626"));
-    private static readonly IBrush WarningBrush = new SolidColorBrush(Color.Parse("#D97706"));
-    private static readonly IBrush InfoBrush = new SolidColorBrush(Color.Parse("#2563EB"));
-    private static readonly IBrush ErrorBg = new SolidColorBrush(Color.Parse("#1FDC2626"));
-    private static readonly IBrush WarningBg = new SolidColorBrush(Color.Parse("#1FD97706"));
-    private static readonly IBrush InfoBg = new SolidColorBrush(Color.Parse("#1F2563EB"));
-
     public RunLogItemViewModel(UiRunLogEntry entry)
     {
         LogId = entry.LogId;
@@ -168,40 +227,31 @@ public sealed class RunLogItemViewModel
             "warning" or "warn" => "warning",
             _ => "info",
         };
-        LevelForeground = LevelBrushKey switch
-        {
-            "error" => ErrorBrush,
-            "warning" => WarningBrush,
-            _ => InfoBrush,
-        };
-        LevelBackground = LevelBrushKey switch
-        {
-            "error" => ErrorBg,
-            "warning" => WarningBg,
-            _ => InfoBg,
-        };
+        IsError = LevelBrushKey == "error";
+        IsWarning = LevelBrushKey == "warning";
+        IsInfo = LevelBrushKey == "info";
     }
 
     public string LogId { get; }
     public long TimestampMs { get; }
-    public string TimestampText { get; }
     public string Kind { get; }
     public string Level { get; }
-    public string LevelBrushKey { get; }
-    public IBrush LevelForeground { get; }
-    public IBrush LevelBackground { get; }
     public string Message { get; }
+    public string TimestampText { get; }
+    public string LevelBrushKey { get; }
+    public bool IsError { get; }
+    public bool IsWarning { get; }
+    public bool IsInfo { get; }
 
-    private static string FormatTimestamp(long timestampMs)
+    private static string FormatTimestamp(long ms)
     {
         try
         {
-            var dto = DateTimeOffset.FromUnixTimeMilliseconds(timestampMs).ToLocalTime();
-            return dto.ToString("MM-dd HH:mm:ss");
+            return DateTimeOffset.FromUnixTimeMilliseconds(ms).LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss");
         }
         catch
         {
-            return timestampMs.ToString();
+            return ms.ToString();
         }
     }
 }

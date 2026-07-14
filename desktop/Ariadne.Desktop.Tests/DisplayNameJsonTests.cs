@@ -64,6 +64,9 @@ public sealed class DisplayNameJsonTests
         Assert.True(map.ContainsKey("ui.works.export_open_folder"));
         Assert.True(map.ContainsKey("ui.workspace.start_node.browse_work_dir"));
         Assert.True(map.ContainsKey("ui.workspace.export_autosaved"));
+        Assert.True(map.ContainsKey("ui.error.network"));
+        Assert.True(map.ContainsKey("ui.dialog.unsaved.save_all"));
+        Assert.True(map.ContainsKey("ui.dialog.unsaved.message_many"));
         // No bare string tokens that would break object parse (regression for line 616).
         Assert.DoesNotContain(map.Values, v => v is null);
     }

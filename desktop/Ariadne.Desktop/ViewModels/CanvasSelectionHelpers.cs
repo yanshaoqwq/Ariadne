@@ -60,4 +60,29 @@ public static class CanvasSelectionHelpers
 
         return false;
     }
+
+    /// <summary>数据入是否已被占用（一入一线规则）。</summary>
+    public static bool IsDataInOccupied(
+        IEnumerable<(string Kind, string Target, string TargetHandle)> edges,
+        string toNodeId,
+        string toHandle)
+    {
+        foreach (var e in edges)
+        {
+            if (string.Equals(e.Kind, "data", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(e.Target, toNodeId, StringComparison.Ordinal)
+                && string.Equals(e.TargetHandle, toHandle, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// W1：Delete 目标 — 有选中边时优先删边（不连带端点节点）；否则删节点。
+    /// </summary>
+    public static bool PreferDeleteEdgeOverNodes(bool hasSelectedEdge, bool hasSelectedNode) =>
+        hasSelectedEdge;
 }

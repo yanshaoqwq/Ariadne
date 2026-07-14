@@ -18,6 +18,23 @@ public static class NodeConfigData
         "budget_usd",
         "timeout_ms",
         "breakpoint",
+        "import_path",
+        "path", // document_read 后端字段
+        "include_content",
+        "data_in_handles",
+        "query_alias",
+        "limit",
+        "input_alias",
+        "operator",
+        "expected",
+        "max_iterations",
+        "stop_input_alias",
+        "stop_expected",
+        "approval_id",
+        "auto_approve",
+        "artifact_id",
+        "format",
+        "title",
     };
 
     public static bool IsUiOwnedKey(string? key) =>
@@ -61,7 +78,10 @@ public static class NodeConfigData
         string modelId,
         string budgetUsd,
         string timeoutMs,
-        bool breakpointEnabled)
+        bool breakpointEnabled,
+        string? importPath = null,
+        IReadOnlyList<string>? dataInHandles = null,
+        IReadOnlyDictionary<string, object?>? utilityFields = null)
     {
         var data = new Dictionary<string, object?>(StringComparer.Ordinal);
         if (extra is not null)
@@ -108,14 +128,60 @@ public static class NodeConfigData
             data["model_id"] = modelId;
         }
 
-        if (!string.IsNullOrWhiteSpace(budgetUsd))
+        // F13：后端 WorkflowLlmNodeConfig 期望 f64/u64；UI 绑定仍是 string，这里解析为数值再落盘。
+        if (!string.IsNullOrWhiteSpace(budgetUsd)
+            && double.TryParse(
+                budgetUsd.Trim(),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var budgetValue))
         {
-            data["budget_usd"] = budgetUsd;
+            data["budget_usd"] = budgetValue;
         }
 
-        if (!string.IsNullOrWhiteSpace(timeoutMs))
+        if (!string.IsNullOrWhiteSpace(timeoutMs)
+            && ulong.TryParse(
+                timeoutMs.Trim(),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var timeoutValue)
+            && timeoutValue > 0)
         {
-            data["timeout_ms"] = timeoutMs;
+            // JSON number；超出 long 范围的值用 double 会丢精度，UI 超时不会那么大。
+            data["timeout_ms"] = timeoutValue <= long.MaxValue
+                ? (long)timeoutValue
+                : timeoutValue;
+        }
+
+        // 文档读：后端字段为 path（兼容保留 import_path）
+        if (!string.IsNullOrWhiteSpace(importPath))
+        {
+            var path = importPath.Trim();
+            data["path"] = path;
+            data["import_path"] = path;
+        }
+
+        if (dataInHandles is { Count: > 0 })
+        {
+            data["data_in_handles"] = dataInHandles.ToArray();
+        }
+
+        if (utilityFields is not null)
+        {
+            foreach (var pair in utilityFields)
+            {
+                if (string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null)
+                {
+                    continue;
+                }
+
+                if (pair.Value is string s && string.IsNullOrWhiteSpace(s))
+                {
+                    continue;
+                }
+
+                data[pair.Key] = pair.Value;
+            }
         }
 
         if (breakpointEnabled)

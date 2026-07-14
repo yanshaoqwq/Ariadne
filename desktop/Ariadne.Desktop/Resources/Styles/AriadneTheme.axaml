@@ -17,9 +17,9 @@
 
         <!-- ========================= 浅色（清昼，默认强调=青绿） ========================= -->
         <ResourceDictionary x:Key="Light">
-          <!-- 背景层：中性 Win11 浅灰，避免整屏暖米色。 -->
-          <Color x:Key="Ariadne.Color.WindowBase">#EFF2F5</Color>
-          <Color x:Key="Ariadne.Color.BackgroundMain">#F6F8FA</Color>
+          <!-- 背景层：明确 4 级阶梯——壳 / 工作区 / 主内容面 / 浮层（U71） -->
+          <Color x:Key="Ariadne.Color.WindowBase">#E4E9EF</Color>
+          <Color x:Key="Ariadne.Color.BackgroundMain">#EEF2F6</Color>
           <Color x:Key="Ariadne.Color.BackgroundSurface">#FFFFFF</Color>
           <Color x:Key="Ariadne.Color.BackgroundElevated">#FFFFFF</Color>
           <!-- Win11 毛玻璃菜单：高透明白 + 微冷灰，靠阴影/圆角成形 -->
@@ -27,7 +27,11 @@
           <Color x:Key="Ariadne.Color.GlassTint">#E8F4F6F8</Color>
           <Color x:Key="Ariadne.Color.GlassBorder">#66FFFFFF</Color>
           <Color x:Key="Ariadne.Color.Scrim">#59000000</Color>
-          <Color x:Key="Ariadne.Color.BackgroundSubtle">#EEF2F6</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSubtle">#E8EDF2</Color>
+          <!-- 日志级别 chip 不透明底（保证 caption 对比度 ≥4.5:1，U70） -->
+          <Color x:Key="Ariadne.Color.LogErrorBg">#FEE2E2</Color>
+          <Color x:Key="Ariadne.Color.LogWarningBg">#FEF3C7</Color>
+          <Color x:Key="Ariadne.Color.LogInfoBg">#DBEAFE</Color>
           <Color x:Key="Ariadne.Color.BackgroundHover">#14000000</Color>
           <Color x:Key="Ariadne.Color.BackgroundPressed">#1F000000</Color>
           <Color x:Key="Ariadne.Color.BackgroundCode">#F0F3F6</Color>
@@ -37,9 +41,9 @@
           <Color x:Key="Ariadne.Color.TextSecondary">#5B6469</Color>
           <Color x:Key="Ariadne.Color.TextSubtle">#8A9398</Color>
           <Color x:Key="Ariadne.Color.TextOnAccent">#FFFFFF</Color>
-          <Color x:Key="Ariadne.Color.BorderDefault">#D8DEE6</Color>
-          <Color x:Key="Ariadne.Color.BorderMuted">#E5EAF0</Color>
-          <Color x:Key="Ariadne.Color.BorderStrong">#B8C2CC</Color>
+          <Color x:Key="Ariadne.Color.BorderDefault">#C5CED8</Color>
+          <Color x:Key="Ariadne.Color.BorderMuted">#D5DDE6</Color>
+          <Color x:Key="Ariadne.Color.BorderStrong">#A8B4C0</Color>
           <Color x:Key="Ariadne.Color.BorderCard">#14140A00</Color>
           <Color x:Key="Ariadne.Color.FocusRing">#2E726B</Color>
           <!-- 强调（青绿） -->
@@ -66,8 +70,8 @@
           <Color x:Key="Ariadne.Color.GitCurrent">#2E726B</Color>
           <Color x:Key="Ariadne.Color.GitBranch">#6366F1</Color>
           <Color x:Key="Ariadne.Color.GitFolded">#B9C0BB</Color>
-          <Color x:Key="Ariadne.Color.CanvasBackground">#F2F6F8</Color>
-          <Color x:Key="Ariadne.Color.CanvasGrid">#D7E0E8</Color>
+          <Color x:Key="Ariadne.Color.CanvasBackground">#E8EEF3</Color>
+          <Color x:Key="Ariadne.Color.CanvasGrid">#CBD6E0</Color>
           <Color x:Key="Ariadne.Color.NodeBackground">#FFFFFF</Color>
           <Color x:Key="Ariadne.Color.NodeBorder">#C9D3DD</Color>
           <Color x:Key="Ariadne.Color.NodeSelected">#2E726B</Color>
@@ -112,6 +116,9 @@
           <SolidColorBrush x:Key="Ariadne.StatusSuccess" Color="{StaticResource Ariadne.Color.StatusSuccess}" />
           <SolidColorBrush x:Key="Ariadne.StatusWarning" Color="{StaticResource Ariadne.Color.StatusWarning}" />
           <SolidColorBrush x:Key="Ariadne.StatusError" Color="{StaticResource Ariadne.Color.StatusError}" />
+          <SolidColorBrush x:Key="Ariadne.LogErrorBg" Color="{StaticResource Ariadne.Color.LogErrorBg}" />
+          <SolidColorBrush x:Key="Ariadne.LogWarningBg" Color="{StaticResource Ariadne.Color.LogWarningBg}" />
+          <SolidColorBrush x:Key="Ariadne.LogInfoBg" Color="{StaticResource Ariadne.Color.LogInfoBg}" />
           <SolidColorBrush x:Key="Ariadne.RuntimeIdle" Color="{StaticResource Ariadne.Color.RuntimeIdle}" />
           <SolidColorBrush x:Key="Ariadne.RuntimeRunning" Color="{StaticResource Ariadne.Color.RuntimeRunning}" />
           <SolidColorBrush x:Key="Ariadne.RuntimePaused" Color="{StaticResource Ariadne.Color.RuntimePaused}" />
@@ -172,6 +179,9 @@
           <Color x:Key="Ariadne.Color.StatusSuccess">#34D399</Color>
           <Color x:Key="Ariadne.Color.StatusWarning">#FBBF24</Color>
           <Color x:Key="Ariadne.Color.StatusError">#F87171</Color>
+          <Color x:Key="Ariadne.Color.LogErrorBg">#3F1D1D</Color>
+          <Color x:Key="Ariadne.Color.LogWarningBg">#3D2E12</Color>
+          <Color x:Key="Ariadne.Color.LogInfoBg">#1E2A3D</Color>
           <Color x:Key="Ariadne.Color.RuntimeIdle">#6A7079</Color>
           <Color x:Key="Ariadne.Color.RuntimeRunning">#6FB9AD</Color>
           <Color x:Key="Ariadne.Color.RuntimePaused">#FBBF24</Color>
@@ -227,6 +237,9 @@
           <SolidColorBrush x:Key="Ariadne.StatusSuccess" Color="{StaticResource Ariadne.Color.StatusSuccess}" />
           <SolidColorBrush x:Key="Ariadne.StatusWarning" Color="{StaticResource Ariadne.Color.StatusWarning}" />
           <SolidColorBrush x:Key="Ariadne.StatusError" Color="{StaticResource Ariadne.Color.StatusError}" />
+          <SolidColorBrush x:Key="Ariadne.LogErrorBg" Color="{StaticResource Ariadne.Color.LogErrorBg}" />
+          <SolidColorBrush x:Key="Ariadne.LogWarningBg" Color="{StaticResource Ariadne.Color.LogWarningBg}" />
+          <SolidColorBrush x:Key="Ariadne.LogInfoBg" Color="{StaticResource Ariadne.Color.LogInfoBg}" />
           <SolidColorBrush x:Key="Ariadne.RuntimeIdle" Color="{StaticResource Ariadne.Color.RuntimeIdle}" />
           <SolidColorBrush x:Key="Ariadne.RuntimeRunning" Color="{StaticResource Ariadne.Color.RuntimeRunning}" />
           <SolidColorBrush x:Key="Ariadne.RuntimePaused" Color="{StaticResource Ariadne.Color.RuntimePaused}" />
@@ -639,7 +652,8 @@
     <Setter Property="CornerRadius" Value="10" />
   </Style>
 
-  <!-- 项目 AI 输入区：一体边框，发送键叠在右下角 -->
+  <!-- 项目 AI 输入区：Works + Workspace 共用 ProjectAiComposer / ai-composer。
+       默认弱边；hover 轻强调；仅 focus-within 用主题色（产品唯一允许主题色描边的输入面）。 -->
   <Style Selector="Border.ai-composer">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
@@ -649,12 +663,27 @@
   <Style Selector="Border.ai-composer:pointerover">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
   </Style>
+  <Style Selector="Border.ai-composer:focus-within">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
 
-  <!-- 选中节点：边框颜色沿周流动（不旋转整框）；主题色 ↔ 浅主题色；宽描边贴紧卡片外沿 -->
+  <!-- 引脚毛玻璃：半透明底 + 亮边 + 圆角 -->
+  <Style Selector="Border.pin-glass">
+    <Setter Property="Background" Value="#55FFFFFF" />
+    <Setter Property="BorderBrush" Value="#66FFFFFF" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BoxShadow" Value="0 1 4 0 #22000000" />
+  </Style>
+  <Style Selector="Border.pin-glass-soft">
+    <Setter Property="Background" Value="#33FFFFFF" />
+    <Setter Property="BorderBrush" Value="#44FFFFFF" />
+    <Setter Property="BorderThickness" Value="0.8" />
+  </Style>
+
+  <!-- 选中节点：边框颜色沿周流动；描边减半仍贴紧外沿（Margin 与厚度同宽） -->
   <Style Selector="Border.node-flow-ring">
     <Setter Property="Opacity" Value="1" />
-    <!-- 宽描边：与节点模板 Margin 配套，内侧贴紧卡片外缘 -->
-    <Setter Property="BorderThickness" Value="5" />
+    <Setter Property="BorderThickness" Value="2.5" />
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush">
       <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
@@ -783,7 +812,7 @@
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="CornerRadius" Value="0" />
-    <Setter Property="Padding" Value="12,9" />
+    <Setter Property="Padding" Value="8,9" />
     <Setter Property="MinHeight" Value="40" />
     <Setter Property="Margin" Value="0" />
     <Setter Property="ClipToBounds" Value="True" />
@@ -1085,6 +1114,20 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
   </Style>
 
+  <!-- U60：页内表单在窄宽壳上拉满宽度、收紧网格间距（随 Window.compact 级联） -->
+  <Style Selector="Window.compact Grid.form-grid">
+    <Setter Property="Margin" Value="0" />
+  </Style>
+  <Style Selector="Window.compact StackPanel.form-stack">
+    <Setter Property="Spacing" Value="8" />
+  </Style>
+  <Style Selector="Window.compact Border.panel-section">
+    <Setter Property="Padding" Value="10,8" />
+  </Style>
+  <Style Selector="Window.medium Border.panel-section">
+    <Setter Property="Padding" Value="14,10" />
+  </Style>
+
   <!-- ============================ 输入控件 ============================ -->
   <Style Selector="TextBox">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
@@ -1092,11 +1135,14 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="CaretBrush" Value="{DynamicResource Ariadne.TextPrimary}" />
     <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="10,6" />
   </Style>
+  <!-- 禁止全局「纯蓝/强调色边」焦点：聚焦保持默认边，靠 CaretBrush 表示可编辑。
+       主题色描边仅允许 Border.ai-composer:focus-within（项目 AI 一体区）。 -->
   <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
   </Style>
   <Style Selector="TextBox.document-editor">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Reading}" />
@@ -1135,6 +1181,26 @@
     <Setter Property="MinWidth" Value="18" />
     <Setter Property="Height" Value="18" />
     <Setter Property="Padding" Value="5,0" />
+  </Style>
+
+  <!-- 运行日志级别 chip：主题 token + 不透明底，小字对比度（U70） -->
+  <Style Selector="Border.log-level.error">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.LogErrorBg}" />
+  </Style>
+  <Style Selector="Border.log-level.error TextBlock.log-level-text">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+  </Style>
+  <Style Selector="Border.log-level.warning">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.LogWarningBg}" />
+  </Style>
+  <Style Selector="Border.log-level.warning TextBlock.log-level-text">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusWarning}" />
+  </Style>
+  <Style Selector="Border.log-level.info">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.LogInfoBg}" />
+  </Style>
+  <Style Selector="Border.log-level.info TextBlock.log-level-text">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusInfo}" />
   </Style>
   <Style Selector="Border.chip">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />

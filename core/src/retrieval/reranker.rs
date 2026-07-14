@@ -1,5 +1,7 @@
-use crate::contracts::CoreResult;
-use crate::providers::{ProviderCallContext, RerankRequest, RerankerProvider};
+use std::collections::BTreeSet;
+
+use crate::contracts::{CoreError, CoreResult};
+use crate::providers::{ProviderCallContext, RerankRequest, RerankResult, RerankerProvider};
 use crate::retrieval::memory::sort_and_limit;
 use crate::retrieval::models::{RerankInput, RetrievalResult};
 use crate::retrieval::traits::ResultReranker;
@@ -64,23 +66,59 @@ impl ResultReranker for ProviderResultReranker<'_> {
             },
         )?;
 
-        let mut reranked = Vec::new();
-        for item in response.results {
-            // provider 返回的是原候选数组下标，非法下标直接忽略，避免 panic。
-            if let Some(mut result) = input.results.get(item.index).cloned() {
-                result.score = item.score;
-                reranked.push(result);
-            }
-        }
-
-        sort_and_limit(&mut reranked, input.limit);
-        Ok(reranked)
+        apply_rerank_results(&input.results, response.results, input.limit)
     }
+}
+
+/// 校验 provider 返回的候选引用并映射回原始结果。
+///
+/// 即使调用方注入了非 HTTP 实现，越界、重复或非有限分数也必须 fail-loud，
+/// 不能在组合层静默丢弃候选。
+pub(crate) fn apply_rerank_results(
+    candidates: &[RetrievalResult],
+    items: Vec<RerankResult>,
+    limit: usize,
+) -> CoreResult<Vec<RetrievalResult>> {
+    let maximum_results = limit.min(candidates.len());
+    if items.len() > maximum_results {
+        return Err(CoreError::validation(format!(
+            "reranker returned {} results, exceeding requested maximum {maximum_results}",
+            items.len()
+        )));
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut reranked = Vec::with_capacity(items.len());
+    for item in items {
+        let mut result = candidates.get(item.index).cloned().ok_or_else(|| {
+            CoreError::validation(format!(
+                "reranker returned out-of-range document index {}",
+                item.index
+            ))
+        })?;
+        if !seen.insert(item.index) {
+            return Err(CoreError::validation(format!(
+                "reranker returned duplicate document index {}",
+                item.index
+            )));
+        }
+        if !item.score.is_finite() {
+            return Err(CoreError::validation(
+                "reranker returned a non-finite relevance score",
+            ));
+        }
+        result.score = item.score;
+        reranked.push(result);
+    }
+
+    sort_and_limit(&mut reranked, limit);
+    Ok(reranked)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::RerankResult;
     use crate::retrieval::models::{RetrievalResult, RetrievalSource};
 
     #[test]
@@ -115,5 +153,30 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk_id, "high");
+    }
+
+    #[test]
+    fn provider_result_mapping_rejects_unknown_candidate_index() {
+        let candidates = vec![RetrievalResult {
+            chunk_id: "known".to_owned(),
+            document_id: "doc".to_owned(),
+            snippet: "known".to_owned(),
+            score: 0.1,
+            source: RetrievalSource::FullText,
+            spans: Vec::new(),
+            metadata: serde_json::Value::Null,
+        }];
+
+        let error = apply_rerank_results(
+            &candidates,
+            vec![RerankResult {
+                index: 1,
+                score: 0.9,
+            }],
+            1,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("out-of-range document index 1"));
     }
 }

@@ -18,6 +18,8 @@ internal static class HelpDialogFactory
         {
             versionText,
             displayNames.Text("ui.version.channel"),
+            displayNames.Text("ui.version.license"),
+            displayNames.Text("ui.version.commercial"),
             displayNames.Text("ui.version.tutorial"),
             TutorialMessage(displayNames),
         });
@@ -42,7 +44,9 @@ internal static class HelpDialogFactory
                 new DialogButton(displayNames.Text("ui.common.close"), DialogButtonVariant.Primary, 0),
             })
         {
+            Severity = DialogSeverity.Info,
             CancelResultIndex = 0,
+            ConfirmResultIndex = 0,
         };
     }
 

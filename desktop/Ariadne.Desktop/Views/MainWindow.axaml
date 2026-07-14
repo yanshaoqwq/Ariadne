@@ -7,8 +7,8 @@
     x:DataType="vm:MainWindowViewModel"
     Width="1280"
     Height="800"
-    MinWidth="1120"
-    MinHeight="700"
+    MinWidth="720"
+    MinHeight="480"
     CanResize="True"
     UseLayoutRounding="True"
     TextElement.FontSize="14"
@@ -23,15 +23,16 @@
     WindowStartupLocation="CenterScreen"
     Title="{Binding AppName}">
 
-  <!-- 外层圆角窗体：Mica 透出壁纸微光，内容浮在其上 -->
+  <!-- 外层圆角窗体：最大化时圆角/边框归零（U61） -->
   <Border
+      x:Name="WindowChrome"
       Background="{DynamicResource Ariadne.WindowBase}"
       BorderBrush="{DynamicResource Ariadne.BorderStrong}"
       BorderThickness="1"
       CornerRadius="10"
       ClipToBounds="True">
     <Panel>
-    <Grid RowDefinitions="40,*">
+    <Grid RowDefinitions="40,Auto,*">
 
       <!-- ================= 顶栏（自定义标题栏 + 项目 + 预算） ================= -->
       <Grid
@@ -40,29 +41,33 @@
           Background="Transparent"
           PointerPressed="OnTitleBarPointerPressed">
 
-        <!-- 品牌 + 项目 chip -->
+        <!-- 品牌 + 项目 chip：限宽 + 省略号（U43） -->
         <StackPanel
             Grid.Column="0"
             Orientation="Horizontal"
             Spacing="10"
             Margin="14,0"
-            VerticalAlignment="Center">
-          <!-- 斜钢笔 + 波浪线；强调色底 + 反色笔画，均随个性化 token -->
+            VerticalAlignment="Center"
+            MaxWidth="360">
           <ctl:BrandLogo Width="24" Height="24" OnAccent="True" VerticalAlignment="Center" />
           <TextBlock
               Text="{Binding AppName}"
               Foreground="{DynamicResource Ariadne.TextPrimary}"
               FontWeight="SemiBold"
               VerticalAlignment="Center" />
-          <Button Classes="subtle" Padding="0" VerticalAlignment="Center" ToolTip.Tip="{Binding ProjectMenuText}">
-            <Border Classes="chip">
+          <Button Classes="subtle" Padding="0" VerticalAlignment="Center"
+                  ToolTip.Tip="{Binding ProjectMenuText}"
+                  AutomationProperties.Name="{Binding ProjectMenuText}">
+            <Border Classes="chip" MaxWidth="220">
               <TextBlock
                   Text="{Binding ProjectTitle}"
                   Classes="caption"
-                  VerticalAlignment="Center" />
+                  VerticalAlignment="Center"
+                  TextTrimming="CharacterEllipsis"
+                  MaxWidth="200"
+                  ToolTip.Tip="{Binding ProjectTitle}" />
             </Border>
             <Button.Flyout>
-              <!-- 项目菜单：全局 MenuFlyoutPresenter 毛玻璃样式 -->
               <MenuFlyout Placement="BottomEdgeAlignedLeft">
                 <MenuItem Header="{Binding CreateProjectText}" Command="{Binding CreateProjectCommand}" />
                 <MenuItem Header="{Binding OpenProjectText}" Command="{Binding OpenProjectCommand}" />
@@ -83,128 +88,149 @@
           </Button>
         </StackPanel>
 
-        <!-- 中段：后端连接状态 -->
+        <!-- 中段：短状态 + 省略（U43） -->
         <TextBlock
             Grid.Column="1"
             Text="{Binding HeaderStatusText}"
             Classes="subtle"
             HorizontalAlignment="Right"
             VerticalAlignment="Center"
-            Margin="0,0,18,0" />
+            Margin="8,0,12,0"
+            TextTrimming="CharacterEllipsis"
+            MaxWidth="280"
+            ToolTip.Tip="{Binding HeaderStatusText}" />
 
-        <!-- 预算条 -->
+        <!-- 预算条：文本限宽 -->
         <StackPanel
             Grid.Column="2"
             Orientation="Horizontal"
             Spacing="8"
             VerticalAlignment="Center"
-            Margin="0,0,12,0">
+            Margin="0,0,8,0">
           <TextBlock Text="{Binding BudgetLabel}" Classes="caption" VerticalAlignment="Center" />
           <ProgressBar
-              Width="92"
+              Width="72"
               Height="8"
               Minimum="0"
               Maximum="100"
               Value="{Binding BudgetUsagePercent}"
               VerticalAlignment="Center" />
-          <TextBlock Text="{Binding BudgetStatusText}" Classes="caption" VerticalAlignment="Center" />
+          <TextBlock Text="{Binding BudgetStatusText}"
+                     Classes="caption"
+                     VerticalAlignment="Center"
+                     MaxWidth="100"
+                     TextTrimming="CharacterEllipsis"
+                     ToolTip.Tip="{Binding BudgetStatusText}" />
         </StackPanel>
 
-        <!-- 窗口控制（矢量 Path，不依赖字体） -->
+        <!-- 窗口控制（U69 AutomationProperties） -->
         <StackPanel Grid.Column="3" Orientation="Horizontal">
           <Button
               Classes="window-control"
               ToolTip.Tip="{Binding MinimizeWindowText}"
+              AutomationProperties.Name="{Binding MinimizeWindowText}"
               Click="OnMinimizeClicked">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Minimize}" />
           </Button>
           <Button
               Classes="window-control"
               ToolTip.Tip="{Binding MaximizeWindowText}"
+              AutomationProperties.Name="{Binding MaximizeWindowText}"
               Click="OnMaximizeClicked">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Maximize}" />
           </Button>
           <Button
               Classes="window-control close"
               ToolTip.Tip="{Binding CloseWindowText}"
+              AutomationProperties.Name="{Binding CloseWindowText}"
               Click="OnCloseClicked">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Close}" />
           </Button>
         </StackPanel>
       </Grid>
 
-      <!-- ================= 主体：侧栏 + 内容 ================= -->
-      <Grid Grid.Row="1" ColumnDefinitions="Auto,*">
+      <!-- D3：项目维护门禁横幅（active/failed） -->
+      <Border Grid.Row="1"
+              IsVisible="{Binding IsMaintenanceBlocking}"
+              Background="{DynamicResource Ariadne.LogWarningBg}"
+              BorderBrush="{DynamicResource Ariadne.StatusWarning}"
+              BorderThickness="0,0,0,1"
+              Padding="12,6">
+        <TextBlock Text="{Binding MaintenanceBannerText}"
+                   TextWrapping="Wrap"
+                   Classes="body"
+                   Foreground="{DynamicResource Ariadne.StatusWarning}" />
+      </Border>
 
-        <!-- 左侧栏 -->
+      <!-- ================= 主体：侧栏 + 内容 ================= -->
+      <Grid Grid.Row="2" ColumnDefinitions="Auto,*">
+
+        <!-- 左侧栏：折叠时仅图标（U66） -->
         <Border
             Grid.Column="0"
             Width="{Binding SidebarWidth}"
-            Background="{DynamicResource Ariadne.BackgroundSurface}"
+            Background="{DynamicResource Ariadne.BackgroundSubtle}"
             BorderBrush="{DynamicResource Ariadne.BorderMuted}"
             BorderThickness="0,0,1,0">
           <DockPanel Margin="0,4,0,0">
 
-            <!-- 折叠按钮 -->
             <Button
                 DockPanel.Dock="Top"
                 Classes="subtle"
-                Margin="10,2,10,6"
-                HorizontalAlignment="Left"
+                Margin="8,2,8,6"
+                HorizontalAlignment="Center"
                 Width="36"
                 Height="32"
                 Command="{Binding ToggleSidebarCommand}"
-                ToolTip.Tip="{Binding ToggleSidebarText}">
+                ToolTip.Tip="{Binding ToggleSidebarText}"
+                AutomationProperties.Name="{Binding ToggleSidebarText}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Menu}" />
             </Button>
 
             <!-- 底部：版本 + 反馈 -->
-            <StackPanel DockPanel.Dock="Bottom" Margin="10,8,10,14" Spacing="2">
+            <StackPanel DockPanel.Dock="Bottom" Margin="4,8,4,14" Spacing="2">
               <Separator Margin="2,6" />
-              <Button Classes="nav" Command="{Binding OpenVersionCommand}">
-                <Grid ColumnDefinitions="30,*">
-                  <Path Grid.Column="0" Classes="icon" Data="{StaticResource Ariadne.Icon.Info}" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                  <TextBlock Grid.Column="1" Text="{Binding VersionText}" Classes="caption" VerticalAlignment="Center" />
-                </Grid>
+              <Button Classes="nav"
+                      Command="{Binding OpenVersionCommand}"
+                      ToolTip.Tip="{Binding VersionText}"
+                      AutomationProperties.Name="{Binding VersionText}">
+                <Panel>
+                  <!-- 展开 -->
+                  <Grid ColumnDefinitions="30,*" IsVisible="{Binding SidebarExpanded}">
+                    <Path Grid.Column="0" Classes="icon" Data="{StaticResource Ariadne.Icon.Info}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="{Binding VersionText}" Classes="caption" VerticalAlignment="Center" />
+                  </Grid>
+                  <!-- 折叠 -->
+                  <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Info}"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        IsVisible="{Binding SidebarCollapsed}" />
+                </Panel>
               </Button>
-              <Button Classes="nav" Command="{Binding OpenFeedbackCommand}">
-                <Grid ColumnDefinitions="30,*">
-                  <Path Grid.Column="0" Classes="icon" Data="{StaticResource Ariadne.Icon.Feedback}" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                  <TextBlock Grid.Column="1" Text="{Binding FeedbackText}" Classes="caption" VerticalAlignment="Center" />
-                </Grid>
+              <Button Classes="nav"
+                      Command="{Binding OpenFeedbackCommand}"
+                      ToolTip.Tip="{Binding FeedbackText}"
+                      AutomationProperties.Name="{Binding FeedbackText}">
+                <Panel>
+                  <Grid ColumnDefinitions="30,*" IsVisible="{Binding SidebarExpanded}">
+                    <Path Grid.Column="0" Classes="icon" Data="{StaticResource Ariadne.Icon.Feedback}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="{Binding FeedbackText}" Classes="caption" VerticalAlignment="Center" />
+                  </Grid>
+                  <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Feedback}"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        IsVisible="{Binding SidebarCollapsed}" />
+                </Panel>
               </Button>
             </StackPanel>
 
-            <!-- 导航：上组 →(大间距分隔)→ 下组，顺排靠上，不置底 -->
             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-              <!-- 左右 0 边距：悬停横条贴齐左栏；Spacing 加大项间距，渐变只在按钮高度内不撑满缝 -->
               <StackPanel Margin="0,4,0,0" Spacing="6">
+                <!-- U66：模板在 App.DataTemplates（NavigationItemViewModel 单源） -->
                 <ItemsControl ItemsSource="{Binding PrimaryNavigationItems}">
                   <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                       <StackPanel Spacing="6" />
                     </ItemsPanelTemplate>
                   </ItemsControl.ItemsPanel>
-                  <ItemsControl.ItemTemplate>
-                    <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
-                      <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Command="{Binding SelectCommand}">
-                        <Grid ColumnDefinitions="3,26,*,Auto" Margin="0,0,10,0">
-                          <!-- 选中竖条贴左缘 -->
-                          <Border
-                              Grid.Column="0"
-                              Width="3"
-                              VerticalAlignment="Stretch"
-                              IsVisible="{Binding IsSelected}"
-                              Background="{DynamicResource Ariadne.AccentPrimary}" />
-                          <Path Grid.Column="1" Classes="icon" Width="17" Height="17" Data="{Binding Icon}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="8,0,0,0" />
-                          <TextBlock Grid.Column="2" Text="{Binding Title}" FontSize="13" VerticalAlignment="Center" Margin="6,0,0,0" />
-                          <Border Grid.Column="3" Classes="badge" IsVisible="{Binding HasBadge}" VerticalAlignment="Center">
-                            <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                          </Border>
-                        </Grid>
-                      </Button>
-                    </DataTemplate>
-                  </ItemsControl.ItemTemplate>
                 </ItemsControl>
 
                 <Grid Height="52" VerticalAlignment="Center">
@@ -217,37 +243,17 @@
                       <StackPanel Spacing="6" />
                     </ItemsPanelTemplate>
                   </ItemsControl.ItemsPanel>
-                  <ItemsControl.ItemTemplate>
-                    <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
-                      <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Command="{Binding SelectCommand}">
-                        <Grid ColumnDefinitions="3,26,*,Auto" Margin="0,0,10,0">
-                          <Border
-                              Grid.Column="0"
-                              Width="3"
-                              VerticalAlignment="Stretch"
-                              IsVisible="{Binding IsSelected}"
-                              Background="{DynamicResource Ariadne.AccentPrimary}" />
-                          <Path Grid.Column="1" Classes="icon" Width="17" Height="17" Data="{Binding Icon}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="8,0,0,0" />
-                          <TextBlock Grid.Column="2" Text="{Binding Title}" FontSize="13" VerticalAlignment="Center" Margin="6,0,0,0" />
-                          <Border Grid.Column="3" Classes="badge" IsVisible="{Binding HasBadge}" VerticalAlignment="Center">
-                            <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                          </Border>
-                        </Grid>
-                      </Button>
-                    </DataTemplate>
-                  </ItemsControl.ItemTemplate>
                 </ItemsControl>
               </StackPanel>
             </ScrollViewer>
           </DockPanel>
         </Border>
 
-        <!-- 内容区 -->
         <ContentControl
             Grid.Column="1"
             Content="{Binding CurrentPage}" />
       </Grid>
-      <!-- ================= 全局弹窗遮罩（Win11 半透明 scrim） ================= -->
+      <!-- ================= 全局弹窗遮罩 ================= -->
       <Border x:Name="DialogScrim"
               Grid.Row="1"
               Background="{DynamicResource Ariadne.Scrim}"
@@ -256,7 +262,8 @@
         <ContentControl Content="{Binding Dialog.ActiveDialog}"
                         HorizontalAlignment="Center"
                         VerticalAlignment="Center"
-                        Margin="40"
+                        Margin="24"
+                        MaxHeight="{Binding $parent[Border].Bounds.Height}"
                         FontFamily="{DynamicResource Ariadne.Font.Ui}" />
       </Border>
     </Grid>

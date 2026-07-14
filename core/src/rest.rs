@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -10,12 +11,13 @@ use crate::commands::{self, AriadneAppState, RunLogQuery, RunWorkflowRequest, Wo
 use crate::frontend::{UiRunLogKind, UiRunLogLevel};
 
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
+const HTTP_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestServerConfig {
     pub bind: String,
     pub bearer_token: String,
-    pub allow_remote: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +104,8 @@ fn handle_connection(
     state: &AriadneAppState,
     config: &RestServerConfig,
 ) -> io::Result<()> {
+    stream.set_read_timeout(Some(HTTP_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(HTTP_IO_TIMEOUT))?;
     let request = read_http_request(stream)?;
     let response = handle_rest_request(state, config, request);
     write_http_response(stream, response)
@@ -347,10 +351,10 @@ fn validate_rest_server_config(config: &RestServerConfig) -> io::Result<()> {
             "REST bearer token is required",
         ));
     }
-    if !config.allow_remote && !bind_is_loopback(&config.bind) {
+    if !bind_is_loopback(&config.bind) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "REST bind address must be loopback unless allow_remote is true",
+            "REST bind address must be loopback; remote plaintext HTTP is not supported",
         ));
     }
     Ok(())
@@ -503,6 +507,13 @@ fn read_http_request(stream: &mut TcpStream) -> io::Result<RestRequest> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
+    let mut header_bytes = request_line.len();
+    if header_bytes > MAX_HTTP_HEADER_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "HTTP request headers are too large",
+        ));
+    }
     let parts = request_line.split_whitespace().collect::<Vec<_>>();
     if parts.len() < 2 {
         return Err(io::Error::new(
@@ -516,6 +527,13 @@ fn read_http_request(stream: &mut TcpStream) -> io::Result<RestRequest> {
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
+        header_bytes = header_bytes.saturating_add(line.len());
+        if header_bytes > MAX_HTTP_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP request headers are too large",
+            ));
+        }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             break;
@@ -623,8 +641,16 @@ mod tests {
         RestServerConfig {
             bind: "127.0.0.1:4817".to_owned(),
             bearer_token: "test-token".to_owned(),
-            allow_remote: false,
         }
+    }
+
+    #[test]
+    fn remote_bind_is_rejected_without_override() {
+        let config = RestServerConfig {
+            bind: "0.0.0.0:4817".to_owned(),
+            bearer_token: "test-token".to_owned(),
+        };
+        assert!(super::validate_rest_server_config(&config).is_err());
     }
 
     fn json_body(response: super::RestResponse) -> Value {
@@ -710,6 +736,8 @@ mod tests {
                 }],
                 edges: Vec::new(),
                 metadata: Value::Null,
+                content_revision: None,
+                expected_revision: None,
             },
         )
         .unwrap();
@@ -775,6 +803,8 @@ mod tests {
                 }],
                 edges: Vec::new(),
                 metadata: Value::Null,
+                content_revision: None,
+                expected_revision: None,
             },
         )
         .unwrap();
@@ -814,7 +844,7 @@ mod tests {
             temp.path(),
             UiRunLogEntry {
                 log_id: "log-a".to_owned(),
-                timestamp_ms: 1,
+                timestamp_ms: 0,
                 kind: UiRunLogKind::Error,
                 level: UiRunLogLevel::Error,
                 message: "writer failed".to_owned(),
@@ -830,7 +860,7 @@ mod tests {
             temp.path(),
             UiRunLogEntry {
                 log_id: "log-b".to_owned(),
-                timestamp_ms: 2,
+                timestamp_ms: 0,
                 kind: UiRunLogKind::Node,
                 level: UiRunLogLevel::Info,
                 message: "other run".to_owned(),

@@ -1,13 +1,15 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use ariadne::config::AutoModeConfig;
 use ariadne::contracts::{
-    AutoModeState, CoreResult, Edge, EdgeId, ExecutionPolicy, NodeId, NodeInstance,
-    PermissionPolicy, PortEndpoint, PortValue, ProviderCapability, ProviderDefinition,
-    ProviderType, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
+    AutoModeState, CancellationToken, CoreError, CoreResult, Edge, EdgeId, ExecutionPolicy,
+    ExternalDispatchAuthorization, ExternalDispatchOutcome, NodeId, NodeInstance, PermissionPolicy,
+    PortEndpoint, PortValue, ProviderCapability, ProviderDefinition, ProviderType,
+    WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
 use ariadne::costs::SqliteCostLedger;
 use ariadne::providers::{
@@ -38,8 +40,32 @@ impl HttpSkillBackend for MockHttpBackend {
         _config: &HttpSkillConfig,
         _inputs: &ariadne::contracts::PortMap,
         _timeout_ms: u64,
+        _cancellation: &ariadne::contracts::CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
         Ok(self.output.clone())
+    }
+}
+
+#[derive(Default)]
+struct CountingHttpBackend {
+    calls: AtomicUsize,
+}
+
+impl HttpSkillBackend for CountingHttpBackend {
+    fn execute(
+        &self,
+        _config: &HttpSkillConfig,
+        _inputs: &ariadne::contracts::PortMap,
+        _timeout_ms: u64,
+        _cancellation: &CancellationToken,
+    ) -> CoreResult<SkillBackendOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(SkillBackendOutput {
+            outputs: ariadne::contracts::PortMap::new(),
+            logs: Vec::new(),
+            metadata: Value::Null,
+            elapsed_ms: 0,
+        })
     }
 }
 
@@ -55,6 +81,7 @@ impl WasmSkillBackend for MockWasmBackend {
         _inputs: &ariadne::contracts::PortMap,
         _timeout_ms: u64,
         _max_memory_bytes: Option<u64>,
+        _cancellation: &ariadne::contracts::CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
         Ok(self.output.clone())
     }
@@ -69,6 +96,7 @@ impl HttpSkillBackend for SlowHttpBackend {
         _config: &HttpSkillConfig,
         _inputs: &ariadne::contracts::PortMap,
         _timeout_ms: u64,
+        _cancellation: &ariadne::contracts::CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
         std::thread::sleep(Duration::from_millis(10));
         Ok(SkillBackendOutput {
@@ -439,6 +467,50 @@ fn http_skill_requires_http_permission() {
     assert!(error.to_string().contains("permission denied"));
 }
 
+#[test]
+fn skill_executor_does_not_call_backend_when_dispatch_authorization_is_denied() {
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let backend = CountingHttpBackend::default();
+    let execution_policy = policy(true, false);
+    let auto_mode_config = AutoModeConfig::default();
+    let executor = SkillExecutor::new(SkillExecutionContext {
+        execution_policy: &execution_policy,
+        auto_mode_config: &auto_mode_config,
+        budget_limits: Default::default(),
+        ledger: &ledger,
+        llm_provider: None,
+        http_backend: Some(&backend),
+        wasm_backend: None,
+    });
+    let cancellation = CancellationToken::new();
+    let authorization = ExternalDispatchAuthorization::new(|dispatch| {
+        assert!(dispatch);
+        Err(CoreError::external_cancelled(
+            "skill_dispatch_test",
+            ExternalDispatchOutcome::NotDispatched,
+        ))
+    });
+
+    let error = executor
+        .execute_with_control(
+            &http_manifest(),
+            SkillRunRequest {
+                skill_id: "fetch-info".to_owned(),
+                inputs: inputs(),
+                metadata: Value::Null,
+            },
+            &cancellation,
+            &authorization,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.external_dispatch_outcome(),
+        Some(ExternalDispatchOutcome::NotDispatched)
+    );
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+}
+
 /// 验证 HTTP Skill 输出日志会脱敏。
 #[test]
 fn http_skill_sanitizes_sensitive_logs() {
@@ -630,13 +702,101 @@ fn native_http_backend_rejects_oversized_streaming_response() {
     };
 
     std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
-    let result = backend.execute(&config, &inputs(), 1_000);
+    let result = backend.execute(
+        &config,
+        &inputs(),
+        1_000,
+        &ariadne::contracts::CancellationToken::new(),
+    );
     std::env::remove_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL");
     server.join().unwrap();
 
-    let error = result.unwrap_err().to_string();
-    assert!(error.contains("http_skill_response"));
-    assert!(error.contains("response exceeds"));
+    let error = result.unwrap_err();
+    assert_eq!(
+        error.external_dispatch_outcome(),
+        Some(ariadne::contracts::ExternalDispatchOutcome::DispatchedUnknown)
+    );
+    let message = error.to_string();
+    assert!(message.contains("http_skill_response"));
+    assert!(message.contains("response exceeds"));
+}
+
+/// HTTP 状态已经返回时，workflow 可安全终止本次 operation，不应误报未知副作用。
+#[test]
+fn native_http_backend_classifies_error_status_as_response_received() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+    });
+    let config = HttpSkillConfig {
+        host: format!("http://127.0.0.1:{}", addr.port()),
+        method: "POST".to_owned(),
+        path: "/unavailable".to_owned(),
+    };
+
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
+    let result = NativeHttpSkillBackend.execute(
+        &config,
+        &inputs(),
+        1_000,
+        &ariadne::contracts::CancellationToken::new(),
+    );
+    std::env::remove_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL");
+    server.join().unwrap();
+
+    let error = result.unwrap_err();
+    assert_eq!(
+        error.external_dispatch_outcome(),
+        Some(ariadne::contracts::ExternalDispatchOutcome::ResponseReceived)
+    );
+    assert!(error.to_string().contains("503"));
+}
+
+/// HTTP Skill 与 workflow 共用同一取消 token，不能继续依赖 blocking timeout。
+#[test]
+fn native_http_skill_cancellation_aborts_in_flight_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer).unwrap();
+        seen_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+    });
+    let config = HttpSkillConfig {
+        host: format!("http://127.0.0.1:{}", addr.port()),
+        method: "POST".to_owned(),
+        path: "/cancel".to_owned(),
+    };
+    let cancellation = ariadne::contracts::CancellationToken::new();
+    let worker_token = cancellation.clone();
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
+    let started = std::time::Instant::now();
+    let worker = std::thread::spawn(move || {
+        NativeHttpSkillBackend.execute(&config, &inputs(), 30_000, &worker_token)
+    });
+    seen_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("HTTP skill request must reach the server");
+    cancellation.cancel();
+    let error = worker.join().unwrap().unwrap_err();
+    std::env::remove_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL");
+    assert_eq!(
+        error.external_dispatch_outcome(),
+        Some(ariadne::contracts::ExternalDispatchOutcome::DispatchedUnknown)
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    server.join().unwrap();
 }
 
 /// 默认拒绝 HTTP Skill 访问本机/内网地址，避免 SSRF。
@@ -649,7 +809,14 @@ fn native_http_backend_rejects_local_addresses_by_default() {
         path: "/run".to_owned(),
     };
 
-    assert!(backend.execute(&config, &inputs(), 1_000).is_err());
+    assert!(backend
+        .execute(
+            &config,
+            &inputs(),
+            1_000,
+            &ariadne::contracts::CancellationToken::new(),
+        )
+        .is_err());
 }
 
 /// 验证真实 WASM 后端按固定 ABI 执行并返回 SkillBackendOutput。

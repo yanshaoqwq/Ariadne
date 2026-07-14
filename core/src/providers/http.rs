@@ -1,16 +1,19 @@
-use std::io::Read;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::ProviderConfig;
-use crate::contracts::{CoreError, CoreResult, ProviderCapability, ProviderDefinition};
+use crate::contracts::{
+    CoreError, CoreResult, ExternalDispatchOutcome, ProviderCapability, ProviderDefinition,
+};
 use crate::costs::{estimate_model_config_cost, TokenUsage};
 use crate::providers::{
-    ContentPart, LlmMessage, LlmProvider, LlmRequest, LlmResponse, LlmRole, Provider,
-    ProviderCallContext, ProviderHealth, ProviderProtocol, ToolCall,
+    ContentPart, EmbeddingProvider, EmbeddingRequest, EmbeddingResponse, LlmMessage, LlmProvider,
+    LlmRequest, LlmResponse, LlmRole, Provider, ProviderCallContext, ProviderHealth,
+    ProviderProtocol, RerankRequest, RerankResponse, RerankResult, RerankerProvider, ToolCall,
 };
 
 const MAX_PROVIDER_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
@@ -31,10 +34,7 @@ impl OpenAiCompatibleLlmProvider {
         let base_url = crate::providers::resolve_base_url(&config)?
             .trim_end_matches('/')
             .to_owned();
-        let client = Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .map_err(http_provider_error)?;
+        let client = Client::builder().build().map_err(http_provider_error)?;
         Ok(Self {
             config,
             base_url,
@@ -74,24 +74,13 @@ impl LlmProvider for OpenAiCompatibleLlmProvider {
     ) -> CoreResult<LlmResponse> {
         let protocol = ProviderProtocol::from_provider_type(&self.config.provider_type)?;
         let (endpoint, payload) = self.request_envelope(protocol, &request)?;
-        let mut http_request = self.authorize(protocol, self.client.post(endpoint).json(&payload));
-        // per-call 超时优先生效；context.timeout_ms 为 0 时沿用 client 的默认超时。
-        if context.timeout_ms > 0 {
-            http_request = http_request.timeout(Duration::from_millis(context.timeout_ms));
-        }
-        let response = http_request.send().map_err(http_provider_error)?;
-        let status = response.status();
-        // 先取原始文本再解析：错误响应体可能不是 JSON（如网关返回 HTML），
-        // 若先 .json() 会用解码错误掩盖真实的 4xx/5xx 状态码。
-        let body = read_provider_response_body(response)?;
-        if !status.is_success() {
-            return Err(CoreError::External {
-                service: context.provider_id.clone(),
-                message: format!("{protocol:?} provider returned {status}: {body}"),
-            });
-        }
-        let raw = serde_json::from_str::<Value>(&body).map_err(http_provider_error)?;
-        match protocol {
+        let http_request = authorize_provider_request(
+            protocol,
+            self.api_key.as_deref(),
+            self.client.post(endpoint).json(&payload),
+        );
+        let raw = execute_provider_json(http_request, context, &format!("{protocol:?}"))?;
+        let parsed = match protocol {
             ProviderProtocol::OpenAi => openai_chat_response(&self.config, &request.model_id, raw),
             ProviderProtocol::Anthropic => {
                 anthropic_messages_response(&self.config, &request.model_id, raw)
@@ -99,7 +88,14 @@ impl LlmProvider for OpenAiCompatibleLlmProvider {
             ProviderProtocol::Gemini => {
                 gemini_generate_content_response(&self.config, &request.model_id, raw)
             }
-        }
+        };
+        parsed.map_err(|error| {
+            provider_request_error(
+                &context.provider_id,
+                ExternalDispatchOutcome::DispatchedUnknown,
+                error,
+            )
+        })
     }
 }
 
@@ -124,29 +120,212 @@ impl OpenAiCompatibleLlmProvider {
             )),
         }
     }
+}
 
-    fn authorize(
-        &self,
-        protocol: ProviderProtocol,
-        request: reqwest::blocking::RequestBuilder,
-    ) -> reqwest::blocking::RequestBuilder {
-        let Some(api_key) = self.api_key.as_deref().filter(|value| !value.is_empty()) else {
-            return match protocol {
-                ProviderProtocol::Anthropic => request.header("anthropic-version", "2023-06-01"),
-                _ => request,
-            };
-        };
+/// OpenAI-compatible / Gemini HTTP embedding provider。
+#[derive(Debug, Clone)]
+pub struct HttpEmbeddingProvider {
+    config: ProviderConfig,
+    base_url: String,
+    api_key: Option<String>,
+    client: Client,
+}
 
-        match protocol {
-            ProviderProtocol::OpenAi => request.bearer_auth(api_key),
-            ProviderProtocol::Anthropic => request
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01"),
-            // ⚠️ Gemini API 要求将 key 作为 URL query parameter 传递，
-            // 这意味着 API Key 可能被记录在服务器访问日志、代理日志等中。
-            // 建议通过反向代理中转，或在网络层面限制日志记录。
-            ProviderProtocol::Gemini => request.query(&[("key", api_key)]),
+impl HttpEmbeddingProvider {
+    /// 从项目 provider 配置和已解析密钥创建 embedding provider。
+    pub fn new(config: ProviderConfig, api_key: Option<String>) -> CoreResult<Self> {
+        config.validate()?;
+        let protocol = ProviderProtocol::from_provider_type(&config.provider_type)?;
+        if matches!(protocol, ProviderProtocol::Anthropic) {
+            return Err(CoreError::validation(
+                "anthropic protocol does not define an embedding endpoint",
+            ));
         }
+        let base_url = crate::providers::resolve_base_url(&config)?
+            .trim_end_matches('/')
+            .to_owned();
+        let client = Client::builder().build().map_err(http_provider_error)?;
+        Ok(Self {
+            config,
+            base_url,
+            api_key,
+            client,
+        })
+    }
+}
+
+impl Provider for HttpEmbeddingProvider {
+    fn definition(&self) -> ProviderDefinition {
+        ProviderDefinition {
+            provider_id: self.config.provider_id.clone(),
+            provider_type: self.config.provider_type.clone(),
+            display_name: self.config.display_name.clone(),
+            capabilities: vec![ProviderCapability::Embedding],
+            config_schema: Value::Null,
+        }
+    }
+
+    fn health_check(&self) -> CoreResult<ProviderHealth> {
+        provider_config_health(&self.config)
+    }
+}
+
+impl EmbeddingProvider for HttpEmbeddingProvider {
+    fn embed(
+        &self,
+        context: &ProviderCallContext,
+        request: EmbeddingRequest,
+    ) -> CoreResult<EmbeddingResponse> {
+        validate_embedding_request(&request)?;
+        let protocol = ProviderProtocol::from_provider_type(&self.config.provider_type)?;
+        let (endpoint, payload) = match protocol {
+            ProviderProtocol::OpenAi => (
+                format!("{}/embeddings", self.base_url),
+                json!({
+                    "model": request.model_id,
+                    "input": request.inputs,
+                }),
+            ),
+            ProviderProtocol::Gemini => {
+                let model = gemini_model_path(&request.model_id);
+                let requests = request
+                    .inputs
+                    .iter()
+                    .map(|input| {
+                        json!({
+                            "model": model,
+                            "content": { "parts": [{ "text": input }] },
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    format!("{}/{}:batchEmbedContents", self.base_url, model),
+                    json!({ "requests": requests }),
+                )
+            }
+            ProviderProtocol::Anthropic => {
+                return Err(CoreError::validation(
+                    "anthropic protocol does not define an embedding endpoint",
+                ));
+            }
+        };
+        let http_request = authorize_provider_request(
+            protocol,
+            self.api_key.as_deref(),
+            self.client.post(endpoint).json(&payload),
+        );
+        let raw = execute_provider_json(http_request, context, &format!("{protocol:?}"))?;
+        match protocol {
+            ProviderProtocol::OpenAi => openai_embedding_response(
+                &self.config,
+                &request.model_id,
+                request.inputs.len(),
+                raw,
+            ),
+            ProviderProtocol::Gemini => gemini_embedding_response(
+                &self.config,
+                &request.model_id,
+                request.inputs.len(),
+                raw,
+            ),
+            ProviderProtocol::Anthropic => unreachable!("validated above"),
+        }
+        .map_err(|error| {
+            provider_request_error(
+                &context.provider_id,
+                ExternalDispatchOutcome::DispatchedUnknown,
+                error,
+            )
+        })
+    }
+}
+
+/// OpenAI-compatible `/rerank` HTTP provider。
+#[derive(Debug, Clone)]
+pub struct HttpRerankerProvider {
+    config: ProviderConfig,
+    base_url: String,
+    api_key: Option<String>,
+    client: Client,
+}
+
+impl HttpRerankerProvider {
+    /// 原生 OpenAI/Anthropic/Gemini 均没有本项目可依赖的统一 rerank 契约。
+    pub fn new(config: ProviderConfig, api_key: Option<String>) -> CoreResult<Self> {
+        config.validate()?;
+        if !matches!(
+            config.provider_type,
+            crate::contracts::ProviderType::OpenAiCompatible
+                | crate::contracts::ProviderType::Local
+        ) {
+            return Err(CoreError::validation(
+                "reranker requires an open_ai_compatible or local provider",
+            ));
+        }
+        let base_url = crate::providers::resolve_base_url(&config)?
+            .trim_end_matches('/')
+            .to_owned();
+        let client = Client::builder().build().map_err(http_provider_error)?;
+        Ok(Self {
+            config,
+            base_url,
+            api_key,
+            client,
+        })
+    }
+}
+
+impl Provider for HttpRerankerProvider {
+    fn definition(&self) -> ProviderDefinition {
+        ProviderDefinition {
+            provider_id: self.config.provider_id.clone(),
+            provider_type: self.config.provider_type.clone(),
+            display_name: self.config.display_name.clone(),
+            capabilities: vec![ProviderCapability::Reranker],
+            config_schema: Value::Null,
+        }
+    }
+
+    fn health_check(&self) -> CoreResult<ProviderHealth> {
+        provider_config_health(&self.config)
+    }
+}
+
+impl RerankerProvider for HttpRerankerProvider {
+    fn rerank(
+        &self,
+        context: &ProviderCallContext,
+        request: RerankRequest,
+    ) -> CoreResult<RerankResponse> {
+        validate_rerank_request(&request)?;
+        let payload = json!({
+            "model": request.model_id,
+            "query": request.query,
+            "documents": request.documents,
+            "top_n": request.top_n,
+        });
+        let http_request = authorize_provider_request(
+            ProviderProtocol::OpenAi,
+            self.api_key.as_deref(),
+            self.client
+                .post(format!("{}/rerank", self.base_url))
+                .json(&payload),
+        );
+        let raw = execute_provider_json(http_request, context, "OpenAiCompatibleRerank")?;
+        openai_compatible_rerank_response(
+            &self.config,
+            &request.model_id,
+            request.documents.len(),
+            request.top_n,
+            raw,
+        )
+        .map_err(|error| {
+            provider_request_error(
+                &context.provider_id,
+                ExternalDispatchOutcome::DispatchedUnknown,
+                error,
+            )
+        })
     }
 }
 
@@ -496,12 +675,16 @@ fn anthropic_usage(raw: &Value) -> Option<TokenUsage> {
 }
 
 fn gemini_generate_content_url(base_url: &str, model_id: &str) -> String {
-    let model_path = if model_id.starts_with("models/") {
+    let model_path = gemini_model_path(model_id);
+    format!("{base_url}/{model_path}:generateContent")
+}
+
+fn gemini_model_path(model_id: &str) -> String {
+    if model_id.starts_with("models/") {
         model_id.to_owned()
     } else {
         format!("models/{model_id}")
-    };
-    format!("{base_url}/{model_path}:generateContent")
+    }
 }
 
 fn gemini_generate_content_request(request: &LlmRequest) -> CoreResult<Value> {
@@ -675,6 +858,341 @@ fn gemini_schema(value: &Value) -> Value {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAiEmbeddingEnvelope {
+    data: Vec<OpenAiEmbeddingDatum>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    usage: Option<EmbeddingUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiEmbeddingDatum {
+    index: usize,
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct EmbeddingUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    total_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiEmbeddingEnvelope {
+    embeddings: Vec<GeminiEmbeddingDatum>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiEmbeddingDatum {
+    values: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompatibleRerankEnvelope {
+    results: Vec<CompatibleRerankResult>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    usage: Option<EmbeddingUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompatibleRerankResult {
+    index: usize,
+    #[serde(alias = "score")]
+    relevance_score: f32,
+}
+
+fn validate_embedding_request(request: &EmbeddingRequest) -> CoreResult<()> {
+    if request.model_id.trim().is_empty() {
+        return Err(CoreError::validation(
+            "embedding request model_id cannot be empty",
+        ));
+    }
+    if request.inputs.is_empty() {
+        return Err(CoreError::validation(
+            "embedding request inputs cannot be empty",
+        ));
+    }
+    if request.inputs.iter().any(|input| input.trim().is_empty()) {
+        return Err(CoreError::validation(
+            "embedding request inputs cannot contain empty text",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rerank_request(request: &RerankRequest) -> CoreResult<()> {
+    if request.model_id.trim().is_empty() {
+        return Err(CoreError::validation(
+            "rerank request model_id cannot be empty",
+        ));
+    }
+    if request.query.trim().is_empty() {
+        return Err(CoreError::validation("rerank query cannot be empty"));
+    }
+    if request.documents.is_empty() {
+        return Err(CoreError::validation("rerank documents cannot be empty"));
+    }
+    if request
+        .documents
+        .iter()
+        .any(|document| document.trim().is_empty())
+    {
+        return Err(CoreError::validation(
+            "rerank documents cannot contain empty text",
+        ));
+    }
+    if request
+        .top_n
+        .is_some_and(|top_n| top_n == 0 || top_n > request.documents.len())
+    {
+        return Err(CoreError::validation(
+            "rerank top_n must be between one and the document count",
+        ));
+    }
+    Ok(())
+}
+
+fn openai_embedding_response(
+    config: &ProviderConfig,
+    requested_model_id: &str,
+    expected_count: usize,
+    raw: Value,
+) -> CoreResult<EmbeddingResponse> {
+    let mut parsed: OpenAiEmbeddingEnvelope = serde_json::from_value(raw.clone())?;
+    parsed.data.sort_by_key(|item| item.index);
+    for (expected_index, item) in parsed.data.iter().enumerate() {
+        if item.index != expected_index {
+            return Err(CoreError::validation(format!(
+                "embedding provider returned non-contiguous index {}; expected {expected_index}",
+                item.index
+            )));
+        }
+    }
+    let embeddings = parsed
+        .data
+        .into_iter()
+        .map(|item| item.embedding)
+        .collect::<Vec<_>>();
+    validate_embedding_vectors(expected_count, &embeddings)?;
+    let usage = parsed.usage.map(embedding_token_usage);
+    let response_model_id = parsed.model.as_deref().unwrap_or(requested_model_id);
+    Ok(EmbeddingResponse {
+        embeddings,
+        usage,
+        cost_usd: response_cost_usd(config, response_model_id, usage),
+        raw,
+    })
+}
+
+fn gemini_embedding_response(
+    config: &ProviderConfig,
+    requested_model_id: &str,
+    expected_count: usize,
+    raw: Value,
+) -> CoreResult<EmbeddingResponse> {
+    let parsed: GeminiEmbeddingEnvelope = serde_json::from_value(raw.clone())?;
+    let embeddings = parsed
+        .embeddings
+        .into_iter()
+        .map(|item| item.values)
+        .collect::<Vec<_>>();
+    validate_embedding_vectors(expected_count, &embeddings)?;
+    let usage = raw
+        .get("usageMetadata")
+        .and_then(|value| serde_json::from_value::<EmbeddingUsage>(value.clone()).ok())
+        .map(embedding_token_usage);
+    Ok(EmbeddingResponse {
+        embeddings,
+        usage,
+        cost_usd: response_cost_usd(config, requested_model_id, usage),
+        raw,
+    })
+}
+
+fn validate_embedding_vectors(expected_count: usize, embeddings: &[Vec<f32>]) -> CoreResult<()> {
+    if embeddings.len() != expected_count {
+        return Err(CoreError::validation(format!(
+            "embedding provider returned {} vectors for {expected_count} inputs",
+            embeddings.len()
+        )));
+    }
+    let dimensions = embeddings
+        .first()
+        .map(Vec::len)
+        .ok_or_else(|| CoreError::validation("embedding provider returned no vectors"))?;
+    if dimensions == 0 {
+        return Err(CoreError::validation(
+            "embedding provider returned an empty vector",
+        ));
+    }
+    for embedding in embeddings {
+        if embedding.len() != dimensions {
+            return Err(CoreError::validation(
+                "embedding provider returned inconsistent vector dimensions",
+            ));
+        }
+        if embedding.iter().any(|value| !value.is_finite()) {
+            return Err(CoreError::validation(
+                "embedding provider returned a non-finite vector value",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn openai_compatible_rerank_response(
+    config: &ProviderConfig,
+    requested_model_id: &str,
+    document_count: usize,
+    top_n: Option<usize>,
+    raw: Value,
+) -> CoreResult<RerankResponse> {
+    let parsed: CompatibleRerankEnvelope = serde_json::from_value(raw.clone())?;
+    let maximum_results = top_n.unwrap_or(document_count);
+    if parsed.results.len() > maximum_results {
+        return Err(CoreError::validation(format!(
+            "reranker returned {} results, exceeding requested maximum {maximum_results}",
+            parsed.results.len()
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    let mut results = Vec::with_capacity(parsed.results.len());
+    for result in parsed.results {
+        if result.index >= document_count {
+            return Err(CoreError::validation(format!(
+                "reranker returned out-of-range document index {}",
+                result.index
+            )));
+        }
+        if !seen.insert(result.index) {
+            return Err(CoreError::validation(format!(
+                "reranker returned duplicate document index {}",
+                result.index
+            )));
+        }
+        if !result.relevance_score.is_finite() {
+            return Err(CoreError::validation(
+                "reranker returned a non-finite relevance score",
+            ));
+        }
+        results.push(RerankResult {
+            index: result.index,
+            score: result.relevance_score,
+        });
+    }
+    let usage = parsed.usage.map(embedding_token_usage);
+    let response_model_id = parsed.model.as_deref().unwrap_or(requested_model_id);
+    Ok(RerankResponse {
+        results,
+        cost_usd: response_cost_usd(config, response_model_id, usage),
+        raw,
+    })
+}
+
+fn embedding_token_usage(usage: EmbeddingUsage) -> TokenUsage {
+    TokenUsage {
+        input_tokens: if usage.prompt_tokens > 0 {
+            usage.prompt_tokens
+        } else {
+            usage.total_tokens
+        },
+        output_tokens: 0,
+    }
+}
+
+fn provider_config_health(config: &ProviderConfig) -> CoreResult<ProviderHealth> {
+    if config.enabled {
+        Ok(ProviderHealth::Healthy)
+    } else {
+        Ok(ProviderHealth::Unhealthy {
+            reason: "provider is disabled".to_owned(),
+        })
+    }
+}
+
+fn authorize_provider_request(
+    protocol: ProviderProtocol,
+    api_key: Option<&str>,
+    request: reqwest::RequestBuilder,
+) -> reqwest::RequestBuilder {
+    let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) else {
+        return match protocol {
+            ProviderProtocol::Anthropic => request.header("anthropic-version", "2023-06-01"),
+            _ => request,
+        };
+    };
+
+    match protocol {
+        ProviderProtocol::OpenAi => request.bearer_auth(api_key),
+        ProviderProtocol::Anthropic => request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        // Gemini REST API 以 query parameter 接收 key；生产部署应避免代理记录完整 URL。
+        ProviderProtocol::Gemini => request.query(&[("key", api_key)]),
+    }
+}
+
+fn execute_provider_json(
+    mut request: reqwest::RequestBuilder,
+    context: &ProviderCallContext,
+    protocol_name: &str,
+) -> CoreResult<Value> {
+    // per-call 超时优先生效；context.timeout_ms 为 0 时沿用 client 默认值。
+    if context.timeout_ms > 0 {
+        request = request.timeout(Duration::from_millis(context.timeout_ms));
+    }
+    if context.cancellation.is_cancelled() {
+        return Err(CoreError::external_cancelled(
+            &context.provider_id,
+            ExternalDispatchOutcome::NotDispatched,
+        ));
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(http_provider_error)?;
+    let response = runtime.block_on(send_provider_request(
+        request,
+        context,
+        &context.provider_id,
+    ))?;
+    let status = response.status();
+    // 错误响应体可能是 HTML；先保留状态码和原始文本，避免 JSON 解码掩盖原因。
+    if !status.is_success() {
+        let body = runtime.block_on(read_provider_response_body(
+            response,
+            &context.provider_id,
+            &context.cancellation,
+            ExternalDispatchOutcome::ResponseReceived,
+        ))?;
+        return Err(provider_request_error(
+            &context.provider_id,
+            ExternalDispatchOutcome::ResponseReceived,
+            format!("{protocol_name} provider returned {status}: {body}"),
+        ));
+    }
+    let body = runtime.block_on(read_provider_response_body(
+        response,
+        &context.provider_id,
+        &context.cancellation,
+        ExternalDispatchOutcome::DispatchedUnknown,
+    ))?;
+    serde_json::from_str::<Value>(&body).map_err(|error| {
+        provider_request_error(
+            &context.provider_id,
+            ExternalDispatchOutcome::DispatchedUnknown,
+            error,
+        )
+    })
+}
+
 fn response_cost_usd(
     config: &ProviderConfig,
     response_model_id: &str,
@@ -689,34 +1207,103 @@ fn response_cost_usd(
     })
 }
 
-fn read_provider_response_body(response: reqwest::blocking::Response) -> CoreResult<String> {
+async fn send_provider_request(
+    request: reqwest::RequestBuilder,
+    context: &ProviderCallContext,
+    service: &str,
+) -> CoreResult<reqwest::Response> {
+    let cancellation = context.cancellation.clone();
+    let mut send = Box::pin(request.send());
+    loop {
+        match tokio::time::timeout(Duration::from_millis(25), &mut send).await {
+            Ok(result) => {
+                return result.map_err(|error| {
+                    let outcome = if error.is_builder() || error.is_connect() {
+                        ExternalDispatchOutcome::NotDispatched
+                    } else {
+                        ExternalDispatchOutcome::DispatchedUnknown
+                    };
+                    provider_request_error(service, outcome, error)
+                });
+            }
+            Err(_) => {
+                if cancellation.is_cancelled() {
+                    return Err(CoreError::external_cancelled(
+                        service,
+                        ExternalDispatchOutcome::DispatchedUnknown,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+async fn read_provider_response_body(
+    mut response: reqwest::Response,
+    service: &str,
+    cancellation: &crate::contracts::ExecutionCancellation,
+    failure_outcome: ExternalDispatchOutcome,
+) -> CoreResult<String> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES)
     {
-        return Err(CoreError::ResourceLimitExceeded {
-            resource: "provider_response".to_owned(),
-            reason: format!("response exceeds {MAX_PROVIDER_RESPONSE_BYTES} bytes"),
-        });
+        return Err(provider_request_error(
+            service,
+            failure_outcome,
+            format!("provider_response exceeds {MAX_PROVIDER_RESPONSE_BYTES} bytes"),
+        ));
     }
 
-    let mut limited = response.take(MAX_PROVIDER_RESPONSE_BYTES.saturating_add(1));
     let mut bytes = Vec::new();
-    limited
-        .read_to_end(&mut bytes)
-        .map_err(http_provider_error)?;
-    if bytes.len() as u64 > MAX_PROVIDER_RESPONSE_BYTES {
-        return Err(CoreError::ResourceLimitExceeded {
-            resource: "provider_response".to_owned(),
-            reason: format!("response exceeds {MAX_PROVIDER_RESPONSE_BYTES} bytes"),
-        });
+    loop {
+        let chunk = match tokio::time::timeout(Duration::from_millis(25), response.chunk()).await {
+            Ok(result) => {
+                result.map_err(|error| provider_request_error(service, failure_outcome, error))?
+            }
+            Err(_) => {
+                if cancellation.is_cancelled() {
+                    return Err(CoreError::external_cancelled(service, failure_outcome));
+                }
+                continue;
+            }
+        };
+        let Some(chunk) = chunk else { break };
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() as u64 > MAX_PROVIDER_RESPONSE_BYTES {
+            return Err(provider_request_error(
+                service,
+                failure_outcome,
+                format!("provider_response exceeds {MAX_PROVIDER_RESPONSE_BYTES} bytes"),
+            ));
+        }
     }
-    String::from_utf8(bytes).map_err(http_provider_error)
+    if bytes.len() as u64 > MAX_PROVIDER_RESPONSE_BYTES {
+        return Err(provider_request_error(
+            service,
+            failure_outcome,
+            format!("provider_response exceeds {MAX_PROVIDER_RESPONSE_BYTES} bytes"),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| provider_request_error(service, failure_outcome, error))
 }
 
 fn http_provider_error(message: impl std::fmt::Display) -> CoreError {
     CoreError::External {
         service: "openai_compatible_provider".to_owned(),
+        message: message.to_string(),
+    }
+}
+
+fn provider_request_error(
+    service: &str,
+    outcome: ExternalDispatchOutcome,
+    message: impl std::fmt::Display,
+) -> CoreError {
+    CoreError::ProviderRequest {
+        service: service.to_owned(),
+        outcome,
         message: message.to_string(),
     }
 }

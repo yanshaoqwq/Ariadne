@@ -63,17 +63,10 @@ impl GitService {
         Ok(())
     }
 
-    /// 执行 Git 健康检查。
-    pub fn health_check(&self) -> GitHealthReport {
+    /// 执行 Git 健康检查。Strict: errors surface as `Unavailable` with reason, not as NotRepository.
+    pub fn health_check(&self) -> CoreResult<GitHealthReport> {
         self.health_check_with_policy(&GitStagePolicy::default())
             .map(|(health, _)| health)
-            .unwrap_or_else(|error| GitHealthReport {
-                status: GitHealthStatus::NotRepository,
-                branch: None,
-                head: None,
-                dirty: false,
-                reason: Some(error.to_string()),
-            })
     }
 
     /// 一次读取 porcelain 状态并同时生成健康报告，供状态页避免重复执行 git status。
@@ -198,11 +191,14 @@ impl GitService {
     }
 
     /// 流式统计完整 diff 行数，但只保留指定字符数的预览，避免大型 diff 整体驻留内存。
+    /// Concurrently drains stderr (C8) so a full stderr pipe cannot deadlock stdout read.
     pub fn diff_preview_with_policy(
         &self,
         policy: &GitStagePolicy,
         preview_char_limit: usize,
     ) -> CoreResult<GitDiffPreview> {
+        const MAX_LINE_BYTES: usize = 64 * 1024;
+        const MAX_STDERR_BYTES: usize = 256 * 1024;
         let mut args = vec!["diff".to_owned(), "--".to_owned(), ".".to_owned()];
         args.extend(policy.exclude_pathspecs());
         let mut child = Command::new("git")
@@ -215,6 +211,16 @@ impl GitService {
             .stdout
             .take()
             .ok_or_else(|| CoreError::validation("git diff stdout pipe is unavailable"))?;
+        let stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| CoreError::validation("git diff stderr pipe is unavailable"))?;
+        let stderr_handle = std::thread::spawn(move || {
+            let mut limited = stderr_pipe.take(MAX_STDERR_BYTES as u64);
+            let mut buf = String::new();
+            let _ = limited.read_to_string(&mut buf);
+            buf
+        });
         let mut reader = BufReader::new(stdout);
         let mut bytes = Vec::new();
         let mut line_count = 0usize;
@@ -222,8 +228,13 @@ impl GitService {
         let mut preview_chars = 0usize;
         loop {
             bytes.clear();
-            if reader.read_until(b'\n', &mut bytes)? == 0 {
+            let n = reader.read_until(b'\n', &mut bytes)?;
+            if n == 0 {
                 break;
+            }
+            // Cap single-line memory (binary/generated files).
+            if bytes.len() > MAX_LINE_BYTES {
+                bytes.truncate(MAX_LINE_BYTES);
             }
             line_count = line_count.saturating_add(1);
             if preview_chars < preview_char_limit {
@@ -235,17 +246,14 @@ impl GitService {
             }
         }
         let status = child.wait()?;
+        let stderr = stderr_handle.join().unwrap_or_default();
         if !status.success() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                pipe.read_to_string(&mut stderr)?;
-            }
             return Err(CoreError::External {
                 service: "git".to_owned(),
                 message: if stderr.trim().is_empty() {
                     format!("git exited with status {status}")
                 } else {
-                    stderr.trim().to_owned()
+                    stderr.trim().chars().take(2000).collect()
                 },
             });
         }
@@ -425,11 +433,9 @@ impl GitService {
             .output()?;
 
         if output.status.success() {
-            return String::from_utf8(output.stdout)
-                .map(|value| value.trim_end().to_owned())
-                .map_err(|error| {
-                    CoreError::validation(format!("git output is not utf-8: {error}"))
-                });
+            return Ok(String::from_utf8_lossy(&output.stdout)
+                .trim_end()
+                .to_owned());
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();

@@ -1,3 +1,4 @@
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -16,16 +17,76 @@ public partial class MainWindow : Window
         Opened += (_, _) =>
         {
             RefreshWindowIcon();
-            // 首次打开也写出当前主题色到系统图标目录
+            ApplyWindowChromeForState();
             AppIconDesktopSync.QueueSync();
         };
+        PropertyChanged += OnWindowPropertyChanged;
+        LayoutUpdated += (_, _) => ApplyResponsiveBreakpoint();
         AppIconPainter.IconColorsChanged += OnIconColorsChanged;
         Closed += (_, _) => AppIconPainter.IconColorsChanged -= OnIconColorsChanged;
     }
 
+    private void OnWindowPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == WindowStateProperty)
+        {
+            ApplyWindowChromeForState();
+        }
+        if (e.Property == BoundsProperty)
+        {
+            ApplyResponsiveBreakpoint();
+        }
+    }
+
+    /// <summary>
+    /// U60: width breakpoints drive compact chrome / auto-collapse of the global sidebar.
+    /// Compact &lt; 900; medium 900–1199; wide ≥ 1200.
+    /// </summary>
+    private void ApplyResponsiveBreakpoint()
+    {
+        var width = Bounds.Width;
+        if (width <= 0)
+        {
+            return;
+        }
+
+        var compact = width < 900;
+        Classes.Set("compact", compact);
+        Classes.Set("medium", width is >= 900 and < 1200);
+        Classes.Set("wide", width >= 1200);
+
+        if (DataContext is MainWindowViewModel vm)
+        {
+            // Auto-collapse only when entering compact; user may re-expand via toggle.
+            if (compact && vm.SidebarExpanded)
+            {
+                vm.SidebarExpanded = false;
+            }
+        }
+    }
+
+    /// <summary>最大化时去掉圆角与边框，普通态恢复悬浮圆角窗（U61）。</summary>
+    private void ApplyWindowChromeForState()
+    {
+        if (WindowChrome is null)
+        {
+            return;
+        }
+
+        if (WindowState == WindowState.Maximized)
+        {
+            WindowChrome.CornerRadius = new CornerRadius(0);
+            WindowChrome.BorderThickness = new Thickness(0);
+        }
+        else
+        {
+            WindowChrome.CornerRadius = new CornerRadius(10);
+            WindowChrome.BorderThickness = new Thickness(1);
+        }
+    }
+
     private void OnIconColorsChanged()
     {
-        // 个性化 / 主题切换后，系统窗口图标随 Accent 重绘
         Dispatcher.UIThread.Post(RefreshWindowIcon, DispatcherPriority.Background);
     }
 
@@ -37,7 +98,7 @@ public partial class MainWindow : Window
         }
         catch
         {
-            // 回退到打包静态 ico（构建时默认青绿）
+            // 回退到打包静态 ico
         }
     }
 
@@ -87,7 +148,6 @@ public partial class MainWindow : Window
         base.OnClosing(e);
     }
 
-    // 点击遮罩空白处=取消；点在弹窗卡片上（e.Source 非遮罩本身）则忽略。
     private void OnDialogScrimPressed(object? sender, PointerPressedEventArgs e)
     {
         if (ReferenceEquals(e.Source, sender))
@@ -96,14 +156,24 @@ public partial class MainWindow : Window
         }
     }
 
-    // Esc 关闭当前弹窗（走取消语义）。
+    // Esc 取消；Enter 确认（危险弹窗由 VM 拒绝）（U64）
     protected override void OnKeyDown(KeyEventArgs e)
     {
-        if (e.Key == Key.Escape && DialogService.Current.IsOpen)
+        if (DialogService.Current.IsOpen)
         {
-            DialogService.Current.RequestCancelActive();
-            e.Handled = true;
-            return;
+            if (e.Key == Key.Escape)
+            {
+                DialogService.Current.RequestCancelActive();
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Enter)
+            {
+                DialogService.Current.RequestConfirmActive();
+                e.Handled = true;
+                return;
+            }
         }
 
         base.OnKeyDown(e);

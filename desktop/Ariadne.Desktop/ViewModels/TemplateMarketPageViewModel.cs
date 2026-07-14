@@ -94,7 +94,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -134,7 +134,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -183,7 +183,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -205,7 +205,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 

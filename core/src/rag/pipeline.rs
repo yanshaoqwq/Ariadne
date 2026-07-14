@@ -7,8 +7,9 @@ use serde_json::{json, Value};
 use crate::contracts::{AutoModeState, CoreError, CoreResult};
 use crate::rag::memory::MemoryWritingKnowledgeBase;
 use crate::rag::models::{
-    ConfirmationItem, ConfirmationKind, ConfirmationState, SummaryPipelineDraft,
-    SummaryPipelineReport, SummaryPipelineStep, SummaryRerunPlan, WritingConfirmationPolicy,
+    confirmation_state_activates_knowledge, ConfirmationItem, ConfirmationKind, ConfirmationState,
+    SummaryPipelineDraft, SummaryPipelineReport, SummaryPipelineStep, SummaryRerunPlan,
+    WritingConfirmationPolicy,
 };
 
 /// Summarizer 流水线执行器，消费结构化总结草稿并更新创作知识库。
@@ -16,6 +17,7 @@ pub struct SummaryPipelineExecutor<'a> {
     knowledge: &'a MemoryWritingKnowledgeBase,
     confirmation_policy: WritingConfirmationPolicy,
     auto_mode: AutoModeState,
+    cancellation: crate::contracts::CancellationToken,
 }
 
 impl<'a> SummaryPipelineExecutor<'a> {
@@ -25,14 +27,33 @@ impl<'a> SummaryPipelineExecutor<'a> {
         confirmation_policy: WritingConfirmationPolicy,
         auto_mode: AutoModeState,
     ) -> Self {
+        Self::with_cancellation(
+            knowledge,
+            confirmation_policy,
+            auto_mode,
+            crate::contracts::CancellationToken::new(),
+        )
+    }
+
+    /// F11：workflow 执行路径注入共享取消 token。
+    pub fn with_cancellation(
+        knowledge: &'a MemoryWritingKnowledgeBase,
+        confirmation_policy: WritingConfirmationPolicy,
+        auto_mode: AutoModeState,
+        cancellation: crate::contracts::CancellationToken,
+    ) -> Self {
         Self {
             knowledge,
             confirmation_policy,
             auto_mode,
+            cancellation,
         }
     }
 
     /// 执行故事段 -> 事件 -> 章节 -> 阶段的写入流程。
+    /// F14：仅将已激活（Approved/AutoAudited/Skipped）步骤写入 active 知识；
+    /// Pending 步骤载荷放在 confirmation.metadata.pending_payload，批准后物化。
+    /// F21：先完整校验并组装确认项，再经单一内存事务提交。
     pub fn apply_draft(
         &self,
         mut draft: SummaryPipelineDraft,
@@ -40,96 +61,165 @@ impl<'a> SummaryPipelineExecutor<'a> {
         let revision_id = summary_revision_id(&draft);
         attach_revision_metadata(&mut draft, &revision_id);
         validate_complete_draft(&draft)?;
+        validate_stage_identity(self.knowledge, &draft)?;
 
         let chapter_id = draft.chapter_id.clone();
-        let mut completed_steps = Vec::new();
-        let mut confirmation_ids = Vec::new();
-        self.knowledge.replace_chapter_summary_entities(
+        let chapter_summary = draft
+            .chapter_summary
+            .clone()
+            .expect("validated chapter summary");
+        let stage_id = draft.stage_id.clone().expect("validated stage id");
+        let stage_summary = draft
+            .stage_summary
+            .clone()
+            .expect("validated stage summary");
+        let is_new_stage = resolve_is_new_stage(self.knowledge, &stage_id, draft.is_new_stage)?;
+        let segment_count = draft.segments.len();
+        let segments_owned = draft.segments.clone();
+        let events_owned = draft.events.clone();
+        let realized_owned = draft.realized_changes.clone();
+        let foreshadowing_owned = draft.foreshadowing_updates.clone();
+
+        let mut seg_conf = self.build_confirmation(
+            ConfirmationKind::SegmentSummary,
             &chapter_id,
-            draft.segments,
-            draft.events,
+            &revision_id,
+            json!({
+                "step": "segment",
+                "chapter_id": chapter_id.clone(),
+                "segment_count": segment_count,
+                "pending_payload": {
+                    "segments": segments_owned,
+                    "realized_changes": realized_owned,
+                    "foreshadowing_updates": foreshadowing_owned,
+                }
+            }),
         )?;
-        confirmation_ids.push(
-            self.enqueue_confirmation(
-                ConfirmationKind::SegmentSummary,
-                &chapter_id,
-                &revision_id,
-                json!({
-                    "step": "segment",
-                    "chapter_id": chapter_id.clone(),
-                    "segment_count": self
-                        .knowledge
-                        .index_snapshot()?
-                        .chapter_segments
-                        .get(&chapter_id)
-                        .map(|segments| segments.len())
-                        .unwrap_or_default()
-                }),
-            )?
-            .confirmation_id,
-        );
-        completed_steps.push(SummaryPipelineStep::Segment);
+        let mut event_conf = self.build_confirmation(
+            ConfirmationKind::EventSummary,
+            &chapter_id,
+            &revision_id,
+            json!({
+                "step": "event",
+                "chapter_id": chapter_id.clone(),
+                "pending_payload": { "events": events_owned }
+            }),
+        )?;
+        let mut chapter_conf = self.build_confirmation(
+            ConfirmationKind::ChapterSummary,
+            &chapter_id,
+            &revision_id,
+            json!({
+                "step": "chapter",
+                "chapter_id": chapter_id.clone(),
+                "pending_payload": { "chapter_summary": chapter_summary }
+            }),
+        )?;
+        let mut stage_conf = self.build_confirmation(
+            ConfirmationKind::StageSummary,
+            &chapter_id,
+            &revision_id,
+            json!({
+                "step": "stage",
+                "chapter_id": chapter_id.clone(),
+                "stage_id": stage_id.clone(),
+                "is_new_stage": is_new_stage,
+                "pending_payload": {
+                    "stage_id": stage_id.clone(),
+                    "stage_summary": stage_summary.clone(),
+                    "is_new_stage": is_new_stage
+                }
+            }),
+        )?;
 
-        for realized in draft.realized_changes {
-            self.knowledge
-                .mark_change_realized(&realized.change_id, &realized.segment_id)?;
+        let activate_segment = confirmation_state_activates_knowledge(seg_conf.state);
+        let activate_event = confirmation_state_activates_knowledge(event_conf.state);
+        let activate_chapter = confirmation_state_activates_knowledge(chapter_conf.state);
+        let activate_stage = confirmation_state_activates_knowledge(stage_conf.state);
+
+        if activate_segment {
+            clear_pending_payload(&mut seg_conf);
         }
-        for update in draft.foreshadowing_updates {
-            self.knowledge.apply_foreshadowing_update(update)?;
+        if activate_event {
+            clear_pending_payload(&mut event_conf);
+        }
+        if activate_chapter {
+            clear_pending_payload(&mut chapter_conf);
+        }
+        if activate_stage {
+            clear_pending_payload(&mut stage_conf);
         }
 
-        confirmation_ids.push(
-            self.enqueue_confirmation(
-                ConfirmationKind::EventSummary,
-                &chapter_id,
-                &revision_id,
-                json!({ "step": "event", "chapter_id": chapter_id.clone() }),
-            )?
-            .confirmation_id,
-        );
-        completed_steps.push(SummaryPipelineStep::Event);
+        let confirmation_ids = vec![
+            seg_conf.confirmation_id.clone(),
+            event_conf.confirmation_id.clone(),
+            chapter_conf.confirmation_id.clone(),
+            stage_conf.confirmation_id.clone(),
+        ];
+        let confirmations = vec![seg_conf, event_conf, chapter_conf, stage_conf];
 
-        let chapter_summary = draft.chapter_summary.expect("validated chapter summary");
-        self.knowledge
-            .upsert_chapter_summary(&chapter_id, chapter_summary)?;
-        confirmation_ids.push(
-            self.enqueue_confirmation(
-                ConfirmationKind::ChapterSummary,
-                &chapter_id,
-                &revision_id,
-                json!({ "step": "chapter", "chapter_id": chapter_id.clone() }),
-            )?
-            .confirmation_id,
-        );
-        completed_steps.push(SummaryPipelineStep::Chapter);
+        let segments = if activate_segment {
+            Some(draft.segments)
+        } else {
+            None
+        };
+        let events = if activate_event {
+            Some(draft.events)
+        } else {
+            None
+        };
+        let realized = if activate_segment {
+            draft.realized_changes
+        } else {
+            Vec::new()
+        };
+        let foreshadowing = if activate_segment {
+            draft.foreshadowing_updates
+        } else {
+            Vec::new()
+        };
+        let chapter_summary_write = if activate_chapter {
+            draft.chapter_summary
+        } else {
+            None
+        };
+        let stage_write = if activate_stage {
+            Some((stage_id, stage_summary))
+        } else {
+            None
+        };
 
-        let stage_id = draft.stage_id.expect("validated stage id");
-        let stage_summary = draft.stage_summary.expect("validated stage summary");
-        self.knowledge.link_chapter_stage(&chapter_id, &stage_id)?;
-        self.knowledge
-            .upsert_stage_summary(&stage_id, stage_summary)?;
-        confirmation_ids.push(
-            self.enqueue_confirmation(
-                ConfirmationKind::StageSummary,
-                &chapter_id,
-                &revision_id,
-                json!({
-                    "step": "stage",
-                    "chapter_id": chapter_id.clone(),
-                    "stage_id": stage_id
-                }),
-            )?
-            .confirmation_id,
-        );
-        completed_steps.push(SummaryPipelineStep::Stage);
+        let issues = self.knowledge.apply_summary_pipeline_transaction(
+            &chapter_id,
+            segments,
+            events,
+            realized,
+            foreshadowing,
+            confirmations,
+            chapter_summary_write,
+            stage_write,
+            &self.cancellation,
+        )?;
 
-        let issues = self
-            .knowledge
-            .queue_unrealized_changes_for_chapter(&chapter_id)?;
         let planner_issue_ids = issues
             .iter()
             .map(|issue| issue.issue_id.clone())
             .collect::<Vec<_>>();
+
+        // F14：completed_steps 仅包含已激活写入的步骤。
+        let mut completed_steps = Vec::new();
+        if activate_segment {
+            completed_steps.push(SummaryPipelineStep::Segment);
+        }
+        if activate_event {
+            completed_steps.push(SummaryPipelineStep::Event);
+        }
+        if activate_chapter {
+            completed_steps.push(SummaryPipelineStep::Chapter);
+        }
+        if activate_stage {
+            completed_steps.push(SummaryPipelineStep::Stage);
+        }
 
         let pending_confirmations = has_pending_confirmations(self.knowledge)?;
         let has_unrealized_issues = !issues.is_empty();
@@ -159,8 +249,8 @@ impl<'a> SummaryPipelineExecutor<'a> {
         SummaryRerunPlan::new(chapter_id, SummaryPipelineStep::Segment, reason)
     }
 
-    /// 根据确认策略创建确认项。
-    fn enqueue_confirmation(
+    /// 根据确认策略组装确认项（不落库；由单一事务统一写入）。
+    fn build_confirmation(
         &self,
         kind: ConfirmationKind,
         chapter_id: &str,
@@ -174,31 +264,50 @@ impl<'a> SummaryPipelineExecutor<'a> {
             metadata,
             json!({ "revision_id": revision_id, "chapter_id": chapter_id }),
         );
-        let item = ConfirmationItem::new(
+        Ok(ConfirmationItem::new(
             confirmation_id(kind, chapter_id, revision_id),
             kind,
             state,
             metadata,
-        );
-        self.knowledge.upsert_confirmation(item.clone())?;
-        Ok(item)
+        ))
     }
 }
 
-/// 把待确认项状态推进为已通过。
+/// 把待确认项状态推进为已通过，并物化 summary pending_payload（F14）。
 pub fn approve_confirmation(
     knowledge: &MemoryWritingKnowledgeBase,
     confirmation_id: &str,
 ) -> CoreResult<ConfirmationItem> {
-    knowledge.update_confirmation_state(confirmation_id, ConfirmationState::Approved)
+    let current = knowledge
+        .confirmations(None)?
+        .into_iter()
+        .find(|c| c.confirmation_id == confirmation_id)
+        .ok_or_else(|| {
+            CoreError::validation(format!("confirmation item not found: {confirmation_id}"))
+        })?;
+    if is_summary_kind(current.kind)
+        && current.metadata.get("pending_payload").is_some()
+        && !confirmation_state_activates_knowledge(current.state)
+    {
+        knowledge.materialize_summary_confirmation_payload(&current)?;
+    }
+    let mut updated =
+        knowledge.update_confirmation_state(confirmation_id, ConfirmationState::Approved)?;
+    clear_pending_payload(&mut updated);
+    knowledge.upsert_confirmation(updated.clone())?;
+    Ok(updated)
 }
 
-/// 把待确认项状态推进为已拒绝。
+/// 把待确认项状态推进为已拒绝；丢弃 pending_payload，不写入 active 知识（F14）。
 pub fn reject_confirmation(
     knowledge: &MemoryWritingKnowledgeBase,
     confirmation_id: &str,
 ) -> CoreResult<ConfirmationItem> {
-    knowledge.update_confirmation_state(confirmation_id, ConfirmationState::Rejected)
+    let mut updated =
+        knowledge.update_confirmation_state(confirmation_id, ConfirmationState::Rejected)?;
+    clear_pending_payload(&mut updated);
+    knowledge.upsert_confirmation(updated.clone())?;
+    Ok(updated)
 }
 
 /// 判断当前是否仍有待人工确认项。
@@ -206,6 +315,48 @@ pub fn has_pending_confirmations(knowledge: &MemoryWritingKnowledgeBase) -> Core
     Ok(!knowledge
         .confirmations(Some(ConfirmationState::Pending))?
         .is_empty())
+}
+
+fn is_summary_kind(kind: ConfirmationKind) -> bool {
+    matches!(
+        kind,
+        ConfirmationKind::SegmentSummary
+            | ConfirmationKind::EventSummary
+            | ConfirmationKind::ChapterSummary
+            | ConfirmationKind::StageSummary
+    )
+}
+
+fn clear_pending_payload(item: &mut ConfirmationItem) {
+    if let Some(obj) = item.metadata.as_object_mut() {
+        obj.remove("pending_payload");
+    }
+}
+
+/// F25：校验阶段身份。
+fn validate_stage_identity(
+    knowledge: &MemoryWritingKnowledgeBase,
+    draft: &SummaryPipelineDraft,
+) -> CoreResult<()> {
+    let stage_id = draft.stage_id.as_deref().unwrap_or("");
+    let exists = knowledge.has_stage(stage_id)?;
+    match draft.is_new_stage {
+        Some(false) if !exists => Err(CoreError::validation(format!(
+            "unknown stage_id '{stage_id}': set is_new_stage true to propose a new stage"
+        ))),
+        Some(true) | Some(false) | None => Ok(()),
+    }
+}
+
+fn resolve_is_new_stage(
+    knowledge: &MemoryWritingKnowledgeBase,
+    stage_id: &str,
+    flag: Option<bool>,
+) -> CoreResult<bool> {
+    match flag {
+        Some(v) => Ok(v),
+        None => Ok(!knowledge.has_stage(stage_id)?),
+    }
 }
 
 /// 生成稳定确认项 id。
@@ -276,16 +427,9 @@ fn validate_complete_draft(draft: &SummaryPipelineDraft) -> CoreResult<()> {
     Ok(())
 }
 
-fn summary_revision_id(draft: &SummaryPipelineDraft) -> String {
-    if let Some(value) = draft
-        .metadata
-        .get("revision_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return value.to_owned();
-    }
+/// F22：revision 仅由流水线可信层生成；**忽略** draft.metadata 中调用方提供的 revision_id，
+/// 防止伪造/重复 revision 覆盖既有 confirmation 历史。
+fn summary_revision_id(_draft: &SummaryPipelineDraft) -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

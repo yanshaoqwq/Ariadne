@@ -12,6 +12,7 @@ fn sqlite_cost_ledger_tracks_tool_use_costs() {
     ledger
         .record_cost(NewCostRecord {
             occurred_at_ms: 100,
+            operation_id: Some("op-tool-call-1".to_owned()),
             category: CostCategory::Llm,
             provider_id: Some("anthropic".to_owned()),
             model_id: Some("claude".to_owned()),

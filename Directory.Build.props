@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <AriadneRepositoryRoot>$(MSBuildThisFileDirectory)</AriadneRepositoryRoot>
+    <AriadneCargoManifest>$([System.IO.File]::ReadAllText('$(AriadneRepositoryRoot)Cargo.toml'))</AriadneCargoManifest>
+    <AriadneProductVersion>$([System.Text.RegularExpressions.Regex]::Match($(AriadneCargoManifest), '(?m)^version\s*=\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</AriadneProductVersion>
+    <Version>$(AriadneProductVersion)</Version>
+    <AssemblyVersion>$(AriadneProductVersion).0</AssemblyVersion>
+    <FileVersion>$(AriadneProductVersion).0</FileVersion>
+    <InformationalVersion>$(AriadneProductVersion)</InformationalVersion>
+  </PropertyGroup>
+  <Target Name="ValidateAriadneProductVersion" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(AriadneProductVersion)' == ''" Text="Could not read workspace.package.version from Cargo.toml." />
+  </Target>
+</Project>

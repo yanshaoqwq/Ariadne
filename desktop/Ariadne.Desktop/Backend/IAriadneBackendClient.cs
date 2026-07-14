@@ -13,6 +13,9 @@ public interface IAriadneBackendClient
 
     Task<SidebarBadgeCounts> GetSidebarBadgesAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>D3：查询项目维护状态；无维护时返回 null。</summary>
+    Task<ProjectMaintenanceState?> GetProjectMaintenanceAsync(CancellationToken cancellationToken = default);
+
     Task<CurrentProjectStatus?> GetCurrentProjectAsync(CancellationToken cancellationToken = default);
 
     Task<ProjectInitReport> CreateProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default);
@@ -88,6 +91,10 @@ public interface IAriadneBackendClient
 
     Task<WorkflowEventsResult> GetWorkflowEventsAsync(string workflowId, string runId, long afterSequence = 0, int? limit = null, CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<WorkflowOperation>> ListInDoubtOperationsAsync(string workflowId, string runId, CancellationToken cancellationToken = default);
+
+    Task<ResolveInDoubtOperationResult> ResolveInDoubtOperationAsync(string operationId, string decision, object? response = null, string? reason = null, CancellationToken cancellationToken = default);
+
     Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default);
 
     Task<ProjectAiResponse> ProjectAiChatAsync(
@@ -108,7 +115,7 @@ public interface IAriadneBackendClient
 
     Task<WorkflowGraphData> LoadWorkflowGraphAsync(string? workflowId = null, CancellationToken cancellationToken = default);
 
-    Task SaveWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default);
+    Task<WorkflowGraphData> SaveWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default);
 
     Task ValidateWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default);
 
@@ -123,6 +130,8 @@ public interface IAriadneBackendClient
     Task<WorkflowPackReport> PackWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, string? subworkflowNodeId = null, string? title = null, CancellationToken cancellationToken = default);
 
     Task<WorksTreeNode> GetWorksTreeAsync(CancellationToken cancellationToken = default);
+
+    Task<ChapterSummaryView> GetChapterSummaryViewAsync(string chapterId, CancellationToken cancellationToken = default);
 
     Task<DocumentTreeNode> GetDocumentTreeAsync(string? projectId = null, CancellationToken cancellationToken = default);
 

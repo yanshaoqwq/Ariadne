@@ -256,6 +256,9 @@ pub struct ArtifactWriteRequest {
     pub kind: crate::contracts::artifacts::ArtifactKind,
     pub media_type: String,
     pub bytes: Vec<u8>,
+    /// 工作流副作用的稳定 operation id；相同 id 只能提交相同 artifact 载荷。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     #[serde(default)]
     pub metadata: Value,
 }

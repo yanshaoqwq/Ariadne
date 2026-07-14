@@ -1,13 +1,18 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::contracts::{NodeId, RunId, WorkflowId};
+use crate::contracts::{
+    ExecutionCancellation, ExternalDispatchAuthorization, NodeId, RunId, WorkflowId,
+};
 use crate::costs::TokenUsage;
 
 /// Provider 调用上下文，携带运行、节点、超时和重试信息。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderCallContext {
     pub provider_id: String,
+    /// workflow operation journal 分配的稳定 ID，用于关联远端调用与成本幂等写入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_id: Option<WorkflowId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -20,6 +25,12 @@ pub struct ProviderCallContext {
     pub max_retries: u32,
     #[serde(default)]
     pub metadata: Value,
+    /// 与 workflow worker 共享的取消信号；仅限进程内执行，不进入配置或 IPC。
+    #[serde(skip, default)]
+    pub cancellation: ExecutionCancellation,
+    /// workflow operation 的持久化派发栅栏；独立 provider 调用默认不启用。
+    #[serde(skip, default)]
+    pub dispatch_authorization: ExternalDispatchAuthorization,
 }
 
 impl ProviderCallContext {
@@ -27,6 +38,7 @@ impl ProviderCallContext {
     pub fn new(provider_id: impl Into<String>) -> Self {
         Self {
             provider_id: provider_id.into(),
+            operation_id: None,
             workflow_id: None,
             run_id: None,
             node_id: None,
@@ -34,6 +46,8 @@ impl ProviderCallContext {
             timeout_ms: 60_000,
             max_retries: 2,
             metadata: Value::Null,
+            cancellation: ExecutionCancellation::new(),
+            dispatch_authorization: ExternalDispatchAuthorization::default(),
         }
     }
 }

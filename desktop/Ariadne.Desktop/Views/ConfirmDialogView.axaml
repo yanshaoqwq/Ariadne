@@ -5,9 +5,8 @@
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:ConfirmDialogViewModel"
     FontFamily="{DynamicResource Ariadne.Font.Ui}">
-  <!-- Win11 毛玻璃弹窗：半透明 tint + 亮边 + 柔阴影；字体统一 Ui -->
+  <!-- Win11 毛玻璃弹窗：半透明 tint + 亮边 + 柔阴影；高度上限 + 正文滚动（U68） -->
   <Panel>
-    <!-- 可选真实模糊层（窗口已开 Mica/AcrylicBlur 时 digger 生效） -->
     <ExperimentalAcrylicBorder CornerRadius="14" IsHitTestVisible="False">
       <ExperimentalAcrylicBorder.Material>
         <ExperimentalAcrylicMaterial
@@ -19,21 +18,25 @@
     </ExperimentalAcrylicBorder>
 
     <Border
+        x:Name="DialogChrome"
         Classes="glass-dialog"
-        MaxWidth="460"
-        MinWidth="380"
+        MaxWidth="480"
+        MinWidth="360"
+        MaxHeight="520"
         Padding="26,24">
-      <StackPanel Spacing="16">
-        <!-- 头部：图标 + 标题 -->
-        <StackPanel Orientation="Horizontal" Spacing="12">
+      <Grid RowDefinitions="Auto,*,Auto" RowSpacing="14">
+        <!-- 头部：语义图标 + 标题（U63） -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="12">
           <Border Width="36" Height="36" CornerRadius="10"
                   Background="{DynamicResource Ariadne.AccentLight}"
                   BorderBrush="{DynamicResource Ariadne.AccentBorder}"
                   BorderThickness="1"
                   VerticalAlignment="Top">
-            <Path HorizontalAlignment="Center" VerticalAlignment="Center"
+            <Path x:Name="SeverityIcon"
+                  HorizontalAlignment="Center" VerticalAlignment="Center"
                   Width="18" Height="18" Stretch="Uniform"
-                  Fill="{DynamicResource Ariadne.StatusWarning}"
+                  StrokeThickness="1.6"
+                  Fill="Transparent"
                   Data="M12,3 L22,20 L2,20 Z M12,9 L12,14 M12,16.5 L12,17.5" />
           </Border>
           <TextBlock Text="{Binding Title}"
@@ -45,33 +48,42 @@
                      TextWrapping="Wrap" />
         </StackPanel>
 
-        <!-- 正文 -->
-        <TextBlock Text="{Binding Message}"
-                   FontSize="13.5"
-                   FontFamily="{DynamicResource Ariadne.Font.Ui}"
-                   Foreground="{DynamicResource Ariadne.TextSecondary}"
-                   TextWrapping="Wrap"
-                   Margin="48,0,0,0"
-                   LineHeight="22" />
+        <!-- 正文 + 可选输入：可滚动，底部按钮始终可见 -->
+        <ScrollViewer x:Name="BodyScroll"
+                      Grid.Row="1"
+                      MaxHeight="320"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="12">
+            <TextBlock Text="{Binding Message}"
+                       FontSize="13.5"
+                       FontFamily="{DynamicResource Ariadne.Font.Ui}"
+                       Foreground="{DynamicResource Ariadne.TextSecondary}"
+                       TextWrapping="Wrap"
+                       Margin="48,0,0,0"
+                       LineHeight="22" />
 
-        <!-- 可选输入（新建项目名称等） -->
-        <StackPanel Spacing="6" Margin="48,0,0,0" IsVisible="{Binding HasInput}">
-          <TextBlock Text="{Binding InputLabel}"
-                     Classes="caption"
-                     FontFamily="{DynamicResource Ariadne.Font.Ui}" />
-          <TextBox Text="{Binding InputText, Mode=TwoWay}"
-                   PlaceholderText="{Binding InputPlaceholder}"
-                   MinHeight="38"
-                   FontSize="14"
-                   FontFamily="{DynamicResource Ariadne.Font.Ui}"
-                   CornerRadius="8" />
-        </StackPanel>
+            <StackPanel Spacing="6" Margin="48,0,0,0" IsVisible="{Binding HasInput}">
+              <TextBlock Text="{Binding InputLabel}"
+                         Classes="caption"
+                         FontFamily="{DynamicResource Ariadne.Font.Ui}" />
+              <TextBox x:Name="InputBox"
+                       Text="{Binding InputText, Mode=TwoWay}"
+                       PlaceholderText="{Binding InputPlaceholder}"
+                       MinHeight="38"
+                       FontSize="14"
+                       FontFamily="{DynamicResource Ariadne.Font.Ui}"
+                       CornerRadius="8"
+                       MaxLength="80" />
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
 
-        <!-- 按钮组 -->
-        <ItemsControl ItemsSource="{Binding Buttons}" Margin="0,4,0,0">
+        <!-- 按钮组：可换行，始终贴底 -->
+        <ItemsControl Grid.Row="2" ItemsSource="{Binding Buttons}" Margin="0,4,0,0">
           <ItemsControl.ItemsPanel>
             <ItemsPanelTemplate>
-              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10" />
+              <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right" />
             </ItemsPanelTemplate>
           </ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate>
@@ -79,8 +91,11 @@
               <Button Classes.primary="{Binding IsPrimary}"
                       Classes.danger="{Binding IsDanger}"
                       Classes.subtle="{Binding IsSubtle}"
+                      IsDefault="{Binding IsDefault}"
+                      IsCancel="{Binding IsCancel}"
                       MinWidth="84"
                       MinHeight="34"
+                      Margin="6,4,0,0"
                       Padding="16,8"
                       FontSize="13"
                       FontFamily="{DynamicResource Ariadne.Font.Ui}"
@@ -89,7 +104,7 @@
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
-      </StackPanel>
+      </Grid>
     </Border>
   </Panel>
 </UserControl>

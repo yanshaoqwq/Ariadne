@@ -1,0 +1,161 @@
+# 00/00A re-review residual inventory manifest — exactly 16 IDs.
+# residual_mode quotes 00A residual wording (one line).
+# disposition: code-close | already-closed | honest-open-backlog | Non-goal
+# test_filter: substring that must appear as "… … ok" in log_path after suite run.
+# log_path: relative to SCRATCH (implementer evidence dir).
+
+residuals:
+  - id: S3
+    residual_mode: "项目配置可反序列化任意 SecretRef.key_id，正式路径向全局 SecretStore 查询并把密钥发往项目可配置 Provider URL"
+    product_entry: "core/src/config/store.rs::reject_project_owned_secret_refs + ProjectCredentialScope"
+    disposition: already-closed
+    test_filter: "project_config_rejects_untrusted_provider_secret_ref"
+    suite: p0
+    log_path: tests-p0-all.log
+    cargo: "cargo test --test config_contracts project_config_rejects_untrusted -- --nocapture"
+
+  - id: S4
+    residual_mode: "atomic-commit journal 可指定绝对 final_path/外部 stage_dir，恢复器 rename 或 remove_dir_all 用户目录"
+    product_entry: "core/src/config/atomic_commit.rs::app-state authority journal + project-owned quarantine"
+    disposition: already-closed
+    test_filter: "project_owned_legacy_journal_is_quarantined_without_execution"
+    suite: p0
+    log_path: tests-p0-all.log
+    cargo: "cargo test --lib config::atomic_commit -- --nocapture"
+    extra_test_filters:
+      - "forged_project_stage_has_no_recovery_authority"
+
+  - id: D1-a
+    residual_mode: "并发同 base 文档保存 dual-write / 无独占写权与锁内 CAS"
+    product_entry: "core/src/config/store.rs::PathWriteLock + documents save under lock"
+    disposition: already-closed
+    test_filter: "d1a_concurrent_saves_with_same_base_version_serialize_under_lock"
+    suite: p0
+    log_path: tests-p0-all.log
+    cargo: "cargo test --test document_contracts d1a_ -- --nocapture"
+
+  - id: D1-b
+    residual_mode: "锁文件与正文同目录进入 Git；崩溃后永久毒化、无 dead-PID reclaim"
+    product_entry: "core/src/config/store.rs::PathWriteLock (runtime dir + reclaim)"
+    disposition: already-closed
+    test_filter: "d1b_path_write_lock_lives_outside_document_directory"
+    suite: durable
+    log_path: tests-durable-handoff-all.log
+    cargo: "cargo test --test document_contracts d1b_ -- --nocapture"
+
+  - id: D3-a
+    residual_mode: "maintenance/restore 后不门禁已通过检查的写者"
+    product_entry: "documents/commands maintenance fence on save"
+    disposition: already-closed
+    test_filter: "d3a_document_save_blocked_when_maintenance_active"
+    suite: p0
+    log_path: tests-p0-all.log
+    cargo: "cargo test --test document_contracts d3a_ -- --nocapture"
+
+  - id: D4-a
+    residual_mode: "固定 .stage-save / 共享 journal、无独占 commit 锁 → 并发多文件混合世代"
+    product_entry: "core/src/config/atomic_commit.rs::commit_files (app-state lock+journal) + ConfigStore::save"
+    disposition: code-close
+    test_filter: "d4a_config_store_concurrent_saves_leave_readable_consistent_config"
+    suite: durable
+    log_path: tests-durable-handoff-all.log
+    cargo: "cargo test --test config_contracts d4a_ -- --nocapture"
+    extra_test_filters:
+      - "d4a_config_store_save_does_not_use_fixed_stage_save_dir"
+      - "commit_writes_fixed_targets_and_clears_trusted_artifacts"
+      - "mid_fail_recovers_from_app_state_authority"
+      - "automation_settings_mid_fail_leaves_journal_and_recover_completes"
+
+  - id: F10-c
+    residual_mode: "Start input schema 未在 persist 前校验（含 empty initial_inputs）"
+    product_entry: "core/src/commands.rs::start_workflow_with_request schema validate"
+    disposition: already-closed
+    test_filter: "f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist"
+    suite: workflow
+    log_path: tests-workflow-residual-all.log
+    cargo: "cargo test --test command_contracts f10c_ -- --nocapture"
+
+  - id: F10-d
+    residual_mode: "create/lease/spawn crash window 无 open_project orphan recover"
+    product_entry: "core/src/commands.rs::open_project orphan recover"
+    disposition: already-closed
+    test_filter: "f10d_open_project_recovers_orphaned_queued_run"
+    suite: workflow
+    log_path: tests-workflow-residual-all.log
+    cargo: "cargo test --test command_contracts f10d_ -- --nocapture"
+
+  - id: F12-a
+    residual_mode: "request_stop 不写 Stopping/Stopped，execution_should_cancel 只读 status"
+    product_entry: "workflow store control column + request_stop status matrix"
+    disposition: already-closed
+    test_filter: "f12a_stop_sets_stopping_or_stopped"
+    suite: workflow
+    log_path: tests-workflow-residual-all.log
+    cargo: "cargo test --test workflow_contracts f12a_ -- --nocapture"
+
+  - id: F12-b
+    residual_mode: "dispatch 前无 DB 门禁；Pause/Stop 与 executor 副作用未线性化"
+    product_entry: "workflow runtime dispatch authorization fence"
+    disposition: already-closed
+    test_filter: "f12_stop_wins_before_dispatch_without_external_side_effect"
+    suite: workflow
+    log_path: tests-workflow-residual-all.log
+    cargo: "cargo test --test workflow_contracts f12_stop_wins_before_dispatch -- --nocapture"
+
+  - id: F12-c
+    residual_mode: "Pause/Stop 无终态守卫，可把 Succeeded 改回 Paused"
+    product_entry: "workflow control matrix terminal reject"
+    disposition: already-closed
+    test_filter: "f12c_pause_and_stop_reject_terminal_runs"
+    suite: workflow
+    log_path: tests-workflow-residual-all.log
+    cargo: "cargo test --test workflow_contracts f12c_ -- --nocapture"
+
+  - id: C10
+    residual_mode: "完整 prepared_workflow 内联每次 state_json 覆盖保存写放大"
+    product_entry: "workflow store prepared_workflow_json column slim + load rehydrate"
+    disposition: already-closed
+    test_filter: "c10_save_slims_prepared_workflow_but_load_rehydrates_from_column"
+    suite: workflow
+    log_path: tests-workflow-residual-all.log
+    cargo: "cargo test --test workflow_contracts c10_ -- --nocapture"
+
+  - id: F14-a
+    residual_mode: "跨库确认以共享整库 metadata.db 文件覆盖做补偿（WAL split-brain）"
+    product_entry: "commands::resolve_confirmation_impl_with_claim + compensate_writing_knowledge_confirmation_pre_image (no whole-DB bak)"
+    disposition: code-close
+    test_filter: "resolve_confirmation_knowledge_committed_runtime_not_found_compensates_pre_image"
+    suite: p0
+    log_path: tests-p0-all.log
+    cargo: "cargo test --test command_contracts resolve_confirmation_knowledge_committed_runtime_not_found -- --nocapture"
+
+  - id: F14-b
+    residual_mode: "确认日志/投影失败释放 post-commit worker lease 造成孤儿 handoff"
+    product_entry: "core/src/commands.rs::resolve_confirmation (keep lease on projection fail)"
+    disposition: already-closed
+    test_filter: "resolve_confirmation_log_failure_uses_recoverable_projection_outbox"
+    suite: durable
+    log_path: tests-durable-handoff-all.log
+    cargo: "cargo test --test command_contracts resolve_confirmation_log_failure -- --nocapture"
+
+  - id: C5-a
+    residual_mode: "PointerMoved 每事件 ContainerFromItem + 边 Geometry 全量重建；release 丢最后帧"
+    product_entry: "desktop CanvasDragFrameHelpers + WorkspacePageView FlushDragFrameSyncNow"
+    disposition: code-close
+    test_filter: "C5a_ReleasePath_FlushesFrameSyncBeforeClearingDragState"
+    suite: canvas
+    log_path: tests-canvas-c5.log
+    cargo: "dotnet test desktop/Ariadne.Desktop.Tests/Ariadne.Desktop.Tests.csproj --filter FullyQualifiedName~C5a --nologo"
+    extra_test_filters:
+      - "C5a_FrameCoalesce_OnlyFirstScheduleWins"
+
+  - id: C5-b
+    residual_mode: "拖动 X/Y 不 mark dirty；EndContinuousCanvasEdit 离开/保存保护丢失"
+    product_entry: "desktop EndContinuousCanvasEdit + CanvasDragFrameHelpers dirty refresh"
+    disposition: code-close
+    test_filter: "C5b_DragPositionChange_MarksDirtyOnEndContinuousEdit_ZeroMoveDoesNot"
+    suite: canvas
+    log_path: tests-canvas-c5.log
+    cargo: "dotnet test desktop/Ariadne.Desktop.Tests/Ariadne.Desktop.Tests.csproj --filter FullyQualifiedName~C5b --nologo"
+    extra_test_filters:
+      - "C5b_EndContinuousCanvasEdit_MarksDirtyWhenPositionChanged"

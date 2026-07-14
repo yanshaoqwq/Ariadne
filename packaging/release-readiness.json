@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "release_ready": false,
+  "open_blockers": [
+    "D1-a",
+    "F14-a"
+  ],
+  "note": "01 类发布/许可/安全问题关闭后，仓库仍有其它分类的 P0；tag 发布必须继续被阻断。"
+}

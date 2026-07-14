@@ -45,7 +45,8 @@
                 PointerPressed="OnCanvasBackgroundPointerPressed"
                 PointerMoved="OnCanvasBackgroundPointerMoved"
                 PointerReleased="OnCanvasBackgroundPointerReleased"
-                PointerCaptureLost="OnCanvasBackgroundCaptureLost">
+                PointerCaptureLost="OnCanvasBackgroundCaptureLost"
+                PointerWheelChanged="OnCanvasPointerWheel">
         <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
           <ItemsControl.RenderTransform>
             <TransformGroup>
@@ -70,7 +71,7 @@
                       PointerPressed="OnEdgePointerPressed" />
                 <Path Stroke="{Binding StrokeBrush}"
                       StrokeThickness="{Binding StrokeThickness}"
-                      Opacity="0.88"
+                      Opacity="{Binding StrokeOpacity}"
                       Fill="Transparent"
                       StrokeLineCap="Round"
                       Data="{Binding EdgePath}"
@@ -142,16 +143,17 @@
                   <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <!-- 通信：顶中悬浮方块（半在卡片外） -->
+                <!-- 通信：顶中圆角玻璃方块 -->
                 <Border Grid.Row="0"
                         HorizontalAlignment="Center"
                         VerticalAlignment="Bottom"
-                        Width="13" Height="13"
+                        Width="14" Height="14"
                         Margin="0,0,0,-6"
-                        CornerRadius="2"
+                        CornerRadius="4"
+                        Classes="pin-glass"
                         Background="{Binding PortCommunicationFill}"
                         BorderBrush="{DynamicResource Ariadne.EdgeCommunication}"
-                        BorderThickness="1.5"
+                        BorderThickness="1.2"
                         Opacity="{Binding PortCommunicationOpacity}"
                         Cursor="Cross"
                         Tag="communication|both"
@@ -161,11 +163,11 @@
                         PointerReleased="OnPortPointerReleased"
                         ZIndex="3" />
 
-                <!-- 选中环：外扩 = 描边宽，内侧贴紧卡片外缘 -->
+                <!-- 选中环：外扩 = 描边宽 2.5，内侧贴紧卡片外缘 -->
                 <Border Grid.Row="1"
                         Classes="node-flow-ring"
-                        Margin="-5"
-                        CornerRadius="14"
+                        Margin="-2.5"
+                        CornerRadius="12"
                         IsHitTestVisible="False"
                         IsVisible="{Binding IsSelected}" />
 
@@ -192,7 +194,8 @@
                         <Border Grid.Column="0"
                                 Width="16" Height="16"
                                 VerticalAlignment="Center"
-                                Background="Transparent"
+                                Classes="pin-glass-soft"
+                                CornerRadius="3"
                                 Opacity="{Binding PortControlInOpacity}"
                                 Cursor="Cross"
                                 Tag="control|in"
@@ -203,9 +206,9 @@
                           <Path Width="11" Height="11" Stretch="Uniform"
                                 HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Stroke="{DynamicResource Ariadne.AccentPrimary}"
-                                StrokeThickness="1.5"
+                                StrokeThickness="1.4"
                                 Fill="{Binding PortControlInFill}"
-                                Data="M2,2 L12,7 L2,12 Z" />
+                                Data="M3,2.5 L12,7 L3,11.5 Z" />
                         </Border>
                         <Border Grid.Column="1" Width="3" Height="14" CornerRadius="1"
                                 Background="{Binding TypeAccentBrush}" VerticalAlignment="Center" />
@@ -230,7 +233,8 @@
                         <Border Grid.Column="4"
                                 Width="16" Height="16"
                                 VerticalAlignment="Center"
-                                Background="Transparent"
+                                Classes="pin-glass-soft"
+                                CornerRadius="3"
                                 Opacity="{Binding PortControlOutOpacity}"
                                 Cursor="Cross"
                                 Tag="control|out"
@@ -241,35 +245,50 @@
                           <Path Width="11" Height="11" Stretch="Uniform"
                                 HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Stroke="{DynamicResource Ariadne.AccentPrimary}"
-                                StrokeThickness="1.5"
+                                StrokeThickness="1.4"
                                 Fill="{Binding PortControlOutFill}"
-                                Data="M2,2 L12,7 L2,12 Z" />
+                                Data="M3,2.5 L12,7 L3,11.5 Z" />
                         </Border>
                       </Grid>
                     </Border>
 
-                    <!-- 内容栏：左数据入 / 状态 / 右数据出 -->
+                    <!-- 内容栏：数据入顶对齐 + Spacing=8（14+8=22=DataPortSpacing），与 LocalCenter 一致 -->
                     <Border Padding="6,8" MinHeight="44">
-                      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-                        <Border Grid.Column="0"
-                                Width="14" Height="14"
-                                VerticalAlignment="Center"
-                                Background="Transparent"
-                                Opacity="{Binding PortDataInOpacity}"
-                                Cursor="Cross"
-                                Tag="data|in"
-                                ToolTip.Tip="{Binding $parent[UserControl].DataContext.PortDataInTip}"
-                                PointerPressed="OnPortPointerPressed"
-                                PointerMoved="OnPortPointerMoved"
-                                PointerReleased="OnPortPointerReleased">
-                          <Ellipse Width="10" Height="10"
-                                   Stroke="{DynamicResource Ariadne.EdgeData}"
-                                   StrokeThickness="1.5"
-                                   Fill="{Binding PortDataInFill}"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                        <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6">
+                        <ItemsControl Grid.Column="0"
+                                      VerticalAlignment="Top"
+                                      ItemsSource="{Binding DataInPins}">
+                          <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                              <!-- 间距 8：与 NodePortSpec.DataPortSpacing(22)=14+8 对齐 -->
+                              <StackPanel Spacing="8" />
+                            </ItemsPanelTemplate>
+                          </ItemsControl.ItemsPanel>
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:NodeDataInPinViewModel}">
+                              <Border Width="14" Height="14"
+                                      Classes="pin-glass"
+                                      CornerRadius="7"
+                                      Cursor="Cross"
+                                      Tag="{Binding PortTag}"
+                                      ToolTip.Tip="{Binding Handle}"
+                                      PointerPressed="OnPortPointerPressed"
+                                      PointerMoved="OnPortPointerMoved"
+                                      PointerReleased="OnPortPointerReleased">
+                                <Ellipse Width="9" Height="9"
+                                         Stroke="{DynamicResource Ariadne.EdgeData}"
+                                         StrokeThickness="1.3"
+                                         Fill="{Binding FillBrush}"
+                                         HorizontalAlignment="Center" VerticalAlignment="Center" />
+                              </Border>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Top" Margin="0,0,0,0">
                           <TextBlock Text="{Binding Name}" Classes="caption" TextTrimming="CharacterEllipsis" />
+                          <TextBlock Text="{Binding ImportPathDisplay}" Classes="caption mono"
+                                     TextTrimming="CharacterEllipsis" Opacity="0.85"
+                                     IsVisible="{Binding IsImportNode}" />
                           <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
                             <Ellipse Grid.Column="0" Width="6" Height="6"
                                      Fill="{Binding StatusIndicatorBrush}" VerticalAlignment="Center" />
@@ -277,10 +296,12 @@
                                        Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                           </Grid>
                         </StackPanel>
+                        <!-- 数据出与首个数据入同一顶对齐基线 -->
                         <Border Grid.Column="2"
                                 Width="14" Height="14"
-                                VerticalAlignment="Center"
-                                Background="Transparent"
+                                VerticalAlignment="Top"
+                                Classes="pin-glass"
+                                CornerRadius="7"
                                 Opacity="{Binding PortDataOutOpacity}"
                                 Cursor="Cross"
                                 Tag="data|out"
@@ -288,9 +309,9 @@
                                 PointerPressed="OnPortPointerPressed"
                                 PointerMoved="OnPortPointerMoved"
                                 PointerReleased="OnPortPointerReleased">
-                          <Ellipse Width="10" Height="10"
+                          <Ellipse Width="9" Height="9"
                                    Stroke="{DynamicResource Ariadne.EdgeData}"
-                                   StrokeThickness="1.5"
+                                   StrokeThickness="1.3"
                                    Fill="{Binding PortDataOutFill}"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
@@ -325,29 +346,40 @@
                     Margin="0,12,16,0"
                     Orientation="Horizontal"
                     Spacing="4">
-          <Button Classes="icon-btn" ToolTip.Tip="{Binding UndoText}" Command="{Binding UndoCommand}">
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding UndoText}" AutomationProperties.Name="{Binding UndoText}" Command="{Binding UndoCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Undo}" />
           </Button>
-          <Button Classes="icon-btn" ToolTip.Tip="{Binding RedoText}" Command="{Binding RedoCommand}">
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding RedoText}" AutomationProperties.Name="{Binding RedoText}" Command="{Binding RedoCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Redo}" />
           </Button>
-          <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" Command="{Binding ImportCommand}">
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" AutomationProperties.Name="{Binding ImportText}" Command="{Binding ImportCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
           </Button>
-          <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}" Command="{Binding ExportCommand}">
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}" AutomationProperties.Name="{Binding ExportText}" Command="{Binding ExportCommand}">
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Export}" />
           </Button>
-          <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}" Command="{Binding SaveCommand}">
-            <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
+          <Button Classes="icon-btn save"
+                  ToolTip.Tip="{Binding SaveToolTipText}"
+                  AutomationProperties.Name="{Binding SaveToolTipText}"
+                  Command="{Binding SaveCommand}">
+            <Panel>
+              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
+              <!-- W5：脏状态角标 -->
+              <Ellipse Width="7" Height="7"
+                       HorizontalAlignment="Right" VerticalAlignment="Top"
+                       Margin="0,2,2,0"
+                       Fill="{DynamicResource Ariadne.AccentPrimary}"
+                       IsVisible="{Binding HasUnsavedChanges}" />
+            </Panel>
           </Button>
           <Border Width="1" Height="20" Margin="4,6" Background="{DynamicResource Ariadne.BorderMuted}" />
-          <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomOutText}" Command="{Binding ZoomOutCommand}">
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomOutText}" AutomationProperties.Name="{Binding ZoomOutText}" Command="{Binding ZoomOutCommand}">
             <TextBlock Text="{Binding ZoomOutGlyphText}" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
           </Button>
-          <Button Classes="subtle" MinWidth="58" Padding="8,0" ToolTip.Tip="{Binding ResetZoomText}" Command="{Binding ResetZoomCommand}">
+          <Button Classes="subtle" MinWidth="58" Padding="8,0" ToolTip.Tip="{Binding ResetZoomText}" AutomationProperties.Name="{Binding ResetZoomText}" Command="{Binding ResetZoomCommand}">
             <TextBlock Text="{Binding CanvasZoomText}" Classes="caption" VerticalAlignment="Center" />
           </Button>
-          <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomInText}" Command="{Binding ZoomInCommand}">
+          <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomInText}" AutomationProperties.Name="{Binding ZoomInText}" Command="{Binding ZoomInCommand}">
             <TextBlock Text="{Binding ZoomInGlyphText}" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
           </Button>
         </StackPanel>
@@ -427,13 +459,21 @@
                   CornerRadius="6,6,0,0"
                   BoxShadow="0 -2 6 0 #10000000"
                   Cursor="Hand"
-                  ToolTip.Tip="{Binding NodeLibraryText}"
+                  ToolTip.Tip="{Binding BottomPanelToggleText}"
                   PointerPressed="OnPillPointerPressed"
                   PointerMoved="OnPillPointerMoved"
                   PointerReleased="OnPillPointerReleased">
-            <Path Classes="icon" Width="14" Height="14"
-                  HorizontalAlignment="Center" VerticalAlignment="Center"
-                  Data="{StaticResource Ariadne.Icon.ChevronDown}" />
+            <!-- W16：开=收起(上)，关=展开(下)；tooltip 随节点库/执行模式 -->
+            <Panel>
+              <Path Classes="icon" Width="14" Height="14"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    IsVisible="{Binding BottomPanelShowsCollapseGlyph}"
+                    Data="{StaticResource Ariadne.Icon.ChevronUp}" />
+              <Path Classes="icon" Width="14" Height="14"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    IsVisible="{Binding !BottomPanelShowsCollapseGlyph}"
+                    Data="{StaticResource Ariadne.Icon.ChevronDown}" />
+            </Panel>
           </Border>
 
           <Border x:Name="WorkspaceRightPill"
@@ -616,6 +656,33 @@
                     <Button Classes="secondary" HorizontalAlignment="Stretch" Content="{Binding ResumeText}" Command="{Binding ResumeWorkflowCommand}" />
                     <Button Classes="danger" HorizontalAlignment="Stretch" Content="{Binding StopText}" Command="{Binding StopWorkflowCommand}" />
                   </StackPanel>
+                  <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}" IsVisible="{Binding HasInDoubtOperations}" />
+                  <StackPanel Spacing="8" IsVisible="{Binding HasInDoubtOperations}">
+                    <TextBlock Text="{Binding InDoubtTitleText}" Classes="subtitle" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding InDoubtHintText}" Classes="caption" TextWrapping="Wrap" />
+                    <ComboBox ItemsSource="{Binding InDoubtOperations}"
+                              SelectedItem="{Binding SelectedInDoubtOperation, Mode=TwoWay}"
+                              HorizontalAlignment="Stretch">
+                      <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                          <TextBlock Text="{Binding OperationId}" Classes="mono" TextTrimming="CharacterEllipsis" />
+                        </DataTemplate>
+                      </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <TextBlock Text="{Binding SelectedInDoubtOperationSummary}" Classes="caption" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding InDoubtResponseText}" Classes="caption" />
+                    <TextBox Text="{Binding InDoubtResponseJson, Mode=TwoWay}"
+                             PlaceholderText="{Binding InDoubtResponsePlaceholder}"
+                             AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72" />
+                    <TextBlock Text="{Binding InDoubtReasonText}" Classes="caption" />
+                    <TextBox Text="{Binding InDoubtStopReason, Mode=TwoWay}" />
+                    <Button Classes="secondary" HorizontalAlignment="Stretch"
+                            Content="{Binding RetryInDoubtText}" Command="{Binding RetryInDoubtOperationCommand}" />
+                    <Button Classes="primary" HorizontalAlignment="Stretch"
+                            Content="{Binding UseInDoubtResponseText}" Command="{Binding UseInDoubtResponseCommand}" />
+                    <Button Classes="danger" HorizontalAlignment="Stretch"
+                            Content="{Binding StopInDoubtText}" Command="{Binding StopInDoubtOperationCommand}" />
+                  </StackPanel>
                 </StackPanel>
               </Border>
             </Grid>
@@ -762,38 +829,8 @@
 
           <Grid>
             <DockPanel IsVisible="{Binding IsProjectAiTab}">
-              <!-- 单层输入区：底部分割线 + 一体 composer，不再套第二层卡片 -->
-              <Border DockPanel.Dock="Bottom"
-                      Classes="ai-composer"
-                      Margin="12,8,12,12"
-                      MinHeight="96"
-                      Padding="12,10,8,10">
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                  <TextBox Grid.Column="0"
-                           Text="{Binding ProjectAiMessage, Mode=TwoWay}"
-                           AcceptsReturn="True"
-                           TextWrapping="Wrap"
-                           BorderThickness="0"
-                           Background="Transparent"
-                           FontSize="13"
-                           MinHeight="72"
-                           MaxHeight="140"
-                           Padding="0"
-                           VerticalContentAlignment="Top"
-                           VerticalAlignment="Stretch"
-                           PlaceholderText="{Binding ProjectAiPlaceholder}" />
-                  <Button Grid.Column="1"
-                          Classes="primary"
-                          Width="36" Height="36" Padding="0"
-                          VerticalAlignment="Bottom"
-                          Command="{Binding SendProjectAiCommand}"
-                          ToolTip.Tip="{Binding ProjectAiText}">
-                    <Path Classes="icon" Width="16" Height="16"
-                          Stroke="{DynamicResource Ariadne.TextOnAccent}"
-                          Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
-                  </Button>
-                </Grid>
-              </Border>
+              <!-- 与作品页共用 ProjectAiComposer（主题色焦点边仅此一体区） -->
+              <ctl:ProjectAiComposer DockPanel.Dock="Bottom" Margin="12,8,12,12" />
               <ScrollViewer Margin="12,10">
                 <StackPanel Spacing="10">
                   <Border Classes="empty-state" Padding="8,16" IsVisible="{Binding !HasProjectAiBubbles}">
@@ -877,7 +914,122 @@
                     </Grid>
                   </Border>
 
-                  <Border Classes="panel-section" Padding="0,0,0,18">
+                  <!-- 文档读：path + include_content（后端 WorkflowDocumentReadConfig） -->
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsDocumentNode}">
+                    <StackPanel Spacing="8">
+                      <TextBlock Text="{Binding ImportFileLabel}" Classes="subtitle" />
+                      <TextBlock Text="{Binding ImportFileHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <TextBox Grid.Column="0" Text="{Binding SelectedNode.ImportPath, Mode=TwoWay}" Classes="mono"
+                                 PlaceholderText="{Binding ImportNoFileText}" />
+                        <Button Grid.Column="1" Classes="secondary" Content="{Binding BrowseImportFileText}"
+                                Command="{Binding BrowseImportFileCommand}" />
+                      </Grid>
+                      <CheckBox IsChecked="{Binding SelectedNode.IncludeContent, Mode=TwoWay}"
+                                Content="{Binding IncludeContentText}" />
+                    </StackPanel>
+                  </Border>
+
+                  <!-- 搜索：query_alias + limit（后端 project search） -->
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsSearchNode}">
+                    <StackPanel Spacing="8">
+                      <TextBlock Text="{Binding SearchNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding SearchNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                      <TextBlock Text="{Binding QueryAliasLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.QueryAlias, Mode=TwoWay}" Classes="mono"
+                               PlaceholderText="{Binding SearchQueryPlaceholder}" />
+                      <TextBlock Text="{Binding SearchLimitLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.SearchLimit, Mode=TwoWay}" Width="100" HorizontalAlignment="Left" />
+                    </StackPanel>
+                  </Border>
+
+                  <!-- 条件：input_alias / operator / expected -->
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsConditionNode}">
+                    <StackPanel Spacing="8">
+                      <TextBlock Text="{Binding ConditionNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding ConditionNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                      <TextBlock Text="{Binding ConditionInputAliasLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.ConditionInputAlias, Mode=TwoWay}" Classes="mono" />
+                      <TextBlock Text="{Binding ConditionOperatorLabel}" Classes="caption" />
+                      <ComboBox ItemsSource="{x:Static vm:WorkflowNodeViewModel.ConditionOperators}"
+                                SelectedItem="{Binding SelectedNode.ConditionOperator, Mode=TwoWay}"
+                                HorizontalAlignment="Left" MinWidth="140" />
+                      <TextBlock Text="{Binding ConditionExpectedLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.ConditionExpected, Mode=TwoWay}"
+                               PlaceholderText="{Binding ConditionExpectedPlaceholder}" />
+                    </StackPanel>
+                  </Border>
+
+                  <!-- 循环：max_iterations + stop_condition -->
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsLoopNode}">
+                    <StackPanel Spacing="8">
+                      <TextBlock Text="{Binding LoopNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding LoopNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                      <TextBlock Text="{Binding MaxIterationsLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.MaxIterations, Mode=TwoWay}" Width="100" HorizontalAlignment="Left" />
+                      <TextBlock Text="{Binding StopInputAliasLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.StopInputAlias, Mode=TwoWay}" Classes="mono" />
+                      <TextBlock Text="{Binding StopExpectedLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.StopExpected, Mode=TwoWay}" />
+                    </StackPanel>
+                  </Border>
+
+                  <!-- 审批：approval_id + auto_approve -->
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsApprovalNode}">
+                    <StackPanel Spacing="8">
+                      <TextBlock Text="{Binding ApprovalNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding ApprovalNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                      <TextBlock Text="{Binding ApprovalIdLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.ApprovalId, Mode=TwoWay}" Classes="mono" />
+                      <CheckBox IsChecked="{Binding SelectedNode.AutoApprove, Mode=TwoWay}"
+                                Content="{Binding AutoApproveText}" />
+                    </StackPanel>
+                  </Border>
+
+                  <!-- 导出：artifact_id / format / title -->
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsExportNode}">
+                    <StackPanel Spacing="8">
+                      <TextBlock Text="{Binding ExportNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding ExportNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                      <TextBlock Text="{Binding ExportArtifactIdLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.ExportArtifactId, Mode=TwoWay}" Classes="mono" />
+                      <TextBlock Text="{Binding ExportFormatLabel}" Classes="caption" />
+                      <ComboBox ItemsSource="{x:Static vm:WorkflowNodeViewModel.ExportFormats}"
+                                SelectedItem="{Binding SelectedNode.ExportFormat, Mode=TwoWay}"
+                                HorizontalAlignment="Left" MinWidth="140" />
+                      <TextBlock Text="{Binding ExportTitleLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.ExportTitle, Mode=TwoWay}" />
+                    </StackPanel>
+                  </Border>
+
+                  <!-- 数据入口：可建可删 -->
+                  <Border Classes="panel-section" Padding="0,0,0,18"
+                          IsVisible="{Binding SelectedNode.ShowDataInPinEditor}">
+                    <StackPanel Spacing="8">
+                      <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                        <TextBlock Grid.Column="0" Text="{Binding DataInPinsLabel}" Classes="subtitle" VerticalAlignment="Center" />
+                        <Button Grid.Column="1" Classes="secondary" Padding="10,4"
+                                Content="{Binding AddDataInPinText}"
+                                Command="{Binding SelectedNode.AddDataInPinCommand}" />
+                        <Button Grid.Column="2" Classes="subtle" Padding="10,4"
+                                Content="{Binding RemoveDataInPinText}"
+                                Command="{Binding SelectedNode.RemoveDataInPinCommand}" />
+                      </Grid>
+                      <ItemsControl ItemsSource="{Binding SelectedNode.DataInPins}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate DataType="{x:Type vm:NodeDataInPinViewModel}">
+                            <Grid ColumnDefinitions="*,Auto" Margin="0,2" ColumnSpacing="8">
+                              <TextBlock Grid.Column="0" Text="{Binding Handle}" Classes="caption mono" VerticalAlignment="Center" />
+                              <Button Grid.Column="1" Classes="subtle" Padding="6,2" Content="×"
+                                      Command="{Binding RemoveCommand}" />
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </Border>
+
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.ShowPromptEditor}">
                     <StackPanel Spacing="10">
                       <TextBlock Text="{Binding PromptTemplateText}" Classes="subtitle" />
                       <TextBox Text="{Binding SelectedNode.PromptTemplate, Mode=TwoWay}"

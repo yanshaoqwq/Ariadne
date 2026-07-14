@@ -1,7 +1,12 @@
+pub mod embedding;
 pub mod hybrid;
+pub mod knowledge;
+pub mod lifecycle;
 pub mod memory;
 pub mod models;
+pub mod project;
 pub mod qdrant;
+mod query;
 pub mod reranker;
 pub mod runtime;
 pub mod sidecar;
@@ -9,9 +14,13 @@ pub mod sqlite;
 pub mod tantivy;
 pub mod traits;
 
+pub use embedding::*;
 pub use hybrid::*;
+pub use knowledge::*;
+pub use lifecycle::*;
 pub use memory::*;
 pub use models::*;
+pub use project::*;
 pub use qdrant::*;
 pub use reranker::*;
 pub use runtime::*;

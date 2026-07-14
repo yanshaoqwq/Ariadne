@@ -19,7 +19,6 @@ fn run() -> Result<(), String> {
     let config = RestServerConfig {
         bind: args.bind,
         bearer_token: args.token,
-        allow_remote: args.allow_remote,
     };
     eprintln!(
         "ariadne-server listening on {} for project {}",
@@ -34,7 +33,6 @@ struct ServerArgs {
     app_state_root: Option<String>,
     bind: String,
     token: String,
-    allow_remote: bool,
 }
 
 impl ServerArgs {
@@ -43,7 +41,6 @@ impl ServerArgs {
         let mut app_state_root = None;
         let mut bind = "127.0.0.1:4817".to_owned();
         let mut token = std::env::var("ARIADNE_REST_TOKEN").unwrap_or_default();
-        let mut allow_remote = false;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -51,7 +48,6 @@ impl ServerArgs {
                 "--app-state" => app_state_root = Some(next_value(&mut args, "--app-state")?),
                 "--bind" => bind = next_value(&mut args, "--bind")?,
                 "--token" => token = next_value(&mut args, "--token")?,
-                "--allow-remote" => allow_remote = true,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unsupported argument: {other}\n{}", usage())),
             }
@@ -65,7 +61,6 @@ impl ServerArgs {
             app_state_root,
             bind,
             token,
-            allow_remote,
         })
     }
 }
@@ -79,5 +74,5 @@ fn next_value(
 }
 
 fn usage() -> String {
-    "usage: ariadne-server --project <path> [--app-state <path>] [--bind 127.0.0.1:4817] [--token <token>|ARIADNE_REST_TOKEN] [--allow-remote]".to_owned()
+    "usage: ariadne-server --project <path> [--app-state <path>] [--bind 127.0.0.1:4817] [--token <token>|ARIADNE_REST_TOKEN]".to_owned()
 }

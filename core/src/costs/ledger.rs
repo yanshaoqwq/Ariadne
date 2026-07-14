@@ -8,7 +8,7 @@ use crate::contracts::{CoreError, CoreResult, NodeId, RunId, WorkflowId};
 use crate::costs::models::{CostCategory, CostQuery, CostRecord, NewCostRecord};
 
 pub const COSTS_DB_FILE: &str = "costs.db";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// 成本账本抽象，供内存/SQLite/后续其他存储复用。
 pub trait CostLedger: Send + Sync {
@@ -72,6 +72,7 @@ impl SqliteCostLedger {
 
                 CREATE TABLE IF NOT EXISTS cost_events (
                     cost_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation_id TEXT,
                     occurred_at_ms INTEGER NOT NULL,
                     category TEXT NOT NULL,
                     provider_id TEXT,
@@ -92,6 +93,21 @@ impl SqliteCostLedger {
                     ON cost_events(workflow_id, run_id, node_id);
                 CREATE INDEX IF NOT EXISTS idx_cost_events_category
                     ON cost_events(category);
+                ",
+            )
+            .map_err(sqlite_error)?;
+
+        if !sqlite_column_exists(&connection, "cost_events", "operation_id")? {
+            connection
+                .execute("ALTER TABLE cost_events ADD COLUMN operation_id TEXT", [])
+                .map_err(sqlite_error)?;
+        }
+        connection
+            .execute_batch(
+                "
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_cost_events_operation
+                    ON cost_events(operation_id)
+                    WHERE operation_id IS NOT NULL;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -123,17 +139,19 @@ impl CostLedger for SqliteCostLedger {
         let metadata_json = serde_json::to_string(&record.metadata)?;
 
         let connection = self.connection.lock().map_err(lock_error)?;
-        connection
+        let inserted = connection
             .execute(
                 "
                 INSERT INTO cost_events (
-                    occurred_at_ms, category, provider_id, model_id,
+                    operation_id, occurred_at_ms, category, provider_id, model_id,
                     workflow_id, run_id, node_id, tool_call_id,
                     input_tokens, output_tokens, amount_usd, metadata_json
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                ON CONFLICT(operation_id) WHERE operation_id IS NOT NULL DO NOTHING
                 ",
                 params![
+                    record.operation_id.as_deref(),
                     occurred_at_ms,
                     record.category.as_str(),
                     record.provider_id.as_deref(),
@@ -150,8 +168,41 @@ impl CostLedger for SqliteCostLedger {
             )
             .map_err(sqlite_error)?;
 
-        let cost_id = connection.last_insert_rowid();
-        Ok(CostRecord { cost_id, record })
+        if inserted == 1 {
+            let cost_id = connection.last_insert_rowid();
+            return Ok(CostRecord { cost_id, record });
+        }
+
+        let operation_id = record.operation_id.as_deref().ok_or_else(|| {
+            CoreError::validation("cost insert was ignored without an operation_id conflict")
+        })?;
+        let existing = connection
+            .query_row(
+                "
+                SELECT
+                    cost_id, operation_id, occurred_at_ms, category, provider_id, model_id,
+                    workflow_id, run_id, node_id, tool_call_id,
+                    input_tokens, output_tokens, amount_usd, metadata_json
+                FROM cost_events
+                WHERE operation_id = ?1
+                ",
+                params![operation_id],
+                row_to_cost_record,
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .ok_or_else(|| {
+                CoreError::validation(format!(
+                    "cost operation_id conflict disappeared before lookup: {operation_id}"
+                ))
+            })?;
+        if same_cost_payload(&existing.record, &record) {
+            return Ok(existing);
+        }
+
+        Err(CoreError::validation(format!(
+            "cost operation_id reused with a different payload: {operation_id}"
+        )))
     }
 
     /// 通过 list_costs 复用查询逻辑并累加金额。
@@ -170,7 +221,7 @@ impl CostLedger for SqliteCostLedger {
             .prepare(
                 "
                 SELECT
-                    cost_id, occurred_at_ms, category, provider_id, model_id,
+                    cost_id, operation_id, occurred_at_ms, category, provider_id, model_id,
                     workflow_id, run_id, node_id, tool_call_id,
                     input_tokens, output_tokens, amount_usd, metadata_json
                 FROM cost_events
@@ -179,7 +230,7 @@ impl CostLedger for SqliteCostLedger {
             )
             .map_err(sqlite_error)?;
         let rows = statement
-            .query_map([], |row| row_to_cost_record(row))
+            .query_map([], row_to_cost_record)
             .map_err(sqlite_error)?;
 
         let mut records = Vec::new();
@@ -209,28 +260,38 @@ pub fn schema_version(ledger: &SqliteCostLedger) -> CoreResult<Option<i64>> {
 
 /// 将 SQLite 行转换为成本记录。
 fn row_to_cost_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<CostRecord> {
-    let category_raw: String = row.get(2)?;
-    let metadata_json: String = row.get(12)?;
+    let category_raw: String = row.get(3)?;
+    let metadata_json: String = row.get(13)?;
     // metadata 不能阻断账本读取；损坏时降级为 Null，保留其他字段。
     let metadata = serde_json::from_str::<Value>(&metadata_json).unwrap_or(Value::Null);
 
     Ok(CostRecord {
         cost_id: row.get(0)?,
         record: NewCostRecord {
-            occurred_at_ms: i64_to_u64(row.get(1)?, "occurred_at_ms"),
+            operation_id: row.get(1)?,
+            occurred_at_ms: i64_to_u64(row.get(2)?, "occurred_at_ms"),
             category: CostCategory::parse(&category_raw).unwrap_or(CostCategory::Other),
-            provider_id: row.get(3)?,
-            model_id: row.get(4)?,
-            workflow_id: row.get::<_, Option<String>>(5)?.map(WorkflowId::new),
-            run_id: row.get::<_, Option<String>>(6)?.map(RunId::new),
-            node_id: row.get::<_, Option<String>>(7)?.map(NodeId::new),
-            tool_call_id: row.get(8)?,
-            input_tokens: row.get::<_, Option<i64>>(9)?.and_then(i64_to_u64_checked),
-            output_tokens: row.get::<_, Option<i64>>(10)?.and_then(i64_to_u64_checked),
-            amount_usd: row.get(11)?,
+            provider_id: row.get(4)?,
+            model_id: row.get(5)?,
+            workflow_id: row.get::<_, Option<String>>(6)?.map(WorkflowId::new),
+            run_id: row.get::<_, Option<String>>(7)?.map(RunId::new),
+            node_id: row.get::<_, Option<String>>(8)?.map(NodeId::new),
+            tool_call_id: row.get(9)?,
+            input_tokens: row.get::<_, Option<i64>>(10)?.and_then(i64_to_u64_checked),
+            output_tokens: row.get::<_, Option<i64>>(11)?.and_then(i64_to_u64_checked),
+            amount_usd: row.get(12)?,
             metadata,
         },
     })
+}
+
+/// 幂等键冲突时只忽略采集时间；其余会计载荷必须完全一致。
+fn same_cost_payload(existing: &NewCostRecord, requested: &NewCostRecord) -> bool {
+    let mut existing = existing.clone();
+    let mut requested = requested.clone();
+    existing.occurred_at_ms = 0;
+    requested.occurred_at_ms = 0;
+    existing == requested
 }
 
 /// 判断记录是否满足查询条件。
@@ -245,6 +306,14 @@ fn matches_query(record: &CostRecord, query: &CostQuery) -> bool {
     if query
         .end_ms
         .is_some_and(|end| record.record.occurred_at_ms >= end)
+    {
+        return false;
+    }
+
+    if query
+        .operation_id
+        .as_ref()
+        .is_some_and(|operation_id| record.record.operation_id.as_ref() != Some(operation_id))
     {
         return false;
     }
@@ -293,6 +362,21 @@ fn configure_connection(connection: &Connection, persistent: bool) -> CoreResult
             .map_err(sqlite_error)?;
     }
     Ok(())
+}
+
+fn sqlite_column_exists(connection: &Connection, table: &str, column: &str) -> CoreResult<bool> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_error)?;
+    for row in rows {
+        if row.map_err(sqlite_error)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// 返回当前 Unix 毫秒时间戳，并转成 SQLite 友好的 i64。
@@ -361,6 +445,7 @@ mod tests {
         ledger
             .record_cost(NewCostRecord {
                 occurred_at_ms: 10,
+                operation_id: None,
                 category: CostCategory::Llm,
                 provider_id: Some("openai".to_owned()),
                 model_id: Some("gpt".to_owned()),
@@ -377,6 +462,7 @@ mod tests {
         ledger
             .record_cost(NewCostRecord {
                 occurred_at_ms: 20,
+                operation_id: None,
                 category: CostCategory::SearchApi,
                 provider_id: Some("search".to_owned()),
                 model_id: None,

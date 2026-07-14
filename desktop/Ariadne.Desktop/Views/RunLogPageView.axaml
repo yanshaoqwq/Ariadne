@@ -31,7 +31,7 @@
           </DataTemplate>
         </ComboBox.ItemTemplate>
       </ComboBox>
-      <Button Grid.Column="3" Classes="primary" Width="36" Height="32" Padding="0" Command="{Binding SearchCommand}" VerticalAlignment="Center" Margin="0,0,8,0" ToolTip.Tip="{Binding SearchText}">
+      <Button Grid.Column="3" Classes="primary" Width="36" Height="32" Padding="0" Command="{Binding SearchCommand}" VerticalAlignment="Center" Margin="0,0,8,0" ToolTip.Tip="{Binding SearchText}" AutomationProperties.Name="{Binding SearchText}">
         <Path Classes="icon" Width="15" Height="15"
               Stroke="{DynamicResource Ariadne.TextOnAccent}"
               Data="{StaticResource Ariadne.Icon.Search}" />
@@ -42,15 +42,28 @@
 
     <ScrollViewer Grid.Row="1">
       <StackPanel Margin="20,16" Spacing="10">
-        <TextBlock Text="{Binding StatusText}" Classes="caption" Opacity="0.9" />
-        <ItemsControl ItemsSource="{Binding Logs}" IsVisible="{Binding HasLogs}">
+        <!-- Loading / Error / Empty / Content 互斥（U72） -->
+        <TextBlock Text="{Binding LoadingText}" Classes="caption" IsVisible="{Binding IsLoading}" />
+        <Border Classes="empty-state" IsVisible="{Binding IsError}" Margin="0,24,0,0">
+          <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="420">
+            <TextBlock Text="{Binding ErrorTitle}" Classes="subtitle" HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding ErrorText}" Classes="secondary" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+            <Button Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshCommand}" HorizontalAlignment="Center" />
+          </StackPanel>
+        </Border>
+        <TextBlock Text="{Binding StatusText}" Classes="caption" Opacity="0.9"
+                   IsVisible="{Binding ShowContent}" />
+        <ItemsControl ItemsSource="{Binding Logs}" IsVisible="{Binding ShowContent}">
           <ItemsControl.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:RunLogItemViewModel}">
               <Border Classes="layer log-row" Padding="14,11" Margin="0,0,0,8">
                 <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="12">
                   <TextBlock Grid.Column="0" Text="{Binding TimestampText}" Classes="mono" Width="112" VerticalAlignment="Center" Opacity="0.85" />
-                  <Border Grid.Column="1" Classes="chip" Background="{Binding LevelBackground}" Padding="8,2" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding Level}" Classes="caption" Foreground="{Binding LevelForeground}" FontWeight="SemiBold" />
+                  <Border Grid.Column="1" Classes="chip log-level" Padding="8,2" VerticalAlignment="Center"
+                          Classes.error="{Binding IsError}"
+                          Classes.warning="{Binding IsWarning}"
+                          Classes.info="{Binding IsInfo}">
+                    <TextBlock Text="{Binding Level}" Classes="caption log-level-text" FontWeight="SemiBold" />
                   </Border>
                   <TextBlock Grid.Column="2" Text="{Binding Message}" Classes="secondary" VerticalAlignment="Center" TextWrapping="Wrap" LineHeight="20" />
                 </Grid>
@@ -58,7 +71,7 @@
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
-        <Border Classes="empty-state" IsVisible="{Binding IsLogListEmpty}" Margin="0,40,0,0">
+        <Border Classes="empty-state" IsVisible="{Binding ShowEmpty}" Margin="0,40,0,0">
           <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="380">
             <ctl:EmptyStateArt Kind="RunLog" Width="140" Height="100" HorizontalAlignment="Center" />
             <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" />

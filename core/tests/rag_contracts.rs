@@ -803,6 +803,7 @@ fn summary_pipeline_applies_draft_and_tracks_confirmations_and_issues() {
             chapter_summary: Some("章节总结".to_owned()),
             stage_id: Some("stage-1".to_owned()),
             stage_summary: Some("阶段总结".to_owned()),
+            is_new_stage: None,
             realized_changes: Vec::new(),
             foreshadowing_updates: Vec::new(),
             metadata: Value::Null,
@@ -810,22 +811,22 @@ fn summary_pipeline_applies_draft_and_tracks_confirmations_and_issues() {
         .unwrap();
 
     assert!(report.paused);
-    assert_eq!(
-        report.completed_steps,
-        vec![
-            SummaryPipelineStep::Segment,
-            SummaryPipelineStep::Event,
-            SummaryPipelineStep::Chapter,
-            SummaryPipelineStep::Stage,
-        ]
-    );
+    // F14：normal policy 下步骤未确认前不写入 active 知识
+    assert!(report.completed_steps.is_empty());
     assert_eq!(report.confirmation_ids.len(), 4);
-    assert_eq!(report.planner_issue_ids.len(), 1);
+    assert_eq!(report.planner_issue_ids.len(), 0);
+    assert_eq!(kb.chapter_summary("chapter-1").unwrap(), None);
+    assert!(kb.all_segments().unwrap().is_empty());
+    assert_eq!(kb.confirmations(None).unwrap().len(), 4);
+    // 批准全部四步后知识才激活
+    for id in &report.confirmation_ids {
+        ariadne::rag::approve_confirmation(&kb, id).unwrap();
+    }
     assert_eq!(
         kb.chapter_summary("chapter-1").unwrap(),
         Some("章节总结".to_owned())
     );
-    assert_eq!(kb.confirmations(None).unwrap().len(), 4);
+    assert_eq!(kb.all_segments().unwrap().len(), 1);
     assert_eq!(kb.planner_issues("chapter-1").unwrap().len(), 1);
 }
 
@@ -859,6 +860,7 @@ fn summary_pipeline_rejects_event_with_missing_segment_before_mutation() {
             chapter_summary: Some("不会写入".to_owned()),
             stage_id: Some("stage-invalid".to_owned()),
             stage_summary: Some("不会写入".to_owned()),
+            is_new_stage: None,
             realized_changes: Vec::new(),
             foreshadowing_updates: Vec::new(),
             metadata: Value::Null,
@@ -877,8 +879,11 @@ fn summary_pipeline_rerun_replaces_active_entities_and_keeps_revision_history() 
     let kb = MemoryWritingKnowledgeBase::new();
     let executor = SummaryPipelineExecutor::new(
         &kb,
-        WritingConfirmationPolicy::normal_default(),
-        AutoModeState::default(),
+        WritingConfirmationPolicy::auto_audit_default(),
+        AutoModeState {
+            enabled: true,
+            preauthorized_budget_usd: None,
+        },
     );
     let first = executor
         .apply_draft(SummaryPipelineDraft {
@@ -912,6 +917,7 @@ fn summary_pipeline_rerun_replaces_active_entities_and_keeps_revision_history() 
             chapter_summary: Some("旧章节总结".to_owned()),
             stage_id: Some("stage-1".to_owned()),
             stage_summary: Some("旧阶段总结".to_owned()),
+            is_new_stage: None,
             realized_changes: Vec::new(),
             foreshadowing_updates: Vec::new(),
             metadata: Value::Null,
@@ -941,6 +947,7 @@ fn summary_pipeline_rerun_replaces_active_entities_and_keeps_revision_history() 
             chapter_summary: Some("新章节总结".to_owned()),
             stage_id: Some("stage-1".to_owned()),
             stage_summary: Some("新阶段总结".to_owned()),
+            is_new_stage: None,
             realized_changes: Vec::new(),
             foreshadowing_updates: Vec::new(),
             metadata: Value::Null,
@@ -1014,6 +1021,7 @@ fn summary_pipeline_auto_mode_auto_audits_confirmations() {
             chapter_summary: Some("阿宁在废城中开始信任队友".to_owned()),
             stage_id: Some("stage-1".to_owned()),
             stage_summary: Some("废城阶段推进到团队互信".to_owned()),
+            is_new_stage: None,
             realized_changes: vec![RealizedChangeLink {
                 change_id: "trait-1".to_owned(),
                 segment_id: "seg-1".to_owned(),
@@ -1092,6 +1100,7 @@ fn summary_pipeline_links_segments_foreshadowing_stage_and_rerun_plan() {
             chapter_summary: Some("本章推进废城入口事件，并体现阿宁交出钥匙。".to_owned()),
             stage_id: Some("stage-1".to_owned()),
             stage_summary: Some("当前阶段围绕废城入口和团队互信推进。".to_owned()),
+            is_new_stage: None,
             realized_changes: vec![RealizedChangeLink {
                 change_id: "trait-1".to_owned(),
                 segment_id: "seg-1".to_owned(),
@@ -1247,8 +1256,9 @@ mod store_contracts {
     use ariadne::contracts::{SourceSpan, TextRange};
     use ariadne::rag::memory::MemoryWritingKnowledgeBase;
     use ariadne::rag::models::{
-        ForeshadowingContent, ForeshadowingRecord, ForeshadowingStatus, RegisterContent,
-        RegisterFunction, StoryEvent, StoryEventStatus, StorySegment, WritingConfirmationPolicy,
+        ForeshadowingContent, ForeshadowingRecord, ForeshadowingStatus, RealizedChangeLink,
+        RegisterContent, RegisterFunction, RegisteredChange, RegisteredChangeStatus, StoryEvent,
+        StoryEventStatus, StorySegment, WritingConfirmationPolicy,
     };
     use ariadne::rag::pipeline::SummaryPipelineExecutor;
     use ariadne::rag::store::SqliteWritingKnowledgeStore;
@@ -1285,10 +1295,318 @@ mod store_contracts {
             chapter_summary: Some("第一章总结".to_owned()),
             stage_id: Some("stage-1".to_owned()),
             stage_summary: Some("第一阶段开篇".to_owned()),
+            is_new_stage: None,
             realized_changes: vec![],
             foreshadowing_updates: vec![],
             metadata: json!({ "generated_by": "test" }),
         }
+    }
+
+    /// C2：章节 SQLite delta 成功只替换本章，失败不污染库。
+    #[test]
+    fn chapter_sqlite_delta_replaces_only_chapter_and_is_fail_atomic() {
+        use ariadne::rag::models::{StoryEvent, StoryEventStatus, StorySegment};
+        use ariadne::rag::store::SqliteWritingKnowledgeStore;
+        use serde_json::json;
+
+        let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+        let kb = MemoryWritingKnowledgeBase::new();
+        // 先写入两章
+        kb.upsert_segment(StorySegment {
+            segment_id: "ch-a::s1".into(),
+            number: "1".into(),
+            chapter_id: "ch-a".into(),
+            summary: "A旧".into(),
+            source: source_span(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+        kb.upsert_segment(StorySegment {
+            segment_id: "ch-b::s1".into(),
+            number: "1".into(),
+            chapter_id: "ch-b".into(),
+            summary: "B保留".into(),
+            source: source_span(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+        kb.upsert_event(StoryEvent {
+            event_id: "ev-a".into(),
+            summary: "A事件".into(),
+            status: StoryEventStatus::Ongoing,
+            segment_ids: vec!["ch-a::s1".into()],
+            chapter_ids: vec!["ch-a".into()],
+            metadata: Value::Null,
+        })
+        .unwrap();
+        store.save_knowledge(&kb).unwrap();
+
+        // 本章换成新 segment
+        let kb2 = store.load_knowledge().unwrap();
+        kb2.replace_chapter_summary_entities(
+            "ch-a",
+            vec![StorySegment {
+                segment_id: "ch-a::s2".into(),
+                number: "1".into(),
+                chapter_id: "ch-a".into(),
+                summary: "A新".into(),
+                source: source_span(),
+                metadata: Value::Null,
+            }],
+            vec![StoryEvent {
+                event_id: "ev-a2".into(),
+                summary: "A新事件".into(),
+                status: StoryEventStatus::Ongoing,
+                segment_ids: vec!["ch-a::s2".into()],
+                chapter_ids: vec!["ch-a".into()],
+                metadata: Value::Null,
+            }],
+        )
+        .unwrap();
+        kb2.upsert_chapter_summary("ch-a", "章A总结").unwrap();
+        store
+            .save_chapter_knowledge_with_operation(
+                &kb2,
+                "ch-a",
+                "op-chapter-a",
+                "hash-a",
+                &json!({"ok": true}),
+                &ariadne::contracts::CancellationToken::new(),
+            )
+            .unwrap();
+
+        let reloaded = store.load_knowledge().unwrap();
+        let segs = reloaded.all_segments().unwrap();
+        assert!(segs
+            .iter()
+            .any(|s| s.segment_id == "ch-a::s2" && s.summary == "A新"));
+        assert!(!segs.iter().any(|s| s.segment_id == "ch-a::s1"));
+        assert!(
+            segs.iter()
+                .any(|s| s.segment_id == "ch-b::s1" && s.summary == "B保留"),
+            "foreign chapter must survive chapter-scoped save"
+        );
+
+        // fail-after 不得留下半写入（foreign 章仍在；本章不半成功）
+        let before = store.load_knowledge().unwrap();
+        let before_a: Vec<_> = before
+            .all_segments()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.chapter_id == "ch-a")
+            .map(|s| s.segment_id)
+            .collect();
+        let kb3 = store.load_knowledge().unwrap();
+        kb3.replace_chapter_summary_entities(
+            "ch-a",
+            vec![StorySegment {
+                segment_id: "ch-a::s3".into(),
+                number: "1".into(),
+                chapter_id: "ch-a".into(),
+                summary: "应回滚".into(),
+                source: source_span(),
+                metadata: Value::Null,
+            }],
+            vec![],
+        )
+        .unwrap();
+        let err = store
+            .save_chapter_knowledge_with_operation_fail_after(
+                &kb3,
+                "ch-a",
+                "op-fail",
+                "hash-fail",
+                &json!({"ok": false}),
+                2,
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("injected knowledge chapter save failure"));
+        let after = store.load_knowledge().unwrap();
+        let after_a: Vec<_> = after
+            .all_segments()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.chapter_id == "ch-a")
+            .map(|s| s.segment_id)
+            .collect();
+        assert_eq!(
+            before_a, after_a,
+            "failed mid-write must leave chapter unchanged"
+        );
+        assert!(after
+            .all_segments()
+            .unwrap()
+            .iter()
+            .any(|s| s.segment_id == "ch-b::s1"));
+    }
+
+    /// C2：生产 Summarizer 只装配章节关系闭包；无关章不进入工作集，
+    /// 但跨章事件、Planner 变化与伏笔必须在同一章节事务中完整保留/写回。
+    #[test]
+    fn summary_working_set_is_chapter_scoped_and_persists_related_updates() {
+        let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+        let seed = MemoryWritingKnowledgeBase::new();
+        for (segment_id, chapter_id, summary) in [
+            ("ch-a::old", "ch-a", "A旧段"),
+            ("ch-b::linked", "ch-b", "B跨章段"),
+            ("ch-c::unrelated", "ch-c", "C无关段"),
+        ] {
+            seed.upsert_segment(StorySegment {
+                segment_id: segment_id.to_owned(),
+                number: "1".to_owned(),
+                chapter_id: chapter_id.to_owned(),
+                summary: summary.to_owned(),
+                source: source_span(),
+                metadata: Value::Null,
+            })
+            .unwrap();
+        }
+        seed.upsert_event(StoryEvent {
+            event_id: "cross-event".to_owned(),
+            summary: "跨章事件".to_owned(),
+            status: StoryEventStatus::Ongoing,
+            segment_ids: vec!["ch-a::old".to_owned(), "ch-b::linked".to_owned()],
+            chapter_ids: vec!["ch-a".to_owned(), "ch-b".to_owned()],
+            metadata: Value::Null,
+        })
+        .unwrap();
+        seed.upsert_registered_change(RegisteredChange {
+            change_id: "change-a".to_owned(),
+            function: RegisterFunction::CharacterTrait,
+            status: RegisteredChangeStatus::Planned,
+            content: RegisterContent::CharacterTrait(ariadne::rag::models::CharacterTraitContent {
+                character: "阿宁".to_owned(),
+                trait_name: "信任".to_owned(),
+                from_value: None,
+                to_value: "交出钥匙".to_owned(),
+                reason: "测试".to_owned(),
+            }),
+            linked_segment_ids: Vec::new(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+        seed.upsert_foreshadowing(ForeshadowingRecord {
+            foreshadowing_id: "fore-a".to_owned(),
+            title: "钥匙".to_owned(),
+            description: "旧钥匙".to_owned(),
+            status: ForeshadowingStatus::Planned,
+            planted_segment_ids: Vec::new(),
+            recovered_segment_ids: Vec::new(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+        store.save_knowledge(&seed).unwrap();
+
+        let mut draft = make_draft();
+        draft.chapter_id = "ch-a".to_owned();
+        draft.segments[0].segment_id = "ch-a::new".to_owned();
+        draft.segments[0].chapter_id = "ch-a".to_owned();
+        draft.events[0].event_id = "cross-event".to_owned();
+        draft.events[0].segment_ids = vec!["ch-a::new".to_owned()];
+        draft.events[0].chapter_ids = vec!["ch-a".to_owned()];
+        draft.realized_changes = vec![RealizedChangeLink {
+            change_id: "change-a".to_owned(),
+            segment_id: "ch-a::new".to_owned(),
+        }];
+        draft.foreshadowing_updates = vec![ariadne::rag::models::ForeshadowingUpdate {
+            foreshadowing_id: "fore-a".to_owned(),
+            status: ForeshadowingStatus::Planted,
+            segment_id: "ch-a::new".to_owned(),
+        }];
+
+        let working = store
+            .load_summary_working_set("ch-a", Some(&draft))
+            .unwrap();
+        let working_segments = working.all_segments().unwrap();
+        assert!(working_segments
+            .iter()
+            .any(|segment| segment.segment_id == "ch-a::old"));
+        assert!(working_segments
+            .iter()
+            .any(|segment| segment.segment_id == "ch-b::linked"));
+        assert!(!working_segments
+            .iter()
+            .any(|segment| segment.segment_id == "ch-c::unrelated"));
+
+        SummaryPipelineExecutor::new(
+            &working,
+            WritingConfirmationPolicy::auto_audit_default(),
+            AutoModeState {
+                enabled: true,
+                preauthorized_budget_usd: None,
+            },
+        )
+        .apply_draft(draft)
+        .unwrap();
+        store
+            .save_chapter_knowledge_with_operation(
+                &working,
+                "ch-a",
+                "op-scoped-a",
+                "hash-scoped-a",
+                &json!({"ok": true}),
+                &ariadne::contracts::CancellationToken::new(),
+            )
+            .unwrap();
+
+        let reloaded = store.load_knowledge().unwrap();
+        assert!(reloaded
+            .all_segments()
+            .unwrap()
+            .iter()
+            .any(|segment| segment.segment_id == "ch-c::unrelated"));
+        let cross = reloaded.event("cross-event").unwrap().unwrap();
+        assert!(cross.chapter_ids.contains(&"ch-b".to_owned()));
+        assert!(cross.segment_ids.contains(&"ch-b::linked".to_owned()));
+        let change = reloaded.registered_change("change-a").unwrap().unwrap();
+        assert_eq!(change.status, RegisteredChangeStatus::Realized);
+        assert!(change.linked_segment_ids.contains(&"ch-a::new".to_owned()));
+        let foreshadowing = reloaded.foreshadowing("fore-a").unwrap().unwrap();
+        assert_eq!(foreshadowing.status, ForeshadowingStatus::Planted);
+        assert!(foreshadowing
+            .planted_segment_ids
+            .contains(&"ch-a::new".to_owned()));
+        assert!(store
+            .load_operation_receipt("op-scoped-a", "hash-scoped-a")
+            .unwrap()
+            .is_some());
+    }
+
+    /// F21：事务中途失败时不得留下半写入确认项/总结。
+    #[test]
+    fn apply_draft_failed_mid_transaction_leaves_knowledge_unchanged() {
+        let kb = MemoryWritingKnowledgeBase::new();
+        // auto_audit 立即激活 segment 步，从而执行 foreshadowing 更新并触发失败
+        let executor = SummaryPipelineExecutor::new(
+            &kb,
+            WritingConfirmationPolicy::auto_audit_default(),
+            AutoModeState {
+                enabled: true,
+                preauthorized_budget_usd: None,
+            },
+        );
+        // 引用不存在的 foreshadowing → 事务失败
+        let mut draft = make_draft();
+        draft.foreshadowing_updates = vec![ariadne::rag::models::ForeshadowingUpdate {
+            foreshadowing_id: "missing-fore".to_owned(),
+            status: ForeshadowingStatus::Planted,
+            segment_id: "ch-1::seg-1".to_owned(),
+        }];
+        assert!(executor.apply_draft(draft).is_err());
+        assert!(
+            kb.confirmations(None).unwrap().is_empty(),
+            "failed transaction must not enqueue confirmations"
+        );
+        assert!(
+            kb.chapter_summary("ch-1").unwrap().is_none(),
+            "failed transaction must not write chapter summary"
+        );
+        assert!(
+            kb.all_segments().unwrap().is_empty(),
+            "failed transaction must not replace chapter segments"
+        );
     }
 
     #[test]
@@ -1296,11 +1614,14 @@ mod store_contracts {
         let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
         let kb = MemoryWritingKnowledgeBase::new();
 
-        // 填充数据
+        // 填充数据（auto_audit 立即激活四步知识，便于往返断言）
         let executor = SummaryPipelineExecutor::new(
             &kb,
-            WritingConfirmationPolicy::normal_default(),
-            AutoModeState::default(),
+            WritingConfirmationPolicy::auto_audit_default(),
+            AutoModeState {
+                enabled: true,
+                preauthorized_budget_usd: None,
+            },
         );
         executor.apply_draft(make_draft()).unwrap();
 
@@ -1371,8 +1692,11 @@ mod store_contracts {
         // 第一次保存
         let executor = SummaryPipelineExecutor::new(
             &kb,
-            WritingConfirmationPolicy::normal_default(),
-            AutoModeState::default(),
+            WritingConfirmationPolicy::auto_audit_default(),
+            AutoModeState {
+                enabled: true,
+                preauthorized_budget_usd: None,
+            },
         );
         executor.apply_draft(make_draft()).unwrap();
         store.save_knowledge(&kb).unwrap();
@@ -1390,4 +1714,1337 @@ mod store_contracts {
         // 原有实体未丢失
         assert_eq!(kb2.all_segments().unwrap().len(), 1);
     }
+
+    #[test]
+    fn knowledge_operation_receipt_is_atomic_idempotent_and_cancellable() {
+        let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+        let kb = MemoryWritingKnowledgeBase::new();
+        let executor = SummaryPipelineExecutor::new(
+            &kb,
+            WritingConfirmationPolicy::auto_audit_default(),
+            AutoModeState {
+                enabled: true,
+                preauthorized_budget_usd: None,
+            },
+        );
+        executor.apply_draft(make_draft()).unwrap();
+        let response = json!({"outputs":{"chapter_id":"ch-1"}});
+        let cancellation = ariadne::contracts::CancellationToken::new();
+
+        store
+            .save_knowledge_with_operation(
+                &kb,
+                "knowledge-op-1",
+                "request-hash-1",
+                &response,
+                &cancellation,
+            )
+            .unwrap();
+        let receipt = store
+            .load_operation_receipt("knowledge-op-1", "request-hash-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.response_json, response);
+        assert_eq!(
+            store
+                .load_knowledge()
+                .unwrap()
+                .all_segments()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store
+            .save_knowledge_with_operation(
+                &kb,
+                "knowledge-op-1",
+                "request-hash-1",
+                &response,
+                &cancellation,
+            )
+            .unwrap();
+        assert!(store
+            .save_knowledge_with_operation(
+                &kb,
+                "knowledge-op-1",
+                "request-hash-1",
+                &json!({"different":true}),
+                &cancellation,
+            )
+            .is_err());
+        assert!(store
+            .load_operation_receipt("knowledge-op-1", "different-request")
+            .is_err());
+
+        let cancelled = ariadne::contracts::CancellationToken::new();
+        cancelled.cancel();
+        assert!(store
+            .save_knowledge_with_operation(
+                &kb,
+                "knowledge-op-cancelled",
+                "request-hash-cancelled",
+                &json!({}),
+                &cancelled,
+            )
+            .is_err());
+        assert!(store
+            .load_operation_receipt("knowledge-op-cancelled", "request-hash-cancelled")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn knowledge_receipt_failure_rolls_back_entities_confirmations_and_indexes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteWritingKnowledgeStore::open(temp.path()).unwrap();
+        let kb = MemoryWritingKnowledgeBase::new();
+        SummaryPipelineExecutor::new(
+            &kb,
+            WritingConfirmationPolicy::normal_default(),
+            AutoModeState::default(),
+        )
+        .apply_draft(make_draft())
+        .unwrap();
+        let connection = rusqlite::Connection::open(temp.path().join("metadata.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_knowledge_receipt
+                 BEFORE INSERT ON knowledge_operations
+                 BEGIN SELECT RAISE(ABORT, 'forced receipt failure'); END;",
+            )
+            .unwrap();
+
+        assert!(store
+            .save_knowledge_with_operation(
+                &kb,
+                "knowledge-op-fail",
+                "request-hash-fail",
+                &json!({"result":"must rollback"}),
+                &ariadne::contracts::CancellationToken::new(),
+            )
+            .is_err());
+
+        let loaded = store.load_knowledge().unwrap();
+        assert!(loaded.all_segments().unwrap().is_empty());
+        assert!(loaded.all_events().unwrap().is_empty());
+        assert!(loaded.confirmations(None).unwrap().is_empty());
+        assert!(store
+            .load_operation_receipt("knowledge-op-fail", "request-hash-fail")
+            .unwrap()
+            .is_none());
+    }
+}
+
+// ── F14 / F24 / F25 ──────────────────────────────────────────────────────────
+
+fn f14_draft(chapter: &str, stage: &str) -> SummaryPipelineDraft {
+    SummaryPipelineDraft {
+        chapter_id: chapter.to_owned(),
+        segments: vec![StorySegment {
+            segment_id: format!("{chapter}::seg-1"),
+            number: "1".to_owned(),
+            chapter_id: chapter.to_owned(),
+            summary: "段摘要".to_owned(),
+            source: SourceSpan {
+                document_id: "doc.md".to_owned(),
+                range: TextRange { start: 0, end: 10 },
+                version: None,
+            },
+            metadata: Value::Null,
+        }],
+        events: vec![StoryEvent {
+            event_id: format!("{chapter}-event"),
+            summary: "事件摘要".to_owned(),
+            status: StoryEventStatus::Ongoing,
+            segment_ids: vec![format!("{chapter}::seg-1")],
+            chapter_ids: vec![chapter.to_owned()],
+            metadata: Value::Null,
+        }],
+        chapter_summary: Some("章总结".to_owned()),
+        stage_id: Some(stage.to_owned()),
+        stage_summary: Some("阶段总结".to_owned()),
+        is_new_stage: Some(true),
+        realized_changes: vec![],
+        foreshadowing_updates: vec![],
+        metadata: Value::Null,
+    }
+}
+
+/// F14：未确认步骤不得进入 active 知识；拒绝后仍不激活；批准后物化。
+#[test]
+fn f14_stepwise_gate_pending_not_active_reject_stays_inactive_approve_materializes() {
+    let kb = MemoryWritingKnowledgeBase::new();
+    let executor = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::normal_default(),
+        AutoModeState::default(),
+    );
+    let report = executor
+        .apply_draft(f14_draft("ch-f14", "stage-f14"))
+        .unwrap();
+    assert!(report.paused);
+    assert!(report.completed_steps.is_empty());
+    assert!(kb.chapter_summary("ch-f14").unwrap().is_none());
+    assert!(kb.all_segments().unwrap().is_empty());
+    assert!(kb.all_events().unwrap().is_empty());
+    assert!(kb.stage_summary("stage-f14").unwrap().is_none());
+
+    // 拒绝事件步：不得出现 active 事件
+    let event_id = report
+        .confirmation_ids
+        .iter()
+        .find(|id| id.ends_with("event-summary"))
+        .unwrap();
+    ariadne::rag::reject_confirmation(&kb, event_id).unwrap();
+    assert!(kb.all_events().unwrap().is_empty());
+
+    // 批准故事段与章节与阶段
+    for id in &report.confirmation_ids {
+        if id.ends_with("event-summary") {
+            continue;
+        }
+        ariadne::rag::approve_confirmation(&kb, id).unwrap();
+    }
+    assert_eq!(kb.all_segments().unwrap().len(), 1);
+    assert_eq!(
+        kb.chapter_summary("ch-f14").unwrap(),
+        Some("章总结".to_owned())
+    );
+    assert_eq!(
+        kb.stage_summary("stage-f14").unwrap(),
+        Some("阶段总结".to_owned())
+    );
+    // 被拒绝的事件步仍无 active 事件
+    assert!(kb.all_events().unwrap().is_empty());
+}
+
+#[test]
+fn f14_persistent_receipts_cover_all_four_summary_kinds_idempotently() {
+    use ariadne::rag::ConfirmationState;
+
+    let temp = tempfile::tempdir().unwrap();
+    let kb = MemoryWritingKnowledgeBase::new();
+    let executor = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::normal_default(),
+        AutoModeState::default(),
+    );
+    let report = executor
+        .apply_draft(f14_draft("ch-f14-persist", "stage-f14-persist"))
+        .unwrap();
+    let store = SqliteWritingKnowledgeStore::open(temp.path()).unwrap();
+    store.save_knowledge(&kb).unwrap();
+
+    for suffix in [
+        "segment-summary",
+        "event-summary",
+        "chapter-summary",
+        "stage-summary",
+    ] {
+        let confirmation_id = report
+            .confirmation_ids
+            .iter()
+            .find(|confirmation_id| confirmation_id.ends_with(suffix))
+            .unwrap();
+        let operation_id = format!("f14-operation-{suffix}");
+        let request_hash = format!("f14-request-{suffix}");
+        let response = json!({
+            "confirmation_id": confirmation_id,
+            "decision": "approve",
+        });
+        assert!(store
+            .resolve_confirmation_with_operation(
+                confirmation_id,
+                ConfirmationState::Approved,
+                &operation_id,
+                &request_hash,
+                &response,
+            )
+            .unwrap());
+        assert!(store
+            .resolve_confirmation_with_operation(
+                confirmation_id,
+                ConfirmationState::Approved,
+                &operation_id,
+                &request_hash,
+                &response,
+            )
+            .unwrap());
+        assert_eq!(
+            store
+                .load_operation_receipt(&operation_id, &request_hash)
+                .unwrap()
+                .unwrap()
+                .response_json,
+            response
+        );
+    }
+
+    let loaded = store.load_knowledge().unwrap();
+    assert_eq!(loaded.all_segments().unwrap().len(), 1);
+    assert_eq!(loaded.all_events().unwrap().len(), 1);
+    assert_eq!(
+        loaded.chapter_summary("ch-f14-persist").unwrap(),
+        Some("章总结".to_owned())
+    );
+    assert_eq!(
+        loaded.stage_summary("stage-f14-persist").unwrap(),
+        Some("阶段总结".to_owned())
+    );
+    assert!(loaded
+        .confirmations(None)
+        .unwrap()
+        .iter()
+        .all(|item| item.state == ConfirmationState::Approved));
+}
+
+/// F25：is_new_stage=false 且未知 stage 拒绝；提议新阶段经确认后落库；附着已有阶段成功。
+#[test]
+fn f25_stage_identity_rejects_orphan_invent_and_accepts_proposal() {
+    let kb = MemoryWritingKnowledgeBase::new();
+    let executor = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::auto_audit_default(),
+        AutoModeState {
+            enabled: true,
+            preauthorized_budget_usd: None,
+        },
+    );
+
+    let mut orphan = f14_draft("ch-orphan", "stage-ghost");
+    orphan.is_new_stage = Some(false);
+    let err = executor.apply_draft(orphan).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown stage_id") || err.to_string().contains("is_new_stage"),
+        "unexpected: {err}"
+    );
+
+    // 新阶段提议（auto 立即激活）
+    let mut propose = f14_draft("ch-new", "stage-born");
+    propose.is_new_stage = Some(true);
+    executor.apply_draft(propose).unwrap();
+    assert!(kb.has_stage("stage-born").unwrap());
+
+    // 附着已有阶段
+    let mut attach = f14_draft("ch-attach", "stage-born");
+    attach.is_new_stage = Some(false);
+    executor.apply_draft(attach).unwrap();
+    assert_eq!(
+        kb.stage_summary("stage-born").unwrap(),
+        Some("阶段总结".to_owned())
+    );
+}
+
+/// F22：调用方在 draft.metadata 中伪造 revision_id 不得覆盖历史确认项。
+#[test]
+fn f22_forged_revision_id_does_not_overwrite_confirmation_history() {
+    use ariadne::contracts::{AutoModeState, SourceSpan, TextRange};
+    use ariadne::rag::{
+        ConfirmationState, MemoryWritingKnowledgeBase, SummaryPipelineDraft,
+        SummaryPipelineExecutor, WritingConfirmationPolicy,
+    };
+
+    let kb = MemoryWritingKnowledgeBase::new();
+    let executor = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::auto_audit_default(),
+        AutoModeState {
+            enabled: true,
+            preauthorized_budget_usd: None,
+        },
+    );
+    let mut draft = SummaryPipelineDraft {
+        chapter_id: "ch-f22".to_owned(),
+        segments: vec![ariadne::rag::StorySegment {
+            segment_id: "ch-f22::seg-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "ch-f22".to_owned(),
+            summary: "段".to_owned(),
+            source: SourceSpan {
+                document_id: "d.md".to_owned(),
+                range: TextRange { start: 0, end: 1 },
+                version: None,
+            },
+            metadata: Value::Null,
+        }],
+        events: vec![ariadne::rag::StoryEvent {
+            event_id: "e1".to_owned(),
+            summary: "事".to_owned(),
+            status: ariadne::rag::StoryEventStatus::Ongoing,
+            segment_ids: vec!["ch-f22::seg-1".to_owned()],
+            chapter_ids: vec!["ch-f22".to_owned()],
+            metadata: Value::Null,
+        }],
+        chapter_summary: Some("章".to_owned()),
+        stage_id: Some("st".to_owned()),
+        stage_summary: Some("阶".to_owned()),
+        is_new_stage: Some(true),
+        realized_changes: vec![],
+        foreshadowing_updates: vec![],
+        metadata: json!({ "revision_id": "forged-same-rev" }),
+    };
+    let first = executor.apply_draft(draft.clone()).unwrap();
+    draft.chapter_summary = Some("章-第二轮".to_owned());
+    // Same forged revision_id must NOT collapse history.
+    draft.metadata = json!({ "revision_id": "forged-same-rev" });
+    let second = executor.apply_draft(draft).unwrap();
+    assert_ne!(
+        first.revision_id, second.revision_id,
+        "pipeline must mint unique revisions ignoring forged metadata"
+    );
+    assert_ne!(first.revision_id, "forged-same-rev");
+    assert_ne!(second.revision_id, "forged-same-rev");
+    // 两轮 × 四步 = 8 条确认；不得因同 revision 覆盖成 4 条
+    let confs = kb.confirmations(None).unwrap();
+    assert_eq!(
+        confs.len(),
+        8,
+        "forged duplicate revision_id must not overwrite prior confirmations"
+    );
+    assert!(confs
+        .iter()
+        .all(|c| matches!(c.state, ConfirmationState::AutoAudited)));
+}
+
+/// F11：分步 LLM 使用 stable operation_id，重入时命中 step receipt 不再次调用 provider。
+#[test]
+fn f11_summarizer_step_receipt_skips_provider_on_reentry() {
+    use ariadne::contracts::{ProviderCapability, ProviderDefinition, ProviderType};
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::providers::{
+        LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider, ProviderCallContext,
+        ProviderHealth,
+    };
+    use ariadne::rag::load_prompt_resources;
+    use ariadne::rag::summarizer::{
+        SummarizerConfig, SummarizerExecutor, SummarizerWorkflowOperationContext,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingLlm {
+        calls: AtomicUsize,
+    }
+    impl Provider for CountingLlm {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "count".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "count".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for CountingLlm {
+        fn complete(
+            &self,
+            _ctx: &ProviderCallContext,
+            request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let step = request
+                .metadata
+                .get("summarizer_step")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let body = match step {
+                "segments" => {
+                    r#"{"segments":[{"number":"1","summary":"s","start_line":1,"end_line":2}]}"#
+                }
+                "events" => {
+                    r#"{"events":[{"event_id":"e1","summary":"ev","status":"ongoing","segment_ids":["ch::seg-1"]}]}"#
+                }
+                "chapter" => r#"{"summary":"章节总结"}"#,
+                "stage" => r#"{"stage_id":"stage-1","stage_summary":"阶段","is_new_stage":true}"#,
+                _ => r#"{"summary":"x"}"#,
+            };
+            Ok(LlmResponse {
+                message: LlmMessage::assistant(body),
+                tool_calls: Vec::new(),
+                usage: None,
+                finish_reason: Some("stop".to_owned()),
+                cost_usd: Some(0.01),
+                raw: json!({}),
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let provider = CountingLlm {
+        calls: AtomicUsize::new(0),
+    };
+    let exec = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        SummarizerConfig {
+            provider_id: "count".to_owned(),
+            model_id: "m".to_owned(),
+            chapter_document_id: "doc".to_owned(),
+            run_id: Some("run-1".to_owned()),
+            timeout_ms: 5_000,
+            cancellation: ariadne::contracts::CancellationToken::new(),
+            dispatch_authorization: Default::default(),
+            prompt_template: None,
+            generation_context: Default::default(),
+            workflow_operation: Some(SummarizerWorkflowOperationContext {
+                project_root: temp.path().to_path_buf(),
+                workflow_id: ariadne::contracts::WorkflowId::from("wf-f11-step-receipt"),
+                run_id: ariadne::contracts::RunId::from("run-1"),
+                node_id: ariadne::contracts::NodeId::from("summarizer"),
+                operation_id: "wf-op-f11-step-receipt".to_owned(),
+                operation_attempt: 1,
+                request_hash: "wf-request-f11-step-receipt".to_owned(),
+            }),
+        },
+    );
+    let draft1 = exec.summarize_chapter("ch", "line1\nline2").unwrap();
+    assert_eq!(draft1.segments.len(), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    let draft2 = exec.summarize_chapter("ch", "line1\nline2").unwrap();
+    assert_eq!(draft2.segments.len(), 1);
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        4,
+        "second run must not call provider again (all four steps cached)"
+    );
+}
+
+#[test]
+fn f11_summarizer_stage_journal_replays_receipt_and_rejects_identity_drift() {
+    use ariadne::rag::{SummarizerStageOperationStatus, SummarizerStagePreparation};
+
+    let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+    let preparation = store
+        .prepare_summarizer_stage_operation(
+            "parent-op",
+            "parent-op",
+            1,
+            "parent-hash",
+            "segments",
+            "segments-hash",
+        )
+        .unwrap();
+    let SummarizerStagePreparation::Execute { operation_id } = preparation else {
+        panic!("expected a new stage operation");
+    };
+    store
+        .mark_summarizer_stage_dispatched(&operation_id)
+        .unwrap();
+    let response = json!({"message": "segments-response"});
+    store
+        .complete_summarizer_stage_operation(&operation_id, &response)
+        .unwrap();
+
+    assert_eq!(
+        store
+            .prepare_summarizer_stage_operation(
+                "parent-op",
+                "parent-op",
+                1,
+                "parent-hash",
+                "segments",
+                "segments-hash",
+            )
+            .unwrap(),
+        SummarizerStagePreparation::Replay {
+            operation_id: operation_id.clone(),
+            response_json: response,
+        }
+    );
+    assert!(store
+        .prepare_summarizer_stage_operation(
+            "parent-op",
+            "parent-op",
+            1,
+            "changed-parent-hash",
+            "segments",
+            "segments-hash",
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("parent operation identity mismatch"));
+    assert!(store
+        .prepare_summarizer_stage_operation(
+            "parent-op",
+            "parent-op",
+            1,
+            "parent-hash",
+            "segments",
+            "changed-segments-hash",
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("request changed"));
+    assert_eq!(
+        store.list_summarizer_stage_operations("parent-op").unwrap()[0].status,
+        SummarizerStageOperationStatus::Completed
+    );
+}
+
+#[test]
+fn f11_summarizer_stage_journal_does_not_redispatch_unknown_response() {
+    use ariadne::contracts::{CoreError, ExternalDispatchOutcome, NodeId, RunId, WorkflowId};
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::providers::{
+        LlmProvider, LlmRequest, LlmResponse, Provider, ProviderCallContext, ProviderHealth,
+    };
+    use ariadne::rag::summarizer::{
+        SummarizerConfig, SummarizerExecutor, SummarizerWorkflowOperationContext,
+    };
+    use ariadne::rag::SummarizerStageOperationStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct UnknownAfterDispatch {
+        calls: AtomicUsize,
+    }
+    impl Provider for UnknownAfterDispatch {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "unknown-after-dispatch".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "unknown-after-dispatch".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for UnknownAfterDispatch {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            _request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreError::ProviderRequest {
+                service: "unknown-after-dispatch".to_owned(),
+                outcome: ExternalDispatchOutcome::DispatchedUnknown,
+                message: "response lost".to_owned(),
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let provider = UnknownAfterDispatch {
+        calls: AtomicUsize::new(0),
+    };
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    let executor = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        SummarizerConfig {
+            provider_id: "unknown-after-dispatch".to_owned(),
+            model_id: "m".to_owned(),
+            chapter_document_id: "doc".to_owned(),
+            run_id: Some("run-1".to_owned()),
+            timeout_ms: 5_000,
+            cancellation: ariadne::contracts::CancellationToken::new(),
+            dispatch_authorization: Default::default(),
+            prompt_template: None,
+            generation_context: Default::default(),
+            workflow_operation: Some(SummarizerWorkflowOperationContext {
+                project_root: temp.path().to_path_buf(),
+                workflow_id: WorkflowId::from("wf-stage-unknown"),
+                run_id: RunId::from("run-1"),
+                node_id: NodeId::from("summarizer"),
+                operation_id: "parent-stage-unknown".to_owned(),
+                operation_attempt: 1,
+                request_hash: "parent-stage-unknown-hash".to_owned(),
+            }),
+        },
+    );
+
+    assert!(executor
+        .summarize_chapter("chapter", "line 1")
+        .unwrap_err()
+        .to_string()
+        .contains("response lost"));
+    assert!(executor
+        .summarize_chapter("chapter", "line 1")
+        .unwrap_err()
+        .to_string()
+        .contains("no durable response receipt"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let stages = SqliteWritingKnowledgeStore::open(temp.path())
+        .unwrap()
+        .list_summarizer_stage_operations("parent-stage-unknown")
+        .unwrap();
+    assert_eq!(stages.len(), 1);
+    assert_eq!(stages[0].status, SummarizerStageOperationStatus::InDoubt);
+}
+
+#[test]
+fn f11_summarizer_response_receipt_precedes_cost_write_and_recovers_without_recall() {
+    use ariadne::contracts::{NodeId, RunId, WorkflowId};
+    use ariadne::costs::{CostLedger, CostQuery, SqliteCostLedger};
+    use ariadne::providers::{
+        LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider, ProviderCallContext,
+        ProviderHealth,
+    };
+    use ariadne::rag::summarizer::{
+        SummarizerConfig, SummarizerExecutor, SummarizerWorkflowOperationContext,
+    };
+    use ariadne::rag::SummarizerStageOperationStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct StageResponses {
+        calls: AtomicUsize,
+    }
+    impl Provider for StageResponses {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "stage-responses".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "stage-responses".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for StageResponses {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let step = request.metadata["summarizer_step"].as_str().unwrap();
+            let text = match step {
+                "segments" => {
+                    r#"{"segments":[{"number":"1","summary":"s","start_line":1,"end_line":1}]}"#
+                }
+                "events" => {
+                    r#"{"events":[{"event_id":"e","summary":"event","status":"ongoing","segment_ids":["chapter::seg-1"]}]}"#
+                }
+                "chapter" => r#"{"summary":"chapter summary"}"#,
+                "stage" => {
+                    r#"{"stage_id":"stage-1","stage_summary":"stage summary","is_new_stage":true}"#
+                }
+                other => panic!("unexpected summarizer step {other}"),
+            };
+            Ok(LlmResponse {
+                message: LlmMessage::assistant(text),
+                tool_calls: Vec::new(),
+                usage: None,
+                finish_reason: Some("stop".to_owned()),
+                cost_usd: Some(0.01),
+                raw: json!({"step": step}),
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let connection = rusqlite::Connection::open(temp.path().join("costs.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER abort_first_stage_cost
+             BEFORE INSERT ON cost_events
+             BEGIN SELECT RAISE(ABORT, 'forced stage cost failure'); END;",
+        )
+        .unwrap();
+    let provider = StageResponses {
+        calls: AtomicUsize::new(0),
+    };
+    let prompts = load_prompt_resources().unwrap();
+    let executor = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        SummarizerConfig {
+            provider_id: "stage-responses".to_owned(),
+            model_id: "m".to_owned(),
+            chapter_document_id: "doc".to_owned(),
+            run_id: Some("run-1".to_owned()),
+            timeout_ms: 5_000,
+            cancellation: ariadne::contracts::CancellationToken::new(),
+            dispatch_authorization: Default::default(),
+            prompt_template: None,
+            generation_context: Default::default(),
+            workflow_operation: Some(SummarizerWorkflowOperationContext {
+                project_root: temp.path().to_path_buf(),
+                workflow_id: WorkflowId::from("wf-stage-cost"),
+                run_id: RunId::from("run-1"),
+                node_id: NodeId::from("summarizer"),
+                operation_id: "parent-stage-cost".to_owned(),
+                operation_attempt: 1,
+                request_hash: "parent-stage-cost-hash".to_owned(),
+            }),
+        },
+    );
+
+    assert!(executor
+        .summarize_chapter("chapter", "line 1")
+        .unwrap_err()
+        .to_string()
+        .contains("forced stage cost failure"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let first_stage = SqliteWritingKnowledgeStore::open(temp.path())
+        .unwrap()
+        .list_summarizer_stage_operations("parent-stage-cost")
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        first_stage.status,
+        SummarizerStageOperationStatus::Completed
+    );
+
+    connection
+        .execute_batch("DROP TRIGGER abort_first_stage_cost;")
+        .unwrap();
+    let draft = executor.summarize_chapter("chapter", "line 1").unwrap();
+    assert_eq!(draft.segments.len(), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(ledger.list_costs(&CostQuery::default()).unwrap().len(), 4);
+}
+
+#[test]
+fn f11_summarizer_pre_cancel_aborts_prepared_stage_without_provider_call() {
+    use ariadne::contracts::{NodeId, RunId, WorkflowId};
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::providers::{
+        LlmProvider, LlmRequest, LlmResponse, Provider, ProviderCallContext, ProviderHealth,
+    };
+    use ariadne::rag::summarizer::{
+        SummarizerConfig, SummarizerExecutor, SummarizerWorkflowOperationContext,
+    };
+    use ariadne::rag::SummarizerStageOperationStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MustNotCall {
+        calls: AtomicUsize,
+    }
+    impl Provider for MustNotCall {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "must-not-call".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "must-not-call".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for MustNotCall {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            _request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            panic!("cancelled summarizer must not call provider")
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let cancellation = ariadne::contracts::CancellationToken::new();
+    cancellation.cancel();
+    let provider = MustNotCall {
+        calls: AtomicUsize::new(0),
+    };
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    let executor = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        SummarizerConfig {
+            provider_id: "must-not-call".to_owned(),
+            model_id: "m".to_owned(),
+            chapter_document_id: "doc".to_owned(),
+            run_id: Some("run-1".to_owned()),
+            timeout_ms: 5_000,
+            cancellation,
+            dispatch_authorization: Default::default(),
+            prompt_template: None,
+            generation_context: Default::default(),
+            workflow_operation: Some(SummarizerWorkflowOperationContext {
+                project_root: temp.path().to_path_buf(),
+                workflow_id: WorkflowId::from("wf-stage-cancel"),
+                run_id: RunId::from("run-1"),
+                node_id: NodeId::from("summarizer"),
+                operation_id: "parent-stage-cancel".to_owned(),
+                operation_attempt: 1,
+                request_hash: "parent-stage-cancel-hash".to_owned(),
+            }),
+        },
+    );
+
+    assert_eq!(
+        executor
+            .summarize_chapter("chapter", "line 1")
+            .unwrap_err()
+            .external_dispatch_outcome(),
+        Some(ariadne::contracts::ExternalDispatchOutcome::NotDispatched)
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    let stages = SqliteWritingKnowledgeStore::open(temp.path())
+        .unwrap()
+        .list_summarizer_stage_operations("parent-stage-cancel")
+        .unwrap();
+    assert_eq!(stages.len(), 1);
+    assert_eq!(stages[0].status, SummarizerStageOperationStatus::Aborted);
+}
+
+/// F24：非空 prompt_template 进入 summarizer 指令构造，并进入实际 LLM 请求。
+#[test]
+fn f24_author_prompt_template_is_included_in_step_instruction() {
+    use ariadne::contracts::{ProviderCapability, ProviderDefinition, ProviderType};
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::providers::{
+        ContentPart, LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider,
+        ProviderCallContext, ProviderHealth,
+    };
+    use ariadne::rag::load_prompt_resources;
+    use ariadne::rag::summarizer::{SummarizerConfig, SummarizerExecutor};
+    use std::sync::Mutex;
+
+    struct CaptureLlm {
+        last: Mutex<String>,
+    }
+    impl Provider for CaptureLlm {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "cap".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "cap".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for CaptureLlm {
+        fn complete(
+            &self,
+            _ctx: &ProviderCallContext,
+            request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            let text = request
+                .messages
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            *self.last.lock().unwrap() = text;
+            Ok(LlmResponse {
+                message: LlmMessage::assistant(
+                    r#"{"segments":[{"number":"1","summary":"s","start_line":1,"end_line":2}]}"#,
+                ),
+                tool_calls: Vec::new(),
+                usage: None,
+                finish_reason: Some("stop".to_owned()),
+                cost_usd: None,
+                raw: json!({}),
+            })
+        }
+    }
+
+    let marker = "AUTHOR_TEMPLATE_MARKER_F24_XYZ";
+    let prompts = load_prompt_resources().unwrap();
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let provider = CaptureLlm {
+        last: Mutex::new(String::new()),
+    };
+    let exec = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        SummarizerConfig {
+            provider_id: "cap".to_owned(),
+            model_id: "m".to_owned(),
+            chapter_document_id: "doc".to_owned(),
+            run_id: None,
+            timeout_ms: 5_000,
+            cancellation: ariadne::contracts::CancellationToken::new(),
+            dispatch_authorization: Default::default(),
+            prompt_template: Some(marker.to_owned()),
+            generation_context: Default::default(),
+            workflow_operation: None,
+        },
+    );
+    let built = exec
+        .build_step_instruction_for_test("summarizer.segments", "BODY")
+        .unwrap();
+    assert!(
+        built.contains(marker),
+        "template missing from instruction: {built}"
+    );
+    // 真实 LLM 路径（仅完成 step1 也会捕获 user instruction）
+    let _ = exec.summarize_chapter("ch", "line1\nline2");
+    let captured = provider.last.lock().unwrap().clone();
+    assert!(
+        captured.contains(marker),
+        "template missing from LLM request: {captured}"
+    );
+}
+
+/// F15/F16：四步请求消费历史上下文，章节输出真实变化链接，SourceSpan 使用
+/// UTF-8 byte offset + 正文版本，并完整覆盖正文。
+#[test]
+fn f15_f16_summarizer_uses_history_links_changes_and_utf8_source_spans() {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use ariadne::contracts::{
+        content_version_for_bytes, ProviderCapability, ProviderDefinition, ProviderType,
+    };
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::providers::{
+        ContentPart, LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider,
+        ProviderCallContext, ProviderHealth,
+    };
+    use ariadne::rag::models::{CharacterTraitContent, SummaryStageContext};
+    use ariadne::rag::summarizer::{SummarizerConfig, SummarizerExecutor};
+    use ariadne::rag::SummaryGenerationContext;
+
+    struct ContextProvider {
+        requests: Mutex<Vec<LlmRequest>>,
+    }
+    impl Provider for ContextProvider {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "context-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "context-provider".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for ContextProvider {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            let step = request.metadata["summarizer_step"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            self.requests.lock().unwrap().push(request);
+            let body = match step.as_str() {
+                "segments" => {
+                    r#"{"segments":[{"number":"1","summary":"前两行","start_line":1,"end_line":2},{"number":"2","summary":"末行","start_line":3,"end_line":3}]}"#
+                }
+                "events" => {
+                    r#"{"events":[{"event_id":"event-old","summary":"旧事件在本章推进","status":"completed","segment_ids":["chapter::seg-1","chapter::seg-2"]}]}"#
+                }
+                "chapter" => {
+                    r#"{"summary":"本章完成交接并种下钥匙伏笔","realized_changes":[{"change_id":"trait-1","segment_id":"chapter::seg-2"}],"foreshadowing_updates":[{"foreshadowing_id":"fore-1","status":"planted","segment_id":"chapter::seg-1"}]}"#
+                }
+                "stage" => {
+                    r#"{"stage_id":"stage-old","stage_summary":"旧阶段在本章完成","is_new_stage":false}"#
+                }
+                other => panic!("unexpected summarizer step {other}"),
+            };
+            Ok(LlmResponse {
+                message: LlmMessage::assistant(body),
+                tool_calls: Vec::new(),
+                usage: None,
+                finish_reason: Some("stop".to_owned()),
+                cost_usd: None,
+                raw: Value::Null,
+            })
+        }
+    }
+
+    let context = SummaryGenerationContext {
+        existing_events: vec![StoryEvent {
+            event_id: "event-old".to_owned(),
+            summary: "跨章旧事件".to_owned(),
+            status: StoryEventStatus::Ongoing,
+            segment_ids: vec!["previous::seg-1".to_owned()],
+            chapter_ids: vec!["previous".to_owned()],
+            metadata: Value::Null,
+        }],
+        planned_changes: vec![RegisteredChange {
+            change_id: "trait-1".to_owned(),
+            function: RegisterFunction::CharacterTrait,
+            status: RegisteredChangeStatus::Planned,
+            content: RegisterContent::CharacterTrait(CharacterTraitContent {
+                character: "阿宁".to_owned(),
+                trait_name: "信任".to_owned(),
+                from_value: Some("戒备".to_owned()),
+                to_value: "交出钥匙".to_owned(),
+                reason: "关系推进".to_owned(),
+            }),
+            linked_segment_ids: Vec::new(),
+            metadata: Value::Null,
+        }],
+        foreshadowing: vec![ForeshadowingRecord {
+            foreshadowing_id: "fore-1".to_owned(),
+            title: "旧钥匙".to_owned(),
+            description: "将在后续回收".to_owned(),
+            status: ForeshadowingStatus::Planned,
+            planted_segment_ids: Vec::new(),
+            recovered_segment_ids: Vec::new(),
+            metadata: Value::Null,
+        }],
+        stages: vec![SummaryStageContext {
+            stage_id: "stage-old".to_owned(),
+            stage_summary: Some("旧阶段总结".to_owned()),
+            chapter_summaries: BTreeMap::from([(
+                "previous".to_owned(),
+                "上一章正式总结".to_owned(),
+            )]),
+        }],
+        current_stage_id: Some("stage-old".to_owned()),
+    };
+    let prompts = load_prompt_resources().unwrap();
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let provider = ContextProvider {
+        requests: Mutex::new(Vec::new()),
+    };
+    let executor = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        SummarizerConfig {
+            provider_id: "context-provider".to_owned(),
+            model_id: "m".to_owned(),
+            chapter_document_id: "documents/chapter.md".to_owned(),
+            run_id: None,
+            timeout_ms: 5_000,
+            cancellation: ariadne::contracts::CancellationToken::new(),
+            dispatch_authorization: Default::default(),
+            prompt_template: None,
+            generation_context: context,
+            workflow_operation: None,
+        },
+    );
+    let chapter_text = "甲\n乙\n丙";
+    let draft = executor.summarize_chapter("chapter", chapter_text).unwrap();
+
+    assert_eq!(draft.segments.len(), 2);
+    assert_eq!(
+        draft.segments[0].source.range,
+        TextRange {
+            start: 0,
+            end: "甲\n乙\n".len() as u64,
+        }
+    );
+    assert_eq!(
+        draft.segments[1].source.range,
+        TextRange {
+            start: "甲\n乙\n".len() as u64,
+            end: chapter_text.len() as u64,
+        }
+    );
+    let expected_version = content_version_for_bytes(chapter_text.as_bytes());
+    assert_eq!(
+        draft.segments[0].source.version.as_deref(),
+        Some(expected_version.as_str())
+    );
+    assert_eq!(draft.realized_changes[0].change_id, "trait-1");
+    assert_eq!(
+        draft.foreshadowing_updates[0].status,
+        ForeshadowingStatus::Planted
+    );
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    let request_text = |step: &str| {
+        requests
+            .iter()
+            .find(|request| request.metadata["summarizer_step"] == step)
+            .unwrap()
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(request_text("events").contains("跨章旧事件"));
+    assert!(request_text("chapter").contains("trait-1"));
+    assert!(request_text("chapter").contains("旧钥匙"));
+    assert!(request_text("stage").contains("上一章正式总结"));
+    assert!(request_text("stage").contains(chapter_text));
+}
+
+/// F16：分段出现空洞时必须在第一步后阻断，不能继续消费后续 LLM 调用。
+#[test]
+fn f16_summarizer_rejects_segment_gaps_before_later_steps() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ariadne::contracts::{ProviderCapability, ProviderDefinition, ProviderType};
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::providers::{
+        LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider, ProviderCallContext,
+        ProviderHealth,
+    };
+    use ariadne::rag::summarizer::{SummarizerConfig, SummarizerExecutor};
+
+    struct GapProvider(AtomicUsize);
+    impl Provider for GapProvider {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "gap".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "gap".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for GapProvider {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            _request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(LlmResponse {
+                message: LlmMessage::assistant(
+                    r#"{"segments":[{"number":"1","summary":"首行","start_line":1,"end_line":1},{"number":"2","summary":"末行","start_line":3,"end_line":3}]}"#,
+                ),
+                tool_calls: Vec::new(),
+                usage: None,
+                finish_reason: Some("stop".to_owned()),
+                cost_usd: None,
+                raw: Value::Null,
+            })
+        }
+    }
+
+    let provider = GapProvider(AtomicUsize::new(0));
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    let executor = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        SummarizerConfig {
+            provider_id: "gap".to_owned(),
+            model_id: "m".to_owned(),
+            chapter_document_id: "doc".to_owned(),
+            run_id: None,
+            timeout_ms: 5_000,
+            cancellation: ariadne::contracts::CancellationToken::new(),
+            dispatch_authorization: Default::default(),
+            prompt_template: None,
+            generation_context: Default::default(),
+            workflow_operation: None,
+        },
+    );
+
+    let error = executor
+        .summarize_chapter("chapter", "第一行\n第二行\n第三行")
+        .unwrap_err();
+    assert!(error.to_string().contains("gap-free"));
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+}
+
+/// F15/F18：持久化层以固定批量查询构造生成上下文，并保留正式阶段关系。
+#[test]
+fn f15_generation_context_loads_events_changes_foreshadowing_and_stage_history() {
+    use ariadne::rag::models::CharacterTraitContent;
+
+    let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    knowledge
+        .upsert_segment(StorySegment {
+            segment_id: "chapter-old::seg-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "chapter-old".to_owned(),
+            summary: "旧段".to_owned(),
+            source: source_span(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_event(StoryEvent {
+            event_id: "event-cross".to_owned(),
+            summary: "跨章事件".to_owned(),
+            status: StoryEventStatus::Ongoing,
+            segment_ids: vec!["chapter-old::seg-1".to_owned()],
+            chapter_ids: vec!["chapter-old".to_owned()],
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_registered_change(RegisteredChange {
+            change_id: "change-context".to_owned(),
+            function: RegisterFunction::CharacterTrait,
+            status: RegisteredChangeStatus::Planned,
+            content: RegisterContent::CharacterTrait(CharacterTraitContent {
+                character: "阿宁".to_owned(),
+                trait_name: "勇气".to_owned(),
+                from_value: Some("退缩".to_owned()),
+                to_value: "行动".to_owned(),
+                reason: "计划".to_owned(),
+            }),
+            linked_segment_ids: Vec::new(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_foreshadowing(ForeshadowingRecord {
+            foreshadowing_id: "fore-context".to_owned(),
+            title: "钥匙".to_owned(),
+            description: "后续回收".to_owned(),
+            status: ForeshadowingStatus::Planned,
+            planted_segment_ids: Vec::new(),
+            recovered_segment_ids: Vec::new(),
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_chapter_summary("chapter-old", "旧章总结")
+        .unwrap();
+    knowledge
+        .upsert_stage_summary("stage-context", "旧阶段总结")
+        .unwrap();
+    knowledge
+        .link_chapter_stage("chapter-old", "stage-context")
+        .unwrap();
+    store.save_knowledge(&knowledge).unwrap();
+
+    let context = store
+        .load_summary_generation_context("chapter-old")
+        .unwrap();
+    assert_eq!(context.existing_events[0].event_id, "event-cross");
+    assert_eq!(context.planned_changes[0].change_id, "change-context");
+    assert_eq!(context.foreshadowing[0].foreshadowing_id, "fore-context");
+    assert_eq!(context.current_stage_id.as_deref(), Some("stage-context"));
+    assert_eq!(
+        context.stages[0]
+            .chapter_summaries
+            .get("chapter-old")
+            .map(String::as_str),
+        Some("旧章总结")
+    );
 }

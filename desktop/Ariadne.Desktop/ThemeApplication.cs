@@ -34,8 +34,22 @@ public static class ThemeApplication
         "Ariadne.RuntimeRunning",
         "Ariadne.GitCurrent",
         "Ariadne.TextOnAccent",
+        "Ariadne.TextPrimary",
+        "Ariadne.TextHeading",
+        "Ariadne.TextSecondary",
+        "Ariadne.TextSubtle",
         "Ariadne.EditorSelection",
     };
+
+    private static string? _lastTheme;
+    private static string? _lastMain;
+    private static string? _lastSurface;
+    private static string? _lastBrand;
+    private static string? _lastMainDark;
+    private static string? _lastSurfaceDark;
+    private static string? _lastBrandDark;
+    private static bool _lastFollowSystem;
+    private static bool _variantHooked;
 
     public static void Apply(string? theme)
         => Apply(theme, null, null, null);
@@ -65,6 +79,16 @@ public static class ThemeApplication
             return;
         }
 
+        _lastTheme = theme;
+        _lastMain = mainHex;
+        _lastSurface = surfaceHex;
+        _lastBrand = brandHex;
+        _lastMainDark = mainDarkHex;
+        _lastSurfaceDark = surfaceDarkHex;
+        _lastBrandDark = brandDarkHex;
+        _lastFollowSystem = followSystemColors;
+        EnsureActualThemeVariantHook();
+
         var palette = ThemeCatalog.Resolve(theme);
         Application.Current.RequestedThemeVariant = palette.Id switch
         {
@@ -74,15 +98,19 @@ public static class ThemeApplication
         };
 
         var isDark = ResolveIsDark(palette, followSystemColors || palette.Id == "system");
-        string? useMain = mainHex;
-        string? useSurface = surfaceHex;
-        string? useBrand = brandHex;
-        if (followSystemColors && isDark)
-        {
-            useMain = HasHex(mainDarkHex) ? mainDarkHex : mainHex;
-            useSurface = HasHex(surfaceDarkHex) ? surfaceDarkHex : surfaceHex;
-            useBrand = HasHex(brandDarkHex) ? brandDarkHex : brandHex;
-        }
+        // Single resolver for day/night custom colors (U5/U71) — tests and Apply share SelectActiveCustomColors.
+        var selected = SelectActiveCustomColors(
+            isDark,
+            followSystemColors,
+            mainHex,
+            surfaceHex,
+            brandHex,
+            mainDarkHex,
+            surfaceDarkHex,
+            brandDarkHex);
+        string? useMain = selected.Main;
+        string? useSurface = selected.Surface;
+        string? useBrand = selected.Brand;
 
         var hasCustom = HasHex(useMain) || HasHex(useSurface) || HasHex(useBrand);
         if (!hasCustom && palette.UseDictionaryOnly)
@@ -110,6 +138,32 @@ public static class ThemeApplication
         AppIconPainter.NotifyIconColorsChanged();
     }
 
+    /// <summary>系统明暗热切换时重算三色与文字 token（U5）。</summary>
+    private static void EnsureActualThemeVariantHook()
+    {
+        if (_variantHooked || Application.Current is null)
+        {
+            return;
+        }
+
+        Application.Current.ActualThemeVariantChanged += (_, _) =>
+        {
+            if (_lastFollowSystem || string.Equals(_lastTheme, "system", StringComparison.OrdinalIgnoreCase))
+            {
+                Apply(
+                    _lastTheme,
+                    _lastMain,
+                    _lastSurface,
+                    _lastBrand,
+                    _lastMainDark,
+                    _lastSurfaceDark,
+                    _lastBrandDark,
+                    followSystemColors: _lastFollowSystem || string.Equals(_lastTheme, "system", StringComparison.OrdinalIgnoreCase));
+            }
+        };
+        _variantHooked = true;
+    }
+
     /// <summary>由三色推导整套工作台 token 并写入覆盖层。</summary>
     public static void WriteThreeColorOverlay(bool isDark, Color main, Color surface, Color brand, string overlayId = "custom")
     {
@@ -118,16 +172,24 @@ public static class ThemeApplication
             return;
         }
 
-        var window = isDark ? Darken(main, 0.12) : Lighten(main, 0.04);
-        var subtle = isDark ? Lighten(main, 0.06) : Darken(main, 0.04);
-        var elevated = isDark ? Lighten(surface, 0.08) : Lighten(surface, 0.02);
-        var canvas = isDark ? main : Blend(main, surface, 0.35);
+        // 表面阶梯：主底 / 壳 / 内容面 / 浮层拉开明度差（U71 自定义主题）
+        var window = isDark ? Darken(main, 0.14) : Darken(main, 0.06);
+        var subtle = isDark ? Lighten(main, 0.08) : Darken(main, 0.08);
+        var elevated = isDark ? Lighten(surface, 0.10) : Lighten(surface, 0.0);
+        var canvas = isDark ? Blend(main, surface, 0.25) : Blend(main, surface, 0.45);
         var editor = surface;
         var hover = isDark ? Lighten(brand, 0.12) : Darken(brand, 0.10);
         var pressed = isDark ? Darken(brand, 0.10) : Darken(brand, 0.18);
         var onAccent = Luminance(brand) > 0.55
             ? Color.FromRgb(0x08, 0x10, 0x12)
             : Colors.White;
+
+        // 文字 token 按编辑器/表面明度派生，避免自定义表面与 Light/Dark 字典脱节（U5）
+        var surfaceDark = Luminance(surface) < 0.45;
+        var textPrimary = surfaceDark ? Color.FromRgb(0xF2, 0xF4, 0xF6) : Color.FromRgb(0x1B, 0x1F, 0x22);
+        var textHeading = surfaceDark ? Color.FromRgb(0xFA, 0xFB, 0xFC) : Color.FromRgb(0x12, 0x15, 0x18);
+        var textSecondary = surfaceDark ? Color.FromRgb(0xB0, 0xB8, 0xC0) : Color.FromRgb(0x5B, 0x64, 0x69);
+        var textSubtle = surfaceDark ? Color.FromRgb(0x86, 0x8E, 0x96) : Color.FromRgb(0x7A, 0x84, 0x8C);
 
         var resources = Application.Current.Resources;
         SetBrush(resources, "Ariadne.WindowBase", window);
@@ -148,7 +210,23 @@ public static class ThemeApplication
         SetBrush(resources, "Ariadne.RuntimeRunning", brand);
         SetBrush(resources, "Ariadne.GitCurrent", brand);
         SetBrush(resources, "Ariadne.TextOnAccent", onAccent);
+        SetBrush(resources, "Ariadne.TextPrimary", textPrimary);
+        SetBrush(resources, "Ariadne.TextHeading", textHeading);
+        SetBrush(resources, "Ariadne.TextSecondary", textSecondary);
+        SetBrush(resources, "Ariadne.TextSubtle", textSubtle);
         SetBrush(resources, "Ariadne.EditorSelection", WithAlpha(brand, 0x2E));
+
+        // U70：日志 chip 与状态色并入同一 resolver，按表面明暗派生，避免自定义主题下固定字典色失对比度。
+        var logError = isDark ? Color.FromRgb(0xF0, 0x71, 0x78) : Color.FromRgb(0xC9, 0x3C, 0x37);
+        var logWarning = isDark ? Color.FromRgb(0xE3, 0xB3, 0x41) : Color.FromRgb(0x9A, 0x67, 0x00);
+        var logInfo = isDark ? Color.FromRgb(0x79, 0xC0, 0xFF) : Color.FromRgb(0x09, 0x6B, 0xC0);
+        SetBrush(resources, "Ariadne.StatusError", logError);
+        SetBrush(resources, "Ariadne.StatusWarning", logWarning);
+        SetBrush(resources, "Ariadne.StatusInfo", logInfo);
+        SetBrush(resources, "Ariadne.LogErrorBg", WithAlpha(logError, 0x28));
+        SetBrush(resources, "Ariadne.LogWarningBg", WithAlpha(logWarning, 0x28));
+        SetBrush(resources, "Ariadne.LogInfoBg", WithAlpha(logInfo, 0x28));
+
         resources[OverlayKey] = overlayId;
     }
 

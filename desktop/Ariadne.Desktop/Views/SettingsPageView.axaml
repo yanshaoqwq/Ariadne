@@ -610,13 +610,39 @@
           <StackPanel IsVisible="{Binding IsMiscSelected}" Spacing="18">
             <TextBlock Text="{Binding MiscTitle}" Classes="title" />
             <Border Classes="settings-section" Padding="22" Tag="retrieval" IsVisible="{Binding IsSectionRetrievalSelected}">
-              <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
-                <CheckBox Grid.Row="0" Grid.Column="1" IsChecked="{Binding RerankerEnabled, Mode=TwoWay}" Content="{Binding RerankerEnabledText}" />
-                <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding ChunkSizeLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding ChunkSizeChars, Mode=TwoWay}" />
-                <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding ChunkOverlapLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding ChunkOverlapChars, Mode=TwoWay}" />
-              </Grid>
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding RagLabel}" Classes="subtitle" />
+                <CheckBox IsChecked="{Binding VectorEnabled, Mode=TwoWay}" Content="{Binding VectorEnabledText}" />
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding VectorBackendLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding VectorBackendOptions}" SelectedValue="{Binding VectorBackend, Mode=TwoWay}" SelectedValueBinding="{Binding Value}">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:SettingsValueOption">
+                        <TextBlock Text="{Binding Label}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding VectorCollectionLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding VectorCollection, Mode=TwoWay}" />
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding VectorDimensionsLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding VectorDimensions, Mode=TwoWay}" />
+                  <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding QdrantHostLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding QdrantHost, Mode=TwoWay}" />
+                  <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding QdrantPortLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding QdrantPort, Mode=TwoWay}" />
+                  <TextBlock Grid.Row="5" Grid.Column="0" Text="{Binding QdrantDataDirLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding QdrantDataDir, Mode=TwoWay}" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBlock Grid.Row="6" Grid.Column="0" Text="{Binding QdrantBinaryPathLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding QdrantBinaryPath, Mode=TwoWay}" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBlock Grid.Row="7" Grid.Column="0" Text="{Binding QdrantStartupTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding QdrantStartupTimeoutMs, Mode=TwoWay}" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBlock Grid.Row="8" Grid.Column="0" Text="{Binding ChunkSizeLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding ChunkSizeChars, Mode=TwoWay}" />
+                  <TextBlock Grid.Row="9" Grid.Column="0" Text="{Binding ChunkOverlapLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding ChunkOverlapChars, Mode=TwoWay}" />
+                </Grid>
+                <CheckBox IsChecked="{Binding RerankerEnabled, Mode=TwoWay}" Content="{Binding RerankerEnabledText}" />
+              </StackPanel>
             </Border>
             <Border Classes="settings-section" Padding="22" Tag="git" IsVisible="{Binding IsSectionGitSelected}">
               <StackPanel Spacing="14">

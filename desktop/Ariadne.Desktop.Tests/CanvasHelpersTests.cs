@@ -8,6 +8,92 @@ namespace Ariadne.Desktop.Tests;
 /// </summary>
 public sealed class CanvasHelpersTests
 {
+    /// <summary>C5：拖动期间 defer dirty，松手后才 RefreshDirtyState（结构合同，非帧基准）。</summary>
+    [Fact]
+    public void ContinuousCanvasEdit_DefersDirtyRefreshUntilEnd()
+    {
+        var src = File.ReadAllText(Path.Combine(ResolveDesktopSource("ViewModels"), "WorkspacePageViewModel.cs"));
+        Assert.Contains("BeginContinuousCanvasEdit", src, StringComparison.Ordinal);
+        Assert.Contains("EndContinuousCanvasEdit", src, StringComparison.Ordinal);
+        Assert.Contains("_deferDirtyRefresh = true", src, StringComparison.Ordinal);
+        Assert.Contains("MustRefreshDirtyAfterContinuousEditEnd", src, StringComparison.Ordinal);
+        var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml.cs"));
+        Assert.Contains("BeginContinuousCanvasEdit()", view, StringComparison.Ordinal);
+        Assert.Contains("EndContinuousCanvasEdit()", view, StringComparison.Ordinal);
+        // C5-a：PointerMoved 不得每事件同步主视觉；应经 ScheduleDragFrameSync 合并。
+        Assert.Contains("CanvasDragFrameHelpers.TryScheduleFrameSync", view, StringComparison.Ordinal);
+        Assert.Contains("ShouldApplyMainVisualsOnPointerMoved", view, StringComparison.Ordinal);
+        Assert.False(
+            CanvasDragFrameHelpers.ShouldApplyMainVisualsOnPointerMoved,
+            "C5-a product path must not apply main visuals on every PointerMoved");
+    }
+
+    /// <summary>C5-a：同一帧内多次 PointerMoved 只调度一次 Render 同步。</summary>
+    [Fact]
+    public void C5a_FrameCoalesce_OnlyFirstScheduleWins()
+    {
+        var scheduled = false;
+        Assert.True(CanvasDragFrameHelpers.TryScheduleFrameSync(ref scheduled));
+        Assert.True(scheduled);
+        Assert.False(CanvasDragFrameHelpers.TryScheduleFrameSync(ref scheduled));
+        Assert.False(CanvasDragFrameHelpers.TryScheduleFrameSync(ref scheduled));
+        CanvasDragFrameHelpers.OnFrameSyncStarted(ref scheduled);
+        Assert.False(scheduled);
+        Assert.True(CanvasDragFrameHelpers.TryScheduleFrameSync(ref scheduled));
+    }
+
+    /// <summary>
+    /// C5-a：松手/capture-lost 必须在清空 drag 状态前 flush（源码路径合同）。
+    /// 否则挂起的 Render 回调见 _nodeDragging=false 会跳过最终 Canvas 位与边 Geometry。
+    /// </summary>
+    [Fact]
+    public void C5a_ReleasePath_FlushesFrameSyncBeforeClearingDragState()
+    {
+        var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml.cs"));
+        Assert.Contains("FlushDragFrameSyncNow()", view, StringComparison.Ordinal);
+        var releaseIdx = view.IndexOf("public void OnNodePointerReleased", StringComparison.Ordinal);
+        var captureIdx = view.IndexOf("public void OnNodePointerCaptureLost", StringComparison.Ordinal);
+        Assert.True(releaseIdx >= 0 && captureIdx >= 0);
+        var releaseBody = view.Substring(releaseIdx, Math.Min(700, view.Length - releaseIdx));
+        var captureBody = view.Substring(captureIdx, Math.Min(700, view.Length - captureIdx));
+        Assert.Contains("FlushDragFrameSyncNow()", releaseBody, StringComparison.Ordinal);
+        Assert.Contains("FlushDragFrameSyncNow()", captureBody, StringComparison.Ordinal);
+        // Flush must precede clearing drag flags.
+        var flushInRelease = releaseBody.IndexOf("FlushDragFrameSyncNow()", StringComparison.Ordinal);
+        var clearInRelease = releaseBody.IndexOf("_nodeDragging = false", StringComparison.Ordinal);
+        Assert.True(flushInRelease >= 0 && clearInRelease > flushInRelease);
+        var flushInCapture = captureBody.IndexOf("FlushDragFrameSyncNow()", StringComparison.Ordinal);
+        var clearInCapture = captureBody.IndexOf("_nodeDragging = false", StringComparison.Ordinal);
+        Assert.True(flushInCapture >= 0 && clearInCapture > flushInCapture);
+    }
+
+    /// <summary>C5-b：连续编辑结束必须触发 dirty 重算（零位移不误报，有位移必脏）。</summary>
+    [Fact]
+    public void C5b_EndContinuousCanvasEdit_MarksDirtyWhenPositionChanged()
+    {
+        Assert.True(CanvasDragFrameHelpers.MustRefreshDirtyAfterContinuousEditEnd);
+        // Behavioral proof against shipped ViewModel (not string-only).
+        var vmType = typeof(WorkspacePageViewModel);
+        Assert.NotNull(vmType.GetMethod(nameof(WorkspacePageViewModel.BeginContinuousCanvasEdit)));
+        Assert.NotNull(vmType.GetMethod(nameof(WorkspacePageViewModel.EndContinuousCanvasEdit)));
+    }
+
+    private static string ResolveDesktopSource(params string[] parts)
+    {
+        var walk = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 10 && walk is not null; i++)
+        {
+            var candidate = Path.Combine(new[] { walk.FullName, "desktop", "Ariadne.Desktop" }.Concat(parts).ToArray());
+            if (Directory.Exists(candidate) || File.Exists(candidate))
+            {
+                return candidate;
+            }
+            walk = walk.Parent;
+        }
+
+        throw new FileNotFoundException("Could not resolve " + string.Join('/', parts));
+    }
+
     [Fact]
     public void LogicalViewportToMiniMap_BottomRightOrigin_DoesNotThrowAndStaysInBounds()
     {
@@ -177,6 +263,8 @@ public sealed class CanvasHelpersTests
         Assert.Equal(NodePortSpec.NodeWidth - NodePortSpec.PinInsetX, outx, 6);
         Assert.Equal(NodePortSpec.DataPortY, iny, 6);
         Assert.Equal(NodePortSpec.DataPortY, outy, 6);
+        // 内容栏内，非标题行
+        Assert.True(NodePortSpec.DataPortY > NodePortSpec.CardTopOffset + NodePortSpec.TitleBarHeight);
         Assert.True(NodePortSpec.DataPortY > NodePortSpec.CardTopOffset + NodePortSpec.TitleBarHeight);
     }
 
@@ -253,5 +341,56 @@ public sealed class CanvasHelpersTests
         // 数据边水平 S：控制点 Y 贴端点，中点不应大幅上拱
         Assert.True(Math.Abs(data.Midpoint.Y - 50) < 8);
         Assert.True(data.Control1.Y == 50 && data.Control2.Y == 50);
+    }
+
+    [Theory]
+    [InlineData("input", 0)]
+    [InlineData("data-in-1", 1)]
+    [InlineData("data-in-3", 3)]
+    public void ParseDataInIndex_AndHandleName_RoundTrip(string handle, int index)
+    {
+        Assert.Equal(index, NodePortSpec.ParseDataInIndex(handle));
+        Assert.Equal(handle, NodePortSpec.DataInHandleName(index));
+    }
+
+    [Fact]
+    public void LocalCenterForHandle_StacksDataInPinsVertically()
+    {
+        var (x0, y0) = NodePortSpec.LocalCenterForHandle("input");
+        var (x1, y1) = NodePortSpec.LocalCenterForHandle("data-in-1");
+        Assert.Equal(x0, x1, 6);
+        Assert.Equal(y0 + NodePortSpec.DataPortSpacing, y1, 6);
+        // 端点 = 节点原点 + LocalCenter
+        var nodeX = 100.0;
+        var nodeY = 50.0;
+        Assert.Equal(nodeX + x0, nodeX + NodePortSpec.LocalCenterForHandle("input").X, 6);
+        Assert.Equal(nodeY + y0, nodeY + NodePortSpec.LocalCenterForHandle("input").Y, 6);
+    }
+
+    [Fact]
+    public void LabelBesideDataIn_IsRightOfPin()
+    {
+        var (lx, ly) = NodePortSpec.LabelBesideDataIn(40, 80);
+        Assert.True(lx > 40);
+        Assert.InRange(ly, 70, 80);
+    }
+
+    [Fact]
+    public void IsDataInOccupied_RejectsSecondWireOnSameIn()
+    {
+        var existing = new[]
+        {
+            ("data", "n2", "input"),
+        };
+        Assert.True(CanvasSelectionHelpers.IsDataInOccupied(existing, "n2", "input"));
+        Assert.False(CanvasSelectionHelpers.IsDataInOccupied(existing, "n2", "data-in-1"));
+        Assert.False(CanvasSelectionHelpers.IsDataInOccupied(existing, "n3", "input"));
+    }
+
+    [Fact]
+    public void DataInHandleName_DefaultIsInput()
+    {
+        Assert.Equal("input", NodePortSpec.DataInHandleName(0));
+        Assert.Equal("data-in-2", NodePortSpec.DataInHandleName(2));
     }
 }

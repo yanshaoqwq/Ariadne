@@ -78,6 +78,8 @@ pub struct LlmRunRequest {
     pub node_id: Option<NodeId>,
     #[serde(default)]
     pub metadata: Value,
+    #[serde(skip, default)]
+    pub dispatch_authorization: crate::contracts::ExternalDispatchAuthorization,
 }
 
 impl LlmRunRequest {
@@ -95,9 +97,14 @@ impl LlmRunRequest {
     }
 
     /// 构造 Provider 调用上下文。
-    pub fn provider_context(&self, tool_call_id: Option<String>) -> ProviderCallContext {
+    pub fn provider_context(
+        &self,
+        tool_call_id: Option<String>,
+        cancellation: &crate::contracts::CancellationToken,
+    ) -> ProviderCallContext {
         ProviderCallContext {
             provider_id: self.config.provider_id.clone(),
+            operation_id: None,
             workflow_id: self.workflow_id.clone(),
             run_id: self.run_id.clone(),
             node_id: self.node_id.clone(),
@@ -105,6 +112,8 @@ impl LlmRunRequest {
             timeout_ms: self.config.timeout_ms,
             max_retries: 0,
             metadata: self.metadata.clone(),
+            cancellation: cancellation.clone(),
+            dispatch_authorization: self.dispatch_authorization.clone(),
         }
     }
 }

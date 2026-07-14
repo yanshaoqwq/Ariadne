@@ -176,16 +176,18 @@ impl ProviderConfig {
             return Err(CoreError::validation("provider_id cannot be empty"));
         }
 
-        if matches!(self.provider_type, ProviderType::OpenAiCompatible)
-            && self
-                .base_url
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
+        if matches!(
+            self.provider_type,
+            ProviderType::OpenAiCompatible | ProviderType::Local
+        ) && self
+            .base_url
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
         {
             return Err(CoreError::validation(
-                "open_ai_compatible provider requires base_url",
+                "open_ai_compatible and local providers require base_url",
             ));
         }
         if let Some(base_url) = self.base_url.as_deref() {
@@ -376,7 +378,7 @@ pub struct RagConfig {
     pub vector_store: VectorStoreConfig,
     #[serde(default)]
     pub full_text_store: FullTextStoreConfig,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub reranker_enabled: bool,
     #[serde(default = "default_chunk_size")]
     pub chunk_size_chars: u32,
@@ -391,7 +393,7 @@ impl Default for RagConfig {
             schema_version: current_schema_version(),
             vector_store: VectorStoreConfig::default(),
             full_text_store: FullTextStoreConfig::default(),
-            reranker_enabled: true,
+            reranker_enabled: false,
             chunk_size_chars: default_chunk_size(),
             chunk_overlap_chars: default_chunk_overlap(),
         }
@@ -411,6 +413,8 @@ impl RagConfig {
             ));
         }
 
+        self.vector_store.validate()?;
+
         Ok(())
     }
 }
@@ -418,8 +422,15 @@ impl RagConfig {
 /// 向量存储配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VectorStoreConfig {
+    /// 显式启用真实向量链；缺失字段的旧项目按全文-only 处理，禁止生成假向量。
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default)]
     pub backend: VectorStoreBackend,
+    #[serde(default = "default_qdrant_collection")]
+    pub collection: String,
+    #[serde(default = "default_qdrant_vector_dimensions")]
+    pub vector_dimensions: u32,
     #[serde(default)]
     pub sidecar: SidecarConfig,
 }
@@ -428,9 +439,54 @@ impl Default for VectorStoreConfig {
     /// 创建向量存储配置默认值。
     fn default() -> Self {
         Self {
+            enabled: false,
             backend: VectorStoreBackend::QdrantSidecar,
+            collection: default_qdrant_collection(),
+            vector_dimensions: default_qdrant_vector_dimensions(),
             sidecar: SidecarConfig::default(),
         }
+    }
+}
+
+impl VectorStoreConfig {
+    /// 仅在显式启用时要求 Qdrant 和 embedding 维度配置完整。
+    pub fn validate(&self) -> CoreResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.collection.trim().is_empty() {
+            return Err(CoreError::validation(
+                "qdrant collection cannot be empty when vector retrieval is enabled",
+            ));
+        }
+        if self.vector_dimensions == 0 {
+            return Err(CoreError::validation(
+                "qdrant vector_dimensions must be positive",
+            ));
+        }
+        if self.sidecar.host.trim().is_empty() {
+            return Err(CoreError::validation("qdrant host cannot be empty"));
+        }
+        if matches!(self.backend, VectorStoreBackend::QdrantSidecar) {
+            if self.sidecar.data_dir.trim().is_empty() {
+                return Err(CoreError::validation("qdrant data_dir cannot be empty"));
+            }
+            if self.sidecar.binary_path.trim().is_empty() {
+                return Err(CoreError::validation(
+                    "qdrant sidecar binary_path cannot be empty",
+                ));
+            }
+            if self.sidecar.startup_timeout_ms == 0 {
+                return Err(CoreError::validation(
+                    "qdrant sidecar startup_timeout_ms must be positive",
+                ));
+            }
+        } else if self.sidecar.port == 0 {
+            return Err(CoreError::validation(
+                "external qdrant port must be positive",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -458,6 +514,10 @@ pub struct SidecarConfig {
     pub port: u16,
     #[serde(default = "default_qdrant_data_dir")]
     pub data_dir: String,
+    #[serde(default = "default_qdrant_binary_path")]
+    pub binary_path: String,
+    #[serde(default = "default_qdrant_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
 }
 
 impl Default for SidecarConfig {
@@ -467,6 +527,8 @@ impl Default for SidecarConfig {
             host: default_qdrant_host(),
             port: default_qdrant_port(),
             data_dir: default_qdrant_data_dir(),
+            binary_path: default_qdrant_binary_path(),
+            startup_timeout_ms: default_qdrant_startup_timeout_ms(),
         }
     }
 }
@@ -696,6 +758,26 @@ fn default_qdrant_port() -> u16 {
 /// 默认 Qdrant 数据目录。
 fn default_qdrant_data_dir() -> String {
     ".indexes/qdrant".to_owned()
+}
+
+/// 默认 Qdrant collection。
+fn default_qdrant_collection() -> String {
+    "ariadne_chunks".to_owned()
+}
+
+/// 默认向量维度；可按所选 embedding 模型显式覆盖。
+fn default_qdrant_vector_dimensions() -> u32 {
+    1_536
+}
+
+/// 默认从 PATH 解析 Qdrant sidecar。
+fn default_qdrant_binary_path() -> String {
+    "qdrant".to_owned()
+}
+
+/// 默认等待 sidecar 启动十秒。
+fn default_qdrant_startup_timeout_ms() -> u64 {
+    10_000
 }
 
 /// 默认 Tantivy 索引目录。

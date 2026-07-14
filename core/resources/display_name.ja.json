@@ -1,4 +1,7 @@
 {
-  "_comment": "日本語翻訳オーバーレイ（Ariadne）。このファイルにキーがない場合、中国語（display_name.json）にフォールバックします。翻訳が完成次第、順次追加してください。",
-  "_status": "スタブ — 翻訳待ち"
+  "_comment": "Not shipped as a completed locale. First release is Chinese-only (see ui.i18n.release_scope). Keys fall back to display_name.json.",
+  "_status": "out_of_scope_for_v1 — stub retained for future translation only",
+  "_release": "zh-only",
+  "ui.maintenance.banner_active": "プロジェクトメンテナンス中（{kind} · {phase}）。完了まで保存/実行はブロックされます。",
+  "ui.maintenance.banner_failed": "プロジェクトメンテナンス失敗（{kind} · {phase}）: {error}。保存/実行の前に修復してください。"
 }

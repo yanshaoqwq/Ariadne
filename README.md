@@ -186,7 +186,11 @@ Ariadne 通过统一 Provider 层连接不同模型服务，支持：
 
 模型配置与工作流分离。你可以为 Writer、Critic、Summarizer 等节点选择不同模型，也可以在不修改流程结构的情况下更换 Provider。
 
-API Key 通过密钥存储保存，项目配置只引用密钥编号，不需要把明文密钥写进工作流或正文目录。
+API Key 通过系统密钥链或受主密码保护的应用状态保存。项目配置不得携带全局密钥编号；Ariadne 按规范化项目身份和 Provider 在可信应用状态中派生绑定句柄，项目移动或导入后必须由用户显式重新输入凭据。
+
+正式桌面包启用系统密钥链。无系统密钥链的开发/CLI 构建必须显式设置 `ARIADNE_SECRET_MASTER_KEY`；本地文件使用随机 salt 的 Argon2id 和 ChaCha20-Poly1305，加密文件与主密码应分别备份。忘记主密码无法恢复密文，只能删除本地密钥文件并重新输入 Provider 凭据。
+
+旧明文密钥文件会在下一次保存时重写为当前加密格式。旧版机器绑定密文只允许在原机器上进行一次性迁移：同时设置主密码与 `ARIADNE_ALLOW_LEGACY_MACHINE_SECRET_MIGRATION=1`，成功读取后重新保存凭据并立即移除该迁移开关；不得把它作为日常 fallback。
 
 ## 成本、权限与安全
 
@@ -288,7 +292,7 @@ target/debug/ariadne workflow events \
 target/debug/ariadne-ipc stdio
 ```
 
-### 本地 REST
+### 本地 REST（仅开发集成，不随正式安装包发布）
 
 ```bash
 target/debug/ariadne-server \
@@ -303,7 +307,7 @@ target/debug/ariadne-server \
 Authorization: Bearer <strong-random-token>
 ```
 
-REST 服务默认用于本机单项目集成，不应在没有额外网络防护的情况下直接暴露到公网。
+REST 服务强制只绑定 loopback，正式安装包不包含该二进制；对外集成请优先使用 JSON-line IPC/CLI。
 
 ## 项目文件
 
@@ -330,3 +334,11 @@ Ariadne 当前以中文作为正式界面语言。语言包采用同名键覆盖
 在希腊神话中，Ariadne 的线帮助人走出迷宫。
 
 这个名字也代表本项目的目标：在不断增长的正文、设定、人物、事件、伏笔、模型输出和版本历史之间，始终保留一条能找到来源、理解过程并回到正确位置的线。
+
+## 许可与商业使用
+
+Ariadne 是 source-available 软件，按 [PolyForm Noncommercial License 1.0.0](LICENSE) 提供。该许可允许非商业目的的使用、修改和分发，但它不是 OSI 认可的开源许可证，也不授予商业使用权。
+
+商业产品集成、企业内部营利业务、付费部署、代客运营和商业再分发需要另行取得书面授权，具体边界和联系入口见 [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)。赞助或试用不会自动授予商业权利。
+
+第三方组件继续适用其各自许可证，清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。外部贡献在合并前必须遵守 [CONTRIBUTING.md](CONTRIBUTING.md) 并接受 [CLA.md](CLA.md)。

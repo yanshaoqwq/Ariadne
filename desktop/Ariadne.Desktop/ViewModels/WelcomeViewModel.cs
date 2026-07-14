@@ -131,7 +131,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
         finally
         {
@@ -197,7 +197,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
         finally
         {
@@ -241,7 +241,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
         finally
         {

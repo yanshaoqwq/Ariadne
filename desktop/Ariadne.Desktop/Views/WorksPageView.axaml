@@ -34,13 +34,13 @@
             </ComboBox>
             <Border Width="1" Margin="6,4" Background="{DynamicResource Ariadne.BorderMuted}" />
             <!-- 图标按钮：导入稿件 / 导出合并 / 保存 -->
-            <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}">
+            <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" AutomationProperties.Name="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
             </Button>
-            <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}" Command="{Binding ExportCommand}">
+            <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}" AutomationProperties.Name="{Binding ExportText}" Command="{Binding ExportCommand}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Export}" />
             </Button>
-            <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}" Command="{Binding SaveCommand}">
+            <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}" AutomationProperties.Name="{Binding SaveText}" Command="{Binding SaveCommand}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
             </Button>
           </StackPanel>
@@ -76,10 +76,22 @@
             </StackPanel>
           </Border>
 
+          <!-- 有索引但未选文档：单一空态，不重复「未选择」与文档壳（U72） -->
+          <Border Grid.Row="0" Grid.RowSpan="2" Classes="empty-state"
+                  IsVisible="{Binding ShowNoDocumentEmpty}"
+                  VerticalAlignment="Center" HorizontalAlignment="Center"
+                  Padding="40,48">
+            <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="360">
+              <ctl:EmptyStateArt Kind="WorksSnap" Width="140" Height="112" HorizontalAlignment="Center" />
+              <TextBlock Text="{Binding NoDocumentText}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
+              <TextBlock Text="{Binding EmptyIndexHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
           <Border Grid.Row="0"
                   Classes="document-header"
                   Padding="28,18"
-                  IsVisible="{Binding !IsWorksTreeEmpty}">
+                  IsVisible="{Binding ShowDocumentChrome}">
             <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto" RowSpacing="8" ColumnSpacing="18">
               <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentTitle}" Classes="title" TextWrapping="Wrap" />
               <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CharacterCountText}" Classes="caption" VerticalAlignment="Center" />
@@ -91,7 +103,7 @@
           <Border Grid.Row="1"
                   Classes="document-surface"
                   Padding="64,52"
-                  IsVisible="{Binding !IsWorksTreeEmpty}">
+                  IsVisible="{Binding ShowDocumentChrome}">
             <Grid RowDefinitions="*,Auto" RowSpacing="24" MinHeight="640">
               <TextBlock Grid.Row="0"
                          Text="{Binding DocumentBodyText}"
@@ -136,6 +148,8 @@
                              Classes="document-editor"
                              KeyDown="OnDocumentBlockEditorKeyDown"
                              GotFocus="OnDocumentBlockEditorGotFocus"
+                             LostFocus="OnDocumentBlockEditorLostFocus"
+                             PointerReleased="OnDocumentBlockEditorPointerReleased"
                              AcceptsReturn="True"
                              TextWrapping="Wrap"
                              MinHeight="96"
@@ -197,7 +211,7 @@
                     Content="{Binding ProjectAiText}" Command="{Binding ShowProjectAiCommand}" />
           </StackPanel>
           <Button Grid.Column="1" Classes="panel-collapse" VerticalAlignment="Center"
-                  Command="{Binding ToggleRightPanelCommand}" ToolTip.Tip="{Binding ToggleRightPanelText}">
+                  Command="{Binding ToggleRightPanelCommand}" ToolTip.Tip="{Binding ToggleRightPanelText}" AutomationProperties.Name="{Binding ToggleRightPanelText}">
             <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronRight}" />
           </Button>
         </Grid>
@@ -210,7 +224,7 @@
             <Border DockPanel.Dock="Top" Padding="10,10,10,4">
               <StackPanel Spacing="8">
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                  <Button Classes="subtle" Padding="10,6" ToolTip.Tip="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
+                  <Button Classes="subtle" Padding="10,6" ToolTip.Tip="{Binding OutlineText}" AutomationProperties.Name="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
                     <StackPanel Orientation="Horizontal" Spacing="7">
                       <Path Classes="icon" Width="15" Height="15"
                             Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
@@ -236,14 +250,159 @@
               </StackPanel>
             </Border>
             <ScrollViewer Margin="8,4">
-              <StackPanel Spacing="1">
+              <StackPanel Spacing="8">
+                <!-- F19：正式总结投影。加载失败与合法空态分开，确认历史不混入正式知识。 -->
+                <Border Classes="layer" Padding="12" IsVisible="{Binding HasSummaryContext}">
+                  <StackPanel Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                      <TextBlock Grid.Column="0" Text="{Binding SummaryTitle}" Classes="subtitle" />
+                      <TextBlock Grid.Column="1" Text="{Binding SummaryChapterHeading}" Classes="subtle" />
+                    </Grid>
+
+                    <TextBlock Text="{Binding SummaryLoadingText}"
+                               Classes="caption"
+                               IsVisible="{Binding IsSummaryLoading}" />
+                    <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasSummaryError}">
+                      <TextBlock Text="{Binding SummaryErrorText}" Classes="caption" TextWrapping="Wrap" />
+                    </Border>
+                    <TextBlock Text="{Binding SummaryEmptyText}"
+                               Classes="caption"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding ShowSummaryEmpty}" />
+
+                    <StackPanel Spacing="8" IsVisible="{Binding ShowSummaryContent}">
+                      <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasChapterSummary}">
+                        <StackPanel Spacing="4">
+                          <TextBlock Text="{Binding ChapterSummaryLabel}" Classes="caption" FontWeight="SemiBold" />
+                          <TextBlock Text="{Binding ChapterSummaryText}" TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Border>
+
+                      <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasStageSummary}">
+                        <StackPanel Spacing="4">
+                          <TextBlock Text="{Binding StageSummaryLabel}" Classes="caption" FontWeight="SemiBold" />
+                          <TextBlock Text="{Binding SummaryStageHeading}" Classes="subtle" />
+                          <TextBlock Text="{Binding StageSummaryText}" TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Border>
+
+                      <Expander Header="{Binding SummarySegmentsLabel}"
+                                IsExpanded="True"
+                                IsVisible="{Binding HasSummarySegments}">
+                        <ItemsControl ItemsSource="{Binding SummarySegments}" Margin="0,6,0,0">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:WorksSummarySegmentItemViewModel}">
+                              <Button Classes="nav"
+                                      Command="{Binding RevealCommand}"
+                                      ToolTip.Tip="{Binding RevealText}"
+                                      AutomationProperties.Name="{Binding RevealText}"
+                                      HorizontalAlignment="Stretch"
+                                      HorizontalContentAlignment="Stretch"
+                                      Margin="0,0,0,4">
+                                <StackPanel Spacing="3">
+                                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="1" Text="{Binding SourceStateText}" Classes="subtle" />
+                                  </Grid>
+                                  <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" />
+                                  <TextBlock Text="{Binding SourceText}" Classes="subtle" TextWrapping="Wrap" />
+                                </StackPanel>
+                              </Button>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </Expander>
+
+                      <Expander Header="{Binding SummaryEventsLabel}"
+                                IsExpanded="True"
+                                IsVisible="{Binding HasSummaryEvents}">
+                        <ItemsControl ItemsSource="{Binding SummaryEvents}" Margin="0,6,0,0">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:WorksSummaryDetailItemViewModel}">
+                              <Border Classes="soft-panel" Padding="9" Margin="0,0,0,4">
+                                <StackPanel Spacing="3">
+                                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="1" Text="{Binding StatusText}" Classes="subtle" />
+                                  </Grid>
+                                  <TextBlock Text="{Binding Content}" TextWrapping="Wrap" />
+                                </StackPanel>
+                              </Border>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </Expander>
+
+                      <Expander Header="{Binding SummaryChangesLabel}"
+                                IsExpanded="True"
+                                IsVisible="{Binding HasSummaryChanges}">
+                        <ItemsControl ItemsSource="{Binding SummaryChanges}" Margin="0,6,0,0">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:WorksSummaryDetailItemViewModel}">
+                              <Border Classes="soft-panel" Padding="9" Margin="0,0,0,4">
+                                <StackPanel Spacing="3">
+                                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="1" Text="{Binding StatusText}" Classes="subtle" />
+                                  </Grid>
+                                  <TextBlock Text="{Binding Content}" TextWrapping="Wrap" />
+                                </StackPanel>
+                              </Border>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </Expander>
+
+                      <Expander Header="{Binding SummaryForeshadowingLabel}"
+                                IsExpanded="True"
+                                IsVisible="{Binding HasSummaryForeshadowing}">
+                        <ItemsControl ItemsSource="{Binding SummaryForeshadowing}" Margin="0,6,0,0">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:WorksSummaryDetailItemViewModel}">
+                              <Border Classes="soft-panel" Padding="9" Margin="0,0,0,4">
+                                <StackPanel Spacing="3">
+                                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="1" Text="{Binding StatusText}" Classes="subtle" />
+                                  </Grid>
+                                  <TextBlock Text="{Binding Content}" TextWrapping="Wrap" />
+                                </StackPanel>
+                              </Border>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </Expander>
+
+                      <Expander Header="{Binding SummaryConfirmationsLabel}"
+                                IsExpanded="False"
+                                IsVisible="{Binding HasSummaryConfirmations}">
+                        <ItemsControl ItemsSource="{Binding SummaryConfirmations}" Margin="0,6,0,0">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:WorksSummaryDetailItemViewModel}">
+                              <Border Classes="soft-panel" Padding="9" Margin="0,0,0,4">
+                                <StackPanel Spacing="3">
+                                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="1" Text="{Binding StatusText}" Classes="subtle" />
+                                  </Grid>
+                                  <TextBlock Text="{Binding Content}" TextWrapping="Wrap" />
+                                </StackPanel>
+                              </Border>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </Expander>
+                    </StackPanel>
+                  </StackPanel>
+                </Border>
+
                 <ItemsControl ItemsSource="{Binding WorksTreeNodes}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:WorksTreeItemViewModel}">
                       <Button Classes="nav" Command="{Binding OpenCommand}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
                         <Grid RowDefinitions="Auto,Auto" RowSpacing="2">
                           <TextBlock Grid.Row="0" Text="{Binding DisplayTitle}" Classes="caption" TextWrapping="Wrap" />
-                          <TextBlock Grid.Row="1" Text="{Binding DisplayPath}" Classes="subtle" TextWrapping="Wrap" />
+                          <TextBlock Grid.Row="1" Text="{Binding DisplayPath}" Classes="subtle" TextWrapping="Wrap" IsVisible="{Binding HasPath}" />
                         </Grid>
                       </Button>
                     </DataTemplate>
@@ -264,34 +423,8 @@
           <DockPanel IsVisible="{Binding IsProjectAiTab}">
             <Border DockPanel.Dock="Bottom" Padding="12,10"
                     BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,1,0,0">
-              <!-- 输入框一体：发送键嵌在右下角 -->
-              <Border Classes="ai-composer" MinHeight="96" Padding="12,10,8,10">
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                  <TextBox Grid.Column="0"
-                           Text="{Binding ProjectAiMessage, Mode=TwoWay}"
-                           AcceptsReturn="True"
-                           TextWrapping="Wrap"
-                           BorderThickness="0"
-                           Background="Transparent"
-                           FontSize="13"
-                           MinHeight="72"
-                           MaxHeight="140"
-                           Padding="0"
-                           VerticalContentAlignment="Top"
-                           VerticalAlignment="Stretch"
-                           PlaceholderText="{Binding ProjectAiPlaceholder}" />
-                  <Button Grid.Column="1"
-                          Classes="primary"
-                          Width="36" Height="36" Padding="0"
-                          VerticalAlignment="Bottom"
-                          Command="{Binding SendProjectAiCommand}"
-                          ToolTip.Tip="{Binding ProjectAiText}">
-                    <Path Classes="icon" Width="16" Height="16"
-                          Stroke="{DynamicResource Ariadne.TextOnAccent}"
-                          Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
-                  </Button>
-                </Grid>
-              </Border>
+              <!-- 与工作区共用 ProjectAiComposer（主题色焦点边仅此一体区） -->
+              <ctl:ProjectAiComposer />
             </Border>
             <ScrollViewer Margin="12,8">
               <StackPanel Spacing="10">
@@ -327,7 +460,7 @@
 
       <!-- 收起态：右缘悬浮左向箭头 -->
       <Button Classes="panel-float" Command="{Binding ToggleRightPanelCommand}"
-              ToolTip.Tip="{Binding ToggleRightPanelText}"
+              ToolTip.Tip="{Binding ToggleRightPanelText}" AutomationProperties.Name="{Binding ToggleRightPanelText}"
               IsVisible="{Binding !IsRightPanelOpen}">
         <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
       </Button>

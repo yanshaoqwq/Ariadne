@@ -5,6 +5,7 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Controls.Primitives;
 using Avalonia.Threading;
+using Ariadne.Desktop.Localization;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Controls;
@@ -33,10 +34,30 @@ public partial class SpectrumColorPicker : UserControl
         InitializeComponent();
         Loaded += (_, _) =>
         {
+            ApplyChannelLabels();
             ApplyFromHex(SelectedHex, pushProperty: false);
             UpdateVisuals();
         };
         SizeChanged += (_, _) => UpdateCursors();
+    }
+
+    private void ApplyChannelLabels()
+    {
+        var names = DisplayNameService.Current;
+        if (RLabel is not null)
+        {
+            RLabel.Text = names.Text("ui.color.channel_r");
+        }
+
+        if (GLabel is not null)
+        {
+            GLabel.Text = names.Text("ui.color.channel_g");
+        }
+
+        if (BLabel is not null)
+        {
+            BLabel.Text = names.Text("ui.color.channel_b");
+        }
     }
 
     private void OnSwatchClick(object? sender, RoutedEventArgs e)

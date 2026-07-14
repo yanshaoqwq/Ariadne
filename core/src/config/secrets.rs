@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,8 @@ use sha2::{Digest, Sha256};
 
 use crate::contracts::{CoreError, CoreResult};
 
-/// 项目配置中保存的密钥引用，只包含 key id，不包含真实 secret。
+/// 旧项目配置中的密钥引用，仅用于反序列化并触发显式重新绑定。
+/// 新配置不得持久化或信任该全局 key id。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRef {
     pub key_id: String,
@@ -25,8 +27,14 @@ impl SecretRef {
 }
 
 /// 内存中的 secret 值，避免误把 String 直接混入配置结构。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SecretValue(String);
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SecretValue([redacted])")
+    }
+}
 
 impl SecretValue {
     /// 创建 secret 值。
@@ -48,6 +56,79 @@ pub trait SecretStore: Send + Sync {
     fn get_secret(&self, key_id: &str) -> CoreResult<Option<SecretValue>>;
     /// 删除密钥，不存在时视为成功。
     fn delete_secret(&self, key_id: &str) -> CoreResult<()>;
+}
+
+/// 把通用 SecretStore 收束为当前项目的 Provider 凭据能力。
+///
+/// 项目配置只能提供 provider id，不能选择全局 key id；项目身份使用
+/// canonical path 的无损平台字节参与 SHA-256 派生，移动/导入后必须重新绑定。
+pub struct ProjectCredentialScope<'a> {
+    secrets: &'a dyn SecretStore,
+    project_identity: Vec<u8>,
+}
+
+impl<'a> ProjectCredentialScope<'a> {
+    /// 为已存在的项目根创建可信凭据作用域。
+    pub fn new(project_root: &Path, secrets: &'a dyn SecretStore) -> CoreResult<Self> {
+        let canonical_root = project_root.canonicalize()?;
+        Ok(Self {
+            secrets,
+            project_identity: project_path_identity_bytes(&canonical_root),
+        })
+    }
+
+    /// 读取当前项目指定 Provider 的凭据。
+    pub fn get_provider_secret(&self, provider_id: &str) -> CoreResult<Option<SecretValue>> {
+        self.secrets.get_secret(&self.provider_key_id(provider_id)?)
+    }
+
+    /// 写入当前项目指定 Provider 的凭据。
+    pub fn set_provider_secret(&self, provider_id: &str, value: SecretValue) -> CoreResult<()> {
+        self.secrets
+            .set_secret(&self.provider_key_id(provider_id)?, value)
+    }
+
+    /// 删除当前项目指定 Provider 的凭据。
+    pub fn delete_provider_secret(&self, provider_id: &str) -> CoreResult<()> {
+        self.secrets
+            .delete_secret(&self.provider_key_id(provider_id)?)
+    }
+
+    fn provider_key_id(&self, provider_id: &str) -> CoreResult<String> {
+        if provider_id.trim().is_empty() {
+            return Err(CoreError::validation("provider_id cannot be empty"));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"ariadne-project-credential-v1\0");
+        hasher.update(&self.project_identity);
+        hasher.update(b"\0provider\0");
+        hasher.update(provider_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut encoded = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write;
+            write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        Ok(format!("ariadne-credential-v1-{encoded}"))
+    }
+}
+
+#[cfg(unix)]
+fn project_path_identity_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bytes = b"unix\0".to_vec();
+    bytes.extend_from_slice(path.as_os_str().as_bytes());
+    bytes
+}
+
+#[cfg(windows)]
+fn project_path_identity_bytes(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut bytes = b"windows\0".to_vec();
+    for unit in path.as_os_str().encode_wide() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
 }
 
 /// 测试用内存密钥存储。
@@ -92,10 +173,24 @@ impl SecretStore for MemorySecretStore {
 }
 
 /// 无系统 keychain 时的本地文件 fallback。只用于用户本机 app state，严禁放进项目配置。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocalFileSecretStore {
     path: PathBuf,
     lock: Arc<RwLock<()>>,
+    master_password: Option<Arc<[u8]>>,
+}
+
+impl std::fmt::Debug for LocalFileSecretStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalFileSecretStore")
+            .field("path", &self.path)
+            .field(
+                "master_password",
+                &self.master_password.as_ref().map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 
 impl LocalFileSecretStore {
@@ -103,12 +198,44 @@ impl LocalFileSecretStore {
         Self {
             path: path.into(),
             lock: Arc::new(RwLock::new(())),
+            master_password: std::env::var("ARIADNE_SECRET_MASTER_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| Arc::<[u8]>::from(value.into_bytes())),
         }
+    }
+
+    /// 无系统 keychain 时由上层主密码流程显式注入。密码只保存在进程内存中。
+    pub fn with_master_password(
+        path: impl Into<PathBuf>,
+        master_password: SecretValue,
+    ) -> CoreResult<Self> {
+        if master_password.expose_secret().trim().is_empty() {
+            return Err(CoreError::validation(
+                "local secret master password cannot be empty",
+            ));
+        }
+        Ok(Self {
+            path: path.into(),
+            lock: Arc::new(RwLock::new(())),
+            master_password: Some(Arc::<[u8]>::from(
+                master_password.expose_secret().as_bytes(),
+            )),
+        })
+    }
+
+    fn master_password(&self) -> CoreResult<&[u8]> {
+        self.master_password.as_deref().ok_or_else(|| {
+            CoreError::validation(
+                "system keychain is unavailable; set a local secret master password before storing provider credentials",
+            )
+        })
     }
 
     fn read_values(&self) -> CoreResult<BTreeMap<String, String>> {
         match std::fs::read_to_string(&self.path) {
-            Ok(content) => read_local_secret_file(&content),
+            Ok(content) if content.trim().is_empty() => Ok(BTreeMap::new()),
+            Ok(content) => read_local_secret_file(&content, self.master_password()?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
             Err(error) => Err(CoreError::External {
                 service: "local_secret_store".to_owned(),
@@ -118,15 +245,18 @@ impl LocalFileSecretStore {
     }
 
     fn write_values(&self, values: &BTreeMap<String, String>) -> CoreResult<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(io_secret_error)?;
-        }
-        std::fs::write(
-            &self.path,
-            serde_json::to_string_pretty(&encrypt_local_secret_values(values)?)
-                .map_err(CoreError::from)?,
-        )
-        .map_err(io_secret_error)?;
+        let bytes = serde_json::to_vec_pretty(&encrypt_local_secret_values(
+            values,
+            self.master_password()?,
+        )?)
+        .map_err(CoreError::from)?;
+        // D4：密钥文件与文档正文共用 atomic_write（临时文件 + rename），避免覆盖写半文件。
+        crate::config::store::atomic_write(&self.path, &bytes).map_err(|error| {
+            CoreError::External {
+                service: "local_secret_store".to_owned(),
+                message: error.to_string(),
+            }
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -186,6 +316,14 @@ struct LocalSecretEnvelope {
     version: u8,
     cipher: String,
     kdf: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    salt_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_kib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    iterations: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parallelism: Option<u32>,
     nonce_hex: String,
     ciphertext_hex: String,
 }
@@ -197,34 +335,52 @@ enum LocalSecretFile {
     LegacyPlaintext(BTreeMap<String, String>),
 }
 
-fn read_local_secret_file(content: &str) -> CoreResult<BTreeMap<String, String>> {
+fn read_local_secret_file(
+    content: &str,
+    master_password: &[u8],
+) -> CoreResult<BTreeMap<String, String>> {
     if content.trim().is_empty() {
         return Ok(BTreeMap::new());
     }
     match serde_json::from_str::<LocalSecretFile>(content)? {
-        LocalSecretFile::Envelope(envelope) => decrypt_local_secret_values(&envelope),
+        LocalSecretFile::Envelope(envelope) => {
+            decrypt_local_secret_values(&envelope, master_password)
+        }
         LocalSecretFile::LegacyPlaintext(values) => Ok(values),
     }
 }
 
 fn encrypt_local_secret_values(
     values: &BTreeMap<String, String>,
+    master_password: &[u8],
 ) -> CoreResult<LocalSecretEnvelope> {
-    let key_bytes = derive_local_secret_key();
+    const MEMORY_KIB: u32 = 19 * 1024;
+    const ITERATIONS: u32 = 3;
+    const PARALLELISM: u32 = 1;
+    let mut salt_bytes = [0u8; 16];
+    getrandom::getrandom(&mut salt_bytes).map_err(local_secret_random_error)?;
+    let key_bytes = derive_argon2id_key(
+        master_password,
+        &salt_bytes,
+        MEMORY_KIB,
+        ITERATIONS,
+        PARALLELISM,
+    )?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
     let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes).map_err(|error| CoreError::External {
-        service: "local_secret_store".to_owned(),
-        message: format!("failed to generate secret nonce: {error}"),
-    })?;
+    getrandom::getrandom(&mut nonce_bytes).map_err(local_secret_random_error)?;
     let plaintext = serde_json::to_vec(values)?;
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
         .map_err(local_secret_crypto_error)?;
     Ok(LocalSecretEnvelope {
-        version: 2,
+        version: 3,
         cipher: "chacha20poly1305".to_owned(),
-        kdf: local_secret_kdf_label().to_owned(),
+        kdf: "argon2id".to_owned(),
+        salt_hex: Some(encode_hex(&salt_bytes)),
+        memory_kib: Some(MEMORY_KIB),
+        iterations: Some(ITERATIONS),
+        parallelism: Some(PARALLELISM),
         nonce_hex: encode_hex(&nonce_bytes),
         ciphertext_hex: encode_hex(&ciphertext),
     })
@@ -232,13 +388,8 @@ fn encrypt_local_secret_values(
 
 fn decrypt_local_secret_values(
     envelope: &LocalSecretEnvelope,
+    master_password: &[u8],
 ) -> CoreResult<BTreeMap<String, String>> {
-    if envelope.version != 2 {
-        return Err(CoreError::validation(format!(
-            "unsupported local secret store version {}",
-            envelope.version
-        )));
-    }
     if envelope.cipher != "chacha20poly1305" {
         return Err(CoreError::validation(format!(
             "unsupported local secret cipher {}",
@@ -250,7 +401,41 @@ fn decrypt_local_secret_values(
         return Err(CoreError::validation("local secret nonce must be 12 bytes"));
     }
     let ciphertext = decode_hex(&envelope.ciphertext_hex)?;
-    let key_bytes = derive_local_secret_key();
+    let key_bytes = match envelope.version {
+        3 => {
+            if envelope.kdf != "argon2id" {
+                return Err(CoreError::validation(format!(
+                    "unsupported local secret kdf {}",
+                    envelope.kdf
+                )));
+            }
+            let salt = decode_hex(
+                envelope
+                    .salt_hex
+                    .as_deref()
+                    .ok_or_else(|| CoreError::validation("local secret salt is missing"))?,
+            )?;
+            derive_argon2id_key(
+                master_password,
+                &salt,
+                envelope
+                    .memory_kib
+                    .ok_or_else(|| CoreError::validation("local secret memory cost is missing"))?,
+                envelope.iterations.ok_or_else(|| {
+                    CoreError::validation("local secret iteration count is missing")
+                })?,
+                envelope
+                    .parallelism
+                    .ok_or_else(|| CoreError::validation("local secret parallelism is missing"))?,
+            )?
+        }
+        2 => derive_legacy_v2_key(&envelope.kdf, master_password)?,
+        other => {
+            return Err(CoreError::validation(format!(
+                "unsupported local secret store version {other}",
+            )))
+        }
+    };
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
     let plaintext = cipher
         .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
@@ -258,15 +443,47 @@ fn decrypt_local_secret_values(
     serde_json::from_slice(&plaintext).map_err(CoreError::from)
 }
 
-fn derive_local_secret_key() -> [u8; 32] {
+fn derive_argon2id_key(
+    master_password: &[u8],
+    salt: &[u8],
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> CoreResult<[u8; 32]> {
+    let params = Params::new(memory_kib, iterations, parallelism, Some(32))
+        .map_err(local_secret_kdf_error)?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon2
+        .hash_password_into(master_password, salt, &mut key)
+        .map_err(local_secret_kdf_error)?;
+    Ok(key)
+}
+
+fn derive_legacy_v2_key(kdf: &str, master_password: &[u8]) -> CoreResult<[u8; 32]> {
+    derive_legacy_v2_key_with_machine_migration(
+        kdf,
+        master_password,
+        std::env::var("ARIADNE_ALLOW_LEGACY_MACHINE_SECRET_MIGRATION").as_deref() == Ok("1"),
+    )
+}
+
+fn derive_legacy_v2_key_with_machine_migration(
+    kdf: &str,
+    master_password: &[u8],
+    allow_machine_migration: bool,
+) -> CoreResult<[u8; 32]> {
     let mut hasher = Sha256::new();
     hasher.update(b"ariadne-local-secret-store-v2");
-    if let Ok(secret) = std::env::var("ARIADNE_SECRET_MASTER_KEY") {
-        if !secret.trim().is_empty() {
-            hasher.update(b"\0env-master-key\0");
-            hasher.update(secret.as_bytes());
-            return digest_to_key(hasher.finalize());
-        }
+    if kdf == "env_master_key_sha256" {
+        hasher.update(b"\0env-master-key\0");
+        hasher.update(master_password);
+        return Ok(digest_to_key(hasher.finalize()));
+    }
+    if kdf != "machine_bound_sha256" || !allow_machine_migration {
+        return Err(CoreError::validation(
+            "legacy machine-bound secret store is disabled; explicitly enable one-time migration and re-save with a master password",
+        ));
     }
     hasher.update(b"\0machine-bound-fallback\0");
     for path in [
@@ -289,7 +506,7 @@ fn derive_local_secret_key() -> [u8; 32] {
             hasher.update(b"\0");
         }
     }
-    digest_to_key(hasher.finalize())
+    Ok(digest_to_key(hasher.finalize()))
 }
 
 fn digest_to_key(digest: impl AsRef<[u8]>) -> [u8; 32] {
@@ -298,10 +515,17 @@ fn digest_to_key(digest: impl AsRef<[u8]>) -> [u8; 32] {
     key
 }
 
-fn local_secret_kdf_label() -> &'static str {
-    match std::env::var("ARIADNE_SECRET_MASTER_KEY") {
-        Ok(value) if !value.trim().is_empty() => "env_master_key_sha256",
-        _ => "machine_bound_sha256",
+fn local_secret_random_error(error: getrandom::Error) -> CoreError {
+    CoreError::External {
+        service: "local_secret_store".to_owned(),
+        message: format!("failed to generate secret encryption randomness: {error}"),
+    }
+}
+
+fn local_secret_kdf_error(error: argon2::Error) -> CoreError {
+    CoreError::External {
+        service: "local_secret_store".to_owned(),
+        message: format!("local secret key derivation failed: {error}"),
     }
 }
 
@@ -323,7 +547,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> CoreResult<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(CoreError::validation("hex value must have even length"));
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
@@ -432,21 +656,94 @@ mod tests {
     }
 
     #[test]
+    fn secret_debug_output_redacts_values_and_master_password() {
+        let secret = SecretValue::new("sk-never-log-this");
+        assert_eq!(format!("{secret:?}"), "SecretValue([redacted])");
+
+        let store = LocalFileSecretStore::with_master_password(
+            "secrets.json",
+            SecretValue::new("master-never-log-this"),
+        )
+        .unwrap();
+        let debug = format!("{store:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("master-never-log-this"));
+    }
+
+    #[test]
+    fn local_file_secret_store_without_master_password_refuses_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secrets.json");
+        std::fs::write(&path, r#"{"legacy":"must-not-open"}"#).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let store = LocalFileSecretStore {
+            path: path.clone(),
+            lock: Arc::new(RwLock::new(())),
+            master_password: None,
+        };
+
+        assert!(store.get_secret("legacy").is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn legacy_machine_bound_key_requires_explicit_migration_mode() {
+        assert!(derive_legacy_v2_key_with_machine_migration(
+            "machine_bound_sha256",
+            b"unused",
+            false,
+        )
+        .is_err());
+        assert!(derive_legacy_v2_key_with_machine_migration(
+            "machine_bound_sha256",
+            b"unused",
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn local_file_secret_store_persists_between_instances() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("secrets.json");
-        let store = LocalFileSecretStore::new(&path);
+        let store = LocalFileSecretStore::with_master_password(
+            &path,
+            SecretValue::new("correct horse battery staple"),
+        )
+        .unwrap();
         store
             .set_secret("openai-main", SecretValue::new("sk-secret"))
             .unwrap();
 
-        let reloaded = LocalFileSecretStore::new(&path);
+        let reloaded = LocalFileSecretStore::with_master_password(
+            &path,
+            SecretValue::new("correct horse battery staple"),
+        )
+        .unwrap();
         let secret = reloaded.get_secret("openai-main").unwrap().unwrap();
         assert_eq!(secret.expose_secret(), "sk-secret");
 
         let file = std::fs::read_to_string(&path).unwrap();
         assert!(file.contains("chacha20poly1305"));
+        assert!(file.contains("argon2id"));
         assert!(!file.contains("sk-secret"));
+    }
+
+    #[test]
+    fn local_file_secret_store_wrong_password_does_not_modify_ciphertext() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secrets.json");
+        LocalFileSecretStore::with_master_password(&path, SecretValue::new("correct-password"))
+            .unwrap()
+            .set_secret("openai-main", SecretValue::new("sk-secret"))
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let wrong =
+            LocalFileSecretStore::with_master_password(&path, SecretValue::new("wrong-password"))
+                .unwrap();
+        assert!(wrong.get_secret("openai-main").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -455,7 +752,11 @@ mod tests {
         let path = temp.path().join("secrets.json");
         std::fs::write(&path, r#"{"legacy":"old-secret"}"#).unwrap();
 
-        let store = LocalFileSecretStore::new(&path);
+        let store = LocalFileSecretStore::with_master_password(
+            &path,
+            SecretValue::new("migration-password"),
+        )
+        .unwrap();
         let secret = store.get_secret("legacy").unwrap().unwrap();
         assert_eq!(secret.expose_secret(), "old-secret");
         store

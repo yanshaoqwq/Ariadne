@@ -12,6 +12,7 @@ use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
 
 use crate::contracts::{CoreError, CoreResult};
 use crate::retrieval::memory::sort_and_limit;
+use crate::retrieval::query::tantivy_literal_query;
 use crate::retrieval::models::{
     ChunkDocument, FullTextRecord, FullTextSearchRequest, RebuildReport, RebuildStatus,
     RetrievalResult, RetrievalSource, StoreHealth,
@@ -106,9 +107,11 @@ impl FullTextStore for TantivyFullTextStore {
             return Ok(Vec::new());
         }
         let searcher = self.reader.searcher();
-        let parser = QueryParser::for_index(&self.index, vec![self.fields.text]);
+        let mut parser = QueryParser::for_index(&self.index, vec![self.fields.text]);
+        parser.set_conjunction_by_default();
+        let literal_query = tantivy_literal_query(&request.query)?;
         let query = parser
-            .parse_query(&request.query)
+            .parse_query(&literal_query)
             .map_err(|error| CoreError::validation(format!("tantivy query error: {error}")))?;
         let top_docs = searcher
             .search(

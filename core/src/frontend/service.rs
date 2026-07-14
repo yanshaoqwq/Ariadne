@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +32,10 @@ const ALLOW_LOCAL_TEMPLATE_REPOSITORY_ENV: &str = "ARIADNE_ALLOW_LOCAL_TEMPLATE_
 const MAX_QUICK_EDIT_DIFF_BYTES: usize = 16 * 1024;
 const MAX_RUN_LOG_ENTRIES: i64 = 100_000;
 const MAX_RESOLVED_CONFIRMATION_ENTRIES: i64 = 100_000;
+/// C3：运行日志最长保留 90 天（与条数配额同时生效）。
+const MAX_RUN_LOG_AGE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+/// C3：ui_logs.db 软上限约 256 MiB（按 page_count * page_size 估算后裁剪最旧日志）。
+const MAX_UI_LOG_DB_BYTES: i64 = 256 * 1024 * 1024;
 const MAX_PROJECT_MEMORY_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 最近项目和项目初始化状态，默认落在 `.runtime/recent_projects.json`。
@@ -79,10 +83,8 @@ impl ProjectRegistryStore {
 
     /// 写入最近项目列表。
     pub fn write_all(&self, entries: &[RecentProjectEntry]) -> CoreResult<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, serde_json::to_string_pretty(entries)?)?;
+        let bytes = serde_json::to_vec_pretty(entries)?;
+        crate::config::store::atomic_write(&self.path, &bytes)?;
         Ok(())
     }
 
@@ -185,61 +187,28 @@ impl ProjectMemoryStore {
                 ),
             });
         }
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, content)?;
+        crate::config::store::atomic_write(&self.path, content.as_bytes())?;
         Ok(())
     }
 
     /// 追加项目记忆内容，自动补换行边界。
+    ///
+    /// D4：读改写后走 `write_all` / `atomic_write`，避免 OpenOptions 就地追加在崩溃窗口留下半行。
     pub fn append(&self, content: &str) -> CoreResult<String> {
         if content.trim().is_empty() {
             return self.read_all();
         }
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let existing = self.read_all()?;
+        let mut next = existing;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
         }
-        let existing_len = std::fs::metadata(&self.path)
-            .map(|metadata| metadata.len())
-            .or_else(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Ok(0)
-                } else {
-                    Err(error)
-                }
-            })?;
-        let additional = u64::try_from(content.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(2);
-        if existing_len.saturating_add(additional) > MAX_PROJECT_MEMORY_BYTES {
-            return Err(CoreError::ResourceLimitExceeded {
-                resource: "project_memory_bytes".to_owned(),
-                reason: format!(
-                    "project memory would exceed {} bytes; compact or remove obsolete entries",
-                    MAX_PROJECT_MEMORY_BYTES
-                ),
-            });
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&self.path)?;
-        if existing_len > 0 {
-            file.seek(SeekFrom::End(-1))?;
-            let mut last = [0u8; 1];
-            file.read_exact(&mut last)?;
-            if last[0] != b'\n' {
-                file.write_all(b"\n")?;
-            }
-        }
-        file.write_all(content.as_bytes())?;
+        next.push_str(content);
         if !content.ends_with('\n') {
-            file.write_all(b"\n")?;
+            next.push('\n');
         }
-        file.flush()?;
-        self.read_all()
+        self.write_all(&next)?;
+        Ok(next)
     }
 }
 
@@ -1110,6 +1079,7 @@ fn insert_run_log(connection: &Connection, entry: &UiRunLogEntry) -> CoreResult<
 }
 
 fn prune_run_logs(connection: &Connection) -> CoreResult<()> {
+    // 条数配额：保留最新 N 条。
     connection
         .execute(
             "DELETE FROM run_logs
@@ -1121,6 +1091,53 @@ fn prune_run_logs(connection: &Connection) -> CoreResult<()> {
             params![MAX_RUN_LOG_ENTRIES],
         )
         .map_err(sqlite_frontend_error)?;
+    // 时间配额：删除超过保留窗口的最旧条目。
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let cutoff = now_ms.saturating_sub(MAX_RUN_LOG_AGE_MS);
+    connection
+        .execute(
+            "DELETE FROM run_logs WHERE timestamp_ms < ?1",
+            params![cutoff],
+        )
+        .map_err(sqlite_frontend_error)?;
+    // 磁盘软配额：超限时继续删最旧，直到估算体积回到上限内。
+    prune_run_logs_to_disk_budget(connection)?;
+    Ok(())
+}
+
+fn prune_run_logs_to_disk_budget(connection: &Connection) -> CoreResult<()> {
+    let page_count: i64 = connection
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .map_err(sqlite_frontend_error)?;
+    let page_size: i64 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(sqlite_frontend_error)?;
+    let mut estimated = page_count.saturating_mul(page_size);
+    let mut guard = 0;
+    while estimated > MAX_UI_LOG_DB_BYTES && guard < 32 {
+        let deleted = connection
+            .execute(
+                "DELETE FROM run_logs
+                 WHERE log_id IN (
+                     SELECT log_id FROM run_logs
+                     ORDER BY timestamp_ms ASC, log_id ASC
+                     LIMIT 1000
+                 )",
+                [],
+            )
+            .map_err(sqlite_frontend_error)?;
+        if deleted == 0 {
+            break;
+        }
+        let page_count: i64 = connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .map_err(sqlite_frontend_error)?;
+        estimated = page_count.saturating_mul(page_size);
+        guard += 1;
+    }
     Ok(())
 }
 
@@ -1204,6 +1221,10 @@ pub struct WorksTreeNode {
     pub title: String,
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline_ref: Option<crate::contracts::SourceSpan>,
     #[serde(default)]
     pub children: Vec<WorksTreeNode>,
@@ -1224,7 +1245,9 @@ pub struct ChapterImportRequest {
 /// 章节合并导出格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ChapterExportFormat {
+    #[default]
     Markdown,
     Epub,
     Pdf,
@@ -1245,12 +1268,6 @@ impl ChapterExportFormat {
             Self::Epub => "epub",
             Self::Pdf => "pdf",
         }
-    }
-}
-
-impl Default for ChapterExportFormat {
-    fn default() -> Self {
-        Self::Markdown
     }
 }
 
@@ -1275,29 +1292,55 @@ pub struct CombinedExportReport {
 /// 从章节索引生成作品页导航树。
 pub fn build_works_tree(
     index: &ChapterDocumentIndex,
+    chapter_stage: &BTreeMap<String, String>,
     planning_root: impl AsRef<Path>,
 ) -> CoreResult<WorksTreeNode> {
     index.validate()?;
     let planning_root = planning_root.as_ref();
-    let mut stages = BTreeMap::<String, Vec<&ChapterDocumentEntry>>::new();
-    for entry in index.chapter_bodies() {
-        let stage_id = entry
-            .chapter_id
-            .split_once(':')
-            .map(|(stage, _)| stage)
-            .unwrap_or("default")
-            .to_owned();
+    let chapter_entries = index.chapter_bodies();
+    let known_chapter_ids = chapter_entries
+        .iter()
+        .map(|entry| entry.chapter_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for (chapter_id, stage_id) in chapter_stage {
+        if chapter_id.trim().is_empty() || stage_id.trim().is_empty() {
+            return Err(CoreError::validation(
+                "chapter-stage relation contains an empty id",
+            ));
+        }
+        if !known_chapter_ids.contains(chapter_id.as_str()) {
+            return Err(CoreError::validation(format!(
+                "chapter-stage relation references missing chapter index entry: {chapter_id}"
+            )));
+        }
+    }
+
+    let mut stages = BTreeMap::<Option<String>, Vec<&ChapterDocumentEntry>>::new();
+    for entry in chapter_entries {
+        let stage_id = chapter_stage.get(&entry.chapter_id).cloned();
         stages.entry(stage_id).or_default().push(entry);
     }
     let children = stages
         .into_iter()
         .map(|(stage_id, entries)| WorksTreeNode {
-            node_id: format!("stage:{stage_id}"),
+            node_id: stage_id
+                .as_deref()
+                .map(|stage_id| format!("stage:{stage_id}"))
+                .unwrap_or_else(|| "stage:__unassigned__".to_owned()),
             kind: WorksTreeNodeKind::StageOutline,
-            title: stage_id.clone(),
-            path: planning_root
-                .join("stages")
-                .join(format!("{}.md", safe_file_stem(&stage_id))),
+            title: stage_id
+                .clone()
+                .unwrap_or_else(|| "ui.works.unassigned_stage".to_owned()),
+            path: stage_id
+                .as_deref()
+                .map(|stage_id| {
+                    planning_root
+                        .join("stages")
+                        .join(format!("{}.md", safe_file_stem(stage_id)))
+                })
+                .unwrap_or_default(),
+            chapter_id: None,
+            stage_id: stage_id.clone(),
             outline_ref: None,
             children: entries
                 .into_iter()
@@ -1306,6 +1349,8 @@ pub fn build_works_tree(
                     kind: WorksTreeNodeKind::Chapter,
                     title: entry.title.clone(),
                     path: entry.path.clone(),
+                    chapter_id: Some(entry.chapter_id.clone()),
+                    stage_id: stage_id.clone(),
                     outline_ref: entry.outline_ref.clone(),
                     children: Vec::new(),
                 })
@@ -1317,6 +1362,8 @@ pub fn build_works_tree(
         kind: WorksTreeNodeKind::GlobalOutline,
         title: "ui.works.global_outline".to_owned(),
         path: planning_root.join("global.md"),
+        chapter_id: None,
+        stage_id: None,
         outline_ref: None,
         children,
     })
@@ -1404,6 +1451,7 @@ pub fn export_chapters_combined(
         kind: ArtifactKind::Export,
         media_type: format.media_type().to_owned(),
         bytes,
+        operation_id: None,
         metadata: json!({
             "chapter_ids": exported_chapter_ids,
             "document_ids": document_ids,
@@ -2048,10 +2096,8 @@ impl UiPreferencesStore {
             "theme_brand_color_dark",
             &preferences.theme_brand_color_dark,
         )?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, serde_json::to_string_pretty(preferences)?)?;
+        let bytes = serde_json::to_string_pretty(preferences)?;
+        crate::config::store::atomic_write(&self.path, bytes.as_bytes())?;
         Ok(())
     }
 }
@@ -2384,7 +2430,7 @@ pub fn install_workflow_template_manifest(
     ensure_path_under_root(&workflows_root, &manifest_path)?;
     std::fs::create_dir_all(&manifest_dir)?;
     let content = serde_json::to_string_pretty(&manifest)?;
-    std::fs::write(&manifest_path, content)?;
+    crate::config::store::atomic_write(&manifest_path, content.as_bytes())?;
     Ok(TemplateInstallReport {
         workflow_id: manifest.workflow_id,
         version: manifest.version,
@@ -2446,6 +2492,7 @@ impl<'a, L: crate::costs::CostLedger> QuickEditService<'a, L> {
                 run_id: None,
                 node_id: None,
                 metadata: json!({ "quick_edit": true }),
+                dispatch_authorization: Default::default(),
             },
             &crate::contracts::CancellationToken::new(),
         )?;
@@ -2519,28 +2566,105 @@ pub fn apply_quick_edit_patch(
     documents.apply_patch(&patch, None, None)
 }
 
+/// U52：行级 unified diff；相同上下文折叠；整 diff 强制 ≤ MAX_QUICK_EDIT_DIFF_BYTES。
+/// 删除/新增两侧各预留约一半预算，避免单侧超长行吃光上限后看不到另一侧。
 fn simple_diff(original: &str, suggested: &str) -> String {
     if original == suggested {
         return String::new();
     }
-    let fixed_bytes = "- …\n+ …".len();
-    let content_budget = MAX_QUICK_EDIT_DIFF_BYTES.saturating_sub(fixed_bytes);
-    let original_budget = content_budget / 2;
-    let suggested_budget = content_budget - original_budget;
-    let (original_preview, original_truncated) = utf8_prefix(original, original_budget);
-    let (suggested_preview, suggested_truncated) = utf8_prefix(suggested, suggested_budget);
-    let mut diff = String::with_capacity(MAX_QUICK_EDIT_DIFF_BYTES);
-    diff.push_str("- ");
-    diff.push_str(original_preview);
-    if original_truncated {
-        diff.push('…');
+    let old_lines: Vec<&str> = original.split('\n').collect();
+    let new_lines: Vec<&str> = suggested.split('\n').collect();
+    // 整段替换（常见长章）时两侧各半预算，保证 `-` 与 `+` 都出现。
+    if old_lines.len() == 1 && new_lines.len() == 1 {
+        let half = MAX_QUICK_EDIT_DIFF_BYTES / 2;
+        let (old_part, old_cut) = utf8_prefix(old_lines[0], half.saturating_sub(4));
+        let (new_part, new_cut) = utf8_prefix(new_lines[0], half.saturating_sub(4));
+        let mut out = String::with_capacity(MAX_QUICK_EDIT_DIFF_BYTES);
+        out.push_str("- ");
+        out.push_str(old_part);
+        if old_cut {
+            out.push_str("...");
+        }
+        out.push_str("\n+ ");
+        out.push_str(new_part);
+        if new_cut {
+            out.push_str("...");
+        }
+        if out.len() > MAX_QUICK_EDIT_DIFF_BYTES {
+            let (prefix, _) = utf8_prefix(&out, MAX_QUICK_EDIT_DIFF_BYTES);
+            return prefix.to_owned();
+        }
+        return out;
     }
-    diff.push_str("\n+ ");
-    diff.push_str(suggested_preview);
-    if suggested_truncated {
-        diff.push('…');
+
+    let mut out = String::with_capacity(MAX_QUICK_EDIT_DIFF_BYTES.min(4096));
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while (i < old_lines.len() || j < new_lines.len()) && out.len() < MAX_QUICK_EDIT_DIFF_BYTES {
+        let remaining = MAX_QUICK_EDIT_DIFF_BYTES.saturating_sub(out.len());
+        if remaining < 8 {
+            break;
+        }
+        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
+            let mut run = 1usize;
+            while i + run < old_lines.len()
+                && j + run < new_lines.len()
+                && old_lines[i + run] == new_lines[j + run]
+            {
+                run += 1;
+            }
+            let line = if run == 1 {
+                format!("  {}\n", old_lines[i])
+            } else {
+                format!("  ... ({run} unchanged lines)\n")
+            };
+            let (chunk, _) = utf8_prefix(&line, remaining);
+            out.push_str(chunk);
+            i += run;
+            j += run;
+            continue;
+        }
+        if i < old_lines.len()
+            && (j >= new_lines.len()
+                || !new_lines[j..]
+                    .iter()
+                    .take(8)
+                    .any(|line| *line == old_lines[i]))
+        {
+            let line = format!("- {}\n", old_lines[i]);
+            let (chunk, cut) = utf8_prefix(&line, remaining);
+            out.push_str(chunk);
+            if cut {
+                break;
+            }
+            i += 1;
+            continue;
+        }
+        if j < new_lines.len() {
+            let line = format!("+ {}\n", new_lines[j]);
+            let (chunk, cut) = utf8_prefix(&line, remaining);
+            out.push_str(chunk);
+            if cut {
+                break;
+            }
+            j += 1;
+            continue;
+        }
+        if i < old_lines.len() {
+            let line = format!("- {}\n", old_lines[i]);
+            let (chunk, cut) = utf8_prefix(&line, remaining);
+            out.push_str(chunk);
+            if cut {
+                break;
+            }
+            i += 1;
+        }
     }
-    diff
+    if out.len() > MAX_QUICK_EDIT_DIFF_BYTES {
+        let (prefix, _) = utf8_prefix(&out, MAX_QUICK_EDIT_DIFF_BYTES);
+        return prefix.to_owned();
+    }
+    out
 }
 
 fn utf8_prefix(value: &str, max_bytes: usize) -> (&str, bool) {

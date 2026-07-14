@@ -74,93 +74,239 @@ impl MemoryWritingKnowledgeBase {
         segments: Vec<StorySegment>,
         events: Vec<StoryEvent>,
     ) -> CoreResult<()> {
+        let mut state = self.lock_state()?;
+        replace_chapter_summary_entities_on_state(&mut state, chapter_id, segments, events)
+    }
+
+    /// F21/C2/F14：章节总结 draft 的单一内存事务。
+    /// `segments`/`events`/`chapter_summary`/`stage` 为 `None` 时跳过该步写入（确认前不激活）。
+    /// 先在克隆态上完整应用，成功后再提交到锁内状态；任一步失败不修改库。
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_summary_pipeline_transaction(
+        &self,
+        chapter_id: &str,
+        segments: Option<Vec<StorySegment>>,
+        events: Option<Vec<StoryEvent>>,
+        realized_changes: Vec<crate::rag::models::RealizedChangeLink>,
+        foreshadowing_updates: Vec<ForeshadowingUpdate>,
+        confirmations: Vec<ConfirmationItem>,
+        chapter_summary: Option<String>,
+        stage: Option<(String, String)>,
+        cancellation: &crate::contracts::CancellationToken,
+    ) -> CoreResult<Vec<PlannerIssue>> {
         validate_non_empty_local("chapter_id", chapter_id)?;
-        let mut segment_ids = BTreeSet::new();
-        for segment in &segments {
-            segment.validate()?;
-            if segment.chapter_id != chapter_id {
-                return Err(CoreError::validation(
-                    "replacement story segment belongs to another chapter",
-                ));
-            }
-            if !segment_ids.insert(segment.segment_id.clone()) {
-                return Err(CoreError::validation(
-                    "replacement contains duplicate story segment id",
-                ));
-            }
+        if let Some(ref summary) = chapter_summary {
+            validate_non_empty_local("chapter_summary", summary)?;
         }
-        let mut event_ids = BTreeSet::new();
-        for event in &events {
-            event.validate()?;
-            if !event.chapter_ids.iter().any(|id| id == chapter_id) {
-                return Err(CoreError::validation(
-                    "replacement story event does not reference chapter",
-                ));
+        if let Some((ref stage_id, ref stage_summary)) = stage {
+            validate_non_empty_local("stage_id", stage_id)?;
+            validate_non_empty_local("stage_summary", stage_summary)?;
+        }
+        cancellation.check()?;
+
+        let mut guard = self.lock_state()?;
+        let mut working = (*guard).clone();
+        let wrote_entities = segments.is_some() || events.is_some();
+        let wrote_chapter = chapter_summary.is_some();
+        if wrote_entities {
+            let segs = segments.unwrap_or_else(|| {
+                working
+                    .segments
+                    .values()
+                    .filter(|s| s.chapter_id == chapter_id)
+                    .cloned()
+                    .collect()
+            });
+            let evs = events.unwrap_or_else(|| {
+                working
+                    .events
+                    .values()
+                    .filter(|e| e.chapter_ids.iter().any(|id| id == chapter_id))
+                    .cloned()
+                    .collect()
+            });
+            replace_chapter_summary_entities_on_state(&mut working, chapter_id, segs, evs)?;
+        }
+        cancellation.check()?;
+        for link in realized_changes {
+            mark_change_realized_on_state(&mut working, &link.change_id, &link.segment_id)?;
+        }
+        for update in foreshadowing_updates {
+            apply_foreshadowing_update_on_state(&mut working, update)?;
+        }
+        for item in confirmations {
+            validate_non_empty_local("confirmation_id", &item.confirmation_id)?;
+            validate_non_empty_local("prompt_key", &item.prompt_key)?;
+            working
+                .confirmations
+                .insert(item.confirmation_id.clone(), item);
+        }
+        if let Some(chapter_summary) = chapter_summary {
+            working
+                .chapter_summaries
+                .insert(chapter_id.to_owned(), chapter_summary);
+        }
+        if let Some((stage_id, stage_summary)) = stage {
+            if let Some(previous_stage_id) = working.index.chapter_stage.remove(chapter_id) {
+                unlink_value(
+                    &mut working.index.stage_chapters,
+                    &previous_stage_id,
+                    chapter_id,
+                );
             }
-            if !event_ids.insert(event.event_id.clone()) {
-                return Err(CoreError::validation(
-                    "replacement contains duplicate story event id",
-                ));
-            }
-            if let Some(missing) = event
-                .segment_ids
-                .iter()
-                .find(|segment_id| !segment_ids.contains(*segment_id))
-            {
-                return Err(CoreError::validation(format!(
-                    "story event references missing replacement segment: {missing}"
-                )));
-            }
+            link_unique(
+                &mut working.index.stage_chapters,
+                &stage_id,
+                chapter_id.to_owned(),
+            );
+            working
+                .index
+                .chapter_stage
+                .insert(chapter_id.to_owned(), stage_id.clone());
+            working.stage_summaries.insert(stage_id, stage_summary);
         }
 
-        let mut state = self.lock_state()?;
-        let old_segment_ids = state
-            .index
-            .chapter_segments
-            .get(chapter_id)
+        let issues = if wrote_entities || wrote_chapter {
+            queue_unrealized_changes_on_state(&mut working, chapter_id)?
+        } else {
+            Vec::new()
+        };
+        cancellation.check()?;
+        *guard = working;
+        Ok(issues)
+    }
+
+    /// F14：将确认项中的 pending_payload 物化为 active 知识（单步）。
+    pub fn materialize_summary_confirmation_payload(
+        &self,
+        item: &ConfirmationItem,
+    ) -> CoreResult<()> {
+        use crate::rag::models::ConfirmationKind;
+        let payload = item
+            .metadata
+            .get("pending_payload")
             .cloned()
-            .unwrap_or_default();
-        let old_segment_set = old_segment_ids.iter().cloned().collect::<BTreeSet<_>>();
-        let old_event_ids = state
-            .index
-            .chapter_events
-            .get(chapter_id)
-            .cloned()
-            .unwrap_or_default();
-        let mut preserved_events = BTreeMap::new();
-        for event_id in old_event_ids {
-            if let Some(mut event) = state.events.remove(&event_id) {
-                state.remove_event_links(&event_id);
-                event.chapter_ids.retain(|id| id != chapter_id);
-                event.segment_ids.retain(|id| !old_segment_set.contains(id));
-                if !event.chapter_ids.is_empty() && !event.segment_ids.is_empty() {
-                    preserved_events.insert(event_id, event);
-                }
+            .ok_or_else(|| {
+                CoreError::validation(format!(
+                    "summary confirmation missing pending_payload: {}",
+                    item.confirmation_id
+                ))
+            })?;
+        let chapter_id = item
+            .metadata
+            .get("chapter_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::validation("confirmation missing chapter_id"))?
+            .to_owned();
+        let cancellation = crate::contracts::CancellationToken::new();
+        match item.kind {
+            ConfirmationKind::SegmentSummary => {
+                let segments: Vec<StorySegment> = serde_json::from_value(
+                    payload
+                        .get("segments")
+                        .cloned()
+                        .unwrap_or(Value::Array(vec![])),
+                )
+                .map_err(|e| CoreError::validation(format!("pending segments: {e}")))?;
+                let realized: Vec<crate::rag::models::RealizedChangeLink> = serde_json::from_value(
+                    payload
+                        .get("realized_changes")
+                        .cloned()
+                        .unwrap_or(Value::Array(vec![])),
+                )
+                .unwrap_or_default();
+                let foreshadowing: Vec<ForeshadowingUpdate> = serde_json::from_value(
+                    payload
+                        .get("foreshadowing_updates")
+                        .cloned()
+                        .unwrap_or(Value::Array(vec![])),
+                )
+                .unwrap_or_default();
+                self.apply_summary_pipeline_transaction(
+                    &chapter_id,
+                    Some(segments),
+                    None,
+                    realized,
+                    foreshadowing,
+                    Vec::new(),
+                    None,
+                    None,
+                    &cancellation,
+                )?;
             }
-        }
-        for segment_id in old_segment_ids {
-            state.segments.remove(&segment_id);
-            state.remove_segment_links(&segment_id);
-        }
-        for segment in segments {
-            state.insert_segment(segment);
-        }
-        for mut event in events {
-            if let Some(existing) = state.events.remove(&event.event_id) {
-                state.remove_event_links(&event.event_id);
-                merge_unique(&mut event.segment_ids, existing.segment_ids);
-                merge_unique(&mut event.chapter_ids, existing.chapter_ids);
+            ConfirmationKind::EventSummary => {
+                let events: Vec<StoryEvent> = serde_json::from_value(
+                    payload
+                        .get("events")
+                        .cloned()
+                        .unwrap_or(Value::Array(vec![])),
+                )
+                .map_err(|e| CoreError::validation(format!("pending events: {e}")))?;
+                self.apply_summary_pipeline_transaction(
+                    &chapter_id,
+                    None,
+                    Some(events),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                    &cancellation,
+                )?;
             }
-            if let Some(existing) = preserved_events.remove(&event.event_id) {
-                merge_unique(&mut event.segment_ids, existing.segment_ids);
-                merge_unique(&mut event.chapter_ids, existing.chapter_ids);
+            ConfirmationKind::ChapterSummary => {
+                let summary = payload
+                    .get("chapter_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                self.apply_summary_pipeline_transaction(
+                    &chapter_id,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Some(summary),
+                    None,
+                    &cancellation,
+                )?;
             }
-            state.insert_event(event);
-        }
-        for (_, event) in preserved_events {
-            state.insert_event(event);
+            ConfirmationKind::StageSummary => {
+                let stage_id = payload
+                    .get("stage_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let stage_summary = payload
+                    .get("stage_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                self.apply_summary_pipeline_transaction(
+                    &chapter_id,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some((stage_id, stage_summary)),
+                    &cancellation,
+                )?;
+            }
+            _ => {
+                return Err(CoreError::validation(
+                    "materialize_summary_confirmation_payload only supports summary kinds",
+                ));
+            }
         }
         Ok(())
+    }
+
+    /// F25：stage_id 是否已作为确认过的阶段存在。
+    pub fn has_stage(&self, stage_id: &str) -> CoreResult<bool> {
+        Ok(self.lock_state()?.stage_summaries.contains_key(stage_id))
     }
 
     /// 写入或更新注册项，注册项默认表示 Planner 计划变化。
@@ -403,7 +549,7 @@ impl MemoryWritingKnowledgeBase {
             .values()
             .filter(|change| {
                 change.status == RegisteredChangeStatus::Planned
-                    && change_applies_to_chapter(change, chapter_id)
+                    && change.applies_to_chapter(chapter_id)
             })
             .cloned()
             .collect();
@@ -919,6 +1065,219 @@ impl WritingKnowledgeState {
     }
 }
 
+fn replace_chapter_summary_entities_on_state(
+    state: &mut WritingKnowledgeState,
+    chapter_id: &str,
+    segments: Vec<StorySegment>,
+    events: Vec<StoryEvent>,
+) -> CoreResult<()> {
+    validate_non_empty_local("chapter_id", chapter_id)?;
+    let mut segment_ids = BTreeSet::new();
+    for segment in &segments {
+        segment.validate()?;
+        if segment.chapter_id != chapter_id {
+            return Err(CoreError::validation(
+                "replacement story segment belongs to another chapter",
+            ));
+        }
+        if !segment_ids.insert(segment.segment_id.clone()) {
+            return Err(CoreError::validation(
+                "replacement contains duplicate story segment id",
+            ));
+        }
+    }
+    let mut event_ids = BTreeSet::new();
+    for event in &events {
+        event.validate()?;
+        if !event.chapter_ids.iter().any(|id| id == chapter_id) {
+            return Err(CoreError::validation(
+                "replacement story event does not reference chapter",
+            ));
+        }
+        if !event_ids.insert(event.event_id.clone()) {
+            return Err(CoreError::validation(
+                "replacement contains duplicate story event id",
+            ));
+        }
+        if let Some(missing) = event
+            .segment_ids
+            .iter()
+            .find(|segment_id| !segment_ids.contains(*segment_id))
+        {
+            return Err(CoreError::validation(format!(
+                "story event references missing replacement segment: {missing}"
+            )));
+        }
+    }
+
+    let old_segment_ids = state
+        .index
+        .chapter_segments
+        .get(chapter_id)
+        .cloned()
+        .unwrap_or_default();
+    let old_segment_set = old_segment_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let old_event_ids = state
+        .index
+        .chapter_events
+        .get(chapter_id)
+        .cloned()
+        .unwrap_or_default();
+    let mut preserved_events = BTreeMap::new();
+    for event_id in old_event_ids {
+        if let Some(mut event) = state.events.remove(&event_id) {
+            state.remove_event_links(&event_id);
+            event.chapter_ids.retain(|id| id != chapter_id);
+            event.segment_ids.retain(|id| !old_segment_set.contains(id));
+            if !event.chapter_ids.is_empty() && !event.segment_ids.is_empty() {
+                preserved_events.insert(event_id, event);
+            }
+        }
+    }
+    for segment_id in old_segment_ids {
+        state.segments.remove(&segment_id);
+        state.remove_segment_links(&segment_id);
+    }
+    for segment in segments {
+        state.insert_segment(segment);
+    }
+    for mut event in events {
+        if let Some(existing) = state.events.remove(&event.event_id) {
+            state.remove_event_links(&event.event_id);
+            merge_unique(&mut event.segment_ids, existing.segment_ids);
+            merge_unique(&mut event.chapter_ids, existing.chapter_ids);
+        }
+        if let Some(existing) = preserved_events.remove(&event.event_id) {
+            merge_unique(&mut event.segment_ids, existing.segment_ids);
+            merge_unique(&mut event.chapter_ids, existing.chapter_ids);
+        }
+        state.insert_event(event);
+    }
+    for (_, event) in preserved_events {
+        state.insert_event(event);
+    }
+    Ok(())
+}
+
+fn mark_change_realized_on_state(
+    state: &mut WritingKnowledgeState,
+    change_id: &str,
+    segment_id: &str,
+) -> CoreResult<()> {
+    validate_non_empty_local("change_id", change_id)?;
+    validate_non_empty_local("segment_id", segment_id)?;
+    if !state.segments.contains_key(segment_id) {
+        return Err(CoreError::validation(format!(
+            "story segment not found: {segment_id}"
+        )));
+    }
+    {
+        let change = state.changes.get_mut(change_id).ok_or_else(|| {
+            CoreError::validation(format!("registered change not found: {change_id}"))
+        })?;
+        change.status = RegisteredChangeStatus::Realized;
+        push_unique(&mut change.linked_segment_ids, segment_id.to_owned());
+    }
+    link_unique(
+        &mut state.index.change_segments,
+        change_id,
+        segment_id.to_owned(),
+    );
+    link_unique(
+        &mut state.index.segment_changes,
+        segment_id,
+        change_id.to_owned(),
+    );
+    Ok(())
+}
+
+fn apply_foreshadowing_update_on_state(
+    state: &mut WritingKnowledgeState,
+    update: ForeshadowingUpdate,
+) -> CoreResult<()> {
+    validate_non_empty_local("foreshadowing_id", &update.foreshadowing_id)?;
+    validate_non_empty_local("segment_id", &update.segment_id)?;
+    if !state.segments.contains_key(&update.segment_id) {
+        return Err(CoreError::validation(format!(
+            "story segment not found: {}",
+            update.segment_id
+        )));
+    }
+    let record = state
+        .foreshadowing
+        .get_mut(&update.foreshadowing_id)
+        .ok_or_else(|| {
+            CoreError::validation(format!(
+                "foreshadowing not found: {}",
+                update.foreshadowing_id
+            ))
+        })?;
+    if !matches!(
+        update.status,
+        ForeshadowingStatus::Planted | ForeshadowingStatus::Recovered
+    ) {
+        return Err(CoreError::validation(
+            "summarizer foreshadowing update only supports planted or recovered",
+        ));
+    }
+    record.status = update.status;
+    match update.status {
+        ForeshadowingStatus::Planted => {
+            push_unique(&mut record.planted_segment_ids, update.segment_id.clone());
+        }
+        ForeshadowingStatus::Recovered => {
+            push_unique(&mut record.recovered_segment_ids, update.segment_id.clone());
+        }
+        ForeshadowingStatus::Planned | ForeshadowingStatus::Abandoned => unreachable!(),
+    }
+    link_unique(
+        &mut state.index.foreshadowing_segments,
+        &update.foreshadowing_id,
+        update.segment_id.clone(),
+    );
+    link_unique(
+        &mut state.index.segment_foreshadowing,
+        &update.segment_id,
+        update.foreshadowing_id,
+    );
+    Ok(())
+}
+
+fn queue_unrealized_changes_on_state(
+    state: &mut WritingKnowledgeState,
+    chapter_id: &str,
+) -> CoreResult<Vec<PlannerIssue>> {
+    let changes: Vec<RegisteredChange> = state
+        .changes
+        .values()
+        .filter(|change| {
+            change.status == RegisteredChangeStatus::Planned
+                && change.applies_to_chapter(chapter_id)
+        })
+        .cloned()
+        .collect();
+    let mut issues = Vec::new();
+    for change in changes {
+        let issue_id = format!("{chapter_id}::{}", change.change_id);
+        if let Some(existing) = state.issues.get(&issue_id).cloned() {
+            issues.push(existing);
+            continue;
+        }
+        let issue = PlannerIssue {
+            issue_id: issue_id.clone(),
+            change_id: change.change_id,
+            chapter_id: chapter_id.to_owned(),
+            reason: "registered change was not matched to any realized story segment".to_owned(),
+            related_sources: Vec::new(),
+            planner_explanation: None,
+            correction_patch: None,
+        };
+        state.issues.insert(issue_id, issue.clone());
+        issues.push(issue);
+    }
+    Ok(issues)
+}
+
 /// 判断 register 内容类型是否与功能一致。
 fn matches_register_content(function: RegisterFunction, content: &RegisterContent) -> bool {
     matches!(
@@ -943,21 +1302,6 @@ fn matches_register_content(function: RegisterFunction, content: &RegisterConten
             RegisterContent::Foreshadowing(_)
         )
     )
-}
-
-/// 判断注册项是否应由当前章节的 Summarizer 负责核对。
-fn change_applies_to_chapter(change: &RegisteredChange, chapter_id: &str) -> bool {
-    match &change.content {
-        RegisterContent::CharacterPlan(plan) => plan
-            .chapter_id
-            .as_deref()
-            .map(|id| id == chapter_id)
-            .unwrap_or(true),
-        RegisterContent::ThemeAnchor(anchor) => {
-            anchor.chapter_ids.is_empty() || anchor.chapter_ids.iter().any(|id| id == chapter_id)
-        }
-        _ => true,
-    }
 }
 
 /// 生成稳定且单调递增的注册项 id，避免显式 id 或失败重试造成 `len()+1` 撞号。

@@ -1,4 +1,7 @@
 {
-  "_comment": "English translation overlay for Ariadne. Keys missing here fall back to zh (display_name.json). Fill in translations as they are ready.",
-  "_status": "stub — pending translation"
+  "_comment": "Not shipped as a completed locale. First release is Chinese-only (see ui.i18n.release_scope). Keys fall back to display_name.json.",
+  "_status": "out_of_scope_for_v1 — stub retained for future translation only",
+  "_release": "zh-only",
+  "ui.maintenance.banner_active": "Project maintenance in progress ({kind} · {phase}). Saves and runs are blocked until it finishes.",
+  "ui.maintenance.banner_failed": "Project maintenance failed ({kind} · {phase}): {error}. Fix the issue before saving or running."
 }

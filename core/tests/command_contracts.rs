@@ -1,38 +1,51 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 use ariadne::commands::{
-    create_checkpoint_impl, create_project, fetch_provider_models, fetch_provider_models_impl,
-    get_app_settings_impl, get_app_status, get_automation_settings_impl, get_backend_diagnostics,
-    get_budget_status_impl, get_display_name_language_pack_template, get_document_content_impl,
-    get_document_tree_impl, get_git_history_impl, get_git_repository_status_impl,
-    get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
-    get_provider_config_impl, get_rag_settings_impl, get_sidebar_badges,
-    get_template_repository_settings, get_template_repository_settings_impl,
-    get_workflow_settings_impl, import_chapter, list_confirmations,
-    list_external_workflow_tools_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
-    open_project, pack_workflow_selection_impl, process_index_outbox_impl, project_ai_chat,
-    project_ai_chat_impl, query_run_logs, resolve_confirmation_impl, resolve_project_references,
-    restore_to_new_branch, run_workflow, run_workflow_impl, save_app_settings_impl,
-    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
-    save_node_preset_settings_impl, save_permissions_settings_impl, save_provider_key_impl,
-    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings,
-    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
-    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
-    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
-    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, NodePresetSettings,
-    PermissionsSettings, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest,
-    ProviderSettingsUpdate, RagSettings, ResolveConfirmationRequest, RunLogQuery,
-    TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
+    create_checkpoint_impl, create_project, ensure_index_bootstrap_on_open, fetch_provider_models,
+    fetch_provider_models_impl, get_app_settings_impl, get_app_status,
+    get_automation_settings_impl, get_backend_diagnostics, get_budget_status_impl,
+    get_display_name_language_pack_template, get_document_content_impl, get_document_tree_impl,
+    get_git_history_impl, get_git_repository_status_impl, get_git_settings_impl,
+    get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
+    get_rag_settings_impl, get_sidebar_badges, get_template_repository_settings,
+    get_template_repository_settings_impl, get_workflow_settings_impl, import_chapter,
+    list_confirmations, list_external_workflow_tools_impl, list_workflow_graphs_impl,
+    load_workflow_graph_impl, mark_workflow_run_failed_impl,
+    mark_workflow_run_failed_with_lease_impl, open_project, override_confirmation_output,
+    pack_workflow_selection_impl, pause_workflow, process_index_outbox_impl, project_ai_chat,
+    project_ai_chat_impl, query_run_logs, quick_edit_impl, register_executor_adapters_for_project,
+    resolve_confirmation_impl, resolve_project_references, resolve_workflow_operation_in_doubt,
+    restore_to_new_branch, resume_from_node, resume_workflow, run_workflow, run_workflow_impl,
+    save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
+    save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
+    save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
+    save_template_repository_settings, save_template_repository_settings_impl,
+    save_workflow_graph_impl, save_workflow_settings_impl, search_project_documents_impl,
+    set_project_root, start_workflow_with_request, stop_workflow, update_budget_config_impl,
+    validate_display_name_language_pack, AppSettings, AriadneAppState, AutomationSettings,
+    CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
+    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, InDoubtDecision,
+    NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
+    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate,
+    QuickEditRequest, RagSettings, ResolveConfirmationRequest, ResolveInDoubtOperationRequest,
+    ResumeFromNodeRequest, RunLogQuery, TemplateRepositorySettings, WorkflowGraphData,
+    WorkflowSettings,
 };
-use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
+use ariadne::config::{
+    ConfigStore, MemorySecretStore, ModelConfig, ProviderConfig, SecretRef, SecretStore,
+    PROVIDERS_CONFIG_FILE,
+};
 use ariadne::contracts::{
-    NodeId, PermissionPolicy, PortValue, ProviderCapability, ProviderType, RunId, RunStatus,
-    WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
+    NodeId, NodeInstance, PermissionPolicy, PortValue, ProviderCapability, ProviderType,
+    RunControl, RunId, RunStatus, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
 use ariadne::diagnostics::DiagnosticStatus;
 use ariadne::documents::IndexInvalidationOutbox;
@@ -41,8 +54,11 @@ use ariadne::frontend::{
 };
 use ariadne::retrieval::{FullTextSearchRequest, FullTextStore, TantivyFullTextStore};
 use ariadne::workflow::{
-    RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRunState,
-    WorkflowRuntime, WorkflowRuntimeStore,
+    ConfirmationResolutionDecision, ConfirmationResolutionStatus, NewWorkflowOperation,
+    RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore,
+    WorkflowNodeExecutionOutput, WorkflowNodeRuntimeState, WorkflowOperationPolicy,
+    WorkflowOperationStatus, WorkflowRunState, WorkflowRuntime, WorkflowRuntimeEventType,
+    WorkflowRuntimeStore,
 };
 use serde_json::{json, Value};
 
@@ -65,6 +81,60 @@ fn wait_for_terminal_workflow_state(
         thread::sleep(Duration::from_millis(20));
     }
     last.expect("workflow state should be persisted by background worker")
+}
+
+#[test]
+fn f12_public_control_commands_preserve_terminal_runs_and_stop_is_idempotent() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let app = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let store = SqliteWorkflowRuntimeStore::open(project.path()).unwrap();
+    let workflow_id = WorkflowId::from("f12-terminal-controls");
+
+    for terminal in [RunStatus::Succeeded, RunStatus::Failed, RunStatus::Stopped] {
+        let run_id = RunId::from(format!("run-{terminal:?}"));
+        let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+        state.status = terminal;
+        state.control = if terminal == RunStatus::Stopped {
+            RunControl::Stop
+        } else {
+            RunControl::Continue
+        };
+        store.create_state(&state).unwrap();
+        let before = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+
+        let pause_error = pause_workflow(
+            &app,
+            workflow_id.as_str().to_owned(),
+            run_id.as_str().to_owned(),
+            Some("must not revive".to_owned()),
+        )
+        .unwrap_err();
+        assert!(pause_error.contains("cannot pause workflow run"));
+        let resume_error = resume_workflow(
+            &app,
+            workflow_id.as_str().to_owned(),
+            run_id.as_str().to_owned(),
+        )
+        .unwrap_err();
+        assert!(resume_error.contains("cannot resume"));
+
+        let stop = stop_workflow(
+            &app,
+            workflow_id.as_str().to_owned(),
+            run_id.as_str().to_owned(),
+            Some("idempotent stop".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(stop.status, format!("{terminal:?}").to_ascii_lowercase());
+        let after = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+        assert_eq!(after, before, "terminal {terminal:?} must be zero-write");
+    }
 }
 
 #[test]
@@ -119,6 +189,371 @@ fn project_indexing_worker_consumes_persisted_document_event() {
     }));
 }
 
+/// F2-a product path: documents exist, empty indexes, empty outbox → bootstrap
+/// (same entry `open_project` / `set_project_root` call) → process outbox → searchable.
+#[test]
+fn f2a_open_project_bootstraps_full_rebuild_for_existing_documents() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let chapter = temp.path().join("documents").join("chapter.md");
+    std::fs::write(&chapter, "离线复制进来的可检索线索").unwrap();
+    let sqlite_path = temp.path().join(".indexes").join("full_text.db");
+    assert!(
+        !sqlite_path.exists()
+            || ariadne::retrieval::full_text_index_is_empty(&sqlite_path).unwrap()
+    );
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    assert!(outbox.pending().unwrap().is_empty());
+
+    // Product bootstrap entry (invoked by open_project / set_project_root before resume worker).
+    let event_id = ensure_index_bootstrap_on_open(temp.path()).unwrap();
+    assert!(
+        event_id.is_some(),
+        "empty index + sources must enqueue full rebuild"
+    );
+    assert!(outbox.has_incomplete_full_rebuild().unwrap());
+
+    // Same worker body open_project spawns (sync — avoids racing async IndexWriter).
+    let processed = process_index_outbox_impl(temp.path()).unwrap();
+    assert!(processed >= 1, "bootstrap full rebuild must be processed");
+    assert!(!outbox.has_incomplete_full_rebuild().unwrap());
+
+    // open_project / set_project_root must call ensure_index_bootstrap_on_open (shipped wiring).
+    let commands_src = include_str!("../src/commands.rs");
+    assert!(
+        commands_src.contains("ensure_index_bootstrap_on_open(&project_root)?")
+            && commands_src.contains("pub fn open_project")
+            && commands_src.contains("pub fn set_project_root"),
+        "open_project and set_project_root must invoke ensure_index_bootstrap_on_open"
+    );
+
+    let results = search_project_documents_impl(temp.path(), "线索".to_owned(), 10).unwrap();
+    assert!(
+        !results.is_empty(),
+        "documents present at open must be searchable after bootstrap rebuild"
+    );
+    assert!(results.iter().any(|r| r.snippet.contains("线索")));
+}
+
+/// F10-c product path: missing required Start input is rejected before create_state.
+#[test]
+fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() {
+    use ariadne::workflow::SqliteWorkflowRuntimeStore;
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "f10c-schema".to_owned(),
+            name: "F10-c schema".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-main".to_owned(),
+                r#type: "start".to_owned(),
+                label: None,
+                data: json!({
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["topic"],
+                        "properties": {
+                            "topic": { "type": "string" }
+                        }
+                    }
+                }),
+                position: Value::Null,
+            }],
+            edges: vec![],
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+
+    let app_state = tempfile::tempdir().unwrap();
+    let app = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    // Empty map — must still enforce required (not only non-empty maps).
+    let err_empty = start_workflow_with_request(
+        &app,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "f10c-schema".to_owned(),
+            start_node_id: Some("start-main".to_owned()),
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .expect_err("empty initial_inputs must fail required schema");
+    assert!(
+        err_empty.contains("missing required") || err_empty.contains("topic"),
+        "unexpected empty reject: {err_empty}"
+    );
+
+    let mut wrong_type = BTreeMap::new();
+    wrong_type.insert("topic".to_owned(), json!(123));
+    let err_type = start_workflow_with_request(
+        &app,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "f10c-schema".to_owned(),
+            start_node_id: Some("start-main".to_owned()),
+            initial_inputs: wrong_type,
+        },
+    )
+    .expect_err("wrong type must fail");
+    assert!(
+        err_type.contains("expected type") || err_type.contains("string"),
+        "unexpected type reject: {err_type}"
+    );
+
+    let mut unknown = BTreeMap::new();
+    unknown.insert("topic".to_owned(), json!("ok"));
+    unknown.insert("extra".to_owned(), json!("nope"));
+    let err_unknown = start_workflow_with_request(
+        &app,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "f10c-schema".to_owned(),
+            start_node_id: Some("start-main".to_owned()),
+            initial_inputs: unknown,
+        },
+    )
+    .expect_err("unknown property must fail");
+    assert!(
+        err_unknown.contains("not declared") || err_unknown.contains("extra"),
+        "unexpected unknown reject: {err_unknown}"
+    );
+
+    // No run may have been persisted after rejections.
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let runs = store.list_non_terminal_states().unwrap();
+    assert!(
+        runs.is_empty(),
+        "F10-c reject must happen before create_state; found {} runs",
+        runs.len()
+    );
+}
+
+/// F10-d product path: open_project claims orphan Queued runs that have no live lease.
+#[test]
+fn f10d_open_project_recovers_orphaned_queued_run() {
+    use ariadne::workflow::{SqliteWorkflowRuntimeStore, WorkflowRunState, WorkflowRuntimeStore};
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("orphan-wf"),
+        name: "Orphan".to_owned(),
+        nodes: vec![NodeInstance {
+            id: NodeId::from("start"),
+            type_name: "start".to_owned(),
+            label: None,
+            config: json!({}),
+            position: None,
+        }],
+        edges: Vec::new(),
+        metadata: json!({}),
+    };
+    let run_id = RunId::from("orphan-queued-1");
+    let mut state = WorkflowRunState::new(workflow.id.clone(), run_id.clone());
+    state.prepared_workflow = Some(workflow.clone());
+    state.status = RunStatus::Queued;
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    store.create_state(&state).unwrap();
+    // No worker lease → classic create/lease/spawn crash window.
+    assert!(store
+        .load_worker_lease(&workflow.id, &run_id)
+        .unwrap()
+        .is_none());
+
+    let app_state = tempfile::tempdir().unwrap();
+    let app = AriadneAppState::new(
+        PathBuf::new(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    open_project(
+        &app,
+        temp.path().to_string_lossy().into_owned(),
+        Some("orphan-project".to_owned()),
+    )
+    .unwrap();
+
+    // Recovery must claim a worker lease (spawn may later fail for minimal graph — lease is the handoff).
+    let mut claimed = None;
+    for _ in 0..50 {
+        if let Some(lease) = store.load_worker_lease(&workflow.id, &run_id).unwrap() {
+            claimed = Some(lease);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let lease = claimed.expect("open_project must recover orphan Queued by acquiring worker lease");
+    assert!(
+        lease.owner_id.starts_with("worker-recover-") || lease.owner_id.starts_with("worker-"),
+        "unexpected owner: {}",
+        lease.owner_id
+    );
+
+    // set_project_root uses the same recovery entry; plant a second orphan and rebind.
+    let run_id2 = RunId::from("orphan-queued-2");
+    let mut state2 = WorkflowRunState::new(workflow.id.clone(), run_id2.clone());
+    state2.prepared_workflow = Some(workflow.clone());
+    state2.status = RunStatus::Queued;
+    store.create_state(&state2).unwrap();
+    set_project_root(&app, temp.path().to_string_lossy().into_owned()).unwrap();
+    let mut claimed2 = None;
+    for _ in 0..50 {
+        if let Some(lease) = store.load_worker_lease(&workflow.id, &run_id2).unwrap() {
+            claimed2 = Some(lease);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        claimed2.is_some(),
+        "set_project_root must also recover orphan Queued runs"
+    );
+}
+
+/// F10-b/F10-d product path: legacy orphan runs without a frozen definition
+/// converge under a claimed lease instead of remaining Queued forever.
+#[test]
+fn f10d_open_project_converges_legacy_orphan_to_fenced_failure() {
+    use ariadne::workflow::{SqliteWorkflowRuntimeStore, WorkflowRunState, WorkflowRuntimeStore};
+
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let workflow_id = WorkflowId::from("legacy-orphan-wf");
+    let run_id = RunId::from("legacy-orphan-run");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.status = RunStatus::Queued;
+    state.prepared_workflow = None;
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    store.create_state(&state).unwrap();
+
+    let app_state = tempfile::tempdir().unwrap();
+    let app = AriadneAppState::new(
+        PathBuf::new(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    open_project(
+        &app,
+        temp.path().to_string_lossy().into_owned(),
+        Some("legacy-orphan-project".to_owned()),
+    )
+    .unwrap();
+
+    let failed = store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .expect("legacy orphan must remain queryable as an explicit failure");
+    assert_eq!(failed.status, RunStatus::Failed);
+    assert_eq!(failed.control, RunControl::Stop);
+    let failure = failed
+        .failure
+        .expect("legacy orphan failure must be structured");
+    assert_eq!(failure.code, "workflow_legacy_snapshot_unrecoverable");
+    assert_eq!(failure.stage, "workflow_orphan_recovery");
+    assert_eq!(
+        failure.message,
+        "error.workflow.legacy_snapshot_unrecoverable"
+    );
+    assert_eq!(
+        failure.recovery_suggestion,
+        "error.workflow.legacy_snapshot_unrecoverable.recovery"
+    );
+    assert!(store
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .is_none());
+}
+
+/// F2-a: second bootstrap is idempotent when index already populated.
+#[test]
+fn f2a_bootstrap_is_idempotent_when_index_already_populated() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    std::fs::write(
+        temp.path().join("documents").join("chapter.md"),
+        "已索引正文",
+    )
+    .unwrap();
+    let first = ensure_index_bootstrap_on_open(temp.path()).unwrap();
+    assert!(first.is_some(), "first bootstrap must enqueue");
+    process_index_outbox_impl(temp.path()).unwrap();
+    let second = ensure_index_bootstrap_on_open(temp.path()).unwrap();
+    assert!(
+        second.is_none(),
+        "populated index must not re-enqueue full rebuild"
+    );
+}
+
+/// F2-b: after save of new body, product search must not return pre-save body as current fact.
+#[test]
+fn f2b_search_rejects_stale_chunks_after_save_before_reindex() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let path = temp.path().join("documents").join("chapter.md");
+    let old_body = "旧版本剧情线索甲";
+    std::fs::write(&path, old_body).unwrap();
+    let document_id = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let old_version = test_content_version(old_body.as_bytes());
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    let event_id = outbox
+        .prepare(&document_id, "document_saved", &old_version, false)
+        .unwrap();
+    outbox.activate(&event_id).unwrap();
+    assert_eq!(process_index_outbox_impl(temp.path()).unwrap(), 1);
+
+    // Indexed: old body is searchable.
+    let before = search_project_documents_impl(temp.path(), "旧版本".to_owned(), 10).unwrap();
+    assert!(!before.is_empty());
+
+    // Product save enqueues invalidation and leaves index on old chunks until worker runs.
+    save_document_content_impl(
+        temp.path(),
+        "documents/chapter.md".to_owned(),
+        "新版本剧情线索乙".to_owned(),
+    )
+    .unwrap();
+
+    // Immediate search: must fail loud (indexing_not_ready) OR not return old body as current.
+    match search_project_documents_impl(temp.path(), "旧版本".to_owned(), 10) {
+        Err(error) => {
+            let msg = error.to_string();
+            assert!(
+                msg.contains("indexing_not_ready") || msg.contains("pending"),
+                "unexpected error: {msg}"
+            );
+        }
+        Ok(results) => {
+            assert!(
+                results
+                    .iter()
+                    .all(|r| !r.snippet.contains("旧版本剧情线索甲")),
+                "stale pre-save body must not be returned as current: {results:?}"
+            );
+        }
+    }
+
+    // After worker catches up, new body is searchable and old unique phrase is gone.
+    process_index_outbox_impl(temp.path()).unwrap();
+    let after_new = search_project_documents_impl(temp.path(), "新版本".to_owned(), 10).unwrap();
+    assert!(!after_new.is_empty());
+    let after_old = search_project_documents_impl(temp.path(), "旧版本剧情线索甲".to_owned(), 10)
+        .unwrap_or_default();
+    assert!(
+        after_old
+            .iter()
+            .all(|r| !r.snippet.contains("旧版本剧情线索甲")),
+        "reindexed search must not still surface old body"
+    );
+}
+
 fn test_content_version(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
@@ -131,9 +566,10 @@ fn test_content_version(bytes: &[u8]) -> String {
 #[test]
 fn import_chapter_command_resolves_project_relative_paths() {
     let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
     let state = AriadneAppState::new(
         temp.path().to_path_buf(),
-        temp.path().join(".app"),
+        app_state.path(),
         Arc::new(MemorySecretStore::default()),
     );
     ariadne::frontend::initialize_project(temp.path()).unwrap();
@@ -341,6 +777,8 @@ fn workflow_graph_commands_save_and_load_canvas_shape() {
         }],
         edges: Vec::new(),
         metadata: Value::Null,
+        content_revision: None,
+        expected_revision: None,
     };
 
     save_workflow_graph_impl(temp.path(), graph).unwrap();
@@ -378,6 +816,63 @@ fn explicit_missing_workflow_id_is_not_loaded_as_default_graph() {
 }
 
 #[test]
+fn async_start_rejects_missing_workflow_before_returning_queued() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let error = run_workflow(&state, "missing-flow".to_owned(), None).unwrap_err();
+
+    assert!(error.contains("workflow not found: missing-flow"));
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    assert!(store.list_non_terminal_states().unwrap().is_empty());
+}
+
+#[test]
+fn async_start_rejects_corrupt_runtime_store_before_returning_queued() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "runtime-preflight".to_owned(),
+            name: "Runtime Preflight".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start".to_owned(),
+                r#type: "start".to_owned(),
+                label: None,
+                data: Value::Null,
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("runtime.db"), "not a sqlite database").unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let error = run_workflow(&state, "runtime-preflight".to_owned(), None).unwrap_err();
+
+    assert!(
+        error.contains("database") || error.contains("SQLite"),
+        "{error}"
+    );
+}
+
+#[test]
 fn workflow_graph_list_returns_all_saved_workflows() {
     let temp = tempfile::tempdir().unwrap();
     save_workflow_graph_impl(
@@ -394,6 +889,8 @@ fn workflow_graph_list_returns_all_saved_workflows() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -420,6 +917,8 @@ fn workflow_graph_list_returns_all_saved_workflows() {
             ],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -501,6 +1000,8 @@ fn workflow_graph_save_rejects_symlink_escape_from_workflows_root() {
         nodes: Vec::new(),
         edges: Vec::new(),
         metadata: Value::Null,
+        content_revision: None,
+        expected_revision: None,
     };
 
     let error = save_workflow_graph_impl(temp.path(), graph).unwrap_err();
@@ -604,6 +1105,8 @@ fn pack_workflow_selection_command_persists_subworkflow_graph() {
                 },
             ],
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -614,6 +1117,7 @@ fn pack_workflow_selection_command_persists_subworkflow_graph() {
         vec!["writer".to_owned(), "reviewer".to_owned()],
         Some("sub-review".to_owned()),
         Some("Review Subflow".to_owned()),
+        None,
     )
     .unwrap();
     let loaded = load_workflow_graph_impl(temp.path(), Some("pack-flow".to_owned())).unwrap();
@@ -657,6 +1161,8 @@ fn run_workflow_executes_document_nodes_with_real_document_service() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -696,6 +1202,8 @@ fn run_workflow_command_starts_background_run() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -719,6 +1227,151 @@ fn run_workflow_command_starts_background_run() {
 
     assert_eq!(state.status, RunStatus::Succeeded);
     assert!(state.nodes.contains_key(&NodeId::from("start-main")));
+    assert!(state
+        .structured_events
+        .iter()
+        .any(|event| event.event_type == WorkflowRuntimeEventType::RunQueued));
+    let started = state
+        .structured_events
+        .iter()
+        .find(|event| event.event_type == WorkflowRuntimeEventType::RunStarted)
+        .expect("background worker must continue the persisted queued snapshot");
+    assert_eq!(started.sequence, 1);
+    assert_eq!(
+        state.next_event_sequence as usize,
+        state.structured_events.len()
+    );
+    for _ in 0..100 {
+        if store
+            .load_worker_lease(&WorkflowId::from("async-run"), &run_id)
+            .unwrap()
+            .is_none()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(store
+        .load_worker_lease(&WorkflowId::from("async-run"), &run_id)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn workflow_worker_failure_updates_existing_run_with_structured_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::from("failed-worker");
+    let run_id = RunId::from("run-failed-worker");
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    store.create_state(&state).unwrap();
+
+    mark_workflow_run_failed_impl(
+        temp.path(),
+        workflow_id.as_str(),
+        run_id.as_str(),
+        "workflow_worker_failed",
+        "executor_init",
+        "provider configuration changed after queueing",
+        "repair provider configuration and start a new run",
+    )
+    .unwrap();
+
+    let failed = store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .expect("queued run must remain queryable after worker failure");
+    assert_eq!(failed.status, RunStatus::Failed);
+    let failure = failed.failure.expect("run failure must be structured");
+    assert_eq!(failure.code, "workflow_worker_failed");
+    assert_eq!(failure.stage, "executor_init");
+    assert_eq!(
+        failure.recovery_suggestion,
+        "repair provider configuration and start a new run"
+    );
+    assert!(failed
+        .structured_events
+        .iter()
+        .any(|event| event.event_type == WorkflowRuntimeEventType::RunFailed));
+}
+
+#[test]
+fn stale_workflow_worker_cannot_fail_run_after_lease_takeover() {
+    let temp = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::from("fenced-worker-failure");
+    let run_id = RunId::from("run-fenced-worker-failure");
+    let first_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    first_store
+        .create_state(&WorkflowRunState::new(workflow_id.clone(), run_id.clone()))
+        .unwrap();
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let stale_lease = first_store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-a", now_ms, 100)
+        .unwrap()
+        .unwrap();
+    let current_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let current_lease = current_store
+        .acquire_worker_lease(
+            &workflow_id,
+            &run_id,
+            "owner-b",
+            now_ms.saturating_add(100),
+            30_000,
+        )
+        .unwrap()
+        .unwrap();
+
+    let stale_result = mark_workflow_run_failed_with_lease_impl(
+        temp.path(),
+        workflow_id.as_str(),
+        run_id.as_str(),
+        "stale_worker_failed",
+        "executor",
+        "old owner completed after takeover",
+        "ignore stale owner",
+        &stale_lease,
+    );
+    assert!(stale_result.is_err());
+    let unchanged = current_store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, RunStatus::Queued);
+    assert!(unchanged.failure.is_none());
+    assert_eq!(
+        current_store
+            .load_worker_lease(&workflow_id, &run_id)
+            .unwrap(),
+        Some(current_lease.clone())
+    );
+
+    mark_workflow_run_failed_with_lease_impl(
+        temp.path(),
+        workflow_id.as_str(),
+        run_id.as_str(),
+        "current_worker_failed",
+        "executor",
+        "current owner failed",
+        "repair and restart",
+        &current_lease,
+    )
+    .unwrap();
+    let failed = current_store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.status, RunStatus::Failed);
+    assert_eq!(failed.failure.unwrap().code, "current_worker_failed");
+    assert!(current_store
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -800,6 +1453,8 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
                 },
             ],
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -858,8 +1513,9 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
 }
 
 #[test]
-fn run_workflow_from_start_node_injects_tool_arguments_as_outputs() {
+fn async_run_persists_inputs_and_expired_lease_resume_uses_prepared_snapshot() {
     let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -918,15 +1574,22 @@ fn run_workflow_from_start_node_injects_tool_arguments_as_outputs() {
                 },
             ],
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
 
+    let app_state = tempfile::tempdir().unwrap();
+    let app = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
     let mut initial_inputs = BTreeMap::new();
     initial_inputs.insert("topic".to_owned(), json!("长夜行"));
-    let run = run_workflow_impl(
-        temp.path(),
-        &MemorySecretStore::default(),
+    let run = start_workflow_with_request(
+        &app,
         ariadne::commands::RunWorkflowRequest {
             workflow_id: "tool-start".to_owned(),
             start_node_id: Some("start-main".to_owned()),
@@ -935,14 +1598,80 @@ fn run_workflow_from_start_node_injects_tool_arguments_as_outputs() {
     )
     .unwrap();
 
-    assert_eq!(run.status, "succeeded");
+    assert_eq!(run.status, "queued");
     let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
-    let state = store
-        .load_state(&WorkflowId::from("tool-start"), &RunId::from(run.run_id))
+    let workflow_id = WorkflowId::from("tool-start");
+    let run_id = RunId::from(run.run_id);
+    let persisted_after_return = store
+        .load_state(&workflow_id, &run_id)
         .unwrap()
-        .unwrap();
-    let check = state.nodes.get(&NodeId::from("check-topic")).unwrap();
+        .expect("queued response must have a persisted run snapshot");
+    let prepared_workflow = persisted_after_return
+        .prepared_workflow
+        .clone()
+        .expect("validated workflow snapshot must be persisted before returning queued");
+    assert_eq!(
+        prepared_workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == NodeId::from("start-main"))
+            .unwrap()
+            .config["initial_inputs"]["topic"],
+        json!("长夜行")
+    );
+
+    let completed = wait_for_terminal_workflow_state(&store, &workflow_id, &run_id);
+    let check = completed.nodes.get(&NodeId::from("check-topic")).unwrap();
     assert_eq!(check.outputs.get("passed"), Some(&PortValue::inline(true)));
+
+    let recovery_run_id = RunId::from("recovered-tool-run");
+    let mut recovery = WorkflowRuntime::new(&prepared_workflow, recovery_run_id.clone()).unwrap();
+    recovery.state.prepared_workflow = Some(prepared_workflow);
+    recovery.state.start_node_id = Some(NodeId::from("start-main"));
+    recovery.state.status = RunStatus::Running;
+    store.create_state(&recovery.state).unwrap();
+    let stale_lease = store
+        .acquire_worker_lease(&workflow_id, &recovery_run_id, "crashed-worker", 1, 1)
+        .unwrap()
+        .expect("simulated crashed worker must own the initial lease");
+    assert_eq!(stale_lease.generation, 1);
+
+    let current_revision = load_workflow_graph_impl(temp.path(), Some("tool-start".to_owned()))
+        .unwrap()
+        .content_revision;
+
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "tool-start".to_owned(),
+            name: "Changed After Queueing".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-main".to_owned(),
+                r#type: "start".to_owned(),
+                label: None,
+                data: Value::Null,
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: current_revision,
+        },
+    )
+    .unwrap();
+    let resumed = resume_workflow(
+        &app,
+        workflow_id.as_str().to_owned(),
+        recovery_run_id.as_str().to_owned(),
+    )
+    .unwrap();
+    assert_eq!(resumed.status, "running");
+    let recovered = wait_for_terminal_workflow_state(&store, &workflow_id, &recovery_run_id);
+    assert_eq!(recovered.status, RunStatus::Succeeded);
+    assert_eq!(
+        recovered.nodes[&NodeId::from("check-topic")].outputs["passed"],
+        PortValue::inline(true)
+    );
 }
 
 #[test]
@@ -962,6 +1691,8 @@ fn run_workflow_start_node_id_must_reference_start_node() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -1001,6 +1732,8 @@ fn run_workflow_llm_node_requires_configured_provider_instead_of_noop() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -1070,22 +1803,7 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
     assert_eq!(provider.providers[0].provider, "openai");
     assert_eq!(provider.providers[0].models[0].model_id, "gpt-test");
     let config = ConfigStore::new(temp.path()).load_or_create().unwrap();
-    let key_id = config.providers.providers[0]
-        .api_key
-        .as_ref()
-        .unwrap()
-        .key_id
-        .clone();
-    assert!(key_id.starts_with("project."));
-    assert!(key_id.ends_with(".provider.openai"));
-    assert_eq!(
-        secrets
-            .get_secret(&key_id)
-            .unwrap()
-            .unwrap()
-            .expose_secret(),
-        "sk-secret"
-    );
+    assert!(config.providers.providers[0].api_key.is_none());
     assert!(secrets.get_secret("provider.openai").unwrap().is_none());
 }
 
@@ -1108,6 +1826,291 @@ fn provider_key_status_is_namespaced_by_project_root() {
 
     assert!(status_a.has_openai_key);
     assert!(!status_b.has_openai_key);
+}
+
+#[test]
+fn provider_credentials_do_not_collapse_backslash_or_nested_project_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let backslash = root.path().join("team\\book");
+    let nested = root.path().join("team").join("book");
+    ariadne::frontend::initialize_project(&backslash).unwrap();
+    ariadne::frontend::initialize_project(&nested).unwrap();
+    let secrets = MemorySecretStore::default();
+
+    save_provider_key_impl(
+        &backslash,
+        &secrets,
+        "openai".to_owned(),
+        "sk-backslash".to_owned(),
+    )
+    .unwrap();
+
+    assert!(
+        get_provider_config_impl(&backslash, &secrets)
+            .unwrap()
+            .has_openai_key
+    );
+    assert!(
+        !get_provider_config_impl(&nested, &secrets)
+            .unwrap()
+            .has_openai_key
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_credentials_use_lossless_non_utf8_project_identity() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let project_a = root.path().join(OsString::from_vec(b"novel-\xff".to_vec()));
+    let project_b = root.path().join(OsString::from_vec(b"novel-\xfe".to_vec()));
+    ariadne::frontend::initialize_project(&project_a).unwrap();
+    ariadne::frontend::initialize_project(&project_b).unwrap();
+    let secrets = MemorySecretStore::default();
+
+    save_provider_key_impl(
+        &project_a,
+        &secrets,
+        "openai".to_owned(),
+        "sk-non-utf8".to_owned(),
+    )
+    .unwrap();
+
+    assert!(
+        get_provider_config_impl(&project_a, &secrets)
+            .unwrap()
+            .has_openai_key
+    );
+    assert!(
+        !get_provider_config_impl(&project_b, &secrets)
+            .unwrap()
+            .has_openai_key
+    );
+}
+
+#[test]
+fn moved_project_requires_explicit_provider_credential_rebind() {
+    let root = tempfile::tempdir().unwrap();
+    let original = root.path().join("original");
+    let moved = root.path().join("moved");
+    ariadne::frontend::initialize_project(&original).unwrap();
+    let secrets = MemorySecretStore::default();
+    save_provider_key_impl(
+        &original,
+        &secrets,
+        "openai".to_owned(),
+        "sk-original".to_owned(),
+    )
+    .unwrap();
+    std::fs::rename(&original, &moved).unwrap();
+
+    assert!(
+        !get_provider_config_impl(&moved, &secrets)
+            .unwrap()
+            .has_openai_key
+    );
+    save_provider_key_impl(
+        &moved,
+        &secrets,
+        "openai".to_owned(),
+        "sk-rebound".to_owned(),
+    )
+    .unwrap();
+    assert!(
+        get_provider_config_impl(&moved, &secrets)
+            .unwrap()
+            .has_openai_key
+    );
+}
+
+#[test]
+fn malicious_project_secret_ref_is_rejected_before_all_provider_network_entrypoints() {
+    let project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    save_workflow_graph_impl(
+        project.path(),
+        WorkflowGraphData {
+            workflow_id: "llm-flow".to_owned(),
+            name: "LLM Flow".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "ask".to_owned(),
+                r#type: "llm".to_owned(),
+                label: None,
+                data: json!({
+                    "provider_id": "attacker",
+                    "model_id": "gpt-test",
+                    "prompt_alias": "prompt"
+                }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_count = Arc::clone(&request_count);
+    let server_stop = Arc::clone(&stop);
+    let server = thread::spawn(move || {
+        while !server_stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    server_count.fetch_add(1, Ordering::AcqRel);
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer);
+                    let body = r#"{"data":[],"choices":[{"message":{"content":"unexpected"}}]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let store = ConfigStore::new(project.path());
+    let mut config = store.load_or_create().unwrap();
+    config.providers.providers = vec![ProviderConfig {
+        provider_id: "attacker".to_owned(),
+        provider_type: ProviderType::OpenAiCompatible,
+        display_name: "Attacker".to_owned(),
+        enabled: true,
+        base_url: Some(base_url),
+        api_key: Some(SecretRef::new("victim-project-global-secret")),
+        models: vec![ModelConfig {
+            model_id: "gpt-test".to_owned(),
+            capability: ProviderCapability::Llm,
+            max_context_tokens: Some(4096),
+            input_cost_per_million_tokens: None,
+            output_cost_per_million_tokens: None,
+        }],
+    }];
+    config.providers.default_llm_provider_id = Some("attacker".to_owned());
+    let raw = yaml_serde::to_string(&yaml_serde::to_value(&config.providers).unwrap()).unwrap();
+    std::fs::write(store.config_dir().join(PROVIDERS_CONFIG_FILE), raw).unwrap();
+    let secrets = MemorySecretStore::default();
+    secrets
+        .set_secret(
+            "victim-project-global-secret",
+            ariadne::config::SecretValue::new("sk-victim"),
+        )
+        .unwrap();
+
+    assert!(ariadne::commands::fetch_provider_models_with_secrets_impl(
+        project.path(),
+        &secrets,
+        Some("attacker".to_owned())
+    )
+    .unwrap_err()
+    .contains("untrusted project SecretRef"));
+    assert!(quick_edit_impl(
+        project.path(),
+        &secrets,
+        QuickEditRequest {
+            selected_text: "text".to_owned(),
+            instruction: "rewrite".to_owned(),
+            context_ref: None,
+        }
+    )
+    .unwrap_err()
+    .contains("untrusted project SecretRef"));
+    assert!(project_ai_chat_impl(
+        project.path(),
+        &secrets,
+        ProjectAiRequest {
+            message: "hello".to_owned(),
+            ..ProjectAiRequest::default()
+        }
+    )
+    .unwrap_err()
+    .contains("untrusted project SecretRef"));
+    assert!(run_workflow_impl(
+        project.path(),
+        &secrets,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "llm-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        }
+    )
+    .unwrap_err()
+    .contains("untrusted project SecretRef"));
+
+    stop.store(true, Ordering::Release);
+    server.join().unwrap();
+    assert_eq!(request_count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn saving_provider_key_explicitly_rebinds_and_removes_all_legacy_secret_refs() {
+    let project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let store = ConfigStore::new(project.path());
+    let mut config = store.load_or_create().unwrap();
+    config.providers.providers = vec![
+        ProviderConfig {
+            provider_id: "openai".to_owned(),
+            provider_type: ProviderType::OpenAi,
+            display_name: "OpenAI".to_owned(),
+            enabled: true,
+            base_url: None,
+            api_key: Some(SecretRef::new("legacy-openai-global-secret")),
+            models: Vec::new(),
+        },
+        ProviderConfig {
+            provider_id: "anthropic".to_owned(),
+            provider_type: ProviderType::Anthropic,
+            display_name: "Anthropic".to_owned(),
+            enabled: true,
+            base_url: None,
+            api_key: Some(SecretRef::new("legacy-anthropic-global-secret")),
+            models: Vec::new(),
+        },
+    ];
+    config.providers.default_llm_provider_id = Some("openai".to_owned());
+    let raw = yaml_serde::to_string(&yaml_serde::to_value(&config.providers).unwrap()).unwrap();
+    std::fs::write(store.config_dir().join(PROVIDERS_CONFIG_FILE), raw).unwrap();
+    let secrets = MemorySecretStore::default();
+
+    assert!(get_provider_config_impl(project.path(), &secrets).is_err());
+    save_provider_key_impl(
+        project.path(),
+        &secrets,
+        "openai".to_owned(),
+        "sk-rebound".to_owned(),
+    )
+    .unwrap();
+    let rebound = store.load().unwrap();
+    assert!(rebound
+        .providers
+        .providers
+        .iter()
+        .all(|provider| provider.api_key.is_none()));
+    let status = get_provider_config_impl(project.path(), &secrets).unwrap();
+    assert!(status.has_openai_key);
+    assert!(
+        !status
+            .providers
+            .iter()
+            .find(|provider| provider.provider == "anthropic")
+            .unwrap()
+            .has_key
+    );
 }
 
 #[test]
@@ -1152,6 +2155,7 @@ fn provider_model_fetch_returns_configured_and_embedding_models() {
 #[test]
 fn provider_model_fetch_calls_remote_models_endpoint() {
     let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1209,7 +2213,7 @@ fn provider_model_fetch_calls_remote_models_endpoint() {
 
     let state = AriadneAppState::new(
         temp.path().to_path_buf(),
-        temp.path().join("app-state"),
+        app_state.path(),
         Arc::clone(&secrets),
     );
     let models = fetch_provider_models(&state, Some("local_models".to_owned())).unwrap();
@@ -1234,6 +2238,7 @@ fn provider_model_fetch_calls_remote_models_endpoint() {
 #[test]
 fn provider_model_fetch_rejects_oversized_streaming_response() {
     let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1274,7 +2279,7 @@ fn provider_model_fetch_rejects_oversized_streaming_response() {
     .unwrap();
     let state = AriadneAppState::new(
         temp.path().to_path_buf(),
-        temp.path().join("app-state"),
+        app_state.path(),
         Arc::clone(&secrets),
     );
 
@@ -1336,8 +2341,10 @@ fn node_preset_settings_reject_unknown_configured_model() {
         },
     )
     .unwrap();
-    let mut settings = NodePresetSettings::default();
-    settings.default_model_id = "missing-model".to_owned();
+    let mut settings = NodePresetSettings {
+        default_model_id: "missing-model".to_owned(),
+        ..NodePresetSettings::default()
+    };
     for preset in &mut settings.presets {
         preset.model_id = "gpt-configured".to_owned();
     }
@@ -1370,7 +2377,38 @@ fn backend_diagnostics_reports_provider_configuration_gaps() {
         .items
         .iter()
         .any(|item| item.component == "providers.embedding.default"
-            && item.status == DiagnosticStatus::Degraded));
+            && item.status == DiagnosticStatus::Healthy));
+}
+
+#[test]
+fn backend_diagnostics_reports_unconstructable_retrieval_runtime_instead_of_failing() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let store = ConfigStore::new(project.path());
+    let mut config = store.load_or_create().unwrap();
+    config.rag.vector_store.enabled = true;
+    store.save(&config).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+
+    assert_eq!(report.status, DiagnosticStatus::Unavailable);
+    assert!(report.items.iter().any(|item| {
+        item.component == "project_retrieval_runtime"
+            && item.status == DiagnosticStatus::Unavailable
+            && item
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("default_embedding_provider_id"))
+    }));
+    assert!(report.items.iter().any(|item| {
+        item.component == "providers.embedding.default" && item.status == DiagnosticStatus::Degraded
+    }));
 }
 
 #[test]
@@ -1451,9 +2489,11 @@ fn automation_and_permission_settings_round_trip_config_files() {
             && item.normal_policy == ConfirmationNormalPolicy::AllowByDefault
             && item.auto_mode_policy == ConfirmationAutoModePolicy::AllowByDefault));
 
-    let mut policy = PermissionPolicy::default();
-    policy.allow_network = true;
-    policy.allow_http_skill = true;
+    let mut policy = PermissionPolicy {
+        allow_network: true,
+        allow_http_skill: true,
+        ..PermissionPolicy::default()
+    };
     policy
         .readable_file_roots
         .push(temp.path().join("documents"));
@@ -1618,6 +2658,64 @@ fn module_settings_round_trip_config_files() {
 }
 
 #[test]
+fn rag_settings_hot_reload_reuses_open_tantivy_generation() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let original = state.retrieval_runtime().unwrap();
+    assert_eq!(original.config().rag.chunk_size_chars, 2000);
+    drop(original);
+    let mut rag = get_rag_settings_impl(project.path()).unwrap().rag;
+    rag.chunk_size_chars = 3072;
+    rag.chunk_overlap_chars = 256;
+
+    let saved = ariadne::commands::save_rag_settings(&state, RagSettings { rag }).unwrap();
+
+    assert_eq!(saved.rag.chunk_size_chars, 3072);
+    assert_eq!(
+        state
+            .retrieval_runtime()
+            .unwrap()
+            .config()
+            .rag
+            .chunk_size_chars,
+        3072
+    );
+}
+
+#[test]
+fn failed_vector_enable_keeps_config_and_last_good_runtime() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    drop(state.retrieval_runtime().unwrap());
+    let mut rag = get_rag_settings_impl(project.path()).unwrap().rag;
+    rag.vector_store.enabled = true;
+
+    let error = ariadne::commands::save_rag_settings(&state, RagSettings { rag }).unwrap_err();
+
+    assert!(error.contains("default_embedding_provider_id"));
+    assert!(
+        !get_rag_settings_impl(project.path())
+            .unwrap()
+            .rag
+            .vector_store
+            .enabled
+    );
+    assert!(!state.retrieval_runtime().unwrap().vector_enabled());
+}
+
+#[test]
 fn template_repository_settings_are_app_scoped_across_projects() {
     let project_a = tempfile::tempdir().unwrap();
     let project_b = tempfile::tempdir().unwrap();
@@ -1747,7 +2845,7 @@ fn git_restore_command_records_rebuild_followup_log() {
     );
     active.status = RunStatus::Paused;
     active.pause_reason = Some("waiting".to_owned());
-    runtime_store.save_state(&active).unwrap();
+    runtime_store.create_state(&active).unwrap();
     let state = AriadneAppState::new(
         temp.path(),
         app_state.path(),
@@ -1786,6 +2884,275 @@ fn git_restore_command_records_rebuild_followup_log() {
     assert_eq!(stopped.status, RunStatus::Stopped);
     assert_eq!(stopped.control, ariadne::contracts::RunControl::Stop);
     assert!(stopped.pause_reason.is_none());
+}
+
+/// D3-a：restore 必须等待已取得共享 mutation guard 的在途写者排空，才可 checkout。
+#[test]
+fn d3a_git_restore_drains_inflight_project_mutation_before_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    run_git(temp.path(), ["config", "user.name", "Ariadne Test"]);
+    run_git(
+        temp.path(),
+        ["config", "user.email", "ariadne@example.test"],
+    );
+    std::fs::write(temp.path().join("documents").join("chapter.md"), "base").unwrap();
+    let checkpoint = create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
+
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    let inflight = outbox
+        .acquire_project_mutation("d3a_inflight_writer")
+        .unwrap();
+    let project_root = temp.path().to_path_buf();
+    let app_state_root = app_state.path().to_path_buf();
+    let commit_id = checkpoint.commit_id;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let state = AriadneAppState::new(
+            &project_root,
+            &app_state_root,
+            Arc::new(MemorySecretStore::default()),
+        );
+        sender
+            .send(restore_to_new_branch(
+                &state,
+                commit_id,
+                "restore/d3a-drain".to_owned(),
+            ))
+            .unwrap();
+    });
+
+    for _ in 0..100 {
+        if outbox
+            .maintenance_state()
+            .unwrap()
+            .is_some_and(|state| state.status == "active")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        outbox.maintenance_state().unwrap().unwrap().status,
+        "active"
+    );
+    assert!(
+        receiver.recv_timeout(Duration::from_millis(150)).is_err(),
+        "restore must not finish while an earlier project mutation still holds the shared fence"
+    );
+
+    drop(inflight);
+    let report = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("restore must continue after the in-flight mutation drains")
+        .unwrap();
+    handle.join().unwrap();
+    assert_eq!(report.new_branch, "restore/d3a-drain");
+    assert_eq!(
+        outbox.maintenance_state().unwrap().unwrap().status,
+        "completed"
+    );
+}
+
+/// D3-a：旧 generation 的 Start 可在首次扫描后落盘 run；restore 必须继续扫描到其停止。
+#[test]
+fn d3a_git_restore_stops_run_created_after_maintenance_intent_before_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    run_git(temp.path(), ["config", "user.name", "Ariadne Test"]);
+    run_git(
+        temp.path(),
+        ["config", "user.email", "ariadne@example.test"],
+    );
+    std::fs::write(temp.path().join("documents").join("chapter.md"), "base").unwrap();
+    let checkpoint = create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
+
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    let pre_intent_start = outbox
+        .acquire_project_mutation("workflow_start_handoff")
+        .unwrap();
+    let project_root = temp.path().to_path_buf();
+    let app_state_root = app_state.path().to_path_buf();
+    let commit_id = checkpoint.commit_id;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let state = AriadneAppState::new(
+            &project_root,
+            &app_state_root,
+            Arc::new(MemorySecretStore::default()),
+        );
+        sender
+            .send(restore_to_new_branch(
+                &state,
+                commit_id,
+                "restore/d3a-late-run".to_owned(),
+            ))
+            .unwrap();
+    });
+
+    for _ in 0..100 {
+        if outbox
+            .maintenance_state()
+            .unwrap()
+            .is_some_and(|state| state.status == "active")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        outbox.maintenance_state().unwrap().unwrap().status,
+        "active"
+    );
+
+    let runtime_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let workflow_id = WorkflowId::from("d3a-late-workflow");
+    let run_id = RunId::from("d3a-late-run");
+    let late_run = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    runtime_store.create_state(&late_run).unwrap();
+    drop(pre_intent_start);
+
+    let report = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("restore must drain a run created by a pre-intent Start")
+        .unwrap();
+    handle.join().unwrap();
+    assert_eq!(report.new_branch, "restore/d3a-late-run");
+    let stopped = runtime_store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .expect("late run must remain durably visible");
+    assert_eq!(stopped.status, RunStatus::Stopped);
+    assert_eq!(stopped.control, RunControl::Stop);
+}
+
+#[test]
+fn d3a_maintenance_blocks_compound_ai_writes_before_provider_or_memory_side_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    outbox
+        .begin_maintenance("git_restore", "stopping_runtime")
+        .unwrap();
+    let secrets = MemorySecretStore::default();
+
+    let project_ai_error = project_ai_chat_impl(
+        temp.path(),
+        &secrets,
+        ProjectAiRequest {
+            append_memory: Some("must not cross restore".to_owned()),
+            ..ProjectAiRequest::default()
+        },
+    )
+    .unwrap_err();
+    assert!(project_ai_error.contains("maintenance"));
+    assert!(!temp.path().join(".runtime/project_memory.md").exists());
+
+    let quick_edit_error = quick_edit_impl(
+        temp.path(),
+        &secrets,
+        QuickEditRequest {
+            selected_text: "draft".to_owned(),
+            instruction: "rewrite".to_owned(),
+            context_ref: None,
+        },
+    )
+    .unwrap_err();
+    assert!(quick_edit_error.contains("maintenance"));
+    assert!(!temp.path().join("costs.db").exists());
+}
+
+#[test]
+fn d3a_maintenance_rejects_provider_model_fetch_before_network_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_count = Arc::clone(&request_count);
+    let server_stop = Arc::clone(&stop);
+    let server = thread::spawn(move || {
+        while !server_stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    server_count.fetch_add(1, Ordering::AcqRel);
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer);
+                    let body = r#"{"data":[]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "d3a-models".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "D3A Models".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            models: Vec::new(),
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+        },
+    )
+    .unwrap();
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    outbox
+        .begin_maintenance("git_restore", "stopping_runtime")
+        .unwrap();
+
+    let error = ariadne::commands::fetch_provider_models_with_secrets_impl(
+        temp.path(),
+        &MemorySecretStore::default(),
+        Some("d3a-models".to_owned()),
+    )
+    .unwrap_err();
+
+    stop.store(true, Ordering::Release);
+    server.join().unwrap();
+    assert!(error.contains("maintenance"));
+    assert_eq!(request_count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn d3a_maintenance_keeps_project_status_read_only_and_blocks_config_repair() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app_config = temp.path().join(".config").join("app.yaml");
+    std::fs::remove_file(&app_config).unwrap();
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    outbox
+        .begin_maintenance("git_restore", "stopping_runtime")
+        .unwrap();
+
+    let status = ariadne::commands::current_project_status(temp.path()).unwrap();
+    assert_eq!(status.project_root, temp.path());
+    assert!(!app_config.exists());
+
+    let error = get_app_settings_impl(temp.path()).unwrap_err();
+    assert!(error.contains("maintenance"));
+    assert!(!app_config.exists());
 }
 
 #[test]
@@ -2142,6 +3509,8 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -2310,6 +3679,8 @@ fn project_ai_start_node_catalog_includes_id_name_user_note() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -2355,6 +3726,8 @@ fn project_ai_chat_respects_disabled_workflow_tool_permission() {
             }],
             edges: Vec::new(),
             metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
         },
     )
     .unwrap();
@@ -2444,6 +3817,519 @@ fn project_ai_chat_respects_disabled_workflow_tool_permission() {
     assert!(response.workflow_run.is_none());
 }
 
+struct BusySpecialResumeFixture {
+    _project: tempfile::TempDir,
+    _app_state: tempfile::TempDir,
+    state: AriadneAppState,
+    store: SqliteWorkflowRuntimeStore,
+    workflow_id: WorkflowId,
+    run_id: RunId,
+    baseline: WorkflowRunState,
+}
+
+fn busy_special_resume_fixture() -> BusySpecialResumeFixture {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    save_workflow_graph_impl(
+        project.path(),
+        WorkflowGraphData {
+            workflow_id: "special-resume".to_owned(),
+            name: "Special Resume".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "source".to_owned(),
+                r#type: "start".to_owned(),
+                label: None,
+                data: Value::Null,
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+
+    let workflow_id = WorkflowId::from("special-resume");
+    let run_id = RunId::from("run-special-resume");
+    let mut run_state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    run_state.prepared_workflow = Some(WorkflowDefinition {
+        id: workflow_id.clone(),
+        name: "Special Resume".to_owned(),
+        nodes: vec![ariadne::contracts::NodeInstance {
+            id: NodeId::from("source"),
+            type_name: "start".to_owned(),
+            label: None,
+            config: Value::Null,
+            position: None,
+        }],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    });
+    run_state.nodes.insert(
+        NodeId::from("source"),
+        ariadne::workflow::WorkflowNodeRuntimeState {
+            node_id: NodeId::from("source"),
+            status: RunStatus::Succeeded,
+            outputs: BTreeMap::from([(
+                "chapter_text".to_owned(),
+                PortValue::inline("original chapter"),
+            )]),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: json!({ "original": true }),
+            error: None,
+            error_state: None,
+            execution_attempts: 2,
+        },
+    );
+    run_state.confirmations.insert(
+        "confirm-special".to_owned(),
+        RuntimeConfirmation {
+            confirmation_id: "confirm-special".to_owned(),
+            node_id: NodeId::from("source"),
+            state: RuntimeConfirmationState::Pending,
+            artifact_id: None,
+            patch_session_commit_id: None,
+            metadata: json!({ "reason": "needs revision" }),
+        },
+    );
+    run_state.status = RunStatus::Running;
+
+    let store = SqliteWorkflowRuntimeStore::open(project.path()).unwrap();
+    store.create_state(&run_state).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let _lease = store
+        .acquire_worker_lease(&workflow_id, &run_id, "existing-worker", now_ms, 300_000)
+        .unwrap()
+        .expect("fixture must hold an active worker lease");
+    // 合法 Busy 不变量是 Running + active lease。worker 一旦保存 Paused、Queued
+    // 或终态，会在同一事务中释放 lease，不再允许旧的 Paused+lease 窗口。
+    let baseline = store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .expect("fixture state must exist");
+    FileConfirmationLogStore::default_for_project(project.path())
+        .record(ConfirmationLogEntry {
+            confirmation_id: "confirm-special".to_owned(),
+            kind: "approval".to_owned(),
+            node_id: "source".to_owned(),
+            timestamp_ms: 1,
+            state: ConfirmationLogState::Pending,
+            handling_method: "manual".to_owned(),
+            summary: "待确认输出".to_owned(),
+            diff: "- original\n+ replacement".to_owned(),
+            workflow_id: workflow_id.as_str().to_owned(),
+            run_id: run_id.as_str().to_owned(),
+        })
+        .unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    BusySpecialResumeFixture {
+        _project: project,
+        _app_state: app_state,
+        state,
+        store,
+        workflow_id,
+        run_id,
+        baseline,
+    }
+}
+
+fn assert_special_resume_busy(error: &str) {
+    let normalized = error.to_ascii_lowercase();
+    assert!(
+        normalized.contains("busy") || normalized.contains("lease"),
+        "unexpected special resume error: {error}"
+    );
+}
+
+#[test]
+fn override_confirmation_output_busy_rolls_back_entire_mutation() {
+    let fixture = busy_special_resume_fixture();
+
+    let error = override_confirmation_output(
+        &fixture.state,
+        OverrideConfirmationOutputRequest {
+            workflow_id: fixture.workflow_id.as_str().to_owned(),
+            run_id: fixture.run_id.as_str().to_owned(),
+            confirmation_id: "confirm-special".to_owned(),
+            new_outputs: BTreeMap::from([(
+                "chapter_text".to_owned(),
+                PortValue::inline("approved replacement"),
+            )]),
+        },
+    )
+    .unwrap_err();
+
+    assert_special_resume_busy(&error);
+    let persisted = fixture
+        .store
+        .load_state(&fixture.workflow_id, &fixture.run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted, fixture.baseline);
+    let lease = fixture
+        .store
+        .load_worker_lease(&fixture.workflow_id, &fixture.run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.owner_id, "existing-worker");
+}
+
+#[test]
+fn resume_from_node_busy_rolls_back_entire_mutation() {
+    let fixture = busy_special_resume_fixture();
+
+    let error = resume_from_node(
+        &fixture.state,
+        ResumeFromNodeRequest {
+            workflow_id: fixture.workflow_id.as_str().to_owned(),
+            run_id: fixture.run_id.as_str().to_owned(),
+            node_id: "source".to_owned(),
+            injected_outputs: BTreeMap::from([(
+                "chapter_text".to_owned(),
+                PortValue::inline("externally revised chapter"),
+            )]),
+        },
+    )
+    .unwrap_err();
+
+    assert_special_resume_busy(&error);
+    let persisted = fixture
+        .store
+        .load_state(&fixture.workflow_id, &fixture.run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted, fixture.baseline);
+    let lease = fixture
+        .store
+        .load_worker_lease(&fixture.workflow_id, &fixture.run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.owner_id, "existing-worker");
+}
+
+#[test]
+fn resolve_confirmation_busy_rolls_back_runtime_and_confirmation_log() {
+    let fixture = busy_special_resume_fixture();
+
+    let error = resolve_confirmation_impl(
+        fixture._project.path(),
+        ResolveConfirmationRequest {
+            workflow_id: fixture.workflow_id.as_str().to_owned(),
+            run_id: fixture.run_id.as_str().to_owned(),
+            confirmation_id: "confirm-special".to_owned(),
+            decision: ConfirmationDecision::Approve,
+            review_reason: Some("must not be committed while busy".to_owned()),
+        },
+    )
+    .unwrap_err();
+
+    assert_special_resume_busy(&error);
+    let persisted = fixture
+        .store
+        .load_state(&fixture.workflow_id, &fixture.run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted, fixture.baseline);
+    let confirmations = FileConfirmationLogStore::default_for_project(fixture._project.path())
+        .read_all()
+        .unwrap();
+    assert_eq!(confirmations.len(), 1);
+    assert_eq!(confirmations[0].state, ConfirmationLogState::Pending);
+    assert_eq!(confirmations[0].handling_method, "manual");
+    let lease = fixture
+        .store
+        .load_worker_lease(&fixture.workflow_id, &fixture.run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.owner_id, "existing-worker");
+}
+
+#[test]
+fn resolve_confirmation_log_failure_uses_recoverable_projection_outbox() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let workflow_id = WorkflowId::from("confirmation-log-failure");
+    let run_id = RunId::from("run-confirmation-log-failure");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.status = RunStatus::Paused;
+    state.control = ariadne::contracts::RunControl::Pause;
+    state.pause_reason = Some("pending confirmation items".to_owned());
+    state.confirmations.insert(
+        "confirm-log-failure".to_owned(),
+        RuntimeConfirmation {
+            confirmation_id: "confirm-log-failure".to_owned(),
+            node_id: NodeId::from("approval"),
+            state: RuntimeConfirmationState::Pending,
+            artifact_id: None,
+            patch_session_commit_id: None,
+            metadata: json!({
+                "kind": "approval",
+                "summary": "待确认输出",
+                "diff": "- old\n+ new",
+            }),
+        },
+    );
+    state.nodes.insert(
+        NodeId::from("approval"),
+        ariadne::workflow::WorkflowNodeRuntimeState {
+            node_id: NodeId::from("approval"),
+            status: RunStatus::Paused,
+            outputs: Default::default(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: None,
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    store.create_state(&state).unwrap();
+    std::fs::create_dir_all(temp.path().join(".runtime")).unwrap();
+    std::fs::create_dir(temp.path().join(".runtime/ui_logs.db")).unwrap();
+
+    let result = resolve_confirmation_impl(
+        temp.path(),
+        ResolveConfirmationRequest {
+            workflow_id: workflow_id.as_str().to_owned(),
+            run_id: run_id.as_str().to_owned(),
+            confirmation_id: "confirm-log-failure".to_owned(),
+            decision: ConfirmationDecision::Approve,
+            review_reason: Some("人工通过".to_owned()),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.workflow.status, "queued");
+    assert_eq!(result.confirmation.state, ConfirmationLogState::Approved);
+    let persisted = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(persisted.status, RunStatus::Queued);
+    assert_eq!(persisted.control, ariadne::contracts::RunControl::Continue);
+    assert_eq!(persisted.pause_reason, None);
+    assert_eq!(
+        persisted
+            .confirmations
+            .get("confirm-log-failure")
+            .unwrap()
+            .state,
+        RuntimeConfirmationState::Approved
+    );
+    assert!(matches!(
+        persisted
+            .nodes
+            .get(&NodeId::from("approval"))
+            .and_then(|node| node.outputs.get("review_reason")),
+        Some(PortValue::Inline { value }) if value == &json!("人工通过")
+    ));
+    // 领域提交后的投影故障不能反向否定提交；同步测试入口没有 worker，正常释放 lease。
+    assert!(store
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .is_none());
+    let pending_projection = store.list_recoverable_confirmation_resolutions().unwrap();
+    assert_eq!(pending_projection.len(), 1);
+    assert_eq!(
+        pending_projection[0].status,
+        ConfirmationResolutionStatus::Committed
+    );
+    assert!(!pending_projection[0].projected);
+
+    // 打开项目会重放可重建日志投影，不需要再次修改 runtime/knowledge。
+    std::fs::remove_dir(temp.path().join(".runtime/ui_logs.db")).unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let app = AriadneAppState::new(
+        PathBuf::new(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    open_project(&app, temp.path().to_string_lossy().into_owned(), None).unwrap();
+    let entries = FileConfirmationLogStore::default_for_project(temp.path())
+        .read_all()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].state, ConfirmationLogState::Approved);
+    assert!(store
+        .list_recoverable_confirmation_resolutions()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn f14_open_recovers_knowledge_receipt_crash_and_blocks_racing_resume() {
+    use ariadne::rag::{
+        ConfirmationItem, ConfirmationKind, ConfirmationState, MemoryWritingKnowledgeBase,
+        SqliteWritingKnowledgeStore,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let workflow_id = WorkflowId::from("f14-crash-window");
+    let run_id = RunId::from("run-f14-crash-window");
+    let confirmation_id = "confirm-f14-crash-window";
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.prepared_workflow = Some(WorkflowDefinition {
+        id: workflow_id.clone(),
+        name: "F14 Recovery".to_owned(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        metadata: Value::Null,
+    });
+    state.status = RunStatus::Paused;
+    state.control = RunControl::Pause;
+    state.pause_reason = Some("pending confirmation items".to_owned());
+    state.confirmations.insert(
+        confirmation_id.to_owned(),
+        RuntimeConfirmation {
+            confirmation_id: confirmation_id.to_owned(),
+            node_id: NodeId::from("summarizer"),
+            state: RuntimeConfirmationState::Pending,
+            artifact_id: None,
+            patch_session_commit_id: None,
+            metadata: json!({ "kind": "segment_summary", "summary": "待拒绝总结" }),
+        },
+    );
+    state.nodes.insert(
+        NodeId::from("summarizer"),
+        WorkflowNodeRuntimeState {
+            node_id: NodeId::from("summarizer"),
+            status: RunStatus::Paused,
+            outputs: Default::default(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: None,
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    let runtime_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    runtime_store.create_state(&state).unwrap();
+
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    knowledge
+        .upsert_confirmation(ConfirmationItem::new(
+            confirmation_id,
+            ConfirmationKind::SegmentSummary,
+            ConfirmationState::Pending,
+            json!({ "chapter_id": "chapter-f14" }),
+        ))
+        .unwrap();
+    let knowledge_store = SqliteWritingKnowledgeStore::open(temp.path()).unwrap();
+    knowledge_store.save_knowledge(&knowledge).unwrap();
+
+    let operation_id = "confirmation-f14-crash-window";
+    let request_hash = "request-f14-crash-window";
+    let operation = runtime_store
+        .prepare_confirmation_resolution(
+            operation_id,
+            &workflow_id,
+            &run_id,
+            confirmation_id,
+            ConfirmationResolutionDecision::Reject,
+            Some("内容不符合设定"),
+            request_hash,
+            true,
+            100,
+        )
+        .unwrap();
+    assert_eq!(operation.status, ConfirmationResolutionStatus::Prepared);
+
+    let race_error = runtime_store
+        .claim_resume(&workflow_id, &run_id, "racing-worker", 101, 10_000)
+        .unwrap_err();
+    assert!(race_error
+        .to_string()
+        .contains("confirmation resolution is still committing"));
+    let still_pending = runtime_store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_pending.status, RunStatus::Paused);
+    assert_eq!(
+        still_pending.confirmations[confirmation_id].state,
+        RuntimeConfirmationState::Pending
+    );
+
+    let response = json!({
+        "workflow_id": workflow_id.as_str(),
+        "run_id": run_id.as_str(),
+        "confirmation_id": confirmation_id,
+        "decision": "reject",
+    });
+    assert!(knowledge_store
+        .resolve_confirmation_with_operation(
+            confirmation_id,
+            ConfirmationState::Rejected,
+            operation_id,
+            request_hash,
+            &response,
+        )
+        .unwrap());
+    assert_eq!(
+        runtime_store
+            .list_recoverable_confirmation_resolutions()
+            .unwrap()[0]
+            .status,
+        ConfirmationResolutionStatus::Prepared
+    );
+
+    let app_state = tempfile::tempdir().unwrap();
+    let app = AriadneAppState::new(
+        PathBuf::new(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    open_project(&app, temp.path().to_string_lossy().into_owned(), None).unwrap();
+
+    let recovered = runtime_store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        recovered.status,
+        RunStatus::Queued | RunStatus::Running | RunStatus::Succeeded
+    ));
+    assert_eq!(
+        recovered.confirmations[confirmation_id].state,
+        RuntimeConfirmationState::Rejected
+    );
+    let recovered_knowledge = knowledge_store.load_knowledge().unwrap();
+    let recovered_item = recovered_knowledge
+        .confirmations(None)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.confirmation_id == confirmation_id)
+        .unwrap();
+    assert_eq!(recovered_item.state, ConfirmationState::Rejected);
+    assert!(runtime_store
+        .list_recoverable_confirmation_resolutions()
+        .unwrap()
+        .is_empty());
+}
+
 #[test]
 fn resolve_confirmation_command_updates_runtime_and_log_badges() {
     let temp = tempfile::tempdir().unwrap();
@@ -2492,7 +4378,7 @@ fn resolve_confirmation_command_updates_runtime_and_log_badges() {
         },
     );
     let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
-    store.save_state(&runtime.state).unwrap();
+    store.create_state(&runtime.state).unwrap();
     FileConfirmationLogStore::default_for_project(temp.path())
         .record(ConfirmationLogEntry {
             confirmation_id: "confirm-1".to_owned(),
@@ -2538,6 +4424,689 @@ fn resolve_confirmation_command_updates_runtime_and_log_badges() {
     ));
 }
 
+#[test]
+fn resolve_confirmation_waits_until_all_pending_items_are_resolved() {
+    let temp = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::from("confirmation-batch");
+    let run_id = RunId::from("run-confirmation-batch");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.status = RunStatus::Paused;
+    state.control = RunControl::Pause;
+    state.pause_reason = Some("pending confirmation items".to_owned());
+    for confirmation_id in ["confirm-first", "confirm-second"] {
+        state.confirmations.insert(
+            confirmation_id.to_owned(),
+            RuntimeConfirmation {
+                confirmation_id: confirmation_id.to_owned(),
+                node_id: NodeId::from(confirmation_id),
+                state: RuntimeConfirmationState::Pending,
+                artifact_id: None,
+                patch_session_commit_id: None,
+                metadata: json!({ "kind": "approval", "summary": confirmation_id }),
+            },
+        );
+    }
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    store.create_state(&state).unwrap();
+
+    let first = resolve_confirmation_impl(
+        temp.path(),
+        ResolveConfirmationRequest {
+            workflow_id: workflow_id.as_str().to_owned(),
+            run_id: run_id.as_str().to_owned(),
+            confirmation_id: "confirm-first".to_owned(),
+            decision: ConfirmationDecision::Approve,
+            review_reason: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(first.workflow.status, "paused");
+    assert_eq!(first.badges.confirmations, 1);
+    let after_first = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(after_first.status, RunStatus::Paused);
+    assert_eq!(after_first.control, RunControl::Pause);
+    assert_eq!(
+        after_first.confirmations["confirm-second"].state,
+        RuntimeConfirmationState::Pending
+    );
+    assert!(store
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .is_none());
+
+    let second = resolve_confirmation_impl(
+        temp.path(),
+        ResolveConfirmationRequest {
+            workflow_id: workflow_id.as_str().to_owned(),
+            run_id: run_id.as_str().to_owned(),
+            confirmation_id: "confirm-second".to_owned(),
+            decision: ConfirmationDecision::Reject,
+            review_reason: Some("不采用".to_owned()),
+        },
+    )
+    .unwrap();
+    assert_eq!(second.workflow.status, "queued");
+    assert_eq!(second.badges.confirmations, 0);
+    let after_second = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(after_second.status, RunStatus::Queued);
+    assert_eq!(after_second.control, RunControl::Continue);
+}
+
+/// F14 product path: resolve_confirmation_impl must materialize writing-knowledge
+/// pending_payload (not only flip runtime confirmation state).
+#[test]
+fn resolve_confirmation_materializes_summary_knowledge_on_approve() {
+    use ariadne::contracts::{AutoModeState, SourceSpan, TextRange};
+    use ariadne::rag::{
+        MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, StoryEvent, StoryEventStatus,
+        StorySegment, SummaryPipelineDraft, SummaryPipelineExecutor, WritingConfirmationPolicy,
+    };
+    use serde_json::{json, Value};
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+
+    // 1) Apply summarizer draft under normal (human) policy → pending, non-active knowledge.
+    let kb = MemoryWritingKnowledgeBase::new();
+    let pipeline = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::normal_default(),
+        AutoModeState::default(),
+    );
+    let report = pipeline
+        .apply_draft(SummaryPipelineDraft {
+            chapter_id: "ch-f14".to_owned(),
+            segments: vec![StorySegment {
+                segment_id: "ch-f14::seg-1".to_owned(),
+                number: "1".to_owned(),
+                chapter_id: "ch-f14".to_owned(),
+                summary: "段摘要".to_owned(),
+                source: SourceSpan {
+                    document_id: "doc.md".to_owned(),
+                    range: TextRange { start: 0, end: 10 },
+                    version: None,
+                },
+                metadata: Value::Null,
+            }],
+            events: vec![StoryEvent {
+                event_id: "ev-1".to_owned(),
+                summary: "事件".to_owned(),
+                status: StoryEventStatus::Ongoing,
+                segment_ids: vec!["ch-f14::seg-1".to_owned()],
+                chapter_ids: vec!["ch-f14".to_owned()],
+                metadata: Value::Null,
+            }],
+            chapter_summary: Some("章总结".to_owned()),
+            stage_id: Some("stage-f14".to_owned()),
+            stage_summary: Some("阶段".to_owned()),
+            is_new_stage: Some(true),
+            realized_changes: vec![],
+            foreshadowing_updates: vec![],
+            metadata: Value::Null,
+        })
+        .unwrap();
+    assert!(kb.chapter_summary("ch-f14").unwrap().is_none());
+    let knowledge_store = SqliteWritingKnowledgeStore::open(project).unwrap();
+    knowledge_store.save_knowledge(&kb).unwrap();
+
+    let segment_confirmation = report
+        .confirmation_ids
+        .iter()
+        .find(|id| id.ends_with("segment-summary"))
+        .expect("segment confirmation id")
+        .clone();
+
+    // 2) Runtime paused with the same confirmation id (as execute_summarizer_node does).
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf-f14"),
+        name: "Summarizer Confirm".to_owned(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-f14")).unwrap();
+    runtime.state.status = RunStatus::Paused;
+    runtime.state.pause_reason = Some("pending confirmation items".to_owned());
+    runtime.state.confirmations.insert(
+        segment_confirmation.clone(),
+        RuntimeConfirmation {
+            confirmation_id: segment_confirmation.clone(),
+            node_id: NodeId::from("summarizer"),
+            state: RuntimeConfirmationState::Pending,
+            artifact_id: None,
+            patch_session_commit_id: None,
+            metadata: json!({ "step": "segment", "chapter_id": "ch-f14" }),
+        },
+    );
+    runtime.state.nodes.insert(
+        NodeId::from("summarizer"),
+        WorkflowNodeRuntimeState {
+            node_id: NodeId::from("summarizer"),
+            status: RunStatus::Paused,
+            outputs: Default::default(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: None,
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    let runtime_store = SqliteWorkflowRuntimeStore::open(project).unwrap();
+    runtime_store.create_state(&runtime.state).unwrap();
+
+    // 3) Product path: resolve_confirmation_impl Approve
+    resolve_confirmation_impl(
+        project,
+        ResolveConfirmationRequest {
+            workflow_id: "wf-f14".to_owned(),
+            run_id: "run-f14".to_owned(),
+            confirmation_id: segment_confirmation,
+            decision: ConfirmationDecision::Approve,
+            review_reason: Some("ok".to_owned()),
+        },
+    )
+    .unwrap();
+
+    // 4) Knowledge must now have active segment facts
+    let reloaded = knowledge_store.load_knowledge().unwrap();
+    assert_eq!(
+        reloaded.all_segments().unwrap().len(),
+        1,
+        "approve via resolve_confirmation must materialize segments"
+    );
+    assert_eq!(
+        reloaded.chapter_summary("ch-f14").unwrap(),
+        None,
+        "only segment step approved; chapter still pending"
+    );
+}
+
+/// F14 multi-store: knowledge materialize failure must not leave runtime Approved
+/// while knowledge is still Pending (no durable split-brain after command return).
+#[test]
+fn resolve_confirmation_knowledge_failure_leaves_runtime_pending() {
+    use ariadne::contracts::{AutoModeState, SourceSpan, TextRange};
+    use ariadne::rag::{
+        MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, StoryEvent, StoryEventStatus,
+        StorySegment, SummaryPipelineDraft, SummaryPipelineExecutor, WritingConfirmationPolicy,
+    };
+    use serde_json::{json, Value};
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+
+    let kb = MemoryWritingKnowledgeBase::new();
+    let pipeline = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::normal_default(),
+        AutoModeState::default(),
+    );
+    let report = pipeline
+        .apply_draft(SummaryPipelineDraft {
+            chapter_id: "ch-atom".to_owned(),
+            segments: vec![StorySegment {
+                segment_id: "ch-atom::seg-1".to_owned(),
+                number: "1".to_owned(),
+                chapter_id: "ch-atom".to_owned(),
+                summary: "段".to_owned(),
+                source: SourceSpan {
+                    document_id: "doc.md".to_owned(),
+                    range: TextRange { start: 0, end: 5 },
+                    version: None,
+                },
+                metadata: Value::Null,
+            }],
+            events: vec![StoryEvent {
+                event_id: "ev-atom".to_owned(),
+                summary: "事".to_owned(),
+                status: StoryEventStatus::Ongoing,
+                segment_ids: vec!["ch-atom::seg-1".to_owned()],
+                chapter_ids: vec!["ch-atom".to_owned()],
+                metadata: Value::Null,
+            }],
+            chapter_summary: Some("章".to_owned()),
+            stage_id: Some("stage-atom".to_owned()),
+            stage_summary: Some("阶".to_owned()),
+            is_new_stage: Some(true),
+            realized_changes: vec![],
+            foreshadowing_updates: vec![],
+            metadata: Value::Null,
+        })
+        .unwrap();
+    let knowledge_store = SqliteWritingKnowledgeStore::open(project).unwrap();
+    knowledge_store.save_knowledge(&kb).unwrap();
+    let segment_confirmation = report
+        .confirmation_ids
+        .iter()
+        .find(|id| id.ends_with("segment-summary"))
+        .unwrap()
+        .clone();
+
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf-atom"),
+        name: "atom".to_owned(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-atom")).unwrap();
+    runtime.state.status = RunStatus::Paused;
+    runtime.state.pause_reason = Some("pending confirmation items".to_owned());
+    runtime.state.confirmations.insert(
+        segment_confirmation.clone(),
+        RuntimeConfirmation {
+            confirmation_id: segment_confirmation.clone(),
+            node_id: NodeId::from("summarizer"),
+            state: RuntimeConfirmationState::Pending,
+            artifact_id: None,
+            patch_session_commit_id: None,
+            metadata: json!({ "step": "segment" }),
+        },
+    );
+    runtime.state.nodes.insert(
+        NodeId::from("summarizer"),
+        WorkflowNodeRuntimeState {
+            node_id: NodeId::from("summarizer"),
+            status: RunStatus::Paused,
+            outputs: Default::default(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: None,
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    let runtime_store = SqliteWorkflowRuntimeStore::open(project).unwrap();
+    runtime_store.create_state(&runtime.state).unwrap();
+
+    // Force knowledge materialize/save to fail (segment insert aborts).
+    let meta_db = project.join("metadata.db");
+    let conn = rusqlite::Connection::open(&meta_db).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_story_segment_insert
+         BEFORE INSERT ON story_segments
+         BEGIN SELECT RAISE(ABORT, 'forced knowledge materialize failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let err = resolve_confirmation_impl(
+        project,
+        ResolveConfirmationRequest {
+            workflow_id: "wf-atom".to_owned(),
+            run_id: "run-atom".to_owned(),
+            confirmation_id: segment_confirmation.clone(),
+            decision: ConfirmationDecision::Approve,
+            review_reason: None,
+        },
+    )
+    .expect_err("knowledge failure must fail the command");
+    assert!(
+        err.to_string().contains("forced")
+            || err.to_string().contains("knowledge")
+            || err.to_string().contains("ABORT")
+            || err.to_string().contains("sqlite")
+            || !err.is_empty(),
+        "unexpected error: {err}"
+    );
+
+    // Runtime must NOT be left Approved (knowledge-first: runtime never mutated).
+    let after = runtime_store
+        .load_state(&WorkflowId::from("wf-atom"), &RunId::from("run-atom"))
+        .unwrap()
+        .unwrap();
+    let conf = after.confirmations.get(&segment_confirmation).unwrap();
+    assert!(
+        matches!(conf.state, RuntimeConfirmationState::Pending),
+        "runtime must stay Pending when knowledge materialize fails; got {:?}",
+        conf.state
+    );
+
+    // Knowledge must not have activated segments (still Pending payload path).
+    let kb2 = SqliteWritingKnowledgeStore::open(project)
+        .unwrap()
+        .load_knowledge()
+        .unwrap();
+    assert!(
+        kb2.all_segments().unwrap().is_empty(),
+        "failed materialize must not leave active segments"
+    );
+}
+
+/// F14-a product path: after knowledge is durably applied (KnowledgeCommitted),
+/// runtime NotFound must compensate that confirmation pre_image — not leave
+/// knowledge-Approved with no runtime, and never whole-file metadata.db restore.
+#[test]
+fn resolve_confirmation_knowledge_committed_runtime_not_found_compensates_pre_image() {
+    use ariadne::contracts::{AutoModeState, SourceSpan, TextRange};
+    use ariadne::rag::{
+        ConfirmationState, MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, StoryEvent,
+        StoryEventStatus, StorySegment, SummaryPipelineDraft, SummaryPipelineExecutor,
+        WritingConfirmationPolicy,
+    };
+    use ariadne::workflow::{
+        ConfirmationResolutionDecision, SqliteWorkflowRuntimeStore, WorkflowRuntime,
+    };
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+
+    let kb = MemoryWritingKnowledgeBase::new();
+    let pipeline = SummaryPipelineExecutor::new(
+        &kb,
+        WritingConfirmationPolicy::normal_default(),
+        AutoModeState::default(),
+    );
+    let report = pipeline
+        .apply_draft(SummaryPipelineDraft {
+            chapter_id: "ch-inv".to_owned(),
+            segments: vec![StorySegment {
+                segment_id: "ch-inv::seg-1".to_owned(),
+                number: "1".to_owned(),
+                chapter_id: "ch-inv".to_owned(),
+                summary: "段".to_owned(),
+                source: SourceSpan {
+                    document_id: "doc.md".to_owned(),
+                    range: TextRange { start: 0, end: 5 },
+                    version: None,
+                },
+                metadata: Value::Null,
+            }],
+            events: vec![StoryEvent {
+                event_id: "ev-inv".to_owned(),
+                summary: "事".to_owned(),
+                status: StoryEventStatus::Ongoing,
+                segment_ids: vec!["ch-inv::seg-1".to_owned()],
+                chapter_ids: vec!["ch-inv".to_owned()],
+                metadata: Value::Null,
+            }],
+            chapter_summary: Some("章".to_owned()),
+            stage_id: Some("stage-inv".to_owned()),
+            stage_summary: Some("阶".to_owned()),
+            is_new_stage: Some(true),
+            realized_changes: vec![],
+            foreshadowing_updates: vec![],
+            metadata: Value::Null,
+        })
+        .unwrap();
+    let knowledge_store = SqliteWritingKnowledgeStore::open(project).unwrap();
+    knowledge_store.save_knowledge(&kb).unwrap();
+    let segment_confirmation = report
+        .confirmation_ids
+        .iter()
+        .find(|id| id.ends_with("segment-summary"))
+        .unwrap()
+        .clone();
+    let pre_pending = knowledge_store
+        .load_knowledge()
+        .unwrap()
+        .confirmations(None)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.confirmation_id == segment_confirmation)
+        .expect("pending confirmation");
+    assert!(
+        matches!(pre_pending.state, ConfirmationState::Pending),
+        "setup requires Pending confirmation"
+    );
+    assert!(pre_pending.metadata.get("pending_payload").is_some());
+
+    // Runtime run must exist so prepare can enter Prepared (not fail before knowledge).
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf-inv"),
+        name: "F14-a inverse".to_owned(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-inv")).unwrap();
+    runtime.state.status = RunStatus::Paused;
+    runtime.state.pause_reason = Some("pending confirmation items".to_owned());
+    runtime.state.confirmations.insert(
+        segment_confirmation.clone(),
+        RuntimeConfirmation {
+            confirmation_id: segment_confirmation.clone(),
+            node_id: NodeId::from("summarizer"),
+            state: RuntimeConfirmationState::Pending,
+            artifact_id: None,
+            patch_session_commit_id: None,
+            metadata: json!({ "step": "segment", "chapter_id": "ch-inv" }),
+        },
+    );
+    runtime.state.nodes.insert(
+        NodeId::from("summarizer"),
+        WorkflowNodeRuntimeState {
+            node_id: NodeId::from("summarizer"),
+            status: RunStatus::Paused,
+            outputs: Default::default(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: None,
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    let runtime_store = SqliteWorkflowRuntimeStore::open(project).unwrap();
+    runtime_store.create_state(&runtime.state).unwrap();
+
+    let request = ResolveConfirmationRequest {
+        workflow_id: "wf-inv".to_owned(),
+        run_id: "run-inv".to_owned(),
+        confirmation_id: segment_confirmation.clone(),
+        decision: ConfirmationDecision::Approve,
+        review_reason: None,
+    };
+    // Deterministic operation id / request hash matching product path.
+    let mut op_hasher = Sha256::new();
+    for part in ["wf-inv", "run-inv", segment_confirmation.as_str()] {
+        op_hasher.update(part.len().to_le_bytes());
+        op_hasher.update(part.as_bytes());
+    }
+    let operation_id = format!("confirmation-{:x}", op_hasher.finalize());
+    let request_hash = {
+        let canonical = serde_json::to_vec(&json!({
+            "workflow_id": request.workflow_id,
+            "run_id": request.run_id,
+            "confirmation_id": request.confirmation_id,
+            "decision": request.decision,
+            "review_reason": request.review_reason,
+        }))
+        .unwrap();
+        format!("{:x}", Sha256::digest(canonical))
+    };
+
+    // Drive product saga steps through KnowledgeCommitted, then delete the run
+    // so the next product resolve hits KnowledgeCommitted → NotFound.
+    let op = runtime_store
+        .prepare_confirmation_resolution(
+            &operation_id,
+            &WorkflowId::from("wf-inv"),
+            &RunId::from("run-inv"),
+            &segment_confirmation,
+            ConfirmationResolutionDecision::Approve,
+            None,
+            &request_hash,
+            true,
+            1,
+        )
+        .unwrap();
+    assert!(matches!(
+        op.status,
+        ariadne::workflow::ConfirmationResolutionStatus::Prepared
+    ));
+    // Persist pre_image the same way the product path does before knowledge apply.
+    let pre_image_path = project
+        .join(".runtime")
+        .join("confirmation_pre_images")
+        .join(format!("{operation_id}.json"));
+    std::fs::create_dir_all(pre_image_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &pre_image_path,
+        serde_json::to_vec_pretty(&pre_pending).unwrap(),
+    )
+    .unwrap();
+    let applied = knowledge_store
+        .resolve_confirmation_with_operation(
+            &segment_confirmation,
+            ConfirmationState::Approved,
+            &operation_id,
+            &request_hash,
+            &json!({
+                "workflow_id": "wf-inv",
+                "run_id": "run-inv",
+                "confirmation_id": segment_confirmation,
+                "decision": "Approve",
+            }),
+        )
+        .unwrap();
+    assert!(applied, "knowledge must apply under prepared saga");
+    runtime_store
+        .mark_confirmation_knowledge_committed(&operation_id, &request_hash, 2)
+        .unwrap();
+    // Prove knowledge side-effect happened before runtime loss.
+    assert_eq!(
+        knowledge_store
+            .load_knowledge()
+            .unwrap()
+            .all_segments()
+            .unwrap()
+            .len(),
+        1,
+        "segments must be active after knowledge commit"
+    );
+    // Delete runtime run without cascading away the confirmation saga row
+    // (product NotFound after KnowledgeCommitted). Disable FK only for this inject.
+    {
+        let db = project.join("runtime.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute("DELETE FROM workflow_runs", []).unwrap();
+        let still: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM confirmation_resolution_operations WHERE operation_id=?1",
+                rusqlite::params![operation_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            still, 1,
+            "saga row must survive run deletion for NotFound path"
+        );
+    }
+
+    // Product entry: resolve_confirmation_impl re-enters existing KnowledgeCommitted
+    // operation and must compensate pre_image (not theater on never-applied knowledge).
+    let err = resolve_confirmation_impl(project, request).expect_err("must fail after NotFound");
+    assert!(
+        err.to_string().contains("not found") && err.to_string().contains("compensated"),
+        "unexpected error: {err}"
+    );
+
+    let kb2 = knowledge_store.load_knowledge().unwrap();
+    assert!(
+        kb2.all_segments().unwrap().is_empty(),
+        "F14-a compensate must dematerialize segments from pre_image payload"
+    );
+    let item = kb2
+        .confirmations(None)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.confirmation_id == segment_confirmation)
+        .expect("confirmation still present");
+    assert!(
+        matches!(item.state, ConfirmationState::Pending),
+        "knowledge confirmation must be restored to Pending; got {:?}",
+        item.state
+    );
+    assert!(
+        item.metadata.get("pending_payload").is_some(),
+        "pending_payload must be restored for retry"
+    );
+    // No whole-db bak residual.
+    assert!(
+        !project.join("metadata.db.f14-resolve-bak").exists(),
+        "must not use whole metadata.db backup file"
+    );
+}
+
+/// F11 product path: register_executor_adapters_for_project loads skills and
+/// registers executor_adapter:{id} on the shipped RoutedExternalNodeExecutor.
+#[test]
+fn register_executor_adapters_for_project_registers_skill_handlers() {
+    use ariadne::config::ConfigStore;
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::providers::OpenAiCompatibleLlmProvider;
+    use ariadne::workflow::RoutedExternalNodeExecutor;
+    use std::sync::Arc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    // Minimal project config (default skills_dir = "skills")
+    ConfigStore::new(project).load_or_create().unwrap();
+    let skill_dir = project.join("skills").join("fetch-info");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("skill.json"),
+        r#"{
+          "skill_id": "fetch-info",
+          "name": "Fetch Info",
+          "version": "1.0.0",
+          "executor": { "kind": "http", "host": "example.com", "method": "POST", "path": "/lookup" },
+          "schema": {
+            "inputs": [{"name": "query", "type_name": "inline", "required": true}],
+            "outputs": [{"name": "result", "type_name": "inline", "required": true}]
+          },
+          "limits": { "timeout_ms": 1000, "max_output_bytes": 1024 },
+          "estimated_cost_usd": 0.0
+        }"#,
+    )
+    .unwrap();
+
+    let mut external = RoutedExternalNodeExecutor::new();
+    let provider_config = ariadne::config::ProviderConfig {
+        provider_id: "mock".to_owned(),
+        provider_type: ProviderType::OpenAiCompatible,
+        display_name: "mock".to_owned(),
+        enabled: true,
+        base_url: Some("https://example.com".to_owned()),
+        api_key: None,
+        models: vec![],
+    };
+    // If ProviderConfig fields differ, compile will tell us — use minimal via new if needed.
+    let provider = OpenAiCompatibleLlmProvider::new(provider_config, None).unwrap();
+    let ledger = Arc::new(SqliteCostLedger::open_in_memory().unwrap());
+    let registered =
+        register_executor_adapters_for_project(&mut external, project, provider, ledger).unwrap();
+    assert!(
+        registered
+            .iter()
+            .any(|n| n == "executor_adapter:fetch-info"),
+        "registered={registered:?}"
+    );
+    assert!(
+        external.has_handler("executor_adapter:fetch-info"),
+        "handler missing from router; types={:?}",
+        external.registered_type_names()
+    );
+}
+
 fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
     let output = std::process::Command::new("git")
         .args(args)
@@ -2563,4 +5132,343 @@ fn git_stdout<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn automation_settings_mid_fail_leaves_journal_and_recover_completes() {
+    use ariadne::commands::{
+        commit_automation_settings_files_with_fail_after, get_automation_settings_impl,
+        save_automation_settings_impl,
+    };
+    use ariadne::config::atomic_commit::{has_pending_journal, recover_pending_commit};
+    use ariadne::frontend::initialize_project;
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let app_state = temp.path().join("app-state");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&app_state).unwrap();
+    initialize_project(&project).unwrap();
+
+    // Baseline values via product path (default app state); then mid-fail with explicit app_state.
+    let baseline = get_automation_settings_impl(&project).unwrap();
+    let mut settings = baseline.clone();
+    settings.budget.budget_usd = 42.5;
+    settings.budget.preauthorized_usd = 1.0;
+    settings.budget.auto_mode_enabled = true;
+
+    save_automation_settings_impl(&project, settings.clone()).unwrap();
+    let after_ok = get_automation_settings_impl(&project).unwrap();
+    assert!((after_ok.budget.budget_usd - 42.5).abs() < 1e-9);
+
+    settings.budget.budget_usd = 99.0;
+    let config_store = ariadne::config::ConfigStore::with_app_state(&project, &app_state);
+    let mut config = config_store.load_or_create().unwrap();
+    config.auto_mode.enabled_by_default = true;
+    config.auto_mode.preauthorized_budget_usd = Some(2.0);
+    let budget = serde_json::to_vec_pretty(&serde_json::json!({ "budget_usd": 99.0 })).unwrap();
+    let policies = serde_json::to_vec_pretty(&settings.confirmation_policies).unwrap();
+
+    let err = commit_automation_settings_files_with_fail_after(
+        &project,
+        &app_state,
+        &config,
+        &budget,
+        &policies,
+        Some(1),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("injected") || err.contains("atomic"),
+        "unexpected err: {err}"
+    );
+    // D4-a/S4: authority journal lives in app-state, never as project-owned executable journal.
+    assert!(
+        has_pending_journal(&project, &app_state),
+        "app-state authority journal must exist after mid-fail"
+    );
+    assert!(
+        !project
+            .join(".config")
+            .join("atomic-commit.journal.json")
+            .exists(),
+        "live mid-fail must not write project-owned legacy journal"
+    );
+
+    recover_pending_commit(&project, &app_state).unwrap();
+    assert!(
+        !has_pending_journal(&project, &app_state),
+        "authority journal cleared after recover"
+    );
+    let final_settings = get_automation_settings_impl(&project).unwrap();
+    assert!(
+        (final_settings.budget.budget_usd - 99.0).abs() < 1e-9,
+        "budget should be fully applied after recover, got {}",
+        final_settings.budget.budget_usd
+    );
+}
+
+fn seed_command_in_doubt_search_run(
+    project_root: &std::path::Path,
+    workflow_name: &str,
+    run_name: &str,
+    operation_policy: WorkflowOperationPolicy,
+) -> (SqliteWorkflowRuntimeStore, String) {
+    let WorkflowOperationPolicy::Journaled { recovery, response } = operation_policy else {
+        panic!("in_doubt command fixture requires a journaled operation policy");
+    };
+    let workflow_id = WorkflowId::from(workflow_name);
+    let run_id = RunId::from(run_name);
+    let node_id = NodeId::from("search-node");
+    let workflow = WorkflowDefinition {
+        id: workflow_id.clone(),
+        name: "In doubt command fixture".to_owned(),
+        nodes: vec![NodeInstance {
+            id: node_id.clone(),
+            type_name: "search".to_owned(),
+            label: None,
+            config: Value::Null,
+            position: None,
+        }],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.prepared_workflow = Some(workflow.clone());
+    state.status = RunStatus::Paused;
+    state.control = RunControl::Pause;
+    state.pause_reason = Some("operation result is unknown".to_owned());
+    state.nodes.insert(
+        node_id.clone(),
+        WorkflowNodeRuntimeState {
+            node_id: node_id.clone(),
+            status: RunStatus::Paused,
+            outputs: Default::default(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: Some("remote dispatch outcome is unknown".to_owned()),
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    let operation_id = ariadne::skills::stable_text_hash(&format!(
+        "workflow-operation-v1\0{}\0{}\0{}\01",
+        workflow_id.as_str(),
+        run_id.as_str(),
+        node_id.as_str()
+    ));
+    let request_hash = ariadne::skills::stable_text_hash(
+        &serde_json::to_string(&json!({
+            "type_name": "search",
+            "config": Value::Null,
+            "inputs": ariadne::contracts::PortMap::new(),
+            "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
+            "metadata": Value::Null,
+        }))
+        .unwrap(),
+    );
+    let store = SqliteWorkflowRuntimeStore::open(project_root).unwrap();
+    store.create_state(&state).unwrap();
+    store
+        .create_operation(
+            &NewWorkflowOperation {
+                operation_id: operation_id.clone(),
+                workflow_id,
+                run_id,
+                node_id,
+                attempt: 1,
+                kind: "search".to_owned(),
+                provider: "search".to_owned(),
+                request_hash,
+                lease_generation: 0,
+                recovery_policy: recovery,
+                response_policy: response,
+            },
+            1_000,
+        )
+        .unwrap();
+    assert!(store
+        .transition_operation(
+            &operation_id,
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            1_001,
+        )
+        .unwrap());
+    assert!(store
+        .transition_operation(
+            &operation_id,
+            WorkflowOperationStatus::Dispatched,
+            WorkflowOperationStatus::InDoubt,
+            None,
+            1_002,
+        )
+        .unwrap());
+    (store, operation_id)
+}
+
+#[test]
+fn resolve_in_doubt_use_response_command_replays_and_commits_without_provider_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let (store, operation_id) = seed_command_in_doubt_search_run(
+        temp.path(),
+        "use-response-flow",
+        "run-1",
+        WorkflowOperationPolicy::remote_response(),
+    );
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let response = serde_json::to_value(WorkflowNodeExecutionOutput::default()).unwrap();
+
+    let result = resolve_workflow_operation_in_doubt(
+        &state,
+        ResolveInDoubtOperationRequest {
+            operation_id: operation_id.clone(),
+            decision: InDoubtDecision::UseResponse,
+            response: Some(response),
+            reason: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.decision, InDoubtDecision::UseResponse);
+    assert_eq!(result.workflow.status, "queued");
+    let terminal = wait_for_terminal_workflow_state(
+        &store,
+        &WorkflowId::from("use-response-flow"),
+        &RunId::from("run-1"),
+    );
+    assert_eq!(terminal.status, RunStatus::Succeeded);
+    assert_eq!(
+        store.load_operation(&operation_id).unwrap().unwrap().status,
+        WorkflowOperationStatus::Committed
+    );
+    assert!(store
+        .load_worker_lease(
+            &WorkflowId::from("use-response-flow"),
+            &RunId::from("run-1")
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn resolve_in_doubt_use_response_command_rejects_receipt_only_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let (store, operation_id) = seed_command_in_doubt_search_run(
+        temp.path(),
+        "receipt-only-flow",
+        "run-1",
+        WorkflowOperationPolicy::reconcilable_receipt(),
+    );
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let error = resolve_workflow_operation_in_doubt(
+        &state,
+        ResolveInDoubtOperationRequest {
+            operation_id: operation_id.clone(),
+            decision: InDoubtDecision::UseResponse,
+            response: Some(serde_json::to_value(WorkflowNodeExecutionOutput::default()).unwrap()),
+            reason: None,
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("executor receipt"));
+    assert_eq!(
+        store.load_operation(&operation_id).unwrap().unwrap().status,
+        WorkflowOperationStatus::InDoubt
+    );
+    let persisted = store
+        .load_state(
+            &WorkflowId::from("receipt-only-flow"),
+            &RunId::from("run-1"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.status, RunStatus::Paused);
+    assert_eq!(persisted.control, RunControl::Pause);
+    assert!(store
+        .load_worker_lease(
+            &WorkflowId::from("receipt-only-flow"),
+            &RunId::from("run-1")
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn resolve_in_doubt_stop_command_atomically_stops_without_claiming_worker() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let (store, operation_id) = seed_command_in_doubt_search_run(
+        temp.path(),
+        "stop-in-doubt-flow",
+        "run-1",
+        WorkflowOperationPolicy::remote_response(),
+    );
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let result = resolve_workflow_operation_in_doubt(
+        &state,
+        ResolveInDoubtOperationRequest {
+            operation_id: operation_id.clone(),
+            decision: InDoubtDecision::Stop,
+            response: None,
+            reason: Some("author chose not to risk duplicate billing".to_owned()),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.decision, InDoubtDecision::Stop);
+    assert_eq!(result.workflow.status, "stopped");
+    let stopped = store
+        .load_state(
+            &WorkflowId::from("stop-in-doubt-flow"),
+            &RunId::from("run-1"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(stopped.status, RunStatus::Stopped);
+    assert_eq!(stopped.control, RunControl::Stop);
+    assert_eq!(
+        stopped.stop_reason.as_deref(),
+        Some("author chose not to risk duplicate billing")
+    );
+    assert!(stopped.structured_events.iter().any(|event| {
+        event.event_type == WorkflowRuntimeEventType::RunStopped
+            && event.metadata["operation_id"] == operation_id
+    }));
+    assert_eq!(
+        store.load_operation(&operation_id).unwrap().unwrap().status,
+        WorkflowOperationStatus::Aborted
+    );
+    assert!(store
+        .load_worker_lease(
+            &WorkflowId::from("stop-in-doubt-flow"),
+            &RunId::from("run-1")
+        )
+        .unwrap()
+        .is_none());
 }

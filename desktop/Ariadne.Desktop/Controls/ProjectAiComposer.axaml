@@ -1,0 +1,40 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Ariadne.Desktop.Controls.ProjectAiComposer"
+             x:CompileBindings="False">
+  <!--
+    作品页 / 工作区共用的项目 AI 输入区。
+    边框焦点走主题 Border.ai-composer:focus-within（唯一允许主题色描边的输入面）。
+    内层 TextBox 无边框，靠外层一体 chrome + 光标反馈。
+  -->
+  <Border Classes="ai-composer"
+          MinHeight="96"
+          Padding="12,10,8,10">
+    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+      <TextBox Grid.Column="0"
+               Text="{Binding ProjectAiMessage, Mode=TwoWay}"
+               AcceptsReturn="True"
+               TextWrapping="Wrap"
+               BorderThickness="0"
+               Background="Transparent"
+               FontSize="13"
+               MinHeight="72"
+               MaxHeight="140"
+               Padding="0"
+               VerticalContentAlignment="Top"
+               VerticalAlignment="Stretch"
+               PlaceholderText="{Binding ProjectAiPlaceholder}" />
+      <Button Grid.Column="1"
+              Classes="primary"
+              Width="36" Height="36" Padding="0"
+              VerticalAlignment="Bottom"
+              Command="{Binding SendProjectAiCommand}"
+              ToolTip.Tip="{Binding ProjectAiText}"
+              AutomationProperties.Name="{Binding ProjectAiText}">
+        <Path Classes="icon" Width="16" Height="16"
+              Stroke="{DynamicResource Ariadne.TextOnAccent}"
+              Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
+      </Button>
+    </Grid>
+  </Border>
+</UserControl>

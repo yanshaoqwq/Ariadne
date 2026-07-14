@@ -22,3 +22,7 @@ dotnet run --project desktop/Ariadne.Desktop
 ```
 
 源码仍按 Avalonia 12 + net10.0 维护。
+
+## 正式发布
+
+`run-ui.sh install-dev-desktop` 只用于当前源码树的开发快捷方式，不是发布安装器。正式自包含目录、Linux `.deb`、Windows 安装器和 macOS `.app/.pkg/.dmg` 统一从 [`packaging/`](../packaging/README.md) 生成；桌面会优先从应用目录的 `Backend/` 发现 `ariadne-ipc`。

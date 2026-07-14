@@ -138,6 +138,17 @@ pub struct QdrantSidecarSupervisor<R = CommandSidecarProcessRunner> {
     status: Mutex<QdrantSidecarStatus>,
 }
 
+impl<R> Drop for QdrantSidecarSupervisor<R> {
+    fn drop(&mut self) {
+        if let Ok(child) = self.child.get_mut() {
+            if let Some(mut child) = child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
 impl QdrantSidecarSupervisor {
     /// 创建使用默认命令启动器的 supervisor。
     pub fn new(config: QdrantSidecarConfig) -> Self {

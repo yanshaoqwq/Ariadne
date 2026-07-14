@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::contracts::{
-    CommunicationEdgeConfig, CoreError, CoreResult, Edge, EdgeId, LoopPolicy, NodeId, PortMap,
-    PortValue, RunControl, RunId, RunStatus, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
+    CommunicationEdgeConfig, CoreError, CoreResult, Edge, EdgeId, ExecutionCancellation,
+    ExternalDispatchAuthorization, LoopPolicy, NodeId, PortMap, PortValue, RunControl, RunId,
+    RunStatus, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
 use crate::skills::stable_text_hash;
 
@@ -16,6 +17,15 @@ pub struct WorkflowNodeExecutionRequest {
     pub workflow_id: WorkflowId,
     pub run_id: RunId,
     pub node_id: NodeId,
+    /// 由 workflow/run/node/attempt 确定生成，恢复时不得随机变化。
+    #[serde(default)]
+    pub operation_id: String,
+    /// 本次节点执行尝试序号，从 1 开始。
+    #[serde(default)]
+    pub operation_attempt: u32,
+    /// 对节点类型、配置、输入、通信消息和前态 metadata 的稳定摘要。
+    #[serde(default)]
+    pub request_hash: String,
     #[serde(default)]
     pub type_name: String,
     #[serde(default)]
@@ -26,6 +36,12 @@ pub struct WorkflowNodeExecutionRequest {
     pub communication_messages: Vec<CommunicationMessage>,
     #[serde(default)]
     pub metadata: Value,
+    /// 当前 worker 执行链的共享取消信号；不持久化，也不参与 operation hash。
+    #[serde(skip, default)]
+    pub cancellation: ExecutionCancellation,
+    /// 运行控制、worker lease 与 operation journal 的跨层派发栅栏。
+    #[serde(skip, default)]
+    pub dispatch_authorization: ExternalDispatchAuthorization,
 }
 
 /// 节点重试策略；用于网络、rate limit、超时和工具参数错误的可诊断恢复。
@@ -92,10 +108,13 @@ pub struct WorkflowRuntimeEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowRuntimeEventType {
+    RunQueued,
     RunStarted,
     RunPaused,
+    RunStopRequested,
     RunStopped,
     RunSucceeded,
+    RunFailed,
     NodeStarted,
     NodeSucceeded,
     NodePaused,
@@ -110,6 +129,15 @@ pub enum WorkflowRuntimeEventType {
     PatchWriteBackUpdated,
     CommunicationMessage,
     LoopUpdated,
+}
+
+/// 运行级失败详情；与节点错误分离，覆盖 worker 创建和执行器初始化失败。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRunFailure {
+    pub code: String,
+    pub stage: String,
+    pub message: String,
+    pub recovery_suggestion: String,
 }
 
 /// 节点通信控制输出，供 runtime 判断是否继续本条 communication 边。
@@ -186,6 +214,22 @@ pub struct RuntimeLoopControl {
 
 /// 工作流节点执行器，后续接 LLM、Document、ExecutorAdapter 和写作节点。
 pub trait WorkflowNodeExecutor {
+    /// 声明本次节点执行的副作用 journal 与恢复能力。
+    fn operation_policy(
+        &self,
+        _request: &WorkflowNodeExecutionRequest,
+    ) -> CoreResult<crate::workflow::WorkflowOperationPolicy> {
+        Ok(crate::workflow::WorkflowOperationPolicy::Untracked)
+    }
+
+    /// 查询执行器自己的最终 receipt；只用于 `ReconcileReceipt` 恢复策略。
+    fn reconcile_operation(
+        &mut self,
+        _request: &WorkflowNodeExecutionRequest,
+    ) -> CoreResult<Option<WorkflowNodeExecutionOutput>> {
+        Ok(None)
+    }
+
     /// 执行一个节点。
     fn execute(
         &mut self,
@@ -195,8 +239,16 @@ pub trait WorkflowNodeExecutor {
 
 /// Workflow runtime 持久化抽象，SQLite 和测试内存存储共用同一契约。
 pub trait WorkflowRuntimeStore {
+    /// 只创建首次运行快照；run id 冲突必须失败，禁止覆盖已有运行。
+    fn create_state(&self, state: &WorkflowRunState) -> CoreResult<()>;
+
     /// 保存当前运行快照。
-    fn save_state(&self, state: &WorkflowRunState) -> CoreResult<()>;
+    /// 原子保存运行快照；传入 operation id 时，同事务完成 completed→committed。
+    fn save_state(
+        &self,
+        state: &mut WorkflowRunState,
+        commit_operation_id: Option<&str>,
+    ) -> CoreResult<()>;
 
     /// 加载指定运行快照。
     fn load_state(
@@ -204,6 +256,58 @@ pub trait WorkflowRuntimeStore {
         workflow_id: &WorkflowId,
         run_id: &RunId,
     ) -> CoreResult<Option<WorkflowRunState>>;
+
+    /// 当前 worker fencing generation；同步/内存执行可返回 0。
+    fn operation_lease_generation(&self) -> u64 {
+        0
+    }
+
+    fn load_operation(
+        &self,
+        _operation_id: &str,
+    ) -> CoreResult<Option<crate::workflow::WorkflowOperation>> {
+        Ok(None)
+    }
+
+    fn create_operation(
+        &self,
+        _operation: &crate::workflow::NewWorkflowOperation,
+        _now_ms: u64,
+    ) -> CoreResult<()> {
+        Ok(())
+    }
+
+    fn transition_operation(
+        &self,
+        _operation_id: &str,
+        _expected: crate::workflow::WorkflowOperationStatus,
+        _next: crate::workflow::WorkflowOperationStatus,
+        _response_json: Option<&Value>,
+        _now_ms: u64,
+    ) -> CoreResult<bool> {
+        Ok(true)
+    }
+
+    /// 原子完成 operation 响应，或把未消费派发授权的成功响应隔离为 InDoubt。
+    fn complete_operation_response(
+        &self,
+        _operation_id: &str,
+        _response_json: &Value,
+        _now_ms: u64,
+    ) -> CoreResult<crate::workflow::WorkflowOperationCompletionOutcome>;
+
+    /// 创建一个可被真实副作用边界消费的持久化派发授权器。
+    fn operation_dispatch_authorization(
+        &self,
+        _operation_id: &str,
+    ) -> ExternalDispatchAuthorization {
+        ExternalDispatchAuthorization::default()
+    }
+
+    /// 清理尚未派发的 operation；用于配置校验、Stop 或 fencing 在边界前拒绝。
+    fn delete_prepared_operation(&self, _operation_id: &str) -> CoreResult<bool> {
+        Ok(true)
+    }
 }
 
 /// Runtime 确认项状态。
@@ -376,6 +480,12 @@ pub struct WorkflowNodeRuntimeState {
 pub struct WorkflowRunState {
     pub workflow_id: WorkflowId,
     pub run_id: RunId,
+    /// SQLite 快照的乐观并发版本；由 store 加载/保存维护，不进入 state_json。
+    #[serde(skip)]
+    pub state_revision: u64,
+    /// 启动预检后冻结的执行定义。仅写入 runtime.db，不作为运行状态 API 的显示载荷返回。
+    #[serde(default, skip_serializing)]
+    pub prepared_workflow: Option<WorkflowDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_node_id: Option<NodeId>,
     pub status: RunStatus,
@@ -385,8 +495,14 @@ pub struct WorkflowRunState {
     pub pause_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WorkflowRunFailure>,
     #[serde(default)]
     pub nodes: BTreeMap<NodeId, WorkflowNodeRuntimeState>,
+    /// 每个节点已经分配过的 operation 序号。节点因 Loop/回注被移出 `nodes`
+    /// 后仍保留，避免同一 run 内复用旧 operation id。
+    #[serde(default)]
+    pub node_operation_sequences: BTreeMap<NodeId, u32>,
     #[serde(default)]
     pub communication_edges: BTreeMap<EdgeId, CommunicationRuntimeState>,
     #[serde(default)]
@@ -411,12 +527,16 @@ impl WorkflowRunState {
         Self {
             workflow_id,
             run_id,
+            state_revision: 0,
+            prepared_workflow: None,
             start_node_id: None,
             status: RunStatus::Queued,
             control: RunControl::Continue,
             pause_reason: None,
             stop_reason: None,
+            failure: None,
             nodes: BTreeMap::new(),
+            node_operation_sequences: BTreeMap::new(),
             communication_edges: BTreeMap::new(),
             loop_iterations: BTreeMap::new(),
             rerun_queue: Vec::new(),
@@ -439,6 +559,7 @@ impl WorkflowRunState {
 /// 同步工作流运行器，先固定调度和恢复契约。
 pub struct WorkflowRuntime {
     pub state: WorkflowRunState,
+    cancellation: ExecutionCancellation,
 }
 
 impl WorkflowRuntime {
@@ -471,7 +592,10 @@ impl WorkflowRuntime {
                 },
             );
         }
-        Ok(Self { state })
+        Ok(Self {
+            state,
+            cancellation: ExecutionCancellation::new(),
+        })
     }
 
     /// 运行到成功、暂停或失败。
@@ -490,12 +614,30 @@ impl WorkflowRuntime {
         executor: &mut dyn WorkflowNodeExecutor,
         store: &dyn WorkflowRuntimeStore,
     ) -> CoreResult<RunStatus> {
+        if store
+            .load_state(&self.state.workflow_id, &self.state.run_id)?
+            .is_none()
+        {
+            store.create_state(&self.state)?;
+        }
         self.run_inner(workflow, executor, Some(store))
     }
 
     /// 从持久化状态恢复运行器。
     pub fn from_state(state: WorkflowRunState) -> Self {
-        Self { state }
+        Self {
+            state,
+            cancellation: ExecutionCancellation::new(),
+        }
+    }
+
+    /// 将 runtime 绑定到 worker 生命周期共享的取消信号。
+    pub fn set_cancellation(&mut self, cancellation: ExecutionCancellation) {
+        self.cancellation = cancellation;
+    }
+
+    pub fn cancellation(&self) -> &ExecutionCancellation {
+        &self.cancellation
     }
 
     /// 覆盖节点错误重试策略，主要供项目配置或测试注入。
@@ -530,29 +672,54 @@ impl WorkflowRuntime {
     }
 
     /// 请求暂停运行；下一次 run 会先保持 Paused。
-    pub fn request_pause(&mut self, reason: impl Into<String>) {
+    /// F12-c：终态 / Stopping 不得被 Pause 复活。
+    pub fn request_pause(&mut self, reason: impl Into<String>) -> CoreResult<()> {
+        if self.state.status.is_terminal() || self.state.status == RunStatus::Stopping {
+            return Err(CoreError::validation(format!(
+                "cannot pause workflow run in status {:?}",
+                self.state.status
+            )));
+        }
         self.pause(reason);
+        Ok(())
     }
 
     /// 请求停止运行并保留已完成结果。
-    pub fn request_stop(&mut self, reason: impl Into<String>) {
+    /// F12-a：写入 Stopping/Stopped，使 `execution_should_cancel` 能取消 in-flight。
+    /// F12-c：终态不得被 Stop 反复改写。
+    pub fn request_stop(&mut self, reason: impl Into<String>) -> CoreResult<()> {
+        if self.state.status.is_terminal() {
+            return Err(CoreError::validation(format!(
+                "cannot stop workflow run in terminal status {:?}",
+                self.state.status
+            )));
+        }
         let reason = reason.into();
         self.state.control = RunControl::Stop;
         self.state.stop_reason = Some(reason.clone());
+        // Paused/Queued：无 in-flight 节点，直接 Stopped；Running：Stopping 触发取消。
+        let event_type = if matches!(self.state.status, RunStatus::Paused | RunStatus::Queued) {
+            self.state.status = RunStatus::Stopped;
+            WorkflowRuntimeEventType::RunStopped
+        } else {
+            self.state.status = RunStatus::Stopping;
+            WorkflowRuntimeEventType::RunStopRequested
+        };
         self.state
             .events
             .push(format!("run stop requested: {reason}"));
         self.record_event(
-            WorkflowRuntimeEventType::RunStopped,
+            event_type,
             None,
             format!("run stop requested: {reason}"),
             Value::Null,
         );
+        Ok(())
     }
 
     /// 恢复暂停运行。待确认项未解决时，下一次 run 会再次暂停。
     pub fn resume(&mut self) -> CoreResult<()> {
-        if self.state.status.is_terminal() {
+        if self.state.status.is_terminal() || self.state.status == RunStatus::Stopping {
             return Err(CoreError::validation("terminal workflow run cannot resume"));
         }
         self.state.control = RunControl::Continue;
@@ -633,11 +800,11 @@ impl WorkflowRuntime {
         // 又启动新的节点。这里也负责把控制状态写回持久化存储。
         if self.state.control == RunControl::Stop {
             self.stop("stop requested before run");
-            persist_if_needed(store, &self.state)?;
+            persist_if_needed(store, &mut self.state)?;
             return Ok(self.state.status);
         }
         if self.state.control == RunControl::Pause && self.state.status == RunStatus::Paused {
-            persist_if_needed(store, &self.state)?;
+            persist_if_needed(store, &mut self.state)?;
             return Ok(self.state.status);
         }
 
@@ -650,13 +817,13 @@ impl WorkflowRuntime {
             "workflow run started",
             Value::Null,
         );
-        persist_if_needed(store, &self.state)?;
+        persist_if_needed(store, &mut self.state)?;
 
         loop {
             refresh_external_control(store, &mut self.state)?;
             if self.state.control == RunControl::Stop {
                 self.stop("stop requested during run");
-                persist_if_needed(store, &self.state)?;
+                persist_if_needed(store, &mut self.state)?;
                 return Ok(self.state.status);
             }
             if self.state.control == RunControl::Pause {
@@ -666,7 +833,7 @@ impl WorkflowRuntime {
                         .clone()
                         .unwrap_or_else(|| "pause requested during run".to_owned()),
                 );
-                persist_if_needed(store, &self.state)?;
+                persist_if_needed(store, &mut self.state)?;
                 return Ok(self.state.status);
             }
 
@@ -674,7 +841,7 @@ impl WorkflowRuntime {
             // pending 输出继续执行，否则会把未审批 patch 或意见传给后续节点。
             if self.state.has_pending_confirmations() {
                 self.pause("pending confirmation items");
-                persist_if_needed(store, &self.state)?;
+                persist_if_needed(store, &mut self.state)?;
                 return Ok(self.state.status);
             }
 
@@ -689,16 +856,16 @@ impl WorkflowRuntime {
                         "workflow run succeeded",
                         Value::Null,
                     );
-                    persist_if_needed(store, &self.state)?;
+                    persist_if_needed(store, &mut self.state)?;
                     return Ok(self.state.status);
                 }
                 if has_pending_retry_backoff(&self.state) {
                     self.state.status = RunStatus::Queued;
-                    persist_if_needed(store, &self.state)?;
+                    persist_if_needed(store, &mut self.state)?;
                     return Ok(self.state.status);
                 }
                 self.pause("no runnable nodes are ready");
-                persist_if_needed(store, &self.state)?;
+                persist_if_needed(store, &mut self.state)?;
                 return Ok(self.state.status);
             };
             if !node_is_ready(workflow, &graph_index, &self.state, &node_id) {
@@ -718,7 +885,7 @@ impl WorkflowRuntime {
             refresh_external_control(store, &mut self.state)?;
             if self.state.control == RunControl::Stop {
                 self.stop("stop requested during run");
-                persist_if_needed(store, &self.state)?;
+                persist_if_needed(store, &mut self.state)?;
                 return Ok(self.state.status);
             }
             if self.state.control == RunControl::Pause {
@@ -728,7 +895,7 @@ impl WorkflowRuntime {
                         .clone()
                         .unwrap_or_else(|| "pause requested during run".to_owned()),
                 );
-                persist_if_needed(store, &self.state)?;
+                persist_if_needed(store, &mut self.state)?;
                 return Ok(self.state.status);
             }
             let Some(node_instance) = graph_index.node(workflow, &node_id) else {
@@ -739,14 +906,14 @@ impl WorkflowRuntime {
             };
             if should_pause_for_breakpoint(&mut self.state, node_instance) {
                 self.pause(format!("breakpoint before node {}", node_id.as_str()));
-                persist_if_needed(store, &self.state)?;
+                persist_if_needed(store, &mut self.state)?;
                 return Ok(self.state.status);
             }
             let inputs = match collect_data_inputs(workflow, &graph_index, &self.state, &node_id) {
                 Ok(inputs) => inputs,
                 Err(error) => {
                     if self.record_node_error(node_id.clone(), error) {
-                        persist_if_needed(store, &self.state)?;
+                        persist_if_needed(store, &mut self.state)?;
                         continue;
                     }
                     self.state.status = if self
@@ -760,56 +927,186 @@ impl WorkflowRuntime {
                     } else {
                         RunStatus::Failed
                     };
-                    persist_if_needed(store, &self.state)?;
+                    persist_if_needed(store, &mut self.state)?;
                     return Ok(self.state.status);
                 }
             };
-            let request = WorkflowNodeExecutionRequest {
+            let operation_attempt = next_node_operation_attempt(&self.state, &node_id);
+            let communication_messages = collect_inbound_messages(&self.state, &node_id);
+            let metadata = self
+                .state
+                .nodes
+                .get(&node_id)
+                .map(|node| node.metadata.clone())
+                .unwrap_or(Value::Null);
+            let operation_id = stable_text_hash(&format!(
+                "workflow-operation-v1\0{}\0{}\0{}\0{}",
+                workflow.id.as_str(),
+                self.state.run_id.as_str(),
+                node_id.as_str(),
+                operation_attempt
+            ));
+            let request_hash = stable_text_hash(&serde_json::to_string(&json!({
+                "type_name": node_instance.type_name,
+                "config": node_instance.config,
+                "inputs": inputs,
+                "communication_messages": communication_messages,
+                "metadata": metadata,
+            }))?);
+            let mut request = WorkflowNodeExecutionRequest {
                 workflow_id: workflow.id.clone(),
                 run_id: self.state.run_id.clone(),
                 node_id: node_id.clone(),
+                operation_id,
+                operation_attempt,
+                request_hash,
                 type_name: node_instance.type_name.clone(),
                 config: node_instance.config.clone(),
                 inputs,
-                communication_messages: collect_inbound_messages(&self.state, &node_id),
-                metadata: self
-                    .state
-                    .nodes
-                    .get(&node_id)
-                    .map(|node| node.metadata.clone())
-                    .unwrap_or(Value::Null),
+                communication_messages,
+                metadata,
+                cancellation: self.cancellation.clone(),
+                dispatch_authorization: ExternalDispatchAuthorization::default(),
             };
-            self.record_node_started(&node_id);
-            match executor.execute(request) {
+            let operation_policy = executor.operation_policy(&request)?;
+            if operation_is_journaled(operation_policy) {
+                if let Some(runtime_store) = store {
+                    request.dispatch_authorization =
+                        runtime_store.operation_dispatch_authorization(&request.operation_id);
+                }
+            }
+            let journal_action =
+                prepare_operation_journal(store, &request, operation_policy, executor)?;
+            if matches!(journal_action, OperationJournalAction::InDoubt) {
+                self.pause(format!(
+                    "operation {} is in doubt and requires confirmation",
+                    request.operation_id
+                ));
+                persist_if_needed(store, &mut self.state)?;
+                return Ok(self.state.status);
+            }
+            self.record_node_started(&node_id, operation_attempt);
+            let execution_result = match &journal_action {
+                OperationJournalAction::Execute => executor.execute(request.clone()),
+                OperationJournalAction::Replay(output) => Ok(output.as_ref().clone()),
+                OperationJournalAction::InDoubt => unreachable!("handled before execution"),
+            };
+            let execution_result = match execution_result {
+                Ok(output) if matches!(journal_action, OperationJournalAction::Execute) => {
+                    match complete_operation_journal(store, &request, operation_policy, &output) {
+                        Ok(()) => Ok(output),
+                        Err(error @ CoreError::WorkflowExecutorContractViolation { .. }) => {
+                            Err(error)
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                result => result,
+            };
+            refresh_external_control(store, &mut self.state)?;
+            let external_stop_requested = self.state.control == RunControl::Stop;
+            match execution_result {
                 Ok(output) => {
                     let requested_control = output.run_control;
                     let loop_control = output.loop_control.clone();
-                    match requested_control {
-                        Some(RunControl::Pause) => {
-                            // 节点主动 Pause 表示这次节点尚未完成。保存中间输出和
-                            // metadata，但节点状态保持 Paused，Resume 后允许重试。
-                            self.record_node_paused(node_id.clone(), output);
-                            self.pause(format!("node {} requested pause", node_id.as_str()));
-                        }
-                        Some(RunControl::Stop) => {
-                            // 节点主动 Stop 表示当前节点结果有效，但整个运行不再
-                            // 继续下游。先记录成功输出，再停止运行。
-                            self.record_node_success(node_id.clone(), output);
-                            self.stop(format!("node {} requested stop", node_id.as_str()));
-                        }
-                        Some(RunControl::Continue) | None => {
-                            // 普通完成路径先固化节点输出，再推进 communication 和
-                            // Loop。二者都可能把运行切成 Paused。
-                            self.record_node_success(node_id.clone(), output);
-                            self.advance_communication(workflow, &node_id)?;
-                            self.advance_loop(workflow, &node_id, loop_control.as_ref())?;
+                    if external_stop_requested {
+                        self.record_node_success(node_id.clone(), output);
+                        self.stop(
+                            self.state.stop_reason.clone().unwrap_or_else(|| {
+                                "stop requested during node execution".to_owned()
+                            }),
+                        );
+                    } else {
+                        match requested_control {
+                            Some(RunControl::Pause) => {
+                                // 节点主动 Pause 表示这次节点尚未完成。保存中间输出和
+                                // metadata，但节点状态保持 Paused，Resume 后允许重试。
+                                self.record_node_paused(node_id.clone(), output);
+                                self.pause(format!("node {} requested pause", node_id.as_str()));
+                            }
+                            Some(RunControl::Stop) => {
+                                // 节点主动 Stop 表示当前节点结果有效，但整个运行不再
+                                // 继续下游。先记录成功输出，再停止运行。
+                                self.record_node_success(node_id.clone(), output);
+                                self.stop(format!("node {} requested stop", node_id.as_str()));
+                            }
+                            Some(RunControl::Continue) | None => {
+                                // 普通完成路径先固化节点输出，再推进 communication 和
+                                // Loop。二者都可能把运行切成 Paused。
+                                self.record_node_success(node_id.clone(), output);
+                                self.advance_communication(workflow, &node_id)?;
+                                self.advance_loop(workflow, &node_id, loop_control.as_ref())?;
+                            }
                         }
                     }
-                    persist_if_needed(store, &self.state)?;
+                    persist_operation_if_needed(
+                        store,
+                        &mut self.state,
+                        operation_is_journaled(operation_policy)
+                            .then_some(request.operation_id.as_str()),
+                    )?;
                 }
                 Err(error) => {
+                    let error_text = error.to_string();
+                    let operation_in_doubt =
+                        settle_operation_failure(store, &request, operation_policy, &error)?;
+                    // F12：executor 内 Pause/Stop 可能已在 store 中胜出；先 rebase 控制态，
+                    // 避免把「dispatch 被门禁拒绝」误记为节点 Failed 覆盖用户 Pause。
+                    refresh_external_control(store, &mut self.state)?;
+                    let control_stop = external_stop_requested
+                        || self.state.control == RunControl::Stop
+                        || matches!(self.state.status, RunStatus::Stopping | RunStatus::Stopped);
+                    let control_pause = self.state.control == RunControl::Pause
+                        || self.state.status == RunStatus::Paused;
+                    if control_stop {
+                        if let Some(node) = self.state.nodes.get_mut(&node_id) {
+                            node.status = RunStatus::Stopped;
+                            node.error = Some(error_text);
+                            node.error_state = None;
+                        }
+                        self.stop(
+                            self.state.stop_reason.clone().unwrap_or_else(|| {
+                                "stop requested during node execution".to_owned()
+                            }),
+                        );
+                        persist_if_needed(store, &mut self.state)?;
+                        return Ok(self.state.status);
+                    }
+                    if control_pause && !operation_in_doubt {
+                        if let Some(node) = self.state.nodes.get_mut(&node_id) {
+                            node.status = RunStatus::Paused;
+                            node.error = Some(error_text);
+                            node.error_state = None;
+                        }
+                        self.pause(
+                            self.state.pause_reason.clone().unwrap_or_else(|| {
+                                "pause requested during node execution".to_owned()
+                            }),
+                        );
+                        persist_if_needed(store, &mut self.state)?;
+                        return Ok(self.state.status);
+                    }
+                    if operation_in_doubt {
+                        if let Some(node) = self.state.nodes.get_mut(&node_id) {
+                            node.status = RunStatus::Paused;
+                            node.error = Some(error_text);
+                            node.error_state = None;
+                        }
+                        self.pause(format!(
+                            "operation {} may have produced an external side effect: {error}",
+                            request.operation_id
+                        ));
+                        persist_if_needed(store, &mut self.state)?;
+                        if self.state.control == RunControl::Stop {
+                            self.stop(self.state.stop_reason.clone().unwrap_or_else(|| {
+                                "stop requested during in_doubt settlement".to_owned()
+                            }));
+                            persist_if_needed(store, &mut self.state)?;
+                        }
+                        return Ok(self.state.status);
+                    }
                     if self.record_node_error(node_id.clone(), error) {
-                        persist_if_needed(store, &self.state)?;
+                        persist_if_needed(store, &mut self.state)?;
                         continue;
                     }
                     self.state.status = if self
@@ -823,7 +1120,16 @@ impl WorkflowRuntime {
                     } else {
                         RunStatus::Failed
                     };
-                    persist_if_needed(store, &self.state)?;
+                    persist_if_needed(store, &mut self.state)?;
+                    if self.state.control == RunControl::Stop {
+                        self.stop(
+                            self.state
+                                .stop_reason
+                                .clone()
+                                .unwrap_or_else(|| "stop requested during node failure".to_owned()),
+                        );
+                        persist_if_needed(store, &mut self.state)?;
+                    }
                     return Ok(self.state.status);
                 }
             }
@@ -1315,15 +1621,11 @@ impl WorkflowRuntime {
         );
     }
 
-    /// 记录节点启动事件并增加执行次数。
-    fn record_node_started(&mut self, node_id: &NodeId) {
-        let attempts = self
-            .state
-            .nodes
-            .get(node_id)
-            .map(|node| node.execution_attempts)
-            .unwrap_or(0)
-            .saturating_add(1);
+    /// 记录节点启动事件并固化本次 operation 序号。
+    fn record_node_started(&mut self, node_id: &NodeId, attempts: u32) {
+        self.state
+            .node_operation_sequences
+            .insert(node_id.clone(), attempts);
         self.state
             .nodes
             .entry(node_id.clone())
@@ -1742,14 +2044,340 @@ impl WorkflowRuntime {
 ///
 /// 放在单独函数里是为了让调度主循环只表达“何时保存”，不关心具体
 /// store 是否存在。
+#[derive(Debug, Clone)]
+enum OperationJournalAction {
+    Execute,
+    Replay(Box<WorkflowNodeExecutionOutput>),
+    InDoubt,
+}
+
+fn operation_is_journaled(policy: crate::workflow::WorkflowOperationPolicy) -> bool {
+    matches!(
+        policy,
+        crate::workflow::WorkflowOperationPolicy::Journaled { .. }
+    )
+}
+
+/// 只有 provider 明确报告未发送/已收到失败响应时，父 operation 才能安全 abort。
+/// 裸 `Cancelled` 的跨模块合同等价于 dispatch 前取消。
+fn prepare_operation_journal(
+    store: Option<&dyn WorkflowRuntimeStore>,
+    request: &WorkflowNodeExecutionRequest,
+    policy: crate::workflow::WorkflowOperationPolicy,
+    executor: &mut dyn WorkflowNodeExecutor,
+) -> CoreResult<OperationJournalAction> {
+    let crate::workflow::WorkflowOperationPolicy::Journaled { recovery, response } = policy else {
+        return Ok(OperationJournalAction::Execute);
+    };
+    let Some(store) = store else {
+        return Ok(OperationJournalAction::Execute);
+    };
+    let now_ms = unix_timestamp_ms();
+    let existing = store.load_operation(&request.operation_id)?;
+    let operation = if let Some(operation) = existing {
+        if operation.workflow_id != request.workflow_id
+            || operation.run_id != request.run_id
+            || operation.node_id != request.node_id
+            || operation.attempt != request.operation_attempt
+            || operation.request_hash != request.request_hash
+            || operation.recovery_policy != recovery
+            || operation.response_policy != response
+        {
+            return Err(CoreError::validation(format!(
+                "workflow operation identity mismatch: {}",
+                request.operation_id
+            )));
+        }
+        operation
+    } else {
+        let provider = request
+            .config
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .unwrap_or(&request.type_name)
+            .to_owned();
+        store.create_operation(
+            &crate::workflow::NewWorkflowOperation {
+                operation_id: request.operation_id.clone(),
+                workflow_id: request.workflow_id.clone(),
+                run_id: request.run_id.clone(),
+                node_id: request.node_id.clone(),
+                attempt: request.operation_attempt,
+                kind: request.type_name.clone(),
+                provider,
+                request_hash: request.request_hash.clone(),
+                lease_generation: store.operation_lease_generation(),
+                recovery_policy: recovery,
+                response_policy: response,
+            },
+            now_ms,
+        )?;
+        store
+            .load_operation(&request.operation_id)?
+            .ok_or_else(|| CoreError::validation("workflow operation disappeared after create"))?
+    };
+    match operation.status {
+        crate::workflow::WorkflowOperationStatus::Prepared => Ok(OperationJournalAction::Execute),
+        crate::workflow::WorkflowOperationStatus::Dispatched => {
+            match operation.recovery_policy {
+                crate::workflow::WorkflowOperationRecoveryPolicy::ReplayExecutor => {
+                    return Ok(OperationJournalAction::Execute);
+                }
+                crate::workflow::WorkflowOperationRecoveryPolicy::ReconcileReceipt => {
+                    if let Some(output) = executor.reconcile_operation(request)? {
+                        complete_operation_journal(Some(store), request, policy, &output)?;
+                        return Ok(OperationJournalAction::Replay(Box::new(output)));
+                    }
+                }
+                crate::workflow::WorkflowOperationRecoveryPolicy::ManualResolution => {}
+            }
+            let _ = store.transition_operation(
+                &request.operation_id,
+                crate::workflow::WorkflowOperationStatus::Dispatched,
+                crate::workflow::WorkflowOperationStatus::InDoubt,
+                None,
+                now_ms,
+            )?;
+            Ok(OperationJournalAction::InDoubt)
+        }
+        crate::workflow::WorkflowOperationStatus::InDoubt => {
+            if operation.recovery_policy
+                == crate::workflow::WorkflowOperationRecoveryPolicy::ReplayExecutor
+            {
+                return Ok(OperationJournalAction::Execute);
+            }
+            if operation.recovery_policy
+                == crate::workflow::WorkflowOperationRecoveryPolicy::ReconcileReceipt
+            {
+                if let Some(output) = executor.reconcile_operation(request)? {
+                    let response_json = serde_json::to_value(&output)?;
+                    if !store.transition_operation(
+                        &request.operation_id,
+                        crate::workflow::WorkflowOperationStatus::InDoubt,
+                        crate::workflow::WorkflowOperationStatus::Completed,
+                        Some(&response_json),
+                        unix_timestamp_ms(),
+                    )? {
+                        return Err(CoreError::validation(
+                            "workflow operation changed during receipt reconciliation",
+                        ));
+                    }
+                    return Ok(OperationJournalAction::Replay(Box::new(output)));
+                }
+            }
+            Ok(OperationJournalAction::InDoubt)
+        }
+        crate::workflow::WorkflowOperationStatus::Aborted => Err(CoreError::validation(
+            "aborted workflow operation cannot be dispatched again with the same attempt",
+        )),
+        crate::workflow::WorkflowOperationStatus::Completed => {
+            let response = operation.response_json.ok_or_else(|| {
+                CoreError::validation("completed workflow operation response is missing")
+            })?;
+            Ok(OperationJournalAction::Replay(Box::new(
+                serde_json::from_value(response)?,
+            )))
+        }
+        crate::workflow::WorkflowOperationStatus::Committed => Err(CoreError::validation(
+            "committed workflow operation has no matching node snapshot",
+        )),
+    }
+}
+
+fn complete_operation_journal(
+    store: Option<&dyn WorkflowRuntimeStore>,
+    request: &WorkflowNodeExecutionRequest,
+    policy: crate::workflow::WorkflowOperationPolicy,
+    output: &WorkflowNodeExecutionOutput,
+) -> CoreResult<()> {
+    if !operation_is_journaled(policy) {
+        return Ok(());
+    }
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let response = serde_json::to_value(output)?;
+    request.dispatch_authorization.seal()?;
+    match store.complete_operation_response(
+        &request.operation_id,
+        &response,
+        unix_timestamp_ms(),
+    )? {
+        crate::workflow::WorkflowOperationCompletionOutcome::Completed => Ok(()),
+        crate::workflow::WorkflowOperationCompletionOutcome::DispatchAuthorizationMissing => {
+            Err(CoreError::WorkflowExecutorContractViolation {
+                operation_id: request.operation_id.clone(),
+                message: "journaled executor returned success without consuming external dispatch authorization; operation quarantined as in_doubt"
+                    .to_owned(),
+            })
+        }
+    }
+}
+
+fn settle_operation_failure(
+    store: Option<&dyn WorkflowRuntimeStore>,
+    request: &WorkflowNodeExecutionRequest,
+    policy: crate::workflow::WorkflowOperationPolicy,
+    error: &CoreError,
+) -> CoreResult<bool> {
+    if !operation_is_journaled(policy) {
+        return Ok(false);
+    }
+    let Some(store) = store else {
+        return Ok(false);
+    };
+    let Some(operation) = store.load_operation(&request.operation_id)? else {
+        return Ok(false);
+    };
+    let definitely_settled = matches!(
+        error.external_dispatch_outcome(),
+        Some(
+            crate::contracts::ExternalDispatchOutcome::NotDispatched
+                | crate::contracts::ExternalDispatchOutcome::ResponseReceived
+        )
+    );
+    match operation.status {
+        crate::workflow::WorkflowOperationStatus::Prepared => {
+            if error.external_dispatch_outcome()
+                == Some(crate::contracts::ExternalDispatchOutcome::DispatchedUnknown)
+            {
+                let changed = store.transition_operation(
+                    &request.operation_id,
+                    crate::workflow::WorkflowOperationStatus::Prepared,
+                    crate::workflow::WorkflowOperationStatus::InDoubt,
+                    None,
+                    unix_timestamp_ms(),
+                )?;
+                if !changed {
+                    return Err(CoreError::validation(
+                        "workflow operation changed while preserving an unfenced dispatch",
+                    ));
+                }
+                Ok(true)
+            } else {
+                if !store.delete_prepared_operation(&request.operation_id)? {
+                    return Err(CoreError::validation(
+                        "workflow operation changed before prepared cleanup",
+                    ));
+                }
+                Ok(false)
+            }
+        }
+        crate::workflow::WorkflowOperationStatus::InDoubt => Ok(true),
+        crate::workflow::WorkflowOperationStatus::Dispatched => {
+            let next = if definitely_settled {
+                crate::workflow::WorkflowOperationStatus::Aborted
+            } else {
+                crate::workflow::WorkflowOperationStatus::InDoubt
+            };
+            if !store.transition_operation(
+                &request.operation_id,
+                crate::workflow::WorkflowOperationStatus::Dispatched,
+                next,
+                None,
+                unix_timestamp_ms(),
+            )? {
+                return Err(CoreError::validation(
+                    "workflow operation changed during failure settlement",
+                ));
+            }
+            Ok(next == crate::workflow::WorkflowOperationStatus::InDoubt)
+        }
+        crate::workflow::WorkflowOperationStatus::Aborted => Ok(false),
+        crate::workflow::WorkflowOperationStatus::Completed
+        | crate::workflow::WorkflowOperationStatus::Committed => Err(CoreError::validation(
+            "completed workflow operation cannot fail before state commit",
+        )),
+    }
+}
+
 fn persist_if_needed(
     store: Option<&dyn WorkflowRuntimeStore>,
-    state: &WorkflowRunState,
+    state: &mut WorkflowRunState,
 ) -> CoreResult<()> {
-    if let Some(store) = store {
-        store.save_state(state)?;
+    persist_operation_if_needed(store, state, None)
+}
+
+fn persist_operation_if_needed(
+    store: Option<&dyn WorkflowRuntimeStore>,
+    state: &mut WorkflowRunState,
+    commit_operation_id: Option<&str>,
+) -> CoreResult<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    for _ in 0..8 {
+        match store.save_state(state, commit_operation_id) {
+            Ok(()) => return Ok(()),
+            Err(CoreError::WorkflowStateRevisionConflict { .. }) => {
+                let latest = store
+                    .load_state(&state.workflow_id, &state.run_id)?
+                    .ok_or_else(|| CoreError::WorkflowRunNotFound {
+                        workflow_id: state.workflow_id.as_str().to_owned(),
+                        run_id: state.run_id.as_str().to_owned(),
+                    })?;
+                rebase_worker_state_after_conflict(state, latest);
+            }
+            Err(error) => return Err(error),
+        }
     }
-    Ok(())
+    Err(CoreError::validation(
+        "workflow state CAS retry limit exceeded",
+    ))
+}
+
+fn rebase_worker_state_after_conflict(
+    worker_state: &mut WorkflowRunState,
+    mut latest: WorkflowRunState,
+) {
+    let structured_prefix = worker_state
+        .structured_events
+        .iter()
+        .zip(&latest.structured_events)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let local_structured_tail = worker_state.structured_events[structured_prefix..].to_vec();
+    let legacy_prefix = worker_state
+        .events
+        .iter()
+        .zip(&latest.events)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let local_legacy_tail = worker_state.events[legacy_prefix..].to_vec();
+
+    latest.nodes.extend(worker_state.nodes.clone());
+    for (node_id, sequence) in &worker_state.node_operation_sequences {
+        latest
+            .node_operation_sequences
+            .entry(node_id.clone())
+            .and_modify(|persisted| *persisted = (*persisted).max(*sequence))
+            .or_insert(*sequence);
+    }
+    latest
+        .communication_edges
+        .extend(worker_state.communication_edges.clone());
+    latest
+        .loop_iterations
+        .extend(worker_state.loop_iterations.clone());
+    latest.rerun_queue = worker_state.rerun_queue.clone();
+    for (confirmation_id, confirmation) in &worker_state.confirmations {
+        latest
+            .confirmations
+            .entry(confirmation_id.clone())
+            .or_insert_with(|| confirmation.clone());
+    }
+    latest.retry_policy = worker_state.retry_policy;
+    if latest.control == RunControl::Continue {
+        latest.status = worker_state.status;
+        latest.failure = worker_state.failure.clone();
+    }
+    latest.events.extend(local_legacy_tail);
+    for mut event in local_structured_tail {
+        event.sequence = latest.next_event_sequence;
+        latest.next_event_sequence = latest.next_event_sequence.saturating_add(1);
+        latest.structured_events.push(event);
+    }
+    *worker_state = latest;
 }
 
 fn refresh_external_control(
@@ -1762,27 +2390,43 @@ fn refresh_external_control(
     let Some(latest) = store.load_state(&state.workflow_id, &state.run_id)? else {
         return Ok(());
     };
-    match latest.control {
-        RunControl::Stop => {
-            state.control = RunControl::Stop;
-            state.stop_reason = latest.stop_reason;
-        }
-        RunControl::Pause => {
-            state.control = RunControl::Pause;
-            state.pause_reason = latest.pause_reason;
-        }
-        RunControl::Continue => {}
+    if latest.status.is_terminal() {
+        *state = latest;
+        return Ok(());
     }
+    // 控制命令与 worker 事件共享同一 revision/event 序列。只复制 control 会丢失
+    // StopRequested 事件并造成 sequence 冲突，因此复用 CAS rebase 合并完整快照。
+    rebase_worker_state_after_conflict(state, latest);
     Ok(())
 }
 
 /// 返回节点此前记录的执行次数，用于成功/暂停输出不清零尝试计数。
 fn previous_attempts(state: &WorkflowRunState, node_id: &NodeId) -> u32 {
-    state
+    let node_attempts = state
         .nodes
         .get(node_id)
         .map(|node| node.execution_attempts)
+        .unwrap_or(0);
+    state
+        .node_operation_sequences
+        .get(node_id)
+        .copied()
         .unwrap_or(0)
+        .max(node_attempts)
+}
+
+/// 返回下一次 operation 序号。人工尚未裁决的 in_doubt 恢复必须复用原序号；
+/// 正常重试、Loop 和回注重跑则分配新序号。
+fn next_node_operation_attempt(state: &WorkflowRunState, node_id: &NodeId) -> u32 {
+    let previous = previous_attempts(state, node_id);
+    let resumes_in_doubt = state.nodes.get(node_id).is_some_and(|node| {
+        node.status == RunStatus::Paused && node.error.is_some() && node.error_state.is_none()
+    });
+    if resumes_in_doubt && previous > 0 {
+        previous
+    } else {
+        previous.saturating_add(1)
+    }
 }
 
 /// 将 CoreError 转成节点级错误状态。
@@ -1820,7 +2464,9 @@ fn node_error_kind(error: &CoreError) -> NodeErrorKind {
     match error {
         CoreError::PermissionDenied { .. } => NodeErrorKind::Permission,
         CoreError::BudgetExceeded { .. } | CoreError::Paused { .. } => NodeErrorKind::Budget,
-        CoreError::Cancelled | CoreError::Stopped { .. } => NodeErrorKind::Cancelled,
+        CoreError::Cancelled
+        | CoreError::ExternalCancellation { .. }
+        | CoreError::Stopped { .. } => NodeErrorKind::Cancelled,
         CoreError::External { message, .. } => {
             let lower = message.to_ascii_lowercase();
             if lower.contains("timeout")
@@ -1832,6 +2478,27 @@ fn node_error_kind(error: &CoreError) -> NodeErrorKind {
                 NodeErrorKind::Retryable
             } else {
                 NodeErrorKind::External
+            }
+        }
+        CoreError::ProviderRequest {
+            outcome, message, ..
+        }
+        | CoreError::ExternalOperation {
+            outcome, message, ..
+        } => {
+            if *outcome == crate::contracts::ExternalDispatchOutcome::NotDispatched {
+                NodeErrorKind::Retryable
+            } else {
+                let lower = message.to_ascii_lowercase();
+                if lower.contains("rate limit")
+                    || lower.contains("429")
+                    || lower.contains("503")
+                    || lower.contains("504")
+                {
+                    NodeErrorKind::Retryable
+                } else {
+                    NodeErrorKind::External
+                }
             }
         }
         CoreError::Validation { message } => {
@@ -1853,7 +2520,10 @@ fn node_error_kind(error: &CoreError) -> NodeErrorKind {
         CoreError::RegistryDuplicate { .. }
         | CoreError::RegistryMissing { .. }
         | CoreError::PortMissing { .. }
-        | CoreError::PortTypeMismatch { .. } => NodeErrorKind::System,
+        | CoreError::PortTypeMismatch { .. }
+        | CoreError::WorkflowStateRevisionConflict { .. }
+        | CoreError::WorkflowRunNotFound { .. }
+        | CoreError::WorkflowExecutorContractViolation { .. } => NodeErrorKind::System,
     }
 }
 

@@ -1,4 +1,6 @@
 /target/
+/.target-*/
+/artifacts/
 /core/target/
 /core/gen/
 /.agents/
@@ -16,10 +18,14 @@
 /.nuget-packages/
 /.config/
 /node_modules/
+__pycache__/
+*.py[cod]
 /dist/
 /build/
 /desktop/**/bin/
 /desktop/**/obj/
+/tools/**/bin/
+/tools/**/obj/
 /.cache/
 /.ariadne-app/
 /.runtime/

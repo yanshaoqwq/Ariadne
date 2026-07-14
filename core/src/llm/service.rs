@@ -41,7 +41,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
         self.check_estimated_budget(&request)?;
         check_context_limit(&request)?;
 
-        let response = self.call_provider(provider, &request, None, false)?;
+        let response = self.call_provider(provider, &request, None, false, cancellation)?;
         self.check_after_provider_response(&request, &response, started_at, cancellation)?;
         audit_log.push(provider_response_event(&request, 0, &response));
 
@@ -73,7 +73,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
             self.check_estimated_budget(&request)?;
             check_context_limit(&request)?;
 
-            let response = self.call_provider(provider, &request, None, false)?;
+            let response = self.call_provider(provider, &request, None, false, cancellation)?;
             self.check_after_provider_response(&request, &response, started_at, cancellation)?;
             accumulate_usage(&mut total_usage, response.usage);
             audit_log.push(provider_response_event(&request, round, &response));
@@ -136,7 +136,7 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
         }];
         self.check_estimated_budget(&request)?;
 
-        let response = self.call_provider(provider, &request, None, true)?;
+        let response = self.call_provider(provider, &request, None, true, cancellation)?;
         if let Err(error) =
             self.check_after_provider_response(&request, &response, started_at, cancellation)
         {
@@ -168,9 +168,10 @@ impl<'a, L: CostLedger> LlmService<'a, L> {
         request: &LlmRunRequest,
         tool_call_id: Option<String>,
         stream: bool,
+        cancellation: &CancellationToken,
     ) -> CoreResult<LlmResponse> {
         let executor = ProviderExecutor::new(self.ledger);
-        let context = request.provider_context(tool_call_id);
+        let context = request.provider_context(tool_call_id, cancellation);
         executor.complete_llm(provider, &context, request.to_llm_request(stream))
     }
 
@@ -449,7 +450,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     // 以 0000-03-01 为纪元的 Hinnant 算法。
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as i64; // [0, 146096]
+    let doe = z - era * 146_097; // [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
     let year = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
@@ -463,7 +464,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as i64; // [0, 399]
+    let yoe = y - era * 400; // [0, 399]
     let m = month as i64;
     let d = day as i64;
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]

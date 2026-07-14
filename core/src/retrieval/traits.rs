@@ -1,4 +1,5 @@
 use crate::contracts::CoreResult;
+use crate::providers::ProviderCallContext;
 use crate::retrieval::models::{
     FullTextRecord, FullTextSearchRequest, HybridSearchRequest, RebuildReport, RerankInput,
     RetrievalResult, StoreHealth, VectorRecord, VectorSearchRequest,
@@ -23,6 +24,25 @@ pub trait VectorStore: Send + Sync {
 
     /// 使用源记录重建整个索引。
     fn rebuild_from_records(&self, records: Vec<VectorRecord>) -> CoreResult<RebuildReport>;
+}
+
+/// 文本向量化端口；生产实现必须调用已配置的 EmbeddingProvider。
+pub trait TextEmbedder: Send + Sync {
+    /// 稳定 provider id，用于诊断与成本归因。
+    fn provider_id(&self) -> &str;
+
+    /// 稳定模型 id；provider/model 任一变化都代表向量空间可能变化。
+    fn model_id(&self) -> &str;
+
+    /// 配置要求的向量维度。
+    fn dimensions(&self) -> usize;
+
+    /// 批量生成向量，并校验数量、维度和有限值。
+    fn embed(&self, context: ProviderCallContext, inputs: Vec<String>)
+        -> CoreResult<Vec<Vec<f32>>>;
+
+    /// 返回 provider 配置健康状态；不把未探测的远端伪装成已验证健康。
+    fn health_check(&self) -> CoreResult<StoreHealth>;
 }
 
 /// 全文索引后端契约，真实 Tantivy 和测试内存后端都实现它。

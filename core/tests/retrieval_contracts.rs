@@ -1,16 +1,22 @@
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::thread;
 
+use ariadne::contracts::CoreResult;
 use ariadne::documents::IndexInvalidationOutbox;
+use ariadne::providers::ProviderCallContext;
 use ariadne::retrieval::{
     recover_retrieval_components, select_available_port, ChunkDocument, FullTextRecord,
     FullTextSearchRequest, HybridSearchEngine, HybridSearchRequest, IndexingWorker,
     MemoryFullTextStore, MemoryVectorStore, RebuildStatus, RetrievalRecoveryAction,
-    RetrievalSource, SidecarState, SqliteFullTextStore, StoreStatus, TantivyFullTextStore,
-    ThreeWayHybridSearchEngine, VectorRecord, VectorSearchRequest, MAX_HYBRID_SEARCH_LIMIT,
+    RetrievalSource, SidecarState, SqliteFullTextStore, StoreHealth, StoreStatus,
+    TantivyFullTextStore, TextEmbedder, ThreeWayHybridSearchEngine, VectorRecord,
+    VectorSearchRequest, MAX_HYBRID_SEARCH_LIMIT,
 };
 use ariadne::retrieval::{
-    FullTextStore, HybridSearch, QdrantSidecarConfig, QdrantSidecarSupervisor,
+    FullTextStore, HybridSearch, QdrantSidecarConfig, QdrantSidecarSupervisor, QdrantVectorStore,
     SidecarProcessRunner, VectorStore,
 };
 use std::process::{Child, Command};
@@ -127,6 +133,111 @@ fn indexing_worker_executes_project_full_rebuild_event() {
         .search(FullTextSearchRequest::new("线索", 10))
         .unwrap()
         .is_empty());
+}
+
+/// F1 测试夹具：显式模拟 provider embedding，不允许 worker 自行生成哈希向量。
+struct TestTextEmbedder {
+    calls: Arc<AtomicUsize>,
+    dimensions: usize,
+}
+
+impl TextEmbedder for TestTextEmbedder {
+    fn provider_id(&self) -> &str {
+        "test-embedding"
+    }
+
+    fn model_id(&self) -> &str {
+        "test-embedding-model"
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    fn embed(
+        &self,
+        _context: ProviderCallContext,
+        inputs: Vec<String>,
+    ) -> CoreResult<Vec<Vec<f32>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(inputs
+            .into_iter()
+            .map(|_| {
+                let mut vector = vec![0.0; self.dimensions];
+                vector[0] = 1.0;
+                vector
+            })
+            .collect())
+    }
+
+    fn health_check(&self) -> CoreResult<StoreHealth> {
+        Ok(StoreHealth::healthy("test_embedding"))
+    }
+}
+
+/// F1：配置 VectorStore 时 worker 必须调用 TextEmbedder 并 upsert 真实向量。
+#[test]
+fn indexing_worker_upserts_vector_store_when_configured() {
+    let temp = tempfile::tempdir().unwrap();
+    let document = temp.path().join("chapter.md");
+    let content = "可检索的中文线索段落。";
+    std::fs::write(&document, content).unwrap();
+    let document_id = document
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let source_version = test_content_version(content.as_bytes());
+    let outbox = IndexInvalidationOutbox::new(temp.path().join("outbox.db"));
+    let event_id = outbox
+        .prepare(&document_id, "document_saved", &source_version, false)
+        .unwrap();
+    outbox.activate(&event_id).unwrap();
+
+    let tantivy = Arc::new(MemoryFullTextStore::new());
+    let sqlite = Arc::new(MemoryFullTextStore::new());
+    let vector = Arc::new(MemoryVectorStore::new());
+    let embedding_calls = Arc::new(AtomicUsize::new(0));
+    let embedder = Arc::new(TestTextEmbedder {
+        calls: Arc::clone(&embedding_calls),
+        dimensions: 8,
+    });
+    let worker = IndexingWorker::with_vector_store(
+        outbox.clone(),
+        tantivy.clone(),
+        sqlite,
+        vector.clone(),
+        embedder,
+        32,
+        4,
+    )
+    .unwrap();
+
+    let report = worker.process_next().unwrap().unwrap();
+    assert!(report.vector_indexed, "vector path must report indexed");
+    assert!(report.indexed_chunks > 0);
+    assert_eq!(embedding_calls.load(Ordering::SeqCst), 1);
+    assert!(!vector
+        .search(VectorSearchRequest::new(
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            10,
+        ))
+        .unwrap()
+        .is_empty());
+    let health = vector.health_check().unwrap();
+    assert_eq!(health.status, StoreStatus::Healthy);
+    // 删除文档后向量侧同步清空
+    let _ = vector.delete_document(&document_id).unwrap();
+
+    // 未配置向量时不写向量、不报 vector_indexed
+    let event_id2 = outbox
+        .prepare(&document_id, "document_saved", &source_version, false)
+        .unwrap();
+    outbox.activate(&event_id2).unwrap();
+    let worker_ft =
+        IndexingWorker::new(outbox, tantivy, Arc::new(MemoryFullTextStore::new()), 32, 4).unwrap();
+    let report_ft = worker_ft.process_next().unwrap().unwrap();
+    assert!(!report_ft.vector_indexed);
 }
 
 fn test_content_version(bytes: &[u8]) -> String {
@@ -315,6 +426,38 @@ fn tantivy_full_text_store_searches_and_rebuilds() {
 }
 
 #[test]
+fn full_text_backends_treat_author_punctuation_as_literal_natural_language() {
+    let tantivy = TantivyFullTextStore::open_in_memory().unwrap();
+    let sqlite = SqliteFullTextStore::open_in_memory().unwrap();
+    let record = FullTextRecord {
+        chunk: ChunkDocument::new(
+            "chunk-natural-language",
+            "doc-natural-language",
+            "角色：张三（旧城）留下未闭合的线索",
+        ),
+    };
+    tantivy.upsert(vec![record.clone()]).unwrap();
+    sqlite.upsert(vec![record]).unwrap();
+
+    for query in ["角色:张三", "张三（旧城）", "未闭合 \"线索"] {
+        let tantivy_results = tantivy
+            .search(FullTextSearchRequest::new(query, 10))
+            .unwrap();
+        let sqlite_results = sqlite
+            .search(FullTextSearchRequest::new(query, 10))
+            .unwrap();
+        assert!(
+            !tantivy_results.is_empty(),
+            "Tantivy should accept natural query: {query}"
+        );
+        assert!(
+            !sqlite_results.is_empty(),
+            "SQLite FTS should accept natural query: {query}"
+        );
+    }
+}
+
+#[test]
 fn three_way_hybrid_search_merges_vector_tantivy_and_sqlite() {
     let vector = Arc::new(MemoryVectorStore::new());
     let tantivy = Arc::new(TantivyFullTextStore::open_in_memory().unwrap());
@@ -434,4 +577,151 @@ fn retrieval_recovery_restarts_sidecar_and_rebuilds_indexes() {
         .actions
         .contains(&RetrievalRecoveryAction::RebuildFullTextIndex));
     assert_eq!(report.rebuild_reports.len(), 2);
+}
+
+#[test]
+fn qdrant_initialize_rejects_existing_collection_dimension_mismatch() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        assert!(request.starts_with("GET /collections/ariadne "));
+        write_json_response(
+            &mut stream,
+            200,
+            r#"{"result":{"config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}}}"#,
+        );
+    });
+    let store = QdrantVectorStore::new(endpoint, "ariadne", 2).unwrap();
+
+    let error = store.initialize().unwrap_err();
+    server.join().unwrap();
+
+    assert!(error.to_string().contains("vector dimension 3"));
+    assert!(error.to_string().contains("configured dimension 2"));
+}
+
+#[test]
+fn qdrant_health_detects_collection_dimension_drift() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        assert!(request.starts_with("GET /collections/ariadne "));
+        write_json_response(
+            &mut stream,
+            200,
+            r#"{"result":{"config":{"params":{"vectors":{"size":3,"distance":"Cosine"}}}}}"#,
+        );
+    });
+    let store = QdrantVectorStore::new(endpoint, "ariadne", 2).unwrap();
+
+    let health = store.health_check().unwrap();
+    server.join().unwrap();
+
+    assert_eq!(health.status, StoreStatus::Unavailable);
+    assert!(health.reason.unwrap().contains("configured dimension 2"));
+}
+
+#[test]
+fn qdrant_rebuild_deletes_stale_collection_before_recreate_and_upsert() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("qdrant-rebuild-required.json");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let responses = [
+            (200, r#"{"result":true}"#),
+            (404, r#"{"status":"not found"}"#),
+            (200, r#"{"result":true}"#),
+            (
+                200,
+                r#"{"result":{"config":{"params":{"vectors":{"size":2,"distance":"Cosine"}}}}}"#,
+            ),
+            (200, r#"{"result":{"status":"completed"}}"#),
+        ];
+        responses
+            .into_iter()
+            .map(|(status, body)| {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                write_json_response(&mut stream, status, body);
+                request
+            })
+            .collect::<Vec<_>>()
+    });
+    let store = QdrantVectorStore::new(endpoint, "ariadne", 2)
+        .unwrap()
+        .with_rebuild_marker(&marker)
+        .unwrap();
+    store
+        .mark_rebuild_required("old points may remain")
+        .unwrap();
+    assert_eq!(
+        store.health_check().unwrap().status,
+        StoreStatus::RebuildRequired
+    );
+
+    let report = store
+        .rebuild_from_records(vec![VectorRecord {
+            chunk: ChunkDocument::new("fresh-chunk", "fresh-document", "fresh text"),
+            embedding: vec![0.25, 0.75],
+        }])
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(report.status, RebuildStatus::Completed);
+    assert_eq!(report.processed_items, 1);
+    assert!(!marker.exists(), "successful rebuild must clear marker");
+    assert!(requests[0].starts_with("DELETE /collections/ariadne "));
+    assert!(requests[1].starts_with("GET /collections/ariadne "));
+    assert!(requests[2].starts_with("PUT /collections/ariadne "));
+    assert!(requests[2].contains("\"size\":2"));
+    assert!(requests[3].starts_with("GET /collections/ariadne "));
+    assert!(requests[4].starts_with("PUT /collections/ariadne/points?wait=true "));
+    assert!(requests[4].contains("fresh-chunk"));
+    assert!(!requests[4].contains("old points may remain"));
+}
+
+fn read_http_request(stream: &mut TcpStream) -> String {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut expected_len = None;
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if expected_len.is_none() {
+            if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                    })
+                    .unwrap_or(0);
+                expected_len = Some(header_end + 4 + content_len);
+            }
+        }
+        if expected_len.is_some_and(|expected| bytes.len() >= expected) {
+            break;
+        }
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
+fn write_json_response(stream: &mut TcpStream, status: u16, body: &str) {
+    let reason = if status == 200 { "OK" } else { "Not Found" };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).unwrap();
 }

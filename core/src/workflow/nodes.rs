@@ -14,6 +14,20 @@ use crate::workflow::{
 
 /// 外部节点适配器，负责 LLM、Document、ExecutorAdapter、Search 和写作节点。
 pub trait WorkflowExternalNodeExecutor {
+    fn operation_policy(
+        &self,
+        _request: &WorkflowNodeExecutionRequest,
+    ) -> CoreResult<crate::workflow::WorkflowOperationPolicy> {
+        Ok(crate::workflow::WorkflowOperationPolicy::Untracked)
+    }
+
+    fn reconcile_operation(
+        &mut self,
+        _request: &WorkflowNodeExecutionRequest,
+    ) -> CoreResult<Option<WorkflowNodeExecutionOutput>> {
+        Ok(None)
+    }
+
     /// 执行非内建节点。
     fn execute_external(
         &mut self,
@@ -23,6 +37,10 @@ pub trait WorkflowExternalNodeExecutor {
 
 /// Export 节点 artifact 后端。
 pub trait WorkflowExportSink {
+    fn operation_policy(&self) -> crate::workflow::WorkflowOperationPolicy {
+        crate::workflow::WorkflowOperationPolicy::Untracked
+    }
+
     /// 写入导出 artifact，并返回 artifact id。
     fn export_artifact(
         &mut self,
@@ -54,11 +72,44 @@ impl<'a> BuiltinWorkflowNodeExecutor<'a> {
 }
 
 impl WorkflowNodeExecutor for BuiltinWorkflowNodeExecutor<'_> {
+    fn operation_policy(
+        &self,
+        request: &WorkflowNodeExecutionRequest,
+    ) -> CoreResult<crate::workflow::WorkflowOperationPolicy> {
+        match request.type_name.as_str() {
+            "start" | "condition" | "eval" | "loop" | "approval" => {
+                Ok(crate::workflow::WorkflowOperationPolicy::Untracked)
+            }
+            "export" => Ok(self
+                .export_sink
+                .as_ref()
+                .map(|sink| sink.operation_policy())
+                .unwrap_or(crate::workflow::WorkflowOperationPolicy::Untracked)),
+            _ => self.external.operation_policy(request),
+        }
+    }
+
+    fn reconcile_operation(
+        &mut self,
+        request: &WorkflowNodeExecutionRequest,
+    ) -> CoreResult<Option<WorkflowNodeExecutionOutput>> {
+        match request.type_name.as_str() {
+            "start" | "condition" | "eval" | "loop" | "approval" | "export" => Ok(None),
+            _ => self.external.reconcile_operation(request),
+        }
+    }
+
     /// 分发内建节点和外部节点。
     fn execute(
         &mut self,
         request: WorkflowNodeExecutionRequest,
     ) -> CoreResult<WorkflowNodeExecutionOutput> {
+        if request.cancellation.is_cancelled() {
+            return Err(CoreError::external_cancelled(
+                "workflow_node",
+                crate::contracts::ExternalDispatchOutcome::NotDispatched,
+            ));
+        }
         // Module 11 只内置控制语义节点；LLM、Document、Search、写作节点都
         // 通过 external 适配器接入，避免 runtime 直接依赖具体服务。
         match request.type_name.as_str() {

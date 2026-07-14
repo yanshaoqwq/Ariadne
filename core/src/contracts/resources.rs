@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -185,6 +186,101 @@ impl CancellationToken {
         }
     }
 }
+
+impl PartialEq for CancellationToken {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cancelled, &other.cancelled)
+            || self.is_cancelled() == other.is_cancelled()
+    }
+}
+
+impl Eq for CancellationToken {}
+
+/// 外部副作用派发授权。运行时存储提供持久化校验器，执行器在真实副作用边界
+/// 调用 `authorize_dispatch`，把运行控制、worker fencing 与 operation journal
+/// 收敛到同一个线性化点。独立调用默认使用空授权器。
+#[derive(Clone, Default)]
+pub struct ExternalDispatchAuthorization {
+    inner: Option<Arc<ExternalDispatchAuthorizationInner>>,
+}
+
+struct ExternalDispatchAuthorizationInner {
+    check: Arc<dyn Fn(bool) -> CoreResult<()> + Send + Sync>,
+    sealed: Mutex<bool>,
+}
+
+impl ExternalDispatchAuthorization {
+    pub fn new(check: impl Fn(bool) -> CoreResult<()> + Send + Sync + 'static) -> Self {
+        Self {
+            inner: Some(Arc::new(ExternalDispatchAuthorizationInner {
+                check: Arc::new(check),
+                sealed: Mutex::new(false),
+            })),
+        }
+    }
+
+    /// 只复核运行控制与 fencing，不把 operation 标记为 dispatched。
+    pub fn check(&self) -> CoreResult<()> {
+        self.invoke(false)
+    }
+
+    /// 在真实副作用边界复核并原子登记 dispatched。
+    pub fn authorize_dispatch(&self) -> CoreResult<()> {
+        self.invoke(true)
+    }
+
+    /// 封闭本次执行器持有的授权句柄。所有 clone 共享同一把锁，因此返回后才到达的
+    /// 异步派发不能越过 operation 完成事务重新消费旧授权。
+    pub fn seal(&self) -> CoreResult<()> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        let mut sealed = inner
+            .sealed
+            .lock()
+            .map_err(|_| CoreError::validation("external dispatch authorization lock poisoned"))?;
+        *sealed = true;
+        Ok(())
+    }
+
+    fn invoke(&self, dispatch: bool) -> CoreResult<()> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        let sealed = inner
+            .sealed
+            .lock()
+            .map_err(|_| CoreError::validation("external dispatch authorization lock poisoned"))?;
+        if *sealed {
+            return Err(CoreError::external_cancelled(
+                "dispatch_authorization",
+                crate::contracts::ExternalDispatchOutcome::NotDispatched,
+            ));
+        }
+        (inner.check)(dispatch)
+    }
+}
+
+impl fmt::Debug for ExternalDispatchAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExternalDispatchAuthorization")
+            .field("enabled", &self.inner.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for ExternalDispatchAuthorization {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.inner, &other.inner) {
+            (None, None) => true,
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ExternalDispatchAuthorization {}
 
 #[cfg(test)]
 mod tests {

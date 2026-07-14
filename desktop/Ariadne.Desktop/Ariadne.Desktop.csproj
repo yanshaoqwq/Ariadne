@@ -5,10 +5,25 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AriadneApplicationManifestTemplate>$(MSBuildProjectDirectory)\app.manifest</AriadneApplicationManifestTemplate>
+    <AriadneGeneratedApplicationManifest>$([System.IO.Path]::Combine('$(MSBuildProjectExtensionsPath)', '$(Configuration)', '$(TargetFramework)', 'Ariadne.Desktop.app.manifest'))</AriadneGeneratedApplicationManifest>
+    <ApplicationManifest>$(AriadneGeneratedApplicationManifest)</ApplicationManifest>
+    <Product>Ariadne</Product>
+    <Title>Ariadne Desktop</Title>
+    <Description>AI writing workbench for long-form fiction</Description>
+    <Authors>yanshaoqwq and Ariadne contributors</Authors>
+    <Copyright>Copyright 2026 yanshaoqwq and Ariadne contributors</Copyright>
+    <RepositoryUrl>https://github.com/yanshaoqwq/Ariadne</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>PolyForm-Noncommercial-1.0.0</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
     <!-- 系统桌面/任务栏/窗口图标（斜钢笔+波浪线，默认青绿 on 暖纸白） -->
     <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ariadne.Desktop.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="12.0.5" />
@@ -21,6 +36,21 @@
     <None Include="..\..\core\resources\display_name.json" Link="Resources\display_name.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\core\resources\display_name.*.json" Link="Resources\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\core\resources\prompt_list.json" Link="Resources\prompt_list.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
+    <None Include="..\..\NOTICE" Link="NOTICE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
+    <None Include="..\..\COMMERCIAL_LICENSE.md" Link="COMMERCIAL_LICENSE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
+    <None Include="..\..\THIRD_PARTY_NOTICES.md" Link="THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
     <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
+
+  <Target Name="GenerateAriadneApplicationManifest"
+          BeforeTargets="SetWin32ManifestProperties"
+          Inputs="$(AriadneApplicationManifestTemplate);$(AriadneRepositoryRoot)Cargo.toml"
+          Outputs="$(ApplicationManifest)">
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(ApplicationManifest)'))" />
+    <Copy SourceFiles="$(AriadneApplicationManifestTemplate)" DestinationFiles="$(ApplicationManifest)" />
+    <XmlPoke XmlInputPath="$(ApplicationManifest)"
+             Query="/*[local-name()='assembly']/*[local-name()='assemblyIdentity']/@version"
+             Value="$(AssemblyVersion)" />
+  </Target>
 </Project>

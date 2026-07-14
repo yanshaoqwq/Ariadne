@@ -475,7 +475,7 @@ fn validate_non_empty(field: &str, value: &str) -> CoreResult<()> {
 
 /// 计算非零除数的向上取整除法。
 fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
-    value / divisor + u64::from(value % divisor != 0)
+    value / divisor + u64::from(!value.is_multiple_of(divisor))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

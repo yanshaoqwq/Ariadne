@@ -141,10 +141,10 @@ fn scale_to_millionths(value: &str) -> CoreResult<u128> {
     while fractional.len() < 6 {
         fractional.push(b'0');
     }
-    Ok(integer
+    integer
         .checked_mul(1_000_000)
         .and_then(|base| base.checked_add(digits_to_u128(&fractional).ok()?))
-        .ok_or_else(|| CoreError::validation("segment number is too large"))?)
+        .ok_or_else(|| CoreError::validation("segment number is too large"))
 }
 
 /// 将数字串转成整数。

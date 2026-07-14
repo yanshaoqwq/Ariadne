@@ -1,9 +1,16 @@
 [package]
 name = "ariadne"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.78"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 publish = false
+authors.workspace = true
+description = "A local-first AI writing workbench for long-form fiction"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["writing", "workflow", "rag", "desktop"]
 
 [lib]
 name = "ariadne"
@@ -13,11 +20,14 @@ path = "src/lib.rs"
 keyring = { version = "4.1.2", optional = true, default-features = false, features = ["v1"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tokio = { version = "1", features = ["net", "rt", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chacha20poly1305 = "0.10"
+argon2 = "0.5"
 getrandom = "0.2"
 sha2 = "0.10"
+fs4 = "0.8.4"
 tantivy = "0.22"
 thiserror = "1"
 wasmi = "0.40"

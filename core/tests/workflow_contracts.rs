@@ -1,38 +1,2404 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ariadne::config::{ModelConfig, ProviderConfig};
 use ariadne::contracts::{
-    CommunicationEdgeConfig, DocumentPatch, Edge, EdgeId, NodeId, NodeInstance, PatchHunk,
-    PermissionPolicy, PortEndpoint, PortMap, PortValue, ProviderCapability, ProviderDefinition,
-    ProviderType, RunControl, RunId, RunStatus, TextRange, WorkflowDefinition, WorkflowEdgeKind,
-    WorkflowId, COMMUNICATION_PORT, EXECUTION_INPUT_PORT, EXECUTION_OUTPUT_PORT,
+    CommunicationEdgeConfig, DocumentPatch, Edge, EdgeId, ExternalDispatchAuthorization, NodeId,
+    NodeInstance, PatchHunk, PermissionPolicy, PortEndpoint, PortMap, PortValue,
+    ProviderCapability, ProviderDefinition, ProviderType, RunControl, RunId, RunStatus, TextRange,
+    WorkflowDefinition, WorkflowEdgeKind, WorkflowId, COMMUNICATION_PORT, EXECUTION_INPUT_PORT,
+    EXECUTION_OUTPUT_PORT,
 };
-use ariadne::costs::{SqliteCostLedger, TokenUsage};
+use ariadne::costs::{CostLedger, CostQuery, SqliteCostLedger, TokenUsage};
 use ariadne::documents::{DocumentReadRequest, DocumentRepository, FileDocumentService};
 use ariadne::git::GitService;
 use ariadne::providers::{
-    LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider, ProviderCallContext, ProviderHealth,
+    LlmMessage, LlmProvider, LlmRequest, LlmResponse, OpenAiCompatibleLlmProvider, Provider,
+    ProviderCallContext, ProviderHealth,
+};
+use ariadne::rag::{
+    MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, SummarizerStageOperationStatus,
 };
 use ariadne::retrieval::{
     FullTextRecord, FullTextStore, HybridSearchEngine, MemoryFullTextStore, MemoryVectorStore,
 };
 use ariadne::workflow::{
-    apply_confirmed_patch, execute_llm_node_with_defaults, execute_project_search_node,
-    BuiltinWorkflowNodeExecutor, CommunicationControl, DocumentWorkflowExportSink,
-    FilesystemRuntimeReferenceResolver, NodeErrorKind, NodeRetryPolicy, NoopExternalNodeExecutor,
+    apply_confirmed_patch, execute_llm_node, execute_llm_node_with_defaults,
+    execute_project_search_node, execute_summarizer_node, BuiltinWorkflowNodeExecutor,
+    CommunicationControl, DocumentWorkflowExportSink, FilesystemRuntimeReferenceResolver,
+    NewWorkflowOperation, NodeErrorKind, NodeRetryPolicy, NoopExternalNodeExecutor,
     PatchWriteBackState, RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
     RuntimeReferenceKind, RuntimeReferenceResolver, SqliteWorkflowRuntimeStore,
     WorkflowExportRequest, WorkflowExportSink, WorkflowExternalNodeExecutor,
-    WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest, WorkflowNodeExecutor,
-    WorkflowRuntime, WorkflowRuntimeEventType, WorkflowRuntimeStore,
+    WorkflowMutationClaimResult, WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest,
+    WorkflowNodeExecutor, WorkflowOperationPolicy, WorkflowOperationRecoveryPolicy,
+    WorkflowOperationResponsePolicy, WorkflowOperationStatus, WorkflowResumeClaimResult,
+    WorkflowRunState, WorkflowRuntime, WorkflowRuntimeEventType, WorkflowRuntimeStore,
+    WorkflowStopRequestResult,
 };
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 #[derive(Default)]
 struct RecordingLlmProvider {
     requests: Mutex<Vec<LlmRequest>>,
+    contexts: Mutex<Vec<ProviderCallContext>>,
+    /// 测试可注入返回的 cost_usd（F13 单次预算合同）。
+    cost_usd: Mutex<Option<f64>>,
+}
+
+#[test]
+fn runtime_store_create_state_rejects_duplicate_without_overwriting() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("create-only");
+    let run_id = RunId::from("run-1");
+    let original = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    store.create_state(&original).unwrap();
+
+    let mut conflicting = original.clone();
+    conflicting.status = RunStatus::Failed;
+    assert!(store.create_state(&conflicting).is_err());
+
+    let loaded = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(loaded.status, RunStatus::Queued);
+}
+
+#[test]
+fn runtime_store_round_trips_prepared_workflow_snapshot() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("prepared-snapshot"),
+        name: "Prepared Snapshot".to_owned(),
+        nodes: vec![node("start", "start")],
+        edges: Vec::new(),
+        metadata: json!({ "immutable": true }),
+    };
+    let run_id = RunId::from("run-1");
+    let mut state = WorkflowRunState::new(workflow.id.clone(), run_id.clone());
+    state.prepared_workflow = Some(workflow.clone());
+    state.start_node_id = Some(NodeId::from("start"));
+
+    store.create_state(&state).unwrap();
+    let loaded = store.load_state(&workflow.id, &run_id).unwrap().unwrap();
+
+    assert_eq!(loaded.prepared_workflow, Some(workflow));
+    assert_eq!(loaded.start_node_id, Some(NodeId::from("start")));
+}
+
+/// C10：revision>0 后 state_json 不再重复整图，但 load 仍从独立列补回 prepared_workflow。
+#[test]
+fn c10_save_slims_prepared_workflow_but_load_rehydrates_from_column() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("c10-slim"),
+        name: "C10 Slim Workflow Unique Marker".to_owned(),
+        nodes: vec![node("start", "start"), node("llm", "llm")],
+        edges: Vec::new(),
+        metadata: json!({ "marker": "c10-prepared-body-must-not-rewrite" }),
+    };
+    let run_id = RunId::from("run-c10");
+    let mut state = WorkflowRunState::new(workflow.id.clone(), run_id.clone());
+    state.prepared_workflow = Some(workflow.clone());
+    state.start_node_id = Some(NodeId::from("start"));
+    store.create_state(&state).unwrap();
+
+    // revision 0 → 1：仍可含 definition；再 save 一次强制 slim。
+    state.status = RunStatus::Running;
+    store.save_state(&mut state, None).unwrap();
+    assert_eq!(state.state_revision, 1);
+    state.status = RunStatus::Queued;
+    store.save_state(&mut state, None).unwrap();
+    assert_eq!(state.state_revision, 2);
+
+    // 原始 state_json 不应再嵌完整图标记（写放大关闭）。
+    let db =
+        rusqlite::Connection::open(temp.path().join(ariadne::workflow::RUNTIME_DB_FILE)).unwrap();
+    let state_json: String = db
+        .query_row(
+            "SELECT state_json FROM workflow_runs WHERE workflow_id = ?1 AND run_id = ?2",
+            rusqlite::params![workflow.id.as_str(), run_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !state_json.contains("C10 Slim Workflow Unique Marker"),
+        "state_json after slim must not re-embed full prepared_workflow body"
+    );
+    let column: Option<String> = db
+        .query_row(
+            "SELECT prepared_workflow_json FROM workflow_runs WHERE workflow_id = ?1 AND run_id = ?2",
+            rusqlite::params![workflow.id.as_str(), run_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        column
+            .as_deref()
+            .is_some_and(|raw| raw.contains("C10 Slim Workflow Unique Marker")),
+        "prepared_workflow_json column must keep frozen definition"
+    );
+
+    let loaded = store.load_state(&workflow.id, &run_id).unwrap().unwrap();
+    assert_eq!(loaded.prepared_workflow, Some(workflow));
+    assert_eq!(loaded.status, RunStatus::Queued);
+    assert_eq!(loaded.state_revision, 2);
+}
+
+/// F10-d：create 后无 lease / lease 过期的 Queued|Running 可被 orphan 列表发现。
+#[test]
+fn f10d_lists_orphaned_queued_and_running_without_live_lease() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("orphan-wf"),
+        name: "Orphan".to_owned(),
+        nodes: vec![node("start", "start")],
+        edges: Vec::new(),
+        metadata: json!({}),
+    };
+
+    // Queued without any lease row (create then crash before acquire).
+    let mut queued = WorkflowRunState::new(workflow.id.clone(), RunId::from("orphan-queued"));
+    queued.prepared_workflow = Some(workflow.clone());
+    store.create_state(&queued).unwrap();
+
+    // Running with expired lease.
+    let mut running = WorkflowRunState::new(workflow.id.clone(), RunId::from("orphan-running"));
+    running.prepared_workflow = Some(workflow.clone());
+    running.status = RunStatus::Running;
+    store.create_state(&running).unwrap();
+    store
+        .acquire_worker_lease(
+            &workflow.id,
+            &RunId::from("orphan-running"),
+            "dead",
+            1_000,
+            50,
+        )
+        .unwrap()
+        .unwrap();
+
+    // Live lease must not be listed.
+    let mut live = WorkflowRunState::new(workflow.id.clone(), RunId::from("live-running"));
+    live.prepared_workflow = Some(workflow.clone());
+    live.status = RunStatus::Running;
+    store.create_state(&live).unwrap();
+    store
+        .acquire_worker_lease(
+            &workflow.id,
+            &RunId::from("live-running"),
+            "alive",
+            10_000,
+            5_000,
+        )
+        .unwrap()
+        .unwrap();
+
+    // Paused is not orphan-runnable for auto recovery.
+    let mut paused = WorkflowRunState::new(workflow.id.clone(), RunId::from("paused"));
+    paused.prepared_workflow = Some(workflow);
+    paused.status = RunStatus::Paused;
+    store.create_state(&paused).unwrap();
+
+    let orphans = store.list_orphaned_runnable_states(10_100).unwrap();
+    let ids: Vec<_> = orphans
+        .iter()
+        .map(|s| s.run_id.as_str().to_owned())
+        .collect();
+    assert!(ids.contains(&"orphan-queued".to_owned()));
+    assert!(ids.contains(&"orphan-running".to_owned()));
+    assert!(!ids.contains(&"live-running".to_owned()));
+    assert!(!ids.contains(&"paused".to_owned()));
+
+    // claim_resume 可接管 orphan Queued。
+    let claimed = store
+        .claim_resume(
+            &WorkflowId::from("orphan-wf"),
+            &RunId::from("orphan-queued"),
+            "recover-owner",
+            10_200,
+            500,
+        )
+        .unwrap();
+    assert!(matches!(claimed, WorkflowResumeClaimResult::Claimed { .. }));
+}
+
+/// F12-c：终态不得被 Pause/Stop 复活。
+#[test]
+fn f12c_pause_and_stop_reject_terminal_runs() {
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("f12c"),
+        name: "f12c".to_owned(),
+        nodes: vec![node("start", "start")],
+        edges: Vec::new(),
+        metadata: json!({}),
+    };
+    for terminal in [RunStatus::Succeeded, RunStatus::Failed, RunStatus::Stopped] {
+        let mut runtime =
+            WorkflowRuntime::new(&workflow, RunId::from(format!("r-{terminal:?}"))).unwrap();
+        runtime.state.status = terminal;
+        assert!(runtime.request_pause("no").is_err(), "pause {terminal:?}");
+        assert!(runtime.request_stop("no").is_err(), "stop {terminal:?}");
+    }
+}
+
+/// F12-a：Queued/Paused 上 Stop 直接 Stopped；Running 进入 Stopping。
+#[test]
+fn f12a_stop_sets_stopping_or_stopped() {
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("f12a"),
+        name: "f12a".to_owned(),
+        nodes: vec![node("start", "start")],
+        edges: Vec::new(),
+        metadata: json!({}),
+    };
+    let mut queued = WorkflowRuntime::new(&workflow, RunId::from("q")).unwrap();
+    queued.state.status = RunStatus::Queued;
+    queued.request_stop("user").unwrap();
+    assert_eq!(queued.state.status, RunStatus::Stopped);
+
+    let mut running = WorkflowRuntime::new(&workflow, RunId::from("r")).unwrap();
+    running.state.status = RunStatus::Running;
+    running.request_stop("user").unwrap();
+    assert_eq!(running.state.status, RunStatus::Stopping);
+}
+
+struct GatedDispatchExecutor {
+    dispatch_before_control: bool,
+    entered: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+    side_effects: Arc<AtomicUsize>,
+}
+
+impl WorkflowNodeExecutor for GatedDispatchExecutor {
+    fn operation_policy(
+        &self,
+        _request: &WorkflowNodeExecutionRequest,
+    ) -> ariadne::contracts::CoreResult<WorkflowOperationPolicy> {
+        Ok(WorkflowOperationPolicy::remote_response())
+    }
+
+    fn execute(
+        &mut self,
+        request: WorkflowNodeExecutionRequest,
+    ) -> ariadne::contracts::CoreResult<WorkflowNodeExecutionOutput> {
+        if self.dispatch_before_control {
+            request.dispatch_authorization.authorize_dispatch()?;
+            self.side_effects.fetch_add(1, Ordering::SeqCst);
+            self.entered.send(()).unwrap();
+            self.release.recv().unwrap();
+            return Err(ariadne::contracts::CoreError::external_cancelled(
+                "gated_dispatch",
+                ariadne::contracts::ExternalDispatchOutcome::DispatchedUnknown,
+            ));
+        }
+
+        self.entered.send(()).unwrap();
+        self.release.recv().unwrap();
+        request.dispatch_authorization.authorize_dispatch()?;
+        self.side_effects.fetch_add(1, Ordering::SeqCst);
+        Ok(WorkflowNodeExecutionOutput::default())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum F12ControlRace {
+    Pause,
+    Stop,
+}
+
+fn run_control_dispatch_race(
+    control: F12ControlRace,
+    dispatch_before_control: bool,
+) -> (
+    WorkflowRunState,
+    Vec<ariadne::workflow::WorkflowOperation>,
+    usize,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from(match (control, dispatch_before_control) {
+            (F12ControlRace::Pause, false) => "f12-pause-wins",
+            (F12ControlRace::Pause, true) => "f12-dispatch-before-pause",
+            (F12ControlRace::Stop, false) => "f12-stop-wins",
+            (F12ControlRace::Stop, true) => "f12-dispatch-wins",
+        }),
+        name: "F12 dispatch barrier".to_owned(),
+        nodes: vec![node("remote", "writer")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let control_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    control_store.create_state(&runtime.state).unwrap();
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let lease = control_store
+        .acquire_worker_lease(&workflow.id, &run_id, "f12-worker", now_ms, 60_000)
+        .unwrap()
+        .unwrap();
+    let worker_store = SqliteWorkflowRuntimeStore::open(temp.path())
+        .unwrap()
+        .with_worker_lease(lease);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let side_effects = Arc::new(AtomicUsize::new(0));
+    let executor_side_effects = Arc::clone(&side_effects);
+    let thread_workflow = workflow.clone();
+    let expected_worker_status = match control {
+        F12ControlRace::Pause => RunStatus::Paused,
+        F12ControlRace::Stop => RunStatus::Stopped,
+    };
+    let worker = std::thread::spawn(move || {
+        let mut runtime = runtime;
+        let mut executor = GatedDispatchExecutor {
+            dispatch_before_control,
+            entered: entered_tx,
+            release: release_rx,
+            side_effects: executor_side_effects,
+        };
+        assert_eq!(
+            runtime
+                .run_persisted(&thread_workflow, &mut executor, &worker_store)
+                .unwrap(),
+            expected_worker_status
+        );
+    });
+
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    match control {
+        F12ControlRace::Pause => {
+            let mut state = control_store
+                .load_state(&workflow.id, &run_id)
+                .unwrap()
+                .unwrap();
+            let mut control_runtime = WorkflowRuntime::from_state(state.clone());
+            control_runtime.request_pause("user pause").unwrap();
+            state = control_runtime.state;
+            control_store.save_state(&mut state, None).unwrap();
+            assert_eq!(state.status, RunStatus::Paused);
+            assert_eq!(state.control, RunControl::Pause);
+        }
+        F12ControlRace::Stop => {
+            let stop = control_store
+                .request_stop(&workflow.id, &run_id, "user stop", now_ms + 1)
+                .unwrap();
+            let WorkflowStopRequestResult::Saved { state: stopping } = stop else {
+                panic!("run must exist");
+            };
+            assert_eq!(stopping.status, RunStatus::Stopping);
+            assert_eq!(stopping.control, RunControl::Stop);
+        }
+    }
+    release_tx.send(()).unwrap();
+    worker.join().unwrap();
+
+    let persisted = control_store
+        .load_state(&workflow.id, &run_id)
+        .unwrap()
+        .unwrap();
+    let operations = control_store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap();
+    (persisted, operations, side_effects.load(Ordering::SeqCst))
+}
+
+#[test]
+fn f12_stop_wins_before_dispatch_without_external_side_effect() {
+    let (state, operations, side_effects) = run_control_dispatch_race(F12ControlRace::Stop, false);
+    assert_eq!(state.status, RunStatus::Stopped);
+    assert_eq!(state.control, RunControl::Stop);
+    assert_eq!(side_effects, 0);
+    assert!(operations.is_empty(), "Prepared must be cleaned safely");
+    assert!(state
+        .structured_events
+        .iter()
+        .any(|event| event.event_type == WorkflowRuntimeEventType::RunStopRequested));
+    assert!(state
+        .structured_events
+        .iter()
+        .any(|event| event.event_type == WorkflowRuntimeEventType::RunStopped));
+}
+
+#[test]
+fn f12_dispatch_wins_then_unknown_result_stops_but_preserves_in_doubt() {
+    let (state, operations, side_effects) = run_control_dispatch_race(F12ControlRace::Stop, true);
+    assert_eq!(state.status, RunStatus::Stopped);
+    assert_eq!(state.control, RunControl::Stop);
+    assert_eq!(side_effects, 1);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].status, WorkflowOperationStatus::InDoubt);
+}
+
+#[test]
+fn f12_pause_wins_before_dispatch_without_external_side_effect() {
+    let (state, operations, side_effects) = run_control_dispatch_race(F12ControlRace::Pause, false);
+    assert_eq!(state.status, RunStatus::Paused);
+    assert_eq!(state.control, RunControl::Pause);
+    assert_eq!(side_effects, 0);
+    assert!(operations.is_empty(), "Prepared must be cleaned safely");
+    assert!(state
+        .structured_events
+        .iter()
+        .any(|event| event.event_type == WorkflowRuntimeEventType::RunPaused));
+}
+
+#[test]
+fn f12_dispatch_wins_before_pause_and_unknown_result_preserves_in_doubt() {
+    let (state, operations, side_effects) = run_control_dispatch_race(F12ControlRace::Pause, true);
+    assert_eq!(state.status, RunStatus::Paused);
+    assert_eq!(state.control, RunControl::Pause);
+    assert_eq!(side_effects, 1);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].status, WorkflowOperationStatus::InDoubt);
+}
+
+#[test]
+fn f12_orphaned_stopping_run_converges_after_lease_expiry() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("f12-orphan-stop");
+    let run_id = RunId::from("run-1");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.status = RunStatus::Running;
+    store.create_state(&state).unwrap();
+    store
+        .acquire_worker_lease(&workflow_id, &run_id, "dead-worker", 1_000, 100)
+        .unwrap()
+        .unwrap();
+
+    let WorkflowStopRequestResult::Saved { state: stopping } = store
+        .request_stop(&workflow_id, &run_id, "stop before crash", 1_050)
+        .unwrap()
+    else {
+        panic!("run must exist");
+    };
+    assert_eq!(stopping.status, RunStatus::Stopping);
+    let orphans = store.list_orphaned_runnable_states(1_101).unwrap();
+    assert!(orphans.iter().any(|state| state.run_id == run_id));
+
+    let WorkflowStopRequestResult::Saved { state: stopped } = store
+        .request_stop(&workflow_id, &run_id, "stop before crash", 1_101)
+        .unwrap()
+    else {
+        panic!("run must exist");
+    };
+    assert_eq!(stopped.status, RunStatus::Stopped);
+    assert_eq!(stopped.control, RunControl::Stop);
+    assert_eq!(
+        stopped
+            .structured_events
+            .iter()
+            .filter(|event| event.event_type == WorkflowRuntimeEventType::RunStopRequested)
+            .count(),
+        1
+    );
+    assert_eq!(
+        stopped
+            .structured_events
+            .iter()
+            .filter(|event| event.event_type == WorkflowRuntimeEventType::RunStopped)
+            .count(),
+        1
+    );
+}
+
+struct UnfencedSuccessExecutor {
+    leaked_authorization: Arc<Mutex<Option<ExternalDispatchAuthorization>>>,
+}
+
+impl WorkflowNodeExecutor for UnfencedSuccessExecutor {
+    fn operation_policy(
+        &self,
+        _request: &WorkflowNodeExecutionRequest,
+    ) -> ariadne::contracts::CoreResult<WorkflowOperationPolicy> {
+        Ok(WorkflowOperationPolicy::remote_response())
+    }
+
+    fn execute(
+        &mut self,
+        request: WorkflowNodeExecutionRequest,
+    ) -> ariadne::contracts::CoreResult<WorkflowNodeExecutionOutput> {
+        *self.leaked_authorization.lock().unwrap() = Some(request.dispatch_authorization.clone());
+        Ok(WorkflowNodeExecutionOutput::default())
+    }
+}
+
+#[test]
+fn f12_unfenced_success_is_atomically_quarantined_and_late_dispatch_is_rejected() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("f12-unfenced-success"),
+        name: "F12 unfenced success".to_owned(),
+        nodes: vec![node("remote", "writer")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let leaked_authorization = Arc::new(Mutex::new(None));
+    let mut executor = UnfencedSuccessExecutor {
+        leaked_authorization: leaked_authorization.clone(),
+    };
+
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Paused
+    );
+    let operation = store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::InDoubt);
+    assert!(operation.response_json.is_none());
+    let node = runtime.state.nodes.get(&NodeId::from("remote")).unwrap();
+    assert!(node
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("workflow executor contract violation")));
+
+    let late_error = leaked_authorization
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .authorize_dispatch()
+        .unwrap_err();
+    assert_eq!(
+        late_error.external_dispatch_outcome(),
+        Some(ariadne::contracts::ExternalDispatchOutcome::NotDispatched)
+    );
+    assert_eq!(
+        store
+            .load_operation(&operation.operation_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkflowOperationStatus::InDoubt
+    );
+}
+
+#[test]
+fn runtime_worker_lease_is_unique_and_expired_owner_can_be_replaced() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let second_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let workflow_id = WorkflowId::from("lease-workflow");
+    let run_id = RunId::from("lease-run");
+    first_store
+        .create_state(&WorkflowRunState::new(workflow_id.clone(), run_id.clone()))
+        .unwrap();
+
+    let first = first_store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-a", 1_000, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.generation, 1);
+    assert_eq!(first.expires_at_ms, 1_100);
+
+    assert!(second_store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-b", 1_099, 100)
+        .unwrap()
+        .is_none());
+
+    let takeover = second_store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-b", 1_100, 200)
+        .unwrap()
+        .unwrap();
+    assert_eq!(takeover.generation, 2);
+    assert_eq!(
+        second_store
+            .load_worker_lease(&workflow_id, &run_id)
+            .unwrap(),
+        Some(takeover.clone())
+    );
+
+    assert!(!first_store
+        .heartbeat_worker_lease(
+            &workflow_id,
+            &run_id,
+            "owner-a",
+            first.generation,
+            1_101,
+            100
+        )
+        .unwrap());
+    assert!(!first_store
+        .release_worker_lease(&workflow_id, &run_id, "owner-a", first.generation)
+        .unwrap());
+}
+
+#[test]
+fn runtime_worker_lease_allows_only_one_concurrent_sqlite_claim() {
+    let temp = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::from("concurrent-lease-workflow");
+    let run_id = RunId::from("concurrent-lease-run");
+    SqliteWorkflowRuntimeStore::open(temp.path())
+        .unwrap()
+        .create_state(&WorkflowRunState::new(workflow_id.clone(), run_id.clone()))
+        .unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let mut workers = Vec::new();
+    for index in 0..8 {
+        let root = temp.path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        let workflow_id = workflow_id.clone();
+        let run_id = run_id.clone();
+        workers.push(std::thread::spawn(move || {
+            let store = SqliteWorkflowRuntimeStore::open(root).unwrap();
+            barrier.wait();
+            store
+                .acquire_worker_lease(
+                    &workflow_id,
+                    &run_id,
+                    &format!("owner-{index}"),
+                    4_000,
+                    1_000,
+                )
+                .unwrap()
+        }));
+    }
+    let leases = workers
+        .into_iter()
+        .filter_map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].generation, 1);
+    let persisted = SqliteWorkflowRuntimeStore::open(temp.path())
+        .unwrap()
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted, leases[0]);
+}
+
+#[test]
+fn runtime_worker_lease_heartbeat_and_release_require_current_owner() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("lease-owner-workflow");
+    let run_id = RunId::from("lease-owner-run");
+    store
+        .create_state(&WorkflowRunState::new(workflow_id.clone(), run_id.clone()))
+        .unwrap();
+    let lease = store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-a", 2_000, 100)
+        .unwrap()
+        .unwrap();
+
+    assert!(!store
+        .heartbeat_worker_lease(
+            &workflow_id,
+            &run_id,
+            "owner-b",
+            lease.generation,
+            2_010,
+            100
+        )
+        .unwrap());
+    assert!(!store
+        .heartbeat_worker_lease(
+            &workflow_id,
+            &run_id,
+            "owner-a",
+            lease.generation + 1,
+            2_010,
+            100
+        )
+        .unwrap());
+    assert!(store
+        .heartbeat_worker_lease(
+            &workflow_id,
+            &run_id,
+            "owner-a",
+            lease.generation,
+            2_010,
+            200
+        )
+        .unwrap());
+    assert!(store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-b", 2_150, 100)
+        .unwrap()
+        .is_none());
+    assert!(!store
+        .release_worker_lease(&workflow_id, &run_id, "owner-b", lease.generation)
+        .unwrap());
+    assert!(!store
+        .release_worker_lease(&workflow_id, &run_id, "owner-a", lease.generation + 1)
+        .unwrap());
+    assert!(store
+        .release_worker_lease(&workflow_id, &run_id, "owner-a", lease.generation)
+        .unwrap());
+    assert!(store
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .is_none());
+    let next = store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-c", 2_151, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.generation, lease.generation + 1);
+    assert_eq!(
+        store.schema_version().unwrap(),
+        Some(ariadne::workflow::RUNTIME_SCHEMA_VERSION)
+    );
+}
+
+#[test]
+fn workflow_operation_journal_persists_identity_and_cas_transitions() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("operation-workflow");
+    let run_id = RunId::from("operation-run");
+    store
+        .create_state(&WorkflowRunState::new(workflow_id.clone(), run_id.clone()))
+        .unwrap();
+    let operation = NewWorkflowOperation {
+        operation_id: "op-stable-1".to_owned(),
+        workflow_id: workflow_id.clone(),
+        run_id: run_id.clone(),
+        node_id: NodeId::from("llm-node"),
+        attempt: 2,
+        kind: "provider_call".to_owned(),
+        provider: "provider-a".to_owned(),
+        request_hash: "sha256:request".to_owned(),
+        lease_generation: 7,
+        recovery_policy: WorkflowOperationRecoveryPolicy::ManualResolution,
+        response_policy: WorkflowOperationResponsePolicy::AllowExternalResponse,
+    };
+    store.create_operation(&operation, 1_000).unwrap();
+    assert!(store.create_operation(&operation, 1_001).is_err());
+
+    let prepared = store.load_operation("op-stable-1").unwrap().unwrap();
+    assert_eq!(prepared.status, WorkflowOperationStatus::Prepared);
+    assert_eq!(prepared.lease_generation, 7);
+    assert_eq!(
+        prepared.recovery_policy,
+        WorkflowOperationRecoveryPolicy::ManualResolution
+    );
+    assert_eq!(
+        prepared.response_policy,
+        WorkflowOperationResponsePolicy::AllowExternalResponse
+    );
+    assert_eq!(prepared.created_at_ms, 1_000);
+    assert!(prepared.response_json.is_none());
+
+    assert!(store
+        .transition_operation(
+            "op-stable-1",
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            1_010,
+        )
+        .unwrap());
+    assert!(!store
+        .transition_operation(
+            "op-stable-1",
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            1_011,
+        )
+        .unwrap());
+    let response = json!({"text": "done", "usage": {"input": 3}});
+    assert!(store
+        .transition_operation(
+            "op-stable-1",
+            WorkflowOperationStatus::Dispatched,
+            WorkflowOperationStatus::Completed,
+            Some(&response),
+            1_020,
+        )
+        .unwrap());
+    assert!(store
+        .transition_operation(
+            "op-stable-1",
+            WorkflowOperationStatus::Completed,
+            WorkflowOperationStatus::Committed,
+            None,
+            1_030,
+        )
+        .unwrap());
+
+    let committed = store.load_operation("op-stable-1").unwrap().unwrap();
+    assert_eq!(committed.status, WorkflowOperationStatus::Committed);
+    assert_eq!(committed.response_json, Some(response));
+    assert_eq!(committed.dispatched_at_ms, Some(1_010));
+    assert_eq!(committed.completed_at_ms, Some(1_020));
+    assert_eq!(committed.committed_at_ms, Some(1_030));
+    assert_eq!(
+        store.list_operations(&workflow_id, &run_id).unwrap(),
+        vec![committed]
+    );
+}
+
+#[test]
+fn workflow_operation_v7_migration_recovers_from_a_single_added_policy_column() {
+    let temp = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE workflow_operations (
+                 operation_id TEXT PRIMARY KEY,
+                 workflow_id TEXT NOT NULL,
+                 run_id TEXT NOT NULL,
+                 node_id TEXT NOT NULL,
+                 attempt INTEGER NOT NULL,
+                 kind TEXT NOT NULL,
+                 provider TEXT NOT NULL,
+                 request_hash TEXT NOT NULL,
+                 lease_generation INTEGER NOT NULL,
+                 recovery_policy TEXT NOT NULL DEFAULT 'manual_resolution',
+                 status TEXT NOT NULL CHECK(status IN (
+                     'prepared', 'dispatched', 'completed', 'in_doubt', 'aborted', 'committed'
+                 )),
+                 response_json TEXT,
+                 created_at_ms INTEGER NOT NULL,
+                 updated_at_ms INTEGER NOT NULL,
+                 dispatched_at_ms INTEGER,
+                 completed_at_ms INTEGER,
+                 in_doubt_at_ms INTEGER,
+                 committed_at_ms INTEGER
+             );",
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    assert_eq!(
+        store.schema_version().unwrap(),
+        Some(ariadne::workflow::RUNTIME_SCHEMA_VERSION)
+    );
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    let mut statement = connection
+        .prepare("PRAGMA table_info(workflow_operations)")
+        .unwrap();
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.iter().any(|column| column == "recovery_policy"));
+    assert!(columns.iter().any(|column| column == "response_policy"));
+}
+
+#[test]
+fn workflow_operation_journal_tracks_in_doubt_and_rejects_invalid_transitions() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("in-doubt-workflow");
+    let run_id = RunId::from("in-doubt-run");
+    store
+        .create_state(&WorkflowRunState::new(workflow_id.clone(), run_id.clone()))
+        .unwrap();
+    store
+        .create_operation(
+            &NewWorkflowOperation {
+                operation_id: "op-in-doubt".to_owned(),
+                workflow_id,
+                run_id,
+                node_id: NodeId::from("node"),
+                attempt: 1,
+                kind: "provider_call".to_owned(),
+                provider: "provider".to_owned(),
+                request_hash: "hash".to_owned(),
+                lease_generation: 1,
+                recovery_policy: WorkflowOperationRecoveryPolicy::ManualResolution,
+                response_policy: WorkflowOperationResponsePolicy::AllowExternalResponse,
+            },
+            2_000,
+        )
+        .unwrap();
+    assert!(store
+        .transition_operation(
+            "op-in-doubt",
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            2_010,
+        )
+        .unwrap());
+    assert!(store
+        .transition_operation(
+            "op-in-doubt",
+            WorkflowOperationStatus::Dispatched,
+            WorkflowOperationStatus::InDoubt,
+            None,
+            2_020,
+        )
+        .unwrap());
+    assert!(store
+        .transition_operation(
+            "op-in-doubt",
+            WorkflowOperationStatus::InDoubt,
+            WorkflowOperationStatus::Committed,
+            None,
+            2_030,
+        )
+        .is_err());
+    assert!(store
+        .transition_operation(
+            "op-in-doubt",
+            WorkflowOperationStatus::InDoubt,
+            WorkflowOperationStatus::Completed,
+            None,
+            2_030,
+        )
+        .is_err());
+    let persisted = store.load_operation("op-in-doubt").unwrap().unwrap();
+    assert_eq!(persisted.status, WorkflowOperationStatus::InDoubt);
+    assert_eq!(persisted.in_doubt_at_ms, Some(2_020));
+}
+
+#[test]
+fn replayable_in_doubt_operation_reenters_same_attempt_without_becoming_terminal() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("replay-in-doubt"),
+        name: "Replay in doubt".to_owned(),
+        nodes: vec![node("writer", "writer")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let unknown = || ariadne::contracts::CoreError::ProviderRequest {
+        service: "replay-provider".to_owned(),
+        outcome: ariadne::contracts::ExternalDispatchOutcome::DispatchedUnknown,
+        message: "response unknown".to_owned(),
+    };
+    let mut executor = ScriptedExecutor::default()
+        .with_operation_policy(WorkflowOperationPolicy::replayable_receipt());
+    executor.push_error("writer", unknown());
+    executor.push_error("writer", unknown());
+
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Paused
+    );
+    let first_operation = store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(first_operation.status, WorkflowOperationStatus::InDoubt);
+    assert_eq!(first_operation.attempt, 1);
+
+    runtime.resume().unwrap();
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Paused
+    );
+    assert_eq!(executor.call_count("writer"), 2);
+    assert_eq!(
+        executor.calls[0].operation_id,
+        executor.calls[1].operation_id
+    );
+    assert_eq!(executor.calls[1].operation_attempt, 1);
+    let operations = store.list_operations(&workflow.id, &run_id).unwrap();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].status, WorkflowOperationStatus::InDoubt);
+}
+
+#[test]
+fn workflow_operation_journal_only_deletes_prepared_records() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("delete-operation-workflow");
+    let run_id = RunId::from("delete-operation-run");
+    store
+        .create_state(&WorkflowRunState::new(workflow_id.clone(), run_id.clone()))
+        .unwrap();
+    let new_operation = |operation_id: &str| NewWorkflowOperation {
+        operation_id: operation_id.to_owned(),
+        workflow_id: workflow_id.clone(),
+        run_id: run_id.clone(),
+        node_id: NodeId::from("node"),
+        attempt: 1,
+        kind: "provider_call".to_owned(),
+        provider: "provider".to_owned(),
+        request_hash: "hash".to_owned(),
+        lease_generation: 1,
+        recovery_policy: WorkflowOperationRecoveryPolicy::ManualResolution,
+        response_policy: WorkflowOperationResponsePolicy::AllowExternalResponse,
+    };
+    store
+        .create_operation(&new_operation("prepared"), 1)
+        .unwrap();
+    assert!(store.delete_prepared_operation("prepared").unwrap());
+    assert!(store.load_operation("prepared").unwrap().is_none());
+
+    store
+        .create_operation(&new_operation("dispatched"), 2)
+        .unwrap();
+    store
+        .transition_operation(
+            "dispatched",
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            3,
+        )
+        .unwrap();
+    assert!(!store.delete_prepared_operation("dispatched").unwrap());
+    assert_eq!(
+        store.load_operation("dispatched").unwrap().unwrap().status,
+        WorkflowOperationStatus::Dispatched
+    );
+}
+
+#[test]
+fn persisted_external_node_commits_operation_journal_after_state_save() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("journal-runtime"),
+        name: "Journal runtime".to_owned(),
+        nodes: vec![node("writer", "llm")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+    let mut executor = ScriptedExecutor::default()
+        .with_operation_policy(ariadne::workflow::WorkflowOperationPolicy::remote_response());
+    executor.push("writer", inline_output("draft", "completed once"));
+
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(executor.call_count("writer"), 1);
+    let operations = store
+        .list_operations(&workflow.id, &runtime.state.run_id)
+        .unwrap();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].status, WorkflowOperationStatus::Committed);
+    assert_eq!(operations[0].attempt, 1);
+    assert!(operations[0].response_json.is_some());
+    assert_eq!(
+        runtime
+            .state
+            .nodes
+            .get(&NodeId::from("writer"))
+            .unwrap()
+            .execution_attempts,
+        1
+    );
+}
+
+#[test]
+fn external_node_name_does_not_enable_operation_journal_without_declared_policy() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("untracked-llm-name"),
+        name: "Untracked LLM name".to_owned(),
+        nodes: vec![node("writer", "llm")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+    let mut executor = ScriptedExecutor::default();
+    executor.push("writer", inline_output("draft", "untracked"));
+
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Succeeded
+    );
+    assert!(store
+        .list_operations(&workflow.id, &runtime.state.run_id)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn executor_adapter_tool_call_uses_journal_and_unknown_failure_does_not_reexecute() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("journal-tool-adapter"),
+        name: "Journal tool adapter".to_owned(),
+        nodes: vec![node("tool", "executor_adapter")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+    let mut executor = ScriptedExecutor::default()
+        .with_operation_policy(ariadne::workflow::WorkflowOperationPolicy::remote_response());
+    executor.push_error(
+        "tool",
+        ariadne::contracts::CoreError::External {
+            service: "http-skill".to_owned(),
+            message: "connection closed after tool dispatch".to_owned(),
+        },
+    );
+
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+
+    assert_eq!(status, RunStatus::Paused);
+    assert_eq!(executor.call_count("tool"), 1);
+    let operation = store
+        .list_operations(&workflow.id, &runtime.state.run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(operation.kind, "executor_adapter");
+    assert_eq!(operation.status, WorkflowOperationStatus::InDoubt);
+
+    runtime.resume().unwrap();
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Paused
+    );
+    assert_eq!(executor.call_count("tool"), 1);
+}
+
+#[test]
+fn persisted_external_error_becomes_in_doubt_without_automatic_retry() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("journal-in-doubt"),
+        name: "Journal in doubt".to_owned(),
+        nodes: vec![node("writer", "llm")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+    let mut executor = ScriptedExecutor::default()
+        .with_operation_policy(ariadne::workflow::WorkflowOperationPolicy::remote_response());
+    executor.push_error(
+        "writer",
+        ariadne::contracts::CoreError::External {
+            service: "mock-provider".to_owned(),
+            message: "connection closed after dispatch".to_owned(),
+        },
+    );
+
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+
+    assert_eq!(status, RunStatus::Paused);
+    assert_eq!(executor.call_count("writer"), 1);
+    let operation = store
+        .list_operations(&workflow.id, &runtime.state.run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::InDoubt);
+    let node_state = runtime.state.nodes.get(&NodeId::from("writer")).unwrap();
+    assert_eq!(node_state.status, RunStatus::Paused);
+    assert_eq!(node_state.execution_attempts, 1);
+
+    runtime.resume().unwrap();
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+    assert_eq!(status, RunStatus::Paused);
+    assert_eq!(executor.call_count("writer"), 1);
+}
+
+#[test]
+fn confirmed_not_dispatched_error_aborts_operation_and_uses_normal_retry_policy() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("journal-safe-retry"),
+        name: "Journal safe retry".to_owned(),
+        nodes: vec![node("writer", "llm")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+    let mut executor = ScriptedExecutor::default()
+        .with_operation_policy(ariadne::workflow::WorkflowOperationPolicy::remote_response());
+    executor.push_error(
+        "writer",
+        ariadne::contracts::CoreError::ProviderRequest {
+            service: "mock-provider".to_owned(),
+            outcome: ariadne::contracts::ExternalDispatchOutcome::NotDispatched,
+            message: "connection refused before request dispatch".to_owned(),
+        },
+    );
+    executor.push("writer", inline_output("draft", "retried safely"));
+
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+    assert_eq!(status, RunStatus::Queued);
+    assert_eq!(executor.call_count("writer"), 1);
+    let first_operation = store
+        .list_operations(&workflow.id, &runtime.state.run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(first_operation.status, WorkflowOperationStatus::Aborted);
+
+    runtime
+        .state
+        .nodes
+        .get_mut(&NodeId::from("writer"))
+        .unwrap()
+        .error_state
+        .as_mut()
+        .unwrap()
+        .next_retry_at_ms = Some(0);
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(executor.call_count("writer"), 2);
+    let operations = store
+        .list_operations(&workflow.id, &runtime.state.run_id)
+        .unwrap();
+    assert_eq!(operations.len(), 2);
+    assert_eq!(operations[0].status, WorkflowOperationStatus::Aborted);
+    assert_eq!(operations[1].status, WorkflowOperationStatus::Committed);
+}
+
+#[test]
+fn in_doubt_retry_atomically_aborts_old_operation_and_claims_run() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("resolve-in-doubt");
+    let run_id = RunId::from("run-1");
+    let node_id = NodeId::from("writer");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.status = RunStatus::Paused;
+    state.control = RunControl::Pause;
+    state.pause_reason = Some("operation is in doubt".to_owned());
+    state.nodes.insert(
+        node_id.clone(),
+        ariadne::workflow::WorkflowNodeRuntimeState {
+            node_id: node_id.clone(),
+            status: RunStatus::Paused,
+            outputs: PortMap::new(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: Some("unknown remote result".to_owned()),
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    store.create_state(&state).unwrap();
+    store
+        .create_operation(
+            &NewWorkflowOperation {
+                operation_id: "op-in-doubt".to_owned(),
+                workflow_id: workflow_id.clone(),
+                run_id: run_id.clone(),
+                node_id: node_id.clone(),
+                attempt: 1,
+                kind: "llm".to_owned(),
+                provider: "provider".to_owned(),
+                request_hash: "hash".to_owned(),
+                lease_generation: 1,
+                recovery_policy: WorkflowOperationRecoveryPolicy::ManualResolution,
+                response_policy: WorkflowOperationResponsePolicy::AllowExternalResponse,
+            },
+            1_000,
+        )
+        .unwrap();
+    store
+        .transition_operation(
+            "op-in-doubt",
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            1_001,
+        )
+        .unwrap();
+    store
+        .transition_operation(
+            "op-in-doubt",
+            WorkflowOperationStatus::Dispatched,
+            WorkflowOperationStatus::InDoubt,
+            None,
+            1_002,
+        )
+        .unwrap();
+
+    let result = store
+        .resolve_in_doubt_operation(
+            "op-in-doubt",
+            ariadne::workflow::InDoubtResolution::Retry,
+            "recovery-owner",
+            2_000,
+            1_000,
+        )
+        .unwrap();
+    let ariadne::workflow::InDoubtResolutionResult::Saved { state, lease } = result else {
+        panic!("expected saved recovery result");
+    };
+    assert_eq!(state.status, RunStatus::Queued);
+    assert_eq!(state.control, RunControl::Continue);
+    let node = state.nodes.get(&node_id).unwrap();
+    assert_eq!(node.status, RunStatus::Queued);
+    assert!(node.error.is_none());
+    assert_eq!(
+        store.load_operation("op-in-doubt").unwrap().unwrap().status,
+        WorkflowOperationStatus::Aborted
+    );
+    assert_eq!(lease.unwrap().owner_id, "recovery-owner");
+}
+
+#[test]
+fn receipt_only_in_doubt_operation_rejects_external_response_without_mutation() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("receipt-only-response");
+    let run_id = RunId::from("run-1");
+    let node_id = NodeId::from("summarizer");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.status = RunStatus::Paused;
+    state.control = RunControl::Pause;
+    state.pause_reason = Some("operation is in doubt".to_owned());
+    state.nodes.insert(
+        node_id.clone(),
+        ariadne::workflow::WorkflowNodeRuntimeState {
+            node_id: node_id.clone(),
+            status: RunStatus::Paused,
+            outputs: PortMap::new(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: Some("receipt not visible yet".to_owned()),
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    store.create_state(&state).unwrap();
+    store
+        .create_operation(
+            &NewWorkflowOperation {
+                operation_id: "op-receipt-only".to_owned(),
+                workflow_id: workflow_id.clone(),
+                run_id: run_id.clone(),
+                node_id,
+                attempt: 1,
+                kind: "summarizer".to_owned(),
+                provider: "knowledge".to_owned(),
+                request_hash: "request-hash".to_owned(),
+                lease_generation: 1,
+                recovery_policy: WorkflowOperationRecoveryPolicy::ReconcileReceipt,
+                response_policy: WorkflowOperationResponsePolicy::RequireExecutorReceipt,
+            },
+            1_000,
+        )
+        .unwrap();
+    store
+        .transition_operation(
+            "op-receipt-only",
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            1_001,
+        )
+        .unwrap();
+    store
+        .transition_operation(
+            "op-receipt-only",
+            WorkflowOperationStatus::Dispatched,
+            WorkflowOperationStatus::InDoubt,
+            None,
+            1_002,
+        )
+        .unwrap();
+
+    let error = store
+        .resolve_in_doubt_operation(
+            "op-receipt-only",
+            ariadne::workflow::InDoubtResolution::UseResponse {
+                response: serde_json::to_value(WorkflowNodeExecutionOutput::default()).unwrap(),
+            },
+            "recovery-owner",
+            2_000,
+            1_000,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("executor receipt"));
+    assert_eq!(
+        store
+            .load_operation("op-receipt-only")
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkflowOperationStatus::InDoubt
+    );
+    assert_eq!(
+        store.load_state(&workflow_id, &run_id).unwrap().unwrap(),
+        state
+    );
+    assert!(store
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn completed_operation_response_is_reused_without_second_provider_call() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("journal-replay"),
+        name: "Journal replay".to_owned(),
+        nodes: vec![node("writer", "llm")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    store.create_state(&runtime.state).unwrap();
+    let operation_id = ariadne::skills::stable_text_hash(
+        "workflow-operation-v1\0journal-replay\0run-1\0writer\x001",
+    );
+    let request_hash = ariadne::skills::stable_text_hash(
+        &serde_json::to_string(&json!({
+            "type_name": "llm",
+            "config": Value::Null,
+            "inputs": PortMap::new(),
+            "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
+            "metadata": Value::Null,
+        }))
+        .unwrap(),
+    );
+    store
+        .create_operation(
+            &NewWorkflowOperation {
+                operation_id: operation_id.clone(),
+                workflow_id: workflow.id.clone(),
+                run_id: run_id.clone(),
+                node_id: NodeId::from("writer"),
+                attempt: 1,
+                kind: "llm".to_owned(),
+                provider: "llm".to_owned(),
+                request_hash,
+                lease_generation: 0,
+                recovery_policy: WorkflowOperationRecoveryPolicy::ManualResolution,
+                response_policy: WorkflowOperationResponsePolicy::AllowExternalResponse,
+            },
+            1_000,
+        )
+        .unwrap();
+    assert!(store
+        .transition_operation(
+            &operation_id,
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            1_001,
+        )
+        .unwrap());
+    let cached_output = inline_output("draft", "cached response");
+    assert!(store
+        .transition_operation(
+            &operation_id,
+            WorkflowOperationStatus::Dispatched,
+            WorkflowOperationStatus::Completed,
+            Some(&serde_json::to_value(&cached_output).unwrap()),
+            1_002,
+        )
+        .unwrap());
+    let mut executor = ScriptedExecutor::default()
+        .with_operation_policy(WorkflowOperationPolicy::remote_response());
+
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(executor.call_count("writer"), 0);
+    assert_eq!(
+        store.load_operation(&operation_id).unwrap().unwrap().status,
+        WorkflowOperationStatus::Committed
+    );
+    assert!(format!(
+        "{:?}",
+        runtime
+            .state
+            .nodes
+            .get(&NodeId::from("writer"))
+            .unwrap()
+            .outputs
+    )
+    .contains("cached response"));
+}
+
+#[test]
+fn persisted_operation_rejects_recovery_policy_drift_for_the_same_identity() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("journal-policy-drift"),
+        name: "Journal policy drift".to_owned(),
+        nodes: vec![node("writer", "llm")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    store.create_state(&runtime.state).unwrap();
+    let operation_id = ariadne::skills::stable_text_hash(
+        "workflow-operation-v1\0journal-policy-drift\0run-1\0writer\x001",
+    );
+    let request_hash = ariadne::skills::stable_text_hash(
+        &serde_json::to_string(&json!({
+            "type_name": "llm",
+            "config": Value::Null,
+            "inputs": PortMap::new(),
+            "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
+            "metadata": Value::Null,
+        }))
+        .unwrap(),
+    );
+    store
+        .create_operation(
+            &NewWorkflowOperation {
+                operation_id: operation_id.clone(),
+                workflow_id: workflow.id.clone(),
+                run_id,
+                node_id: NodeId::from("writer"),
+                attempt: 1,
+                kind: "llm".to_owned(),
+                provider: "llm".to_owned(),
+                request_hash,
+                lease_generation: 0,
+                recovery_policy: WorkflowOperationRecoveryPolicy::ManualResolution,
+                response_policy: WorkflowOperationResponsePolicy::AllowExternalResponse,
+            },
+            1_000,
+        )
+        .unwrap();
+    let mut executor = ScriptedExecutor::default()
+        .with_operation_policy(WorkflowOperationPolicy::reconcilable_receipt());
+    executor.push("writer", inline_output("draft", "must not execute"));
+
+    let error = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("operation identity mismatch"));
+    assert_eq!(executor.call_count("writer"), 0);
+    let operation = store.load_operation(&operation_id).unwrap().unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::Prepared);
+    assert_eq!(
+        operation.recovery_policy,
+        WorkflowOperationRecoveryPolicy::ManualResolution
+    );
+    assert_eq!(
+        operation.response_policy,
+        WorkflowOperationResponsePolicy::AllowExternalResponse
+    );
+}
+
+#[test]
+fn atomic_node_commit_rolls_back_snapshot_events_and_operation_on_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let workflow_id = WorkflowId::from("atomic-operation-commit");
+    let run_id = RunId::from("run-1");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    store.create_state(&state).unwrap();
+    let operation_id = "atomic-operation-commit-id".to_owned();
+    store
+        .create_operation(
+            &NewWorkflowOperation {
+                operation_id: operation_id.clone(),
+                workflow_id: workflow_id.clone(),
+                run_id: run_id.clone(),
+                node_id: NodeId::from("writer"),
+                attempt: 1,
+                kind: "llm".to_owned(),
+                provider: "provider".to_owned(),
+                request_hash: "request-hash".to_owned(),
+                lease_generation: 0,
+                recovery_policy: WorkflowOperationRecoveryPolicy::ManualResolution,
+                response_policy: WorkflowOperationResponsePolicy::AllowExternalResponse,
+            },
+            1_000,
+        )
+        .unwrap();
+    store
+        .transition_operation(
+            &operation_id,
+            WorkflowOperationStatus::Prepared,
+            WorkflowOperationStatus::Dispatched,
+            None,
+            1_001,
+        )
+        .unwrap();
+    store
+        .transition_operation(
+            &operation_id,
+            WorkflowOperationStatus::Dispatched,
+            WorkflowOperationStatus::Completed,
+            Some(&serde_json::to_value(inline_output("draft", "cached")).unwrap()),
+            1_002,
+        )
+        .unwrap();
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER abort_operation_commit
+             BEFORE UPDATE OF status ON workflow_operations
+             WHEN NEW.status = 'committed'
+             BEGIN SELECT RAISE(ABORT, 'forced operation commit failure'); END;",
+        )
+        .unwrap();
+    state.status = RunStatus::Succeeded;
+    state
+        .structured_events
+        .push(ariadne::workflow::WorkflowRuntimeEvent {
+            sequence: 0,
+            event_type: WorkflowRuntimeEventType::RunSucceeded,
+            node_id: None,
+            message: "must roll back".to_owned(),
+            metadata: Value::Null,
+        });
+    state.next_event_sequence = 1;
+
+    assert!(store.save_state(&mut state, Some(&operation_id)).is_err());
+    let persisted = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(persisted.state_revision, 0);
+    assert_eq!(persisted.status, RunStatus::Queued);
+    assert!(persisted.structured_events.is_empty());
+    assert_eq!(
+        store.load_operation(&operation_id).unwrap().unwrap().status,
+        WorkflowOperationStatus::Completed
+    );
+}
+
+#[test]
+fn real_http_response_is_reused_after_snapshot_commit_failure_without_second_call_or_cost() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let server_count = Arc::clone(&request_count);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /chat/completions "));
+        assert!(request.contains("snapshot crash test"));
+        server_count.fetch_add(1, Ordering::SeqCst);
+        let response_body = r#"{
+          "model":"test-model",
+          "choices":[{"message":{"content":"remote result"},"finish_reason":"stop"}],
+          "usage":{"prompt_tokens":10,"completion_tokens":5}
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    let provider = OpenAiCompatibleLlmProvider::new(
+        ProviderConfig {
+            provider_id: "real-http".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Real HTTP".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            api_key: None,
+            models: vec![ModelConfig {
+                model_id: "test-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: Some(1.0),
+                output_cost_per_million_tokens: Some(2.0),
+            }],
+        },
+        None,
+    )
+    .unwrap();
+    let ledger = Arc::new(SqliteCostLedger::open(temp.path()).unwrap());
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("real-http-snapshot-crash"),
+        name: "Real HTTP snapshot crash".to_owned(),
+        nodes: vec![NodeInstance {
+            id: NodeId::from("writer"),
+            type_name: "llm".to_owned(),
+            label: None,
+            config: json!({
+                "provider_id": "real-http",
+                "model_id": "test-model",
+                "prompt_template": "snapshot crash test",
+            }),
+            position: None,
+        }],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    store.create_state(&runtime.state).unwrap();
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER abort_real_http_operation_commit
+             BEFORE UPDATE OF status ON workflow_operations
+             WHEN NEW.status = 'committed'
+             BEGIN SELECT RAISE(ABORT, 'forced snapshot commit failure'); END;",
+        )
+        .unwrap();
+    let mut external = RoutedExternalNodeExecutor::new();
+    let first_provider = provider.clone();
+    let first_ledger = Arc::clone(&ledger);
+    external
+        .register_handler_with_policy(
+            "llm",
+            WorkflowOperationPolicy::remote_response(),
+            Box::new(move |request| {
+                execute_llm_node(request, &first_provider, first_ledger.as_ref())
+            }),
+        )
+        .unwrap();
+    let mut executor = BuiltinWorkflowNodeExecutor::new(&mut external);
+
+    let first_error = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap_err();
+    server.join().unwrap();
+    assert!(first_error
+        .to_string()
+        .contains("forced snapshot commit failure"));
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    let operation = store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::Completed);
+    let operation_id = operation.operation_id.clone();
+    assert_eq!(
+        ledger
+            .list_costs(&CostQuery {
+                operation_id: Some(operation_id.clone()),
+                ..CostQuery::default()
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+
+    connection
+        .execute_batch("DROP TRIGGER abort_real_http_operation_commit;")
+        .unwrap();
+    let persisted = store.load_state(&workflow.id, &run_id).unwrap().unwrap();
+    let mut recovered = WorkflowRuntime::from_state(persisted);
+    let mut replay_external = RoutedExternalNodeExecutor::new();
+    let replay_provider = provider;
+    let replay_ledger = Arc::clone(&ledger);
+    replay_external
+        .register_handler_with_policy(
+            "llm",
+            WorkflowOperationPolicy::remote_response(),
+            Box::new(move |request| {
+                execute_llm_node(request, &replay_provider, replay_ledger.as_ref())
+            }),
+        )
+        .unwrap();
+    let mut replay_executor = BuiltinWorkflowNodeExecutor::new(&mut replay_external);
+
+    let status = recovered
+        .run_persisted(&workflow, &mut replay_executor, &store)
+        .unwrap();
+
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.load_operation(&operation_id).unwrap().unwrap().status,
+        WorkflowOperationStatus::Committed
+    );
+    assert_eq!(
+        ledger
+            .list_costs(&CostQuery {
+                operation_id: Some(operation_id),
+                ..CostQuery::default()
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(format!(
+        "{:?}",
+        recovered.state.nodes[&NodeId::from("writer")].outputs
+    )
+    .contains("remote result"));
+}
+
+#[test]
+fn real_http_disconnect_after_dispatch_pauses_in_doubt_without_second_request_on_resume() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let server_count = Arc::clone(&request_count);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /chat/completions "));
+        assert!(request.contains("unknown dispatch test"));
+        server_count.fetch_add(1, Ordering::SeqCst);
+        // 已读取完整请求但不返回响应，模拟远端可能已执行而连接中断。
+    });
+    let provider = OpenAiCompatibleLlmProvider::new(
+        ProviderConfig {
+            provider_id: "real-http-unknown".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Real HTTP unknown".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            api_key: None,
+            models: vec![ModelConfig {
+                model_id: "test-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: Some(1.0),
+                output_cost_per_million_tokens: Some(2.0),
+            }],
+        },
+        None,
+    )
+    .unwrap();
+    let ledger = Arc::new(SqliteCostLedger::open(temp.path()).unwrap());
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("real-http-dispatch-unknown"),
+        name: "Real HTTP dispatch unknown".to_owned(),
+        nodes: vec![NodeInstance {
+            id: NodeId::from("writer"),
+            type_name: "llm".to_owned(),
+            label: None,
+            config: json!({
+                "provider_id": "real-http-unknown",
+                "model_id": "test-model",
+                "prompt_template": "unknown dispatch test",
+            }),
+            position: None,
+        }],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    store.create_state(&runtime.state).unwrap();
+    let mut external = RoutedExternalNodeExecutor::new();
+    let handler_provider = provider;
+    let handler_ledger = Arc::clone(&ledger);
+    external
+        .register_handler_with_policy(
+            "llm",
+            WorkflowOperationPolicy::remote_response(),
+            Box::new(move |request| {
+                execute_llm_node(request, &handler_provider, handler_ledger.as_ref())
+            }),
+        )
+        .unwrap();
+    let mut executor = BuiltinWorkflowNodeExecutor::new(&mut external);
+
+    let first_status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(first_status, RunStatus::Paused);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    let operation = store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::InDoubt);
+    assert!(ledger
+        .list_costs(&CostQuery {
+            operation_id: Some(operation.operation_id.clone()),
+            ..CostQuery::default()
+        })
+        .unwrap()
+        .is_empty());
+
+    runtime.resume().unwrap();
+    let resumed_status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+
+    assert_eq!(resumed_status, RunStatus::Paused);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .load_operation(&operation.operation_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkflowOperationStatus::InDoubt
+    );
+}
+
+#[test]
+fn expired_worker_generation_cannot_save_after_takeover() {
+    let temp = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::from("fenced-save-workflow");
+    let run_id = RunId::from("fenced-save-run");
+    let base_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    base_store.create_state(&state).unwrap();
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let stale_lease = base_store
+        .acquire_worker_lease(
+            &workflow_id,
+            &run_id,
+            "owner-a",
+            now_ms.saturating_sub(1_000),
+            100,
+        )
+        .unwrap()
+        .unwrap();
+    let current_lease = base_store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-b", now_ms, 60_000)
+        .unwrap()
+        .unwrap();
+    assert!(current_lease.generation > stale_lease.generation);
+
+    let stale_store = SqliteWorkflowRuntimeStore::open(temp.path())
+        .unwrap()
+        .with_worker_lease(stale_lease);
+    let mut stale_state = state.clone();
+    stale_state.status = RunStatus::Failed;
+    let error = stale_store.save_state(&mut stale_state, None).unwrap_err();
+    assert!(error.to_string().contains("worker lease lost"));
+
+    let current_store = SqliteWorkflowRuntimeStore::open(temp.path())
+        .unwrap()
+        .with_worker_lease(current_lease);
+    let mut current_state = state;
+    current_state.status = RunStatus::Running;
+    current_store.save_state(&mut current_state, None).unwrap();
+    assert_eq!(
+        base_store
+            .load_state(&workflow_id, &run_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Running
+    );
+}
+
+#[test]
+fn worker_save_running_and_stopping_keeps_current_lease() {
+    for status in [RunStatus::Running, RunStatus::Stopping] {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_id = WorkflowId::from(format!("lease-retained-{status:?}"));
+        let run_id = RunId::from("run");
+        let base_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+        let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+        base_store.create_state(&state).unwrap();
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let lease = base_store
+            .acquire_worker_lease(&workflow_id, &run_id, "owner", now_ms, 60_000)
+            .unwrap()
+            .unwrap();
+        let worker_store = SqliteWorkflowRuntimeStore::open(temp.path())
+            .unwrap()
+            .with_worker_lease(lease.clone());
+
+        state.status = status;
+        worker_store.save_state(&mut state, None).unwrap();
+
+        assert_eq!(state.state_revision, 1);
+        assert_eq!(
+            base_store.load_worker_lease(&workflow_id, &run_id).unwrap(),
+            Some(lease)
+        );
+    }
+}
+
+#[test]
+fn worker_save_yield_statuses_atomically_release_current_lease() {
+    for status in [
+        RunStatus::Queued,
+        RunStatus::Paused,
+        RunStatus::Stopped,
+        RunStatus::Succeeded,
+        RunStatus::Failed,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_id = WorkflowId::from(format!("lease-yielded-{status:?}"));
+        let run_id = RunId::from("run");
+        let base_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+        let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+        base_store.create_state(&state).unwrap();
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let lease = base_store
+            .acquire_worker_lease(&workflow_id, &run_id, "owner", now_ms, 60_000)
+            .unwrap()
+            .unwrap();
+        let worker_store = SqliteWorkflowRuntimeStore::open(temp.path())
+            .unwrap()
+            .with_worker_lease(lease.clone());
+
+        state.status = status;
+        worker_store.save_state(&mut state, None).unwrap();
+
+        assert_eq!(state.state_revision, 1);
+        assert_eq!(
+            base_store
+                .load_state(&workflow_id, &run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            status
+        );
+        assert!(base_store
+            .load_worker_lease(&workflow_id, &run_id)
+            .unwrap()
+            .is_none());
+        let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+        let tombstone = connection
+            .query_row(
+                "SELECT owner_id, generation, expires_at_ms
+                 FROM workflow_run_worker_leases
+                 WHERE workflow_id = ?1 AND run_id = ?2",
+                rusqlite::params![workflow_id.as_str(), run_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(tombstone.0, None);
+        assert_eq!(tombstone.1, i64::try_from(lease.generation).unwrap());
+        assert_eq!(tombstone.2, 0);
+    }
+}
+
+#[test]
+fn worker_yield_release_trigger_abort_rolls_back_state_revision_events_and_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::from("lease-yield-rollback");
+    let run_id = RunId::from("run");
+    let base_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let original = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    base_store.create_state(&original).unwrap();
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let lease = base_store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner", now_ms, 60_000)
+        .unwrap()
+        .unwrap();
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER abort_worker_yield_release
+             BEFORE UPDATE OF owner_id ON workflow_run_worker_leases
+             WHEN OLD.owner_id IS NOT NULL AND NEW.owner_id IS NULL
+             BEGIN
+                 SELECT RAISE(ABORT, 'test worker yield release abort');
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+    let worker_store = SqliteWorkflowRuntimeStore::open(temp.path())
+        .unwrap()
+        .with_worker_lease(lease.clone());
+    let mut yielded = original.clone();
+    yielded.status = RunStatus::Paused;
+    yielded.events.push("must roll back".to_owned());
+
+    let error = worker_store.save_state(&mut yielded, None).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("test worker yield release abort"));
+    assert_eq!(yielded.state_revision, 0);
+    assert_eq!(
+        base_store
+            .load_state(&workflow_id, &run_id)
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        base_store.load_worker_lease(&workflow_id, &run_id).unwrap(),
+        Some(lease)
+    );
+}
+
+#[test]
+fn runtime_worker_lease_rejects_non_runnable_runs() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("lease-paused-workflow");
+    let run_id = RunId::from("lease-paused-run");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.status = RunStatus::Paused;
+    store.create_state(&state).unwrap();
+
+    assert!(store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-a", 3_000, 100)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn atomic_resume_claim_transitions_paused_state_and_takes_over_expired_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let workflow_id = WorkflowId::from("atomic-resume-workflow");
+    let run_id = RunId::from("atomic-resume-run");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.events.push("event before resume".to_owned());
+    store.create_state(&state).unwrap();
+    let expired = store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-a", 1_000, 100)
+        .unwrap()
+        .unwrap();
+    state.status = RunStatus::Paused;
+    state.control = RunControl::Pause;
+    state.pause_reason = Some("manual pause".to_owned());
+    store.save_state(&mut state, None).unwrap();
+
+    let result = store
+        .claim_resume(&workflow_id, &run_id, "owner-b", 1_100, 500)
+        .unwrap();
+    let WorkflowResumeClaimResult::Claimed {
+        state: claimed,
+        lease,
+    } = result
+    else {
+        panic!("expected atomic resume claim");
+    };
+    assert_eq!(lease.owner_id, "owner-b");
+    assert_eq!(lease.generation, expired.generation + 1);
+    assert_eq!(claimed.status, RunStatus::Queued);
+    assert_eq!(claimed.control, RunControl::Continue);
+    assert_eq!(claimed.pause_reason, None);
+    assert_eq!(claimed.state_revision, state.state_revision + 1);
+    assert_eq!(claimed.events, vec!["event before resume"]);
+
+    let persisted = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(persisted, claimed);
+    assert_eq!(
+        store.load_worker_lease(&workflow_id, &run_id).unwrap(),
+        Some(lease)
+    );
+}
+
+#[test]
+fn atomic_resume_claim_busy_result_does_not_mutate_paused_state() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("busy-resume-workflow");
+    let run_id = RunId::from("busy-resume-run");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    store.create_state(&state).unwrap();
+    let active = store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-a", 2_000, 500)
+        .unwrap()
+        .unwrap();
+    state.status = RunStatus::Paused;
+    state.control = RunControl::Pause;
+    state.pause_reason = Some("must remain paused".to_owned());
+    store.save_state(&mut state, None).unwrap();
+    let revision = state.state_revision;
+
+    let result = store
+        .claim_resume(&workflow_id, &run_id, "owner-b", 2_100, 500)
+        .unwrap();
+    assert_eq!(
+        result,
+        WorkflowResumeClaimResult::Busy {
+            lease: active.clone()
+        }
+    );
+    let persisted = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(persisted.status, RunStatus::Paused);
+    assert_eq!(persisted.control, RunControl::Pause);
+    assert_eq!(
+        persisted.pause_reason.as_deref(),
+        Some("must remain paused")
+    );
+    assert_eq!(persisted.state_revision, revision);
+    assert_eq!(
+        store.load_worker_lease(&workflow_id, &run_id).unwrap(),
+        Some(active)
+    );
+}
+
+#[test]
+fn atomic_resume_claim_rejects_non_resumable_state_without_creating_lease() {
+    for status in [
+        RunStatus::Stopping,
+        RunStatus::Stopped,
+        RunStatus::Succeeded,
+        RunStatus::Failed,
+    ] {
+        let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+        let workflow_id = WorkflowId::from(format!("non-resumable-{status:?}"));
+        let run_id = RunId::from("run");
+        let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+        state.status = status;
+        state.control = RunControl::Stop;
+        store.create_state(&state).unwrap();
+
+        assert_eq!(
+            store
+                .claim_resume(&workflow_id, &run_id, "owner", 3_000, 500)
+                .unwrap(),
+            WorkflowResumeClaimResult::NotResumable { status }
+        );
+        let persisted = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+        assert_eq!(persisted.status, status);
+        assert_eq!(persisted.control, RunControl::Stop);
+        assert_eq!(persisted.state_revision, 0);
+        assert!(store
+            .load_worker_lease(&workflow_id, &run_id)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[test]
+fn atomic_resume_claim_reports_missing_run_without_creating_state() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("missing-resume-workflow");
+    let run_id = RunId::from("missing-resume-run");
+    assert_eq!(
+        store
+            .claim_resume(&workflow_id, &run_id, "owner", 4_000, 500)
+            .unwrap(),
+        WorkflowResumeClaimResult::NotFound
+    );
+    assert!(store.load_state(&workflow_id, &run_id).unwrap().is_none());
+}
+
+#[test]
+fn atomic_mutation_claim_busy_rolls_back_all_state_changes() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("busy-mutation-workflow");
+    let run_id = RunId::from("busy-mutation-run");
+    let original = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    store.create_state(&original).unwrap();
+    let active = store
+        .acquire_worker_lease(&workflow_id, &run_id, "owner-a", 5_000, 500)
+        .unwrap()
+        .unwrap();
+
+    let result = store
+        .mutate_state_and_claim(&workflow_id, &run_id, "owner-b", 5_100, 500, |state| {
+            state.status = RunStatus::Running;
+            state.pause_reason = Some("must be rolled back".to_owned());
+            state.events.push("transient mutation".to_owned());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        result,
+        WorkflowMutationClaimResult::Busy {
+            lease: active.clone()
+        }
+    );
+    assert_eq!(
+        store.load_state(&workflow_id, &run_id).unwrap().unwrap(),
+        original
+    );
+    assert_eq!(
+        store.load_worker_lease(&workflow_id, &run_id).unwrap(),
+        Some(active)
+    );
+}
+
+#[test]
+fn atomic_mutation_claim_saves_non_runnable_state_without_lease() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("no-lease-mutation-workflow");
+    let run_id = RunId::from("no-lease-mutation-run");
+    store
+        .create_state(&WorkflowRunState::new(workflow_id.clone(), run_id.clone()))
+        .unwrap();
+
+    let result = store
+        .mutate_state_and_claim(&workflow_id, &run_id, "", 6_000, 0, |state| {
+            state.status = RunStatus::Paused;
+            state.control = RunControl::Pause;
+            state.pause_reason = Some("waiting for confirmation".to_owned());
+            state.events.push("pause persisted".to_owned());
+            Ok(())
+        })
+        .unwrap();
+    let WorkflowMutationClaimResult::Saved { state, lease } = result else {
+        panic!("expected saved mutation without worker lease");
+    };
+    assert_eq!(lease, None);
+    assert_eq!(state.status, RunStatus::Paused);
+    assert_eq!(state.control, RunControl::Pause);
+    assert_eq!(state.state_revision, 1);
+    assert_eq!(
+        state.pause_reason.as_deref(),
+        Some("waiting for confirmation")
+    );
+    assert_eq!(state.events, vec!["pause persisted"]);
+    assert_eq!(
+        store.load_state(&workflow_id, &run_id).unwrap().unwrap(),
+        state
+    );
+    assert!(store
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .is_none());
 }
 
 impl Provider for RecordingLlmProvider {
@@ -54,10 +2420,12 @@ impl Provider for RecordingLlmProvider {
 impl LlmProvider for RecordingLlmProvider {
     fn complete(
         &self,
-        _context: &ProviderCallContext,
+        context: &ProviderCallContext,
         request: LlmRequest,
     ) -> ariadne::contracts::CoreResult<LlmResponse> {
+        self.contexts.lock().unwrap().push(context.clone());
         self.requests.lock().unwrap().push(request);
+        let cost_usd = *self.cost_usd.lock().unwrap();
         Ok(LlmResponse {
             message: LlmMessage::assistant("完成"),
             tool_calls: Vec::new(),
@@ -66,7 +2434,7 @@ impl LlmProvider for RecordingLlmProvider {
                 output_tokens: 2,
             }),
             finish_reason: Some("stop".to_owned()),
-            cost_usd: None,
+            cost_usd,
             raw: Value::Null,
         })
     }
@@ -81,6 +2449,9 @@ fn ui_llm_node_uses_prompt_template_and_project_provider_defaults() {
         workflow_id: WorkflowId::from("wf"),
         run_id: RunId::from("run"),
         node_id: NodeId::from("writer"),
+        operation_id: "op-writer".to_owned(),
+        operation_attempt: 1,
+        request_hash: "request-writer".to_owned(),
         type_name: "writer".to_owned(),
         config: json!({
             "schema_version": 1,
@@ -92,6 +2463,8 @@ fn ui_llm_node_uses_prompt_template_and_project_provider_defaults() {
         )]),
         communication_messages: Vec::new(),
         metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
     };
 
     let output = execute_llm_node_with_defaults(
@@ -111,6 +2484,616 @@ fn ui_llm_node_uses_prompt_template_and_project_provider_defaults() {
     assert!(prompt.contains("根据本章大纲续写"));
 }
 
+/// F13：节点 config.timeout_ms / budget_usd 必须进入真实 LLM 调用上下文，不可硬编码 120s 忽略。
+#[test]
+fn f13_llm_node_timeout_and_budget_enter_provider_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let provider = RecordingLlmProvider::default();
+    *provider.cost_usd.lock().unwrap() = Some(0.25);
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf-f13"),
+        run_id: RunId::from("run-f13"),
+        node_id: NodeId::from("writer"),
+        operation_id: "op-f13".to_owned(),
+        operation_attempt: 1,
+        request_hash: "hash-f13".to_owned(),
+        type_name: "writer".to_owned(),
+        config: json!({
+            "schema_version": 1,
+            "provider_id": "p",
+            "model_id": "m",
+            "prompt_template": "写",
+            "timeout_ms": 7_500,
+            "budget_usd": 1.0,
+        }),
+        inputs: PortMap::new(),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
+    };
+
+    execute_llm_node(request, &provider, &ledger).unwrap();
+
+    let contexts = provider.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(
+        contexts[0].timeout_ms, 7_500,
+        "node timeout_ms must drive ProviderCallContext"
+    );
+    assert_eq!(contexts[0].metadata["node_timeout_ms"], json!(7_500));
+    assert_eq!(
+        contexts[0].metadata["node_single_call_budget_usd"],
+        json!(1.0)
+    );
+}
+
+/// F13：桌面历史图可能把 timeout/budget 写成 JSON string；执行路径必须仍能进入上下文。
+#[test]
+fn f13_llm_node_accepts_ui_shaped_string_timeout_and_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let provider = RecordingLlmProvider::default();
+    *provider.cost_usd.lock().unwrap() = Some(0.1);
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf-f13-str"),
+        run_id: RunId::from("run-f13-str"),
+        node_id: NodeId::from("writer"),
+        operation_id: "op-f13-str".to_owned(),
+        operation_attempt: 1,
+        request_hash: "hash-f13-str".to_owned(),
+        type_name: "writer".to_owned(),
+        // 与桌面 MergeUiFields 旧行为 / 已存 graph JSON 一致：string 形态
+        config: json!({
+            "schema_version": 1,
+            "provider_id": "p",
+            "model_id": "m",
+            "prompt_template": "写",
+            "timeout_ms": "7500",
+            "budget_usd": "1.0",
+        }),
+        inputs: PortMap::new(),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
+    };
+
+    execute_llm_node(request, &provider, &ledger).unwrap();
+    let contexts = provider.contexts.lock().unwrap();
+    assert_eq!(contexts[0].timeout_ms, 7_500);
+    assert_eq!(
+        contexts[0].metadata["node_single_call_budget_usd"],
+        json!(1.0)
+    );
+}
+
+/// F13：单次成本超过节点 budget_usd 时节点必须失败，不能当作成功完成。
+#[test]
+fn f13_llm_node_fails_when_cost_exceeds_single_call_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let provider = RecordingLlmProvider::default();
+    *provider.cost_usd.lock().unwrap() = Some(2.5);
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf-f13-budget"),
+        run_id: RunId::from("run-f13-budget"),
+        node_id: NodeId::from("writer"),
+        operation_id: "op-f13-budget".to_owned(),
+        operation_attempt: 1,
+        request_hash: "hash-f13-budget".to_owned(),
+        type_name: "writer".to_owned(),
+        config: json!({
+            "schema_version": 1,
+            "provider_id": "p",
+            "model_id": "m",
+            "prompt_template": "写",
+            "single_call_budget_usd": 1.0,
+        }),
+        inputs: PortMap::new(),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
+    };
+
+    let err = execute_llm_node(request, &provider, &ledger).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("single-call") || message.contains("budget") || message.contains("1"),
+        "expected single-call budget failure, got: {message}"
+    );
+    assert_eq!(
+        provider.contexts.lock().unwrap()[0].timeout_ms,
+        120_000,
+        "unset timeout still defaults to 120s"
+    );
+}
+
+#[test]
+fn summarizer_reuses_committed_knowledge_receipt_without_provider_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let provider = RecordingLlmProvider::default();
+    let cancellation = ariadne::contracts::ExecutionCancellation::new();
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf-summary-replay"),
+        run_id: RunId::from("run-summary-replay"),
+        node_id: NodeId::from("summarizer"),
+        operation_id: "knowledge-replay-op".to_owned(),
+        operation_attempt: 1,
+        request_hash: "knowledge-replay-hash".to_owned(),
+        type_name: "summarizer".to_owned(),
+        config: json!({
+            "provider_id": "unused-provider",
+            "model_id": "unused-model",
+            "chapter_id": "chapter-1",
+            "chapter_document_id": "documents/chapter-1.md",
+            "chapter_text_alias": "chapter_text",
+            "auto_mode": false
+        }),
+        inputs: PortMap::from([(
+            "chapter_text".to_owned(),
+            PortValue::inline(json!("正文不会再次发送给模型")),
+        )]),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+        cancellation: cancellation.clone(),
+        dispatch_authorization: Default::default(),
+    };
+    let expected = WorkflowNodeExecutionOutput {
+        outputs: PortMap::from([(
+            "chapter_id".to_owned(),
+            PortValue::inline(json!("chapter-1")),
+        )]),
+        metadata: json!({"replayed": true}),
+        ..WorkflowNodeExecutionOutput::default()
+    };
+    SqliteWritingKnowledgeStore::open(temp.path())
+        .unwrap()
+        .save_knowledge_with_operation(
+            &MemoryWritingKnowledgeBase::new(),
+            &request.operation_id,
+            &request.request_hash,
+            &serde_json::to_value(&expected).unwrap(),
+            &cancellation,
+        )
+        .unwrap();
+
+    let actual = execute_summarizer_node(request, &provider, &ledger, temp.path()).unwrap();
+
+    assert_eq!(actual, expected);
+    assert!(provider.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn summarizer_receipt_replays_dispatched_runtime_operation_without_second_llm_pipeline() {
+    struct SequenceSummarizerProvider {
+        responses: Mutex<Vec<String>>,
+        calls: AtomicUsize,
+    }
+
+    impl Provider for SequenceSummarizerProvider {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "summarizer-sequence".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Summarizer sequence".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+
+    impl LlmProvider for SequenceSummarizerProvider {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            _request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let response = self.responses.lock().unwrap().remove(0);
+            Ok(LlmResponse {
+                message: LlmMessage::assistant(response),
+                tool_calls: Vec::new(),
+                usage: None,
+                finish_reason: Some("stop".to_owned()),
+                cost_usd: None,
+                raw: Value::Null,
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(SequenceSummarizerProvider {
+        responses: Mutex::new(vec![
+            json!({
+                "segments": [{
+                    "number": "1",
+                    "summary": "开端",
+                    "start_line": 1,
+                    "end_line": 2
+                }]
+            })
+            .to_string(),
+            json!({
+                "events": [{
+                    "event_id": "event-1",
+                    "summary": "事件概括",
+                    "status": "ongoing",
+                    "segment_ids": ["chapter-1::seg-1"]
+                }]
+            })
+            .to_string(),
+            json!({"summary": "章节总结"}).to_string(),
+            json!({
+                "stage_id": "stage-1",
+                "stage_summary": "阶段总结",
+                "is_new_stage": true
+            })
+            .to_string(),
+        ]),
+        calls: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(SqliteCostLedger::open(temp.path()).unwrap());
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("summarizer-receipt-reconciliation"),
+        name: "Summarizer receipt reconciliation".to_owned(),
+        nodes: vec![
+            NodeInstance {
+                id: NodeId::from("start"),
+                type_name: "start".to_owned(),
+                label: None,
+                config: json!({
+                    "initial_inputs": {"chapter_text": "第一行\n第二行"}
+                }),
+                position: None,
+            },
+            NodeInstance {
+                id: NodeId::from("summarizer"),
+                type_name: "summarizer".to_owned(),
+                label: None,
+                config: json!({
+                    "provider_id": "summarizer-sequence",
+                    "model_id": "test-model",
+                    "chapter_id": "chapter-1",
+                    "chapter_document_id": "documents/chapter-1.md",
+                    "chapter_text_alias": "chapter_text",
+                    "auto_mode": true
+                }),
+                position: None,
+            },
+        ],
+        edges: vec![
+            control_edge("start-summary-control", "start", "summarizer"),
+            Edge {
+                id: EdgeId::from("start-summary-data"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("start"),
+                    port_name: "chapter_text".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("summarizer"),
+                    port_name: "chapter_text".to_owned(),
+                },
+                alias: Some("chapter_text".to_owned()),
+                communication: None,
+            },
+        ],
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    store.create_state(&runtime.state).unwrap();
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER abort_summarizer_operation_complete
+             BEFORE UPDATE OF status ON workflow_operations
+             WHEN NEW.status = 'completed'
+             BEGIN SELECT RAISE(ABORT, 'forced summarizer completion failure'); END;",
+        )
+        .unwrap();
+    let mut external = RoutedExternalNodeExecutor::new();
+    let first_provider = Arc::clone(&provider);
+    let first_ledger = Arc::clone(&ledger);
+    let first_root = temp.path().to_path_buf();
+    external
+        .register_handler_with_policy(
+            "summarizer",
+            WorkflowOperationPolicy::replayable_receipt(),
+            Box::new(move |request| {
+                execute_summarizer_node(
+                    request,
+                    first_provider.as_ref(),
+                    first_ledger.as_ref(),
+                    &first_root,
+                )
+            }),
+        )
+        .unwrap();
+    let mut executor = BuiltinWorkflowNodeExecutor::new(&mut external);
+
+    let first_error = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap_err();
+
+    assert!(first_error
+        .to_string()
+        .contains("forced summarizer completion failure"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    let operation = store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::Dispatched);
+    assert_eq!(
+        operation.recovery_policy,
+        WorkflowOperationRecoveryPolicy::ReplayExecutor
+    );
+    assert_eq!(
+        operation.response_policy,
+        WorkflowOperationResponsePolicy::RequireExecutorReceipt
+    );
+    assert!(SqliteWritingKnowledgeStore::open(temp.path())
+        .unwrap()
+        .load_operation_receipt(&operation.operation_id, &operation.request_hash)
+        .unwrap()
+        .is_some());
+
+    connection
+        .execute_batch("DROP TRIGGER abort_summarizer_operation_complete;")
+        .unwrap();
+    let persisted = store.load_state(&workflow.id, &run_id).unwrap().unwrap();
+    let mut recovered = WorkflowRuntime::from_state(persisted);
+    let mut replay_external = RoutedExternalNodeExecutor::new();
+    let replay_provider = Arc::clone(&provider);
+    let replay_ledger = Arc::clone(&ledger);
+    let replay_root = temp.path().to_path_buf();
+    replay_external
+        .register_handler_with_policy(
+            "summarizer",
+            WorkflowOperationPolicy::replayable_receipt(),
+            Box::new(move |request| {
+                execute_summarizer_node(
+                    request,
+                    replay_provider.as_ref(),
+                    replay_ledger.as_ref(),
+                    &replay_root,
+                )
+            }),
+        )
+        .unwrap();
+    let mut replay_executor = BuiltinWorkflowNodeExecutor::new(&mut replay_external);
+
+    assert_eq!(
+        recovered
+            .run_persisted(&workflow, &mut replay_executor, &store)
+            .unwrap(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        store
+            .load_operation(&operation.operation_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkflowOperationStatus::Committed
+    );
+    let knowledge = SqliteWritingKnowledgeStore::open(temp.path())
+        .unwrap()
+        .load_knowledge()
+        .unwrap();
+    assert_eq!(
+        knowledge.chapter_summary("chapter-1").unwrap(),
+        Some("章节总结".to_owned())
+    );
+    assert!(knowledge.has_stage("stage-1").unwrap());
+}
+
+#[test]
+fn summarizer_unknown_stage_response_pauses_same_parent_operation_without_redispatch() {
+    struct UnknownSecondStageProvider {
+        calls: AtomicUsize,
+    }
+
+    impl Provider for UnknownSecondStageProvider {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "summarizer-unknown-stage".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Summarizer unknown stage".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+
+    impl LlmProvider for UnknownSecondStageProvider {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            _request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(LlmResponse {
+                    message: LlmMessage::assistant(
+                        json!({
+                            "segments": [{
+                                "number": "1",
+                                "summary": "开端",
+                                "start_line": 1,
+                                "end_line": 2
+                            }]
+                        })
+                        .to_string(),
+                    ),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    finish_reason: Some("stop".to_owned()),
+                    cost_usd: None,
+                    raw: Value::Null,
+                }),
+                1 => Err(ariadne::contracts::CoreError::ProviderRequest {
+                    service: "summarizer-unknown-stage".to_owned(),
+                    outcome: ariadne::contracts::ExternalDispatchOutcome::DispatchedUnknown,
+                    message: "events response was lost after dispatch".to_owned(),
+                }),
+                call => panic!("summarizer provider must not be redispatched, call {call}"),
+            }
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(UnknownSecondStageProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let ledger = Arc::new(SqliteCostLedger::open(temp.path()).unwrap());
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("summarizer-unknown-stage-recovery"),
+        name: "Summarizer unknown stage recovery".to_owned(),
+        nodes: vec![
+            NodeInstance {
+                id: NodeId::from("start"),
+                type_name: "start".to_owned(),
+                label: None,
+                config: json!({
+                    "initial_inputs": {"chapter_text": "第一行\n第二行"}
+                }),
+                position: None,
+            },
+            NodeInstance {
+                id: NodeId::from("summarizer"),
+                type_name: "summarizer".to_owned(),
+                label: None,
+                config: json!({
+                    "provider_id": "summarizer-unknown-stage",
+                    "model_id": "test-model",
+                    "chapter_id": "chapter-1",
+                    "chapter_document_id": "documents/chapter-1.md",
+                    "chapter_text_alias": "chapter_text",
+                    "auto_mode": true
+                }),
+                position: None,
+            },
+        ],
+        edges: vec![
+            control_edge("start-summary-control", "start", "summarizer"),
+            Edge {
+                id: EdgeId::from("start-summary-data"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("start"),
+                    port_name: "chapter_text".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("summarizer"),
+                    port_name: "chapter_text".to_owned(),
+                },
+                alias: Some("chapter_text".to_owned()),
+                communication: None,
+            },
+        ],
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let runtime_store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    runtime_store.create_state(&runtime.state).unwrap();
+    let mut external = RoutedExternalNodeExecutor::new();
+    let handler_provider = Arc::clone(&provider);
+    let handler_ledger = Arc::clone(&ledger);
+    let project_root = temp.path().to_path_buf();
+    external
+        .register_handler_with_policy(
+            "summarizer",
+            WorkflowOperationPolicy::replayable_receipt(),
+            Box::new(move |request| {
+                execute_summarizer_node(
+                    request,
+                    handler_provider.as_ref(),
+                    handler_ledger.as_ref(),
+                    &project_root,
+                )
+            }),
+        )
+        .unwrap();
+    let mut executor = BuiltinWorkflowNodeExecutor::new(&mut external);
+
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &runtime_store)
+            .unwrap(),
+        RunStatus::Paused
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let operations = runtime_store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap();
+    assert_eq!(operations.len(), 1);
+    let parent_operation = &operations[0];
+    assert_eq!(parent_operation.status, WorkflowOperationStatus::InDoubt);
+    assert_eq!(parent_operation.attempt, 1);
+    let knowledge_store = SqliteWritingKnowledgeStore::open(temp.path()).unwrap();
+    let first_stages = knowledge_store
+        .list_summarizer_stage_operations(&parent_operation.operation_id)
+        .unwrap();
+    assert_eq!(first_stages.len(), 2);
+    let segments = first_stages
+        .iter()
+        .find(|operation| operation.step == "segments")
+        .unwrap();
+    let events = first_stages
+        .iter()
+        .find(|operation| operation.step == "events")
+        .unwrap();
+    assert_eq!(segments.status, SummarizerStageOperationStatus::Completed);
+    assert!(segments.response_json.is_some());
+    assert_eq!(events.status, SummarizerStageOperationStatus::InDoubt);
+    assert!(events.response_json.is_none());
+
+    runtime.resume().unwrap();
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &runtime_store)
+            .unwrap(),
+        RunStatus::Paused
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let resumed_operations = runtime_store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap();
+    assert_eq!(resumed_operations.len(), 1);
+    assert_eq!(
+        resumed_operations[0].operation_id,
+        parent_operation.operation_id
+    );
+    assert_eq!(resumed_operations[0].attempt, 1);
+    assert_eq!(
+        resumed_operations[0].status,
+        WorkflowOperationStatus::InDoubt
+    );
+    assert_eq!(
+        knowledge_store
+            .list_summarizer_stage_operations(&parent_operation.operation_id)
+            .unwrap(),
+        first_stages
+    );
+}
+
 #[test]
 fn project_search_node_returns_indexed_project_results() {
     let vector = Arc::new(MemoryVectorStore::new());
@@ -128,11 +3111,16 @@ fn project_search_node_returns_indexed_project_results() {
         workflow_id: WorkflowId::from("wf"),
         run_id: RunId::from("run"),
         node_id: NodeId::from("search"),
+        operation_id: "op-search".to_owned(),
+        operation_attempt: 1,
+        request_hash: "request-search".to_owned(),
         type_name: "search".to_owned(),
         config: json!({"query_alias": "query", "limit": 5}),
         inputs: PortMap::from([("query".to_owned(), PortValue::inline(json!("线索")))]),
         communication_messages: Vec::new(),
         metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
     };
 
     let output = execute_project_search_node(request, &retrieval).unwrap();
@@ -148,9 +3136,18 @@ struct ScriptedExecutor {
     outputs: BTreeMap<String, Vec<WorkflowNodeExecutionOutput>>,
     errors: BTreeMap<String, Vec<ariadne::contracts::CoreError>>,
     calls: Vec<WorkflowNodeExecutionRequest>,
+    operation_policy: ariadne::workflow::WorkflowOperationPolicy,
 }
 
 impl ScriptedExecutor {
+    fn with_operation_policy(
+        mut self,
+        operation_policy: ariadne::workflow::WorkflowOperationPolicy,
+    ) -> Self {
+        self.operation_policy = operation_policy;
+        self
+    }
+
     /// 为指定节点追加一次预设输出。
     fn push(&mut self, node_id: &str, output: WorkflowNodeExecutionOutput) {
         self.outputs
@@ -177,12 +3174,20 @@ impl ScriptedExecutor {
 }
 
 impl WorkflowNodeExecutor for ScriptedExecutor {
+    fn operation_policy(
+        &self,
+        _request: &WorkflowNodeExecutionRequest,
+    ) -> ariadne::contracts::CoreResult<ariadne::workflow::WorkflowOperationPolicy> {
+        Ok(self.operation_policy)
+    }
+
     /// 按节点 id 返回预设输出，并记录执行请求。
     fn execute(
         &mut self,
         request: WorkflowNodeExecutionRequest,
     ) -> ariadne::contracts::CoreResult<WorkflowNodeExecutionOutput> {
         self.calls.push(request.clone());
+        request.dispatch_authorization.authorize_dispatch()?;
         if let Some(errors) = self.errors.get_mut(request.node_id.as_str()) {
             if !errors.is_empty() {
                 return Err(errors.remove(0));
@@ -239,6 +3244,13 @@ struct ScriptedExternalExecutor {
 }
 
 impl WorkflowExternalNodeExecutor for ScriptedExternalExecutor {
+    fn operation_policy(
+        &self,
+        request: &WorkflowNodeExecutionRequest,
+    ) -> ariadne::contracts::CoreResult<WorkflowOperationPolicy> {
+        self.scripted.operation_policy(request)
+    }
+
     /// 将外部节点请求转交给脚本执行器。
     fn execute_external(
         &mut self,
@@ -1031,7 +4043,7 @@ fn runtime_store_persists_events_append_only_outside_main_snapshot() {
     assert!(!state_json.contains("\"events\""));
     assert_eq!(event_count as usize, runtime.state.structured_events.len());
 
-    store.save_state(&runtime.state).unwrap();
+    store.save_state(&mut runtime.state, None).unwrap();
     let repeated_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM workflow_run_events", [], |row| {
             row.get(0)
@@ -1058,7 +4070,7 @@ fn runtime_store_stops_all_non_terminal_runs_for_restore() {
         let mut state =
             ariadne::workflow::WorkflowRunState::new(WorkflowId::from("wf"), RunId::from(run_id));
         state.status = status;
-        store.save_state(&state).unwrap();
+        store.create_state(&state).unwrap();
     }
 
     assert_eq!(
@@ -1160,6 +4172,21 @@ fn runtime_request_includes_node_type_config_and_previous_metadata() {
     assert_eq!(executor.calls[0].type_name, "llm");
     assert_eq!(executor.calls[0].config, json!({ "model": "mock" }));
     assert_eq!(executor.calls[1].metadata, json!({ "round": 1 }));
+    assert_eq!(executor.calls[0].operation_attempt, 1);
+    assert_eq!(executor.calls[1].operation_attempt, 2);
+    assert_eq!(
+        executor.calls[0].operation_id,
+        ariadne::skills::stable_text_hash("workflow-operation-v1\0wf\0run-1\0writer\x001")
+    );
+    assert_ne!(
+        executor.calls[0].operation_id,
+        executor.calls[1].operation_id
+    );
+    assert!(!executor.calls[0].request_hash.is_empty());
+    assert_ne!(
+        executor.calls[0].request_hash,
+        executor.calls[1].request_hash
+    );
 }
 
 /// 验证网络/rate limit/timeout 类错误会按指数退避重试，并最终清除错误状态。
@@ -1530,9 +4557,11 @@ fn builtin_loop_node_reruns_explicit_target_until_condition_passes() {
         ],
         metadata: Value::Null,
     };
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
     let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
     let mut external = ScriptedExternalExecutor {
-        scripted: ScriptedExecutor::default(),
+        scripted: ScriptedExecutor::default()
+            .with_operation_policy(WorkflowOperationPolicy::replayable_receipt()),
     };
     external
         .scripted
@@ -1556,10 +4585,28 @@ fn builtin_loop_node_reruns_explicit_target_until_condition_passes() {
     );
     let mut executor = BuiltinWorkflowNodeExecutor::new(&mut external);
 
-    let status = runtime.run(&workflow, &mut executor).unwrap();
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
 
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!(external.scripted.call_count("writer"), 2);
+    let writer_calls = external
+        .scripted
+        .calls
+        .iter()
+        .filter(|request| request.node_id == NodeId::from("writer"))
+        .collect::<Vec<_>>();
+    assert_eq!(writer_calls[0].operation_attempt, 1);
+    assert_eq!(writer_calls[1].operation_attempt, 2);
+    assert_ne!(writer_calls[0].operation_id, writer_calls[1].operation_id);
+    let operations = store
+        .list_operations(&workflow.id, &runtime.state.run_id)
+        .unwrap();
+    assert_eq!(operations.len(), 2);
+    assert!(operations
+        .iter()
+        .all(|operation| operation.status == WorkflowOperationStatus::Committed));
     assert_eq!(
         runtime.state.loop_iterations.get(&NodeId::from("loop")),
         Some(&1)
@@ -1675,11 +4722,16 @@ fn document_export_sink_writes_export_artifact() {
         workflow_id: WorkflowId::from("wf"),
         run_id: RunId::from("run"),
         node_id: NodeId::from("export"),
+        operation_id: "op-export".to_owned(),
+        operation_attempt: 1,
+        request_hash: "request-export".to_owned(),
         type_name: "export".to_owned(),
         config: Value::Null,
         inputs: ariadne::contracts::PortMap::new(),
         communication_messages: Vec::new(),
         metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
     };
 
     let artifact_id = sink
@@ -1702,6 +4754,91 @@ fn document_export_sink_writes_export_artifact() {
         .join("exports")
         .join("book.md")
         .exists());
+}
+
+#[test]
+fn export_operation_recovers_dispatched_artifact_without_duplicate_side_effect() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let service = test_document_service(temp_dir.path());
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("export-recovery"),
+        name: "Export recovery".to_owned(),
+        nodes: vec![NodeInstance {
+            id: NodeId::from("export"),
+            type_name: "export".to_owned(),
+            label: None,
+            config: json!({
+                "artifact_id": "exports/recovered.md",
+                "format": "markdown",
+                "title": "Recovered",
+            }),
+            position: None,
+        }],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp_dir.path()).unwrap();
+    store.create_state(&runtime.state).unwrap();
+    let connection = rusqlite::Connection::open(temp_dir.path().join("runtime.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER abort_export_operation_complete
+             BEFORE UPDATE OF status ON workflow_operations
+             WHEN NEW.status = 'completed'
+             BEGIN SELECT RAISE(ABORT, 'forced export completion failure'); END;",
+        )
+        .unwrap();
+    let mut external = NoopExternalNodeExecutor::default();
+    let mut sink = DocumentWorkflowExportSink::new(&service);
+    let mut executor = BuiltinWorkflowNodeExecutor::new(&mut external).with_export_sink(&mut sink);
+
+    let first_error = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap_err();
+
+    assert!(first_error
+        .to_string()
+        .contains("forced export completion failure"));
+    let operation = store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::Dispatched);
+    let artifact_path = temp_dir
+        .path()
+        .join(".runtime/artifacts/exports/recovered.md");
+    let first_bytes = fs::read(&artifact_path).unwrap();
+    let receipt_root = temp_dir.path().join(".runtime/artifacts/.operations");
+    assert_eq!(fs::read_dir(&receipt_root).unwrap().count(), 1);
+
+    connection
+        .execute_batch("DROP TRIGGER abort_export_operation_complete;")
+        .unwrap();
+    let persisted = store.load_state(&workflow.id, &run_id).unwrap().unwrap();
+    let mut recovered = WorkflowRuntime::from_state(persisted);
+    let mut replay_external = NoopExternalNodeExecutor::default();
+    let mut replay_sink = DocumentWorkflowExportSink::new(&service);
+    let mut replay_executor =
+        BuiltinWorkflowNodeExecutor::new(&mut replay_external).with_export_sink(&mut replay_sink);
+
+    let status = recovered
+        .run_persisted(&workflow, &mut replay_executor, &store)
+        .unwrap();
+
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(fs::read(&artifact_path).unwrap(), first_bytes);
+    assert_eq!(fs::read_dir(&receipt_root).unwrap().count(), 1);
+    assert_eq!(
+        store
+            .load_operation(&operation.operation_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkflowOperationStatus::Committed
+    );
 }
 
 /// 验证已审批 patch 能写回正文、创建 checkpoint，并同步 runtime 状态。
@@ -1804,11 +4941,16 @@ fn routed_external_executor_dispatches_registered_handlers() {
             workflow_id: WorkflowId::from("wf"),
             run_id: RunId::from("run"),
             node_id: NodeId::from("node-1"),
+            operation_id: "op-custom".to_owned(),
+            operation_attempt: 1,
+            request_hash: "request-custom".to_owned(),
             type_name: "custom".to_owned(),
             config: Value::Null,
             inputs: ariadne::contracts::PortMap::new(),
             communication_messages: Vec::new(),
             metadata: Value::Null,
+            cancellation: ariadne::contracts::ExecutionCancellation::new(),
+            dispatch_authorization: Default::default(),
         })
         .unwrap();
 
@@ -2040,4 +5182,341 @@ mod prudent_rejection_contracts {
         // 暂停解除
         assert_eq!(runtime.state.status, ariadne::contracts::RunStatus::Queued);
     }
+}
+
+/// F17：项目保存的四项策略在普通模式与 Auto Mode 分别映射到人工、跳过和自动审计。
+#[test]
+fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
+    use ariadne::rag::{ConfirmationKind, ConfirmationState};
+
+    struct PolicyProvider {
+        calls: AtomicUsize,
+    }
+    impl Provider for PolicyProvider {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "policy-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "policy-provider".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for PolicyProvider {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let body = match request.metadata["summarizer_step"].as_str().unwrap() {
+                "segments" => {
+                    r#"{"segments":[{"number":"1","summary":"段","start_line":1,"end_line":1}]}"#
+                }
+                "events" => {
+                    r#"{"events":[{"event_id":"event-policy","summary":"事件","status":"ongoing","segment_ids":["chapter-policy::seg-1"]}]}"#
+                }
+                "chapter" => r#"{"summary":"章节总结"}"#,
+                "stage" => {
+                    r#"{"stage_id":"stage-policy","stage_summary":"阶段总结","is_new_stage":true}"#
+                }
+                other => panic!("unexpected summarizer step {other}"),
+            };
+            Ok(LlmResponse {
+                message: LlmMessage::assistant(body),
+                tool_calls: Vec::new(),
+                usage: None,
+                finish_reason: Some("stop".to_owned()),
+                cost_usd: None,
+                raw: Value::Null,
+            })
+        }
+    }
+
+    let run_case = |auto_mode: bool| {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp
+            .path()
+            .join(".config/confirmation_policy_settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&json!([
+                {
+                    "confirmation_kind": "segment_summary",
+                    "normal_policy": "allow_by_default",
+                    "auto_mode_policy": "auto_approval"
+                },
+                {
+                    "confirmation_kind": "event_summary",
+                    "normal_policy": "manual_review",
+                    "auto_mode_policy": "allow_by_default"
+                },
+                {
+                    "confirmation_kind": "chapter_summary",
+                    "normal_policy": "allow_by_default",
+                    "auto_mode_policy": "allow_by_default"
+                },
+                {
+                    "confirmation_kind": "stage_summary",
+                    "normal_policy": "manual_review",
+                    "auto_mode_policy": "auto_approval"
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let provider = PolicyProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+        let request = WorkflowNodeExecutionRequest {
+            workflow_id: WorkflowId::from("wf-policy"),
+            run_id: RunId::from(if auto_mode { "run-auto" } else { "run-normal" }),
+            node_id: NodeId::from("summarizer"),
+            operation_id: format!("op-policy-{auto_mode}"),
+            operation_attempt: 1,
+            request_hash: format!("hash-policy-{auto_mode}"),
+            type_name: "summarizer".to_owned(),
+            config: json!({
+                "provider_id": "policy-provider",
+                "model_id": "m",
+                "chapter_id": "chapter-policy",
+                "chapter_document_id": "documents/chapter-policy.md",
+                "chapter_text_alias": "chapter_text",
+                "auto_mode": auto_mode,
+            }),
+            inputs: PortMap::from([("chapter_text".to_owned(), PortValue::inline(json!("正文")))]),
+            communication_messages: Vec::new(),
+            metadata: Value::Null,
+            cancellation: ariadne::contracts::ExecutionCancellation::new(),
+            dispatch_authorization: Default::default(),
+        };
+        let output = execute_summarizer_node(request, &provider, &ledger, temp.path()).unwrap();
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+        let knowledge = SqliteWritingKnowledgeStore::open(temp.path())
+            .unwrap()
+            .load_knowledge()
+            .unwrap();
+        let states = knowledge
+            .confirmations(None)
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.kind, item.state))
+            .collect::<BTreeMap<_, _>>();
+        (states, output.run_control)
+    };
+
+    let (normal, normal_control) = run_case(false);
+    assert_eq!(
+        normal[&ConfirmationKind::SegmentSummary],
+        ConfirmationState::Skipped
+    );
+    assert_eq!(
+        normal[&ConfirmationKind::EventSummary],
+        ConfirmationState::Pending
+    );
+    assert_eq!(
+        normal[&ConfirmationKind::ChapterSummary],
+        ConfirmationState::Skipped
+    );
+    assert_eq!(
+        normal[&ConfirmationKind::StageSummary],
+        ConfirmationState::Pending
+    );
+    assert_eq!(normal_control, Some(RunControl::Pause));
+
+    let (auto, auto_control) = run_case(true);
+    assert_eq!(
+        auto[&ConfirmationKind::SegmentSummary],
+        ConfirmationState::AutoAudited
+    );
+    assert_eq!(
+        auto[&ConfirmationKind::EventSummary],
+        ConfirmationState::Skipped
+    );
+    assert_eq!(
+        auto[&ConfirmationKind::ChapterSummary],
+        ConfirmationState::Skipped
+    );
+    assert_eq!(
+        auto[&ConfirmationKind::StageSummary],
+        ConfirmationState::AutoAudited
+    );
+    assert_eq!(auto_control, None);
+}
+
+/// F17：策略文件损坏必须在首次 provider dispatch 前阻断。
+#[test]
+fn f17_malformed_confirmation_policy_blocks_summarizer_before_provider_call() {
+    struct MustNotCall(AtomicUsize);
+    impl Provider for MustNotCall {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "must-not-call-policy".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "must-not-call-policy".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for MustNotCall {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            _request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("malformed policy must block before provider call")
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let settings_path = temp
+        .path()
+        .join(".config/confirmation_policy_settings.json");
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(&settings_path, b"[{not-json]").unwrap();
+    let provider = MustNotCall(AtomicUsize::new(0));
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let error = execute_summarizer_node(
+        WorkflowNodeExecutionRequest {
+            workflow_id: WorkflowId::from("wf-bad-policy"),
+            run_id: RunId::from("run-bad-policy"),
+            node_id: NodeId::from("summarizer"),
+            operation_id: "op-bad-policy".to_owned(),
+            operation_attempt: 1,
+            request_hash: "hash-bad-policy".to_owned(),
+            type_name: "summarizer".to_owned(),
+            config: json!({
+                "provider_id": "must-not-call-policy",
+                "model_id": "m",
+                "chapter_id": "chapter",
+                "chapter_document_id": "documents/chapter.md",
+                "chapter_text_alias": "chapter_text",
+                "auto_mode": false,
+            }),
+            inputs: PortMap::from([("chapter_text".to_owned(), PortValue::inline(json!("正文")))]),
+            communication_messages: Vec::new(),
+            metadata: Value::Null,
+            cancellation: ariadne::contracts::ExecutionCancellation::new(),
+            dispatch_authorization: Default::default(),
+        },
+        &provider,
+        &ledger,
+        temp.path(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("json"));
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+}
+
+/// F18：相关知识 JSON 损坏不得降级为空上下文并继续调用模型。
+#[test]
+fn f18_corrupt_knowledge_blocks_summarizer_before_provider_call() {
+    struct MustNotCall(AtomicUsize);
+    impl Provider for MustNotCall {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "must-not-call-knowledge".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "must-not-call-knowledge".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+    impl LlmProvider for MustNotCall {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            _request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("corrupt knowledge must block before provider call")
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    knowledge
+        .upsert_segment(ariadne::rag::StorySegment {
+            segment_id: "old::seg-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "old".to_owned(),
+            summary: "旧段".to_owned(),
+            source: ariadne::contracts::SourceSpan {
+                document_id: "documents/old.md".to_owned(),
+                range: TextRange { start: 0, end: 3 },
+                version: Some("v1".to_owned()),
+            },
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_event(ariadne::rag::StoryEvent {
+            event_id: "event-corrupt".to_owned(),
+            summary: "旧事件".to_owned(),
+            status: ariadne::rag::StoryEventStatus::Ongoing,
+            segment_ids: vec!["old::seg-1".to_owned()],
+            chapter_ids: vec!["old".to_owned()],
+            metadata: Value::Null,
+        })
+        .unwrap();
+    SqliteWritingKnowledgeStore::open(temp.path())
+        .unwrap()
+        .save_knowledge(&knowledge)
+        .unwrap();
+    let connection = rusqlite::Connection::open(temp.path().join("metadata.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE story_events SET metadata_json = '{broken-json' WHERE event_id = ?1",
+            rusqlite::params!["event-corrupt"],
+        )
+        .unwrap();
+    drop(connection);
+
+    let provider = MustNotCall(AtomicUsize::new(0));
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let error = execute_summarizer_node(
+        WorkflowNodeExecutionRequest {
+            workflow_id: WorkflowId::from("wf-corrupt-knowledge"),
+            run_id: RunId::from("run-corrupt-knowledge"),
+            node_id: NodeId::from("summarizer"),
+            operation_id: "op-corrupt-knowledge".to_owned(),
+            operation_attempt: 1,
+            request_hash: "hash-corrupt-knowledge".to_owned(),
+            type_name: "summarizer".to_owned(),
+            config: json!({
+                "provider_id": "must-not-call-knowledge",
+                "model_id": "m",
+                "chapter_id": "chapter",
+                "chapter_document_id": "documents/chapter.md",
+                "chapter_text_alias": "chapter_text",
+                "auto_mode": false,
+            }),
+            inputs: PortMap::from([("chapter_text".to_owned(), PortValue::inline(json!("正文")))]),
+            communication_messages: Vec::new(),
+            metadata: Value::Null,
+            cancellation: ariadne::contracts::ExecutionCancellation::new(),
+            dispatch_authorization: Default::default(),
+        },
+        &provider,
+        &ledger,
+        temp.path(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("json"));
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
 }

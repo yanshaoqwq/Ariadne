@@ -257,7 +257,8 @@ public sealed class DisplayNameService
 
             var rawCode = fileName[prefix.Length..^suffix.Length];
             var code = NormalizeLanguageCode(rawCode);
-            if (!string.IsNullOrWhiteSpace(code) && HasDisplayNameEntries(path))
+            // v1: only product languages with real entries; EN/JA stubs marked out_of_scope are never product languages (U40).
+            if (!string.IsNullOrWhiteSpace(code) && IsProductLanguagePack(path))
             {
                 codes.Add(code);
             }
@@ -270,12 +271,32 @@ public sealed class DisplayNameService
             .ToArray();
     }
 
-    private static bool HasDisplayNameEntries(string path)
+    /// <summary>
+    /// Product language packs must have real UI keys and must not declare out_of_scope_for_v1 / zh-only stubs.
+    /// </summary>
+    public static bool IsProductLanguagePack(string path)
     {
-        return LoadJson(path).Any(entry =>
+        var map = LoadJson(path);
+        if (map.TryGetValue("_status", out var status)
+            && status.Contains("out_of_scope", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (map.TryGetValue("_release", out var release)
+            && release.Contains("zh-only", StringComparison.OrdinalIgnoreCase)
+            && !path.EndsWith("display_name.json", StringComparison.OrdinalIgnoreCase)
+            && !path.EndsWith("display_name.zh.json", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return map.Any(entry =>
             !entry.Key.StartsWith('_')
             && !string.IsNullOrWhiteSpace(entry.Value));
     }
+
+    private static bool HasDisplayNameEntries(string path) => IsProductLanguagePack(path);
 
     /// 按系统语言返回语言代码，最终是否可用由 NormalizeAvailableLanguage 决定。
     private static string DetectSystemLanguage()

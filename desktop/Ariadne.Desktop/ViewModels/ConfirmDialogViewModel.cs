@@ -40,6 +40,20 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
         }
     }
 
+    /// <summary>
+    /// Assign immutable default/cancel flags after object-initializer sets Confirm/Cancel indices (U63/U64).
+    /// Call once from factories; View must not rewrite these.
+    /// </summary>
+    public ConfirmDialogViewModel SealKeyboardRoles()
+    {
+        foreach (var button in Buttons)
+        {
+            button.IsDefault = AllowEnterConfirm && button.ResultIndex == ConfirmResultIndex;
+            button.IsCancel = CancelResultIndex >= 0 && button.ResultIndex == CancelResultIndex;
+        }
+        return this;
+    }
+
     public string Title { get; }
 
     public string Message { get; }
@@ -59,6 +73,42 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
         set => SetProperty(ref _inputText, value ?? string.Empty);
     }
 
+    /// <summary>弹窗语义：驱动图标与默认键盘策略。</summary>
+    public DialogSeverity Severity { get; init; } = DialogSeverity.Question;
+
+    /// <summary>危险确认默认不把 Enter 绑到确认键，避免误触。</summary>
+    public bool AllowEnterConfirm =>
+        Severity is not DialogSeverity.Danger
+        && ConfirmResultIndex >= 0;
+
+    /// <summary>图标路径（Geometry path data）。</summary>
+    public string IconData => Severity switch
+    {
+        DialogSeverity.Danger =>
+            "M12,2 A10,10 0 1 0 12,22 A10,10 0 1 0 12,2 M12,7 L12,13 M12,16 L12,17.5",
+        DialogSeverity.Warning =>
+            "M12,3 L22,20 L2,20 Z M12,9 L12,14 M12,16.5 L12,17.5",
+        DialogSeverity.Success =>
+            "M12,2 A10,10 0 1 0 12,22 A10,10 0 1 0 12,2 M7.5,12.5 L10.5,15.5 L16.5,8.5",
+        DialogSeverity.Input =>
+            "M4,5 L20,5 L20,19 L4,19 Z M7,9 L17,9 M7,13 L14,13",
+        DialogSeverity.Info =>
+            "M12,2 A10,10 0 1 0 12,22 A10,10 0 1 0 12,2 M12,10 L12,16 M12,7 L12,8",
+        _ => // Question
+            "M12,2 A10,10 0 1 0 12,22 A10,10 0 1 0 12,2 M12,16.5 L12,17.5 M9.5,9 A2.5,2.5 0 1 1 12.5,11.5 L12,13",
+    };
+
+    /// <summary>图标笔刷资源键。</summary>
+    public string IconBrushKey => Severity switch
+    {
+        DialogSeverity.Danger => "Ariadne.StatusError",
+        DialogSeverity.Warning => "Ariadne.StatusWarning",
+        DialogSeverity.Success => "Ariadne.StatusSuccess",
+        DialogSeverity.Info => "Ariadne.StatusInfo",
+        DialogSeverity.Input => "Ariadne.AccentPrimary",
+        _ => "Ariadne.AccentPrimary",
+    };
+
     /// 取消/默认按钮索引：Esc 或点击遮罩时采用；-1 表示无。
     public int CancelResultIndex { get; init; } = -1;
 
@@ -67,6 +117,9 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
 
     /// 有输入时是否要求非空才能点确认。
     public bool RequireNonEmptyInput { get; init; }
+
+    /// 项目名称等输入最大长度（0=不限制）。
+    public int MaxInputLength { get; init; }
 
     /// 弹窗结果任务：值为被点击按钮的 ResultIndex。
     public Task<int> Completion => _completion.Task;
@@ -80,6 +133,17 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
         }
     }
 
+    /// <summary>键盘 Enter：仅在允许且启用时确认。</summary>
+    public void RequestConfirm()
+    {
+        if (!AllowEnterConfirm)
+        {
+            return;
+        }
+
+        Complete(ConfirmResultIndex);
+    }
+
     private void Complete(int result)
     {
         if (RequireNonEmptyInput
@@ -90,11 +154,19 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
             return;
         }
 
+        if (MaxInputLength > 0
+            && HasInput
+            && result == ConfirmResultIndex
+            && InputText.Length > MaxInputLength)
+        {
+            InputText = InputText[..MaxInputLength];
+        }
+
         _completion.TrySetResult(result);
     }
 
     /// 「未保存离开」三按钮工厂：保存 / 不保存 / 取消。
-    public static ConfirmDialogViewModel UnsavedLeave(DisplayNameService names)
+    public static ConfirmDialogViewModel UnsavedLeave(DisplayNameService names, string? pageContext = null)
     {
         var buttons = new[]
         {
@@ -103,13 +175,52 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
             new DialogButton(names.Text("ui.dialog.unsaved.cancel"), DialogButtonVariant.Subtle, (int)UnsavedLeaveChoice.Cancel),
         };
 
+        var message = string.IsNullOrWhiteSpace(pageContext)
+            ? names.Text("ui.dialog.unsaved.message")
+            : names.Format("ui.dialog.unsaved.message_page", new Dictionary<string, string>
+            {
+                ["page"] = pageContext,
+            });
+
         return new ConfirmDialogViewModel(
             names.Text("ui.dialog.unsaved.title"),
-            names.Text("ui.dialog.unsaved.message"),
+            message,
             buttons)
         {
+            Severity = DialogSeverity.Question,
             CancelResultIndex = (int)UnsavedLeaveChoice.Cancel,
+            ConfirmResultIndex = (int)UnsavedLeaveChoice.Save,
+        }.SealKeyboardRoles();
+    }
+
+    /// <summary>多页未保存：一次列出全部 dirty 页，再统一保存/丢弃（U65）。</summary>
+    public static ConfirmDialogViewModel UnsavedLeaveMany(
+        DisplayNameService names,
+        IReadOnlyList<string> pageTitles)
+    {
+        var buttons = new[]
+        {
+            new DialogButton(names.Text("ui.dialog.unsaved.save_all"), DialogButtonVariant.Primary, (int)UnsavedLeaveChoice.Save),
+            new DialogButton(names.Text("ui.dialog.unsaved.discard_all"), DialogButtonVariant.Danger, (int)UnsavedLeaveChoice.Discard),
+            new DialogButton(names.Text("ui.dialog.unsaved.cancel"), DialogButtonVariant.Subtle, (int)UnsavedLeaveChoice.Cancel),
         };
+
+        var list = string.Join("\n", pageTitles.Select((t, i) => $"· {t}"));
+        var message = names.Format("ui.dialog.unsaved.message_many", new Dictionary<string, string>
+        {
+            ["count"] = pageTitles.Count.ToString(),
+            ["pages"] = list,
+        });
+
+        return new ConfirmDialogViewModel(
+            names.Text("ui.dialog.unsaved.title_many"),
+            message,
+            buttons)
+        {
+            Severity = DialogSeverity.Warning,
+            CancelResultIndex = (int)UnsavedLeaveChoice.Cancel,
+            ConfirmResultIndex = (int)UnsavedLeaveChoice.Save,
+        }.SealKeyboardRoles();
     }
 
     /// 新建项目：输入项目名称后确认。
@@ -126,13 +237,15 @@ public sealed class ConfirmDialogViewModel : ViewModelBase
             names.Text("ui.dialog.create_project.message"),
             buttons)
         {
+            Severity = DialogSeverity.Input,
             InputLabel = names.Text("ui.dialog.create_project.name_label"),
             InputPlaceholder = names.Text("ui.dialog.create_project.name_placeholder"),
             InputText = defaultName ?? names.Text("ui.dialog.create_project.default_name"),
             RequireNonEmptyInput = true,
+            MaxInputLength = 80,
             ConfirmResultIndex = 0,
             CancelResultIndex = 1,
-        };
+        }.SealKeyboardRoles();
     }
 }
 
@@ -173,6 +286,12 @@ public sealed class DialogButton : ViewModelBase
     public bool IsDanger => Variant == DialogButtonVariant.Danger;
 
     public bool IsSubtle => Variant == DialogButtonVariant.Subtle;
+
+    /// <summary>Enter 默认按钮（危险确认除外，由视图按 Severity 决定）。</summary>
+    public bool IsDefault { get; set; }
+
+    /// <summary>Escape 取消按钮。</summary>
+    public bool IsCancel { get; set; }
 
     public RelayCommand? Command { get; set; }
 }

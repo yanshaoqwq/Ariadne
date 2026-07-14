@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Ariadne.Desktop.Backend;
@@ -15,6 +16,13 @@ public sealed record SidebarBadgeCounts(
     [property: JsonPropertyName("confirmations")] int Confirmations,
     [property: JsonPropertyName("run_logs")] int RunLogs,
     [property: JsonPropertyName("diagnostics")] int Diagnostics);
+
+/// <summary>D3：项目维护门禁状态（git restore / 全量重建）。</summary>
+public sealed record ProjectMaintenanceState(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("phase")] string Phase,
+    [property: JsonPropertyName("error")] string? Error);
 
 public sealed record UiPreferences(
     [property: JsonPropertyName("theme")] string Theme,
@@ -47,7 +55,9 @@ public sealed record AppStatus(
 public sealed record BackendResult<T>(
     [property: JsonPropertyName("ok")] bool Ok,
     [property: JsonPropertyName("data")] T? Data,
-    [property: JsonPropertyName("error")] string? Error);
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("error_code")] string? ErrorCode = null,
+    [property: JsonPropertyName("error_key")] string? ErrorKey = null);
 
 public sealed record ProjectInitReport(
     [property: JsonPropertyName("project_root")] string ProjectRoot,
@@ -184,13 +194,18 @@ public sealed record RagConfig(
     [property: JsonPropertyName("chunk_overlap_chars")] int ChunkOverlapChars);
 
 public sealed record VectorStoreConfig(
+    [property: JsonPropertyName("enabled")] bool Enabled,
     [property: JsonPropertyName("backend")] string Backend,
+    [property: JsonPropertyName("collection")] string Collection,
+    [property: JsonPropertyName("vector_dimensions")] int VectorDimensions,
     [property: JsonPropertyName("sidecar")] SidecarConfig Sidecar);
 
 public sealed record SidecarConfig(
     [property: JsonPropertyName("host")] string Host,
     [property: JsonPropertyName("port")] int Port,
-    [property: JsonPropertyName("data_dir")] string DataDir);
+    [property: JsonPropertyName("data_dir")] string DataDir,
+    [property: JsonPropertyName("binary_path")] string BinaryPath,
+    [property: JsonPropertyName("startup_timeout_ms")] long StartupTimeoutMs);
 
 public sealed record FullTextStoreConfig(
     [property: JsonPropertyName("backend")] string Backend,
@@ -225,12 +240,19 @@ public sealed record WorkflowActionResult(
     [property: JsonPropertyName("run_id")] string RunId,
     [property: JsonPropertyName("status")] string Status);
 
+public sealed record WorkflowRunFailure(
+    [property: JsonPropertyName("code")] string Code,
+    [property: JsonPropertyName("stage")] string Stage,
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("recovery_suggestion")] string RecoverySuggestion);
+
 public sealed record WorkflowRunState(
     [property: JsonPropertyName("workflow_id")] string WorkflowId,
     [property: JsonPropertyName("run_id")] string RunId,
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("pause_reason")] string? PauseReason,
     [property: JsonPropertyName("stop_reason")] string? StopReason,
+    [property: JsonPropertyName("failure")] WorkflowRunFailure? Failure,
     [property: JsonPropertyName("events")] IReadOnlyList<string> Events);
 
 public sealed record WorkflowRuntimeEvent(
@@ -247,6 +269,22 @@ public sealed record WorkflowEventsResult(
     [property: JsonPropertyName("next_sequence")] long NextSequence,
     [property: JsonPropertyName("events")] IReadOnlyList<WorkflowRuntimeEvent> Events);
 
+public sealed record WorkflowOperation(
+    [property: JsonPropertyName("operation_id")] string OperationId,
+    [property: JsonPropertyName("workflow_id")] string WorkflowId,
+    [property: JsonPropertyName("run_id")] string RunId,
+    [property: JsonPropertyName("node_id")] string NodeId,
+    [property: JsonPropertyName("attempt")] int Attempt,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("provider")] string Provider,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("in_doubt_at_ms")] long? InDoubtAtMs);
+
+public sealed record ResolveInDoubtOperationResult(
+    [property: JsonPropertyName("operation_id")] string OperationId,
+    [property: JsonPropertyName("decision")] string Decision,
+    [property: JsonPropertyName("workflow")] WorkflowActionResult Workflow);
+
 public sealed record ProjectAiResponse(
     [property: JsonPropertyName("answer")] string Answer,
     [property: JsonPropertyName("chat_history")] IReadOnlyList<ProjectAiChatMessage> ChatHistory,
@@ -262,7 +300,64 @@ public sealed record WorksTreeNode(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("title")] string Title,
     [property: JsonPropertyName("path")] string Path,
-    [property: JsonPropertyName("children")] IReadOnlyList<WorksTreeNode> Children);
+    [property: JsonPropertyName("children")] IReadOnlyList<WorksTreeNode> Children,
+    [property: JsonPropertyName("chapter_id")] string? ChapterId = null,
+    [property: JsonPropertyName("stage_id")] string? StageId = null);
+
+public sealed record ChapterSummaryView(
+    [property: JsonPropertyName("chapter_id")] string ChapterId,
+    [property: JsonPropertyName("chapter_summary")] string? ChapterSummary,
+    [property: JsonPropertyName("stage")] ChapterStageSummaryView? Stage,
+    [property: JsonPropertyName("segments")] IReadOnlyList<StorySegmentView> Segments,
+    [property: JsonPropertyName("events")] IReadOnlyList<StoryEventView> Events,
+    [property: JsonPropertyName("realized_changes")] IReadOnlyList<RegisteredChangeView> RealizedChanges,
+    [property: JsonPropertyName("foreshadowing")] IReadOnlyList<ForeshadowingView> Foreshadowing,
+    [property: JsonPropertyName("confirmations")] IReadOnlyList<ChapterSummaryConfirmationView> Confirmations);
+
+public sealed record ChapterStageSummaryView(
+    [property: JsonPropertyName("stage_id")] string StageId,
+    [property: JsonPropertyName("summary")] string? Summary,
+    [property: JsonPropertyName("chapter_ids")] IReadOnlyList<string> ChapterIds);
+
+public sealed record StorySegmentView(
+    [property: JsonPropertyName("segment_id")] string SegmentId,
+    [property: JsonPropertyName("number")] string Number,
+    [property: JsonPropertyName("chapter_id")] string ChapterId,
+    [property: JsonPropertyName("summary")] string Summary,
+    [property: JsonPropertyName("source")] WritingSourceSpan Source);
+
+public sealed record WritingSourceSpan(
+    [property: JsonPropertyName("document_id")] string DocumentId,
+    [property: JsonPropertyName("range")] TextRange Range,
+    [property: JsonPropertyName("version")] string? Version);
+
+public sealed record StoryEventView(
+    [property: JsonPropertyName("event_id")] string EventId,
+    [property: JsonPropertyName("summary")] string Summary,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("segment_ids")] IReadOnlyList<string> SegmentIds,
+    [property: JsonPropertyName("chapter_ids")] IReadOnlyList<string> ChapterIds);
+
+public sealed record RegisteredChangeView(
+    [property: JsonPropertyName("change_id")] string ChangeId,
+    [property: JsonPropertyName("function")] string Function,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("content")] JsonElement Content,
+    [property: JsonPropertyName("linked_segment_ids")] IReadOnlyList<string> LinkedSegmentIds);
+
+public sealed record ForeshadowingView(
+    [property: JsonPropertyName("foreshadowing_id")] string ForeshadowingId,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("description")] string Description,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("planted_segment_ids")] IReadOnlyList<string> PlantedSegmentIds,
+    [property: JsonPropertyName("recovered_segment_ids")] IReadOnlyList<string> RecoveredSegmentIds);
+
+public sealed record ChapterSummaryConfirmationView(
+    [property: JsonPropertyName("confirmation_id")] string ConfirmationId,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("revision_id")] string? RevisionId);
 
 public sealed record DocumentTreeNode(
     [property: JsonPropertyName("id")] string Id,
@@ -329,7 +424,9 @@ public sealed record WorkflowGraphData(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("nodes")] IReadOnlyList<CanvasNode> Nodes,
     [property: JsonPropertyName("edges")] IReadOnlyList<CanvasEdge> Edges,
-    [property: JsonPropertyName("metadata")] Dictionary<string, object?> Metadata);
+    [property: JsonPropertyName("metadata")] Dictionary<string, object?> Metadata,
+    [property: JsonPropertyName("content_revision")] string? ContentRevision = null,
+    [property: JsonPropertyName("expected_revision")] string? ExpectedRevision = null);
 
 public sealed record WorkflowPortEndpoint(
     [property: JsonPropertyName("node_id")] string NodeId,
@@ -341,7 +438,8 @@ public sealed record WorkflowPackReport(
     [property: JsonPropertyName("subworkflow_node_id")] string SubworkflowNodeId,
     [property: JsonPropertyName("embedded_workflow")] WorkflowGraphData EmbeddedWorkflow,
     [property: JsonPropertyName("boundary_inputs")] IReadOnlyList<WorkflowPortEndpoint> BoundaryInputs,
-    [property: JsonPropertyName("boundary_outputs")] IReadOnlyList<WorkflowPortEndpoint> BoundaryOutputs);
+    [property: JsonPropertyName("boundary_outputs")] IReadOnlyList<WorkflowPortEndpoint> BoundaryOutputs,
+    [property: JsonPropertyName("operation_id")] string? OperationId = null);
 
 public sealed record WorkflowSummary(
     [property: JsonPropertyName("workflow_id")] string WorkflowId,

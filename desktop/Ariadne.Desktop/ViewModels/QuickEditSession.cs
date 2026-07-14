@@ -29,17 +29,14 @@ public sealed record QuickEditSession(
             return false;
         }
 
-        var selected = content[SelectionStart..SelectionEnd];
-        if (!string.Equals(selected, Result.Original, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        updatedContent = string.Concat(
-            content.AsSpan(0, SelectionStart),
+        // Shared range apply (Works Project AI selection path uses the same guard).
+        return WorksEditorSelectionEdit.TryReplaceRange(
+            content,
+            SelectionStart,
+            SelectionEnd,
+            Result.Original,
             Result.Suggested,
-            content.AsSpan(SelectionEnd));
-        return true;
+            out updatedContent);
     }
 }
 

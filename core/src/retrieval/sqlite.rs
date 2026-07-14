@@ -5,6 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::contracts::{CoreError, CoreResult};
 use crate::retrieval::memory::sort_and_limit;
+use crate::retrieval::query::sqlite_fts_literal_query;
 use crate::retrieval::models::{
     ChunkDocument, FullTextRecord, FullTextSearchRequest, RebuildReport, RebuildStatus,
     RetrievalResult, RetrievalSource, StoreHealth,
@@ -166,10 +167,10 @@ impl FullTextStore for SqliteFullTextStore {
         if request.limit == 0 {
             return Ok(Vec::new());
         }
-        let query = request.query.trim();
-        if query.is_empty() {
+        if request.query.trim().is_empty() {
             return Ok(Vec::new());
         }
+        let query = sqlite_fts_literal_query(&request.query)?;
         let connection = self.connection.lock().map_err(lock_error)?;
         let mut statement = connection
             .prepare(

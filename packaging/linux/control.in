@@ -1,0 +1,12 @@
+Package: ariadne
+Version: @VERSION@
+Section: editors
+Priority: optional
+Architecture: @ARCHITECTURE@
+Maintainer: Ariadne contributors <https://github.com/yanshaoqwq/Ariadne>
+Homepage: https://github.com/yanshaoqwq/Ariadne
+Installed-Size: @INSTALLED_SIZE@
+Depends: libc6, libfontconfig1, libfreetype6, libx11-6, libxrandr2, libxrender1, libxcb1
+Description: AI writing workbench for long-form fiction
+ Ariadne combines workflow orchestration, long-form writing, retrieval,
+ knowledge management, and version history in a local-first desktop app.

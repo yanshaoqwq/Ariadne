@@ -16,7 +16,10 @@ use crate::providers::{
     LlmProvider, LlmRequest, LlmResponse, ProviderCallContext, ProviderExecutor, SearchProvider,
     SearchProviderRequest,
 };
-use crate::retrieval::{HybridSearch, HybridSearchRequest};
+use crate::retrieval::{
+    validate_product_search_limit, validate_product_search_result_budget, HybridSearch,
+    HybridSearchRequest,
+};
 use crate::skills::{SkillExecutor, SkillManifest, SkillRunRequest};
 use crate::workflow::{
     PatchWriteBackState, RuntimeReferenceResolver, WorkflowExportRequest, WorkflowExportSink,
@@ -28,9 +31,19 @@ use crate::workflow::{
 pub type ExternalNodeHandler =
     Box<dyn FnMut(WorkflowNodeExecutionRequest) -> CoreResult<WorkflowNodeExecutionOutput>>;
 
+pub type ExternalOperationReconciler = Box<
+    dyn FnMut(&WorkflowNodeExecutionRequest) -> CoreResult<Option<WorkflowNodeExecutionOutput>>,
+>;
+
+struct RoutedExternalNodeHandler {
+    policy: crate::workflow::WorkflowOperationPolicy,
+    execute: ExternalNodeHandler,
+    reconcile: Option<ExternalOperationReconciler>,
+}
+
 /// 简单外部节点路由器，用于把具体节点类型挂到 Module 11 runtime。
 pub struct RoutedExternalNodeExecutor {
-    handlers: BTreeMap<String, ExternalNodeHandler>,
+    handlers: BTreeMap<String, RoutedExternalNodeHandler>,
 }
 
 impl RoutedExternalNodeExecutor {
@@ -47,6 +60,43 @@ impl RoutedExternalNodeExecutor {
         type_name: impl Into<String>,
         handler: ExternalNodeHandler,
     ) -> CoreResult<()> {
+        self.register_handler_with_policy(
+            type_name,
+            crate::workflow::WorkflowOperationPolicy::Untracked,
+            handler,
+        )
+    }
+
+    pub fn register_handler_with_policy(
+        &mut self,
+        type_name: impl Into<String>,
+        policy: crate::workflow::WorkflowOperationPolicy,
+        handler: ExternalNodeHandler,
+    ) -> CoreResult<()> {
+        self.register_handler_entry(type_name, policy, handler, None)
+    }
+
+    pub fn register_reconcilable_handler(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: ExternalNodeHandler,
+        reconciler: ExternalOperationReconciler,
+    ) -> CoreResult<()> {
+        self.register_handler_entry(
+            type_name,
+            crate::workflow::WorkflowOperationPolicy::reconcilable_receipt(),
+            handler,
+            Some(reconciler),
+        )
+    }
+
+    fn register_handler_entry(
+        &mut self,
+        type_name: impl Into<String>,
+        policy: crate::workflow::WorkflowOperationPolicy,
+        handler: ExternalNodeHandler,
+        reconciler: Option<ExternalOperationReconciler>,
+    ) -> CoreResult<()> {
         let type_name = type_name.into();
         if type_name.trim().is_empty() {
             return Err(CoreError::validation(
@@ -60,8 +110,37 @@ impl RoutedExternalNodeExecutor {
                 "duplicate workflow external handler: {type_name}"
             )));
         }
-        self.handlers.insert(type_name, handler);
+        if matches!(
+            policy,
+            crate::workflow::WorkflowOperationPolicy::Journaled {
+                recovery: crate::workflow::WorkflowOperationRecoveryPolicy::ReconcileReceipt,
+                ..
+            }
+        ) != reconciler.is_some()
+        {
+            return Err(CoreError::validation(
+                "reconcile_receipt workflow handler requires exactly one reconciler",
+            ));
+        }
+        self.handlers.insert(
+            type_name,
+            RoutedExternalNodeHandler {
+                policy,
+                execute: handler,
+                reconcile: reconciler,
+            },
+        );
         Ok(())
+    }
+
+    /// 已注册外部节点 type_name 列表（产品路径与合同测试共用）。
+    pub fn registered_type_names(&self) -> Vec<String> {
+        self.handlers.keys().cloned().collect()
+    }
+
+    /// 是否已注册指定 type_name。
+    pub fn has_handler(&self, type_name: &str) -> bool {
+        self.handlers.contains_key(type_name)
     }
 }
 
@@ -73,16 +152,53 @@ impl Default for RoutedExternalNodeExecutor {
 }
 
 impl WorkflowExternalNodeExecutor for RoutedExternalNodeExecutor {
+    fn operation_policy(
+        &self,
+        request: &WorkflowNodeExecutionRequest,
+    ) -> CoreResult<crate::workflow::WorkflowOperationPolicy> {
+        self.handlers
+            .get(&request.type_name)
+            .map(|handler| handler.policy)
+            .ok_or_else(|| {
+                CoreError::validation(format!(
+                    "workflow external handler not found: {}",
+                    request.type_name
+                ))
+            })
+    }
+
+    fn reconcile_operation(
+        &mut self,
+        request: &WorkflowNodeExecutionRequest,
+    ) -> CoreResult<Option<WorkflowNodeExecutionOutput>> {
+        let handler = self.handlers.get_mut(&request.type_name).ok_or_else(|| {
+            CoreError::validation(format!(
+                "workflow external handler not found: {}",
+                request.type_name
+            ))
+        })?;
+        match handler.reconcile.as_mut() {
+            Some(reconcile) => reconcile(request),
+            None => Ok(None),
+        }
+    }
+
     /// 按节点 type_name 分发到注册处理器。
     fn execute_external(
         &mut self,
         request: WorkflowNodeExecutionRequest,
     ) -> CoreResult<WorkflowNodeExecutionOutput> {
+        if request.cancellation.is_cancelled() {
+            return Err(CoreError::external_cancelled(
+                "workflow_external_node",
+                crate::contracts::ExternalDispatchOutcome::NotDispatched,
+            ));
+        }
         let type_name = request.type_name.clone();
         let handler = self.handlers.get_mut(&type_name).ok_or_else(|| {
             CoreError::validation(format!("workflow external handler not found: {type_name}"))
         })?;
-        handler(request)
+        (handler.execute)(request)
     }
 }
 
@@ -161,6 +277,10 @@ impl<'a> DocumentWorkflowExportSink<'a> {
 }
 
 impl WorkflowExportSink for DocumentWorkflowExportSink<'_> {
+    fn operation_policy(&self) -> crate::workflow::WorkflowOperationPolicy {
+        crate::workflow::WorkflowOperationPolicy::replayable_receipt()
+    }
+
     /// 将 Export 节点输入序列化为 artifact。
     fn export_artifact(
         &mut self,
@@ -168,6 +288,7 @@ impl WorkflowExportSink for DocumentWorkflowExportSink<'_> {
         export: WorkflowExportRequest,
     ) -> CoreResult<String> {
         let payload = json!({
+            "operation_id": request.operation_id,
             "workflow_id": request.workflow_id,
             "run_id": request.run_id,
             "node_id": request.node_id,
@@ -176,17 +297,23 @@ impl WorkflowExportSink for DocumentWorkflowExportSink<'_> {
             "inputs": export.inputs,
         });
         let bytes = serde_json::to_vec_pretty(&payload)?;
-        let report = self.documents.write_artifact(ArtifactWriteRequest {
-            artifact_id: export.artifact_id.clone(),
-            kind: ArtifactKind::Export,
-            media_type: export_media_type(&export.format).to_owned(),
-            bytes,
-            metadata: json!({
-                "workflow_id": request.workflow_id,
-                "run_id": request.run_id,
-                "node_id": request.node_id,
-            }),
-        })?;
+        request.dispatch_authorization.authorize_dispatch()?;
+        let report = self.documents.write_artifact_with_cancellation(
+            ArtifactWriteRequest {
+                artifact_id: export.artifact_id.clone(),
+                kind: ArtifactKind::Export,
+                media_type: export_media_type(&export.format).to_owned(),
+                bytes,
+                operation_id: Some(request.operation_id.clone()),
+                metadata: json!({
+                    "operation_id": request.operation_id,
+                    "workflow_id": request.workflow_id,
+                    "run_id": request.run_id,
+                    "node_id": request.node_id,
+                }),
+            },
+            &request.cancellation,
+        )?;
         Ok(report.descriptor.artifact_id)
     }
 }
@@ -211,13 +338,14 @@ pub fn apply_confirmed_patch(
     // 修改文件。只有真实文件写入和 checkpoint 都成功后，才把运行态置为
     // Applied，避免 I/O 失败时留下“已写回”的错误快照。
     runtime.ensure_patch_write_back_can_start(node_id)?;
-    let report = documents.apply_patch(
+    let report = documents.apply_patch_with_cancellation(
         patch,
         git,
         Some(&PatchCheckpointRequest {
             node_id: node_id.as_str().to_owned(),
             message: checkpoint_message.map(str::to_owned),
         }),
+        runtime.cancellation(),
     )?;
     runtime.mark_patch_write_back_state(node_id, PatchWriteBackState::Applied)?;
     let checkpoint_id = report
@@ -248,6 +376,138 @@ pub struct WorkflowLlmNodeConfig {
     pub prompt_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// F13：画布/预设写入的节点超时（ms）；未设或 0 时回退默认 120s。
+    /// 兼容桌面历史字符串写入（`"7500"`）与正确 number。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_opt_u64_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout_ms: Option<u64>,
+    /// F13：画布节点单次调用预算（USD）；与 `single_call_budget_usd` 二选一。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_opt_f64_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub budget_usd: Option<f64>,
+    /// F13：设置页预设字段名兼容。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_opt_f64_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub single_call_budget_usd: Option<f64>,
+}
+
+fn deserialize_opt_u64_lenient<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct OptU64;
+    impl<'de> Visitor<'de> for OptU64 {
+        type Value = Option<u64>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("u64, number, or decimal string")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            if v < 0 {
+                return Err(E::custom("timeout_ms cannot be negative"));
+            }
+            Ok(Some(v as u64))
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            if !v.is_finite() || v < 0.0 {
+                return Err(E::custom("timeout_ms must be finite non-negative"));
+            }
+            Ok(Some(v as u64))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed.parse::<u64>().map(Some).or_else(|_| {
+                trimmed
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|n| n.is_finite() && *n >= 0.0)
+                    .map(|n| Some(n as u64))
+                    .ok_or_else(|| E::custom(format!("invalid timeout_ms string: {v}")))
+            })
+        }
+    }
+
+    deserializer.deserialize_any(OptU64)
+}
+
+fn deserialize_opt_f64_lenient<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct OptF64;
+    impl<'de> Visitor<'de> for OptF64 {
+        type Value = Option<f64>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("f64 number or decimal string")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v as f64))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v as f64))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed
+                .parse::<f64>()
+                .map(Some)
+                .map_err(|_| E::custom(format!("invalid budget string: {v}")))
+        }
+    }
+
+    deserializer.deserialize_any(OptF64)
 }
 
 /// 执行单次 LLM 节点。
@@ -307,18 +567,38 @@ pub fn execute_llm_node_with_defaults<L: CostLedger>(
     }
     messages.push(crate::providers::LlmMessage::user(prompt));
 
+    let timeout_ms = resolve_node_timeout_ms(config.timeout_ms);
+    let single_call_budget_usd =
+        resolve_node_single_call_budget_usd(config.budget_usd, config.single_call_budget_usd);
+    let mut call_metadata = request.metadata.clone();
+    if let Some(object) = call_metadata.as_object_mut() {
+        object.insert("node_timeout_ms".to_owned(), json!(timeout_ms));
+        if let Some(budget) = single_call_budget_usd {
+            object.insert("node_single_call_budget_usd".to_owned(), json!(budget));
+        }
+    } else if call_metadata.is_null() {
+        call_metadata = json!({
+            "node_timeout_ms": timeout_ms,
+            "node_single_call_budget_usd": single_call_budget_usd,
+        });
+    }
+
     let executor = ProviderExecutor::new(ledger);
     let response = executor.complete_llm(
         provider,
         &ProviderCallContext {
             provider_id: provider_id.to_owned(),
+            operation_id: Some(request.operation_id.clone()),
             workflow_id: Some(request.workflow_id.clone()),
             run_id: Some(request.run_id.clone()),
             node_id: Some(request.node_id.clone()),
             tool_call_id: None,
-            timeout_ms: 120_000,
+            timeout_ms,
             max_retries: 0,
-            metadata: request.metadata.clone(),
+            metadata: call_metadata.clone(),
+            cancellation: request.cancellation.clone(),
+            // F12-b：把 runtime 注入的派发栅栏传到 provider 真实副作用边界。
+            dispatch_authorization: request.dispatch_authorization.clone(),
         },
         LlmRequest {
             model_id: model_id.to_owned(),
@@ -327,10 +607,48 @@ pub fn execute_llm_node_with_defaults<L: CostLedger>(
             temperature: None,
             max_output_tokens: None,
             stream: false,
-            metadata: request.metadata,
+            metadata: call_metadata,
         },
     )?;
+    enforce_single_call_budget(single_call_budget_usd, response.cost_usd)?;
     llm_response_to_output(response)
+}
+
+/// F13：节点超时；未配置或 0 时保持历史默认 120s。
+fn resolve_node_timeout_ms(timeout_ms: Option<u64>) -> u64 {
+    timeout_ms.filter(|value| *value > 0).unwrap_or(120_000)
+}
+
+/// F13：节点单次预算（画布 `budget_usd` 或预设 `single_call_budget_usd`）。
+fn resolve_node_single_call_budget_usd(
+    budget_usd: Option<f64>,
+    single_call_budget_usd: Option<f64>,
+) -> Option<f64> {
+    budget_usd
+        .or(single_call_budget_usd)
+        .filter(|value| value.is_finite() && *value > 0.0)
+}
+
+/// F13：响应成本超过节点单次预算时 fail-loud，禁止当作成功节点完成。
+fn enforce_single_call_budget(limit_usd: Option<f64>, cost_usd: Option<f64>) -> CoreResult<()> {
+    let Some(limit) = limit_usd else {
+        return Ok(());
+    };
+    let Some(cost) = cost_usd else {
+        return Ok(());
+    };
+    if !cost.is_finite() || cost < 0.0 {
+        return Err(CoreError::validation(format!(
+            "LLM node cost_usd is invalid under single-call budget {limit}"
+        )));
+    }
+    if cost > limit {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "node_single_call_budget_usd".to_owned(),
+            reason: format!("single-call cost {cost} exceeds node budget {limit}"),
+        });
+    }
+    Ok(())
 }
 
 fn resolve_llm_input_prompt(
@@ -371,10 +689,65 @@ pub struct WorkflowSummarizerNodeConfig {
     /// 是否走 Auto Mode 的确认策略（自动审计）。
     #[serde(default)]
     pub auto_mode: bool,
+    /// F24：节点 prompt_template；非空时并入四步 LLM 指令。
+    #[serde(default)]
+    pub prompt_template: Option<String>,
+    /// F24：兼容 agent_prompt.summarizer / 项目级 agent prompt 字段。
+    #[serde(default)]
+    pub agent_prompt: Option<String>,
+    /// F13：节点超时（ms）；未设或 0 时回退 120s。
+    #[serde(default, deserialize_with = "deserialize_opt_u64_lenient")]
+    pub timeout_ms: Option<u64>,
+    /// F13：单次调用预算（USD）。
+    #[serde(default, deserialize_with = "deserialize_opt_f64_lenient")]
+    pub budget_usd: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_lenient")]
+    pub single_call_budget_usd: Option<f64>,
 }
 
 fn default_chapter_text_alias() -> String {
     "chapter_text".to_owned()
+}
+
+/// F17：把项目保存的双模式策略解析为 Summarizer 四步领域策略。
+/// 未出现的键保留领域默认值；文件存在但无法读取/解析时必须在 provider dispatch 前失败。
+fn load_summarizer_confirmation_policy(
+    project_root: &Path,
+    auto_mode: bool,
+) -> CoreResult<crate::rag::models::WritingConfirmationPolicy> {
+    use crate::config::{ConfirmationAutoModePolicy, ConfirmationNormalPolicy};
+    use crate::rag::models::{ConfirmationKind, ConfirmationMode, WritingConfirmationPolicy};
+
+    let mut policy = if auto_mode {
+        WritingConfirmationPolicy::auto_audit_default()
+    } else {
+        WritingConfirmationPolicy::normal_default()
+    };
+    let Some(settings) = crate::config::read_confirmation_policy_settings(project_root)? else {
+        return Ok(policy);
+    };
+    for setting in settings {
+        let kind = match setting.confirmation_kind.as_str() {
+            "segment_summary" => ConfirmationKind::SegmentSummary,
+            "event_summary" => ConfirmationKind::EventSummary,
+            "chapter_summary" => ConfirmationKind::ChapterSummary,
+            "stage_summary" => ConfirmationKind::StageSummary,
+            _ => continue,
+        };
+        let mode = if auto_mode {
+            match setting.auto_mode_policy {
+                ConfirmationAutoModePolicy::AllowByDefault => ConfirmationMode::Skip,
+                ConfirmationAutoModePolicy::AutoApproval => ConfirmationMode::AutoAudit,
+            }
+        } else {
+            match setting.normal_policy {
+                ConfirmationNormalPolicy::ManualReview => ConfirmationMode::RequireHuman,
+                ConfirmationNormalPolicy::AllowByDefault => ConfirmationMode::Skip,
+            }
+        };
+        policy.set_mode(kind, mode);
+    }
+    Ok(policy)
 }
 
 /// 执行 Summarizer 节点：加载写作知识库 → 四步总结 → 落库建索引 → 生成四层确认项。
@@ -386,23 +759,45 @@ pub fn execute_summarizer_node<L: CostLedger>(
     project_root: &Path,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
     use crate::contracts::{AutoModeState, RunControl};
-    use crate::rag::models::{ConfirmationState, WritingConfirmationPolicy};
+    use crate::rag::models::ConfirmationState;
     use crate::rag::pipeline::SummaryPipelineExecutor;
     use crate::rag::store::SqliteWritingKnowledgeStore;
-    use crate::rag::summarizer::{SummarizerConfig, SummarizerExecutor};
+    use crate::rag::summarizer::{
+        SummarizerConfig, SummarizerExecutor, SummarizerWorkflowOperationContext,
+    };
     use crate::workflow::{RuntimeConfirmation, RuntimeConfirmationState};
 
     let config = serde_json::from_value::<WorkflowSummarizerNodeConfig>(request.config.clone())?;
     let chapter_text = input_text(&request.inputs, &config.chapter_text_alias)?;
     let prompts = crate::rag::resources::load_prompt_resources()?;
 
-    // 加载持久化知识库（跨章、跨运行存活）；首次运行则得到空库。
+    // 先验证当前章节关系闭包可读取，避免相关数据损坏时仍发起昂贵外部调用。
     let store = SqliteWritingKnowledgeStore::open(project_root)?;
+    if let Some(receipt) =
+        store.load_operation_receipt(&request.operation_id, &request.request_hash)?
+    {
+        return serde_json::from_value(receipt.response_json).map_err(Into::into);
+    }
     // 只有迁移后的空数据库才代表新项目；损坏、权限或 JSON 错误必须阻断总结，
     // 不能静默创建空知识库后覆盖已有作品事实。
-    let knowledge = store.load_knowledge()?;
+    let generation_context = store.load_summary_generation_context(&config.chapter_id)?;
+    store.load_summary_working_set(&config.chapter_id, None)?;
+    let policy = load_summarizer_confirmation_policy(project_root, config.auto_mode)?;
 
     // 四步总结 → 组装 draft。
+    let author_prompt = config
+        .prompt_template
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            config
+                .agent_prompt
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .cloned()
+        });
+    let timeout_ms = resolve_node_timeout_ms(config.timeout_ms);
     let summarizer = SummarizerExecutor::new(
         provider,
         ledger,
@@ -412,31 +807,50 @@ pub fn execute_summarizer_node<L: CostLedger>(
             model_id: config.model_id.clone(),
             chapter_document_id: config.chapter_document_id.clone(),
             run_id: Some(request.run_id.as_str().to_owned()),
-            timeout_ms: 120_000,
+            timeout_ms,
+            cancellation: request.cancellation.clone(),
+            dispatch_authorization: request.dispatch_authorization.clone(),
+            prompt_template: author_prompt,
+            generation_context,
+            workflow_operation: Some(SummarizerWorkflowOperationContext {
+                project_root: project_root.to_path_buf(),
+                workflow_id: request.workflow_id.clone(),
+                run_id: request.run_id.clone(),
+                node_id: request.node_id.clone(),
+                operation_id: request.operation_id.clone(),
+                operation_attempt: request.operation_attempt,
+                request_hash: request.request_hash.clone(),
+            }),
         },
     );
     let draft = summarizer.summarize_chapter(&config.chapter_id, &chapter_text)?;
 
-    // 落库建索引 + 生成四层确认项。
-    let (policy, auto_mode) = if config.auto_mode {
-        (
-            WritingConfirmationPolicy::auto_audit_default(),
-            AutoModeState {
-                enabled: true,
-                preauthorized_budget_usd: None,
-            },
-        )
-    } else {
-        (
-            WritingConfirmationPolicy::normal_default(),
-            AutoModeState::default(),
-        )
-    };
-    let pipeline = SummaryPipelineExecutor::new(&knowledge, policy, auto_mode);
-    let report = pipeline.apply_draft(draft)?;
+    // 外部计算不占写锁；提交前在统一写护栏内重放检查并重新读取最新快照，
+    // 避免并发确认决策被长耗时总结器的旧快照覆盖。
+    let _writer_lock = store.acquire_writer_lock()?;
+    if let Some(receipt) =
+        store.load_operation_receipt(&request.operation_id, &request.request_hash)?
+    {
+        return serde_json::from_value(receipt.response_json).map_err(Into::into);
+    }
+    let knowledge = store.load_summary_working_set(&config.chapter_id, Some(&draft))?;
 
-    // 持久化更新后的知识库。
-    store.save_knowledge(&knowledge)?;
+    // 落库建索引 + 生成四层确认项。
+    let auto_mode = if config.auto_mode {
+        AutoModeState {
+            enabled: true,
+            preauthorized_budget_usd: None,
+        }
+    } else {
+        AutoModeState::default()
+    };
+    let pipeline = SummaryPipelineExecutor::with_cancellation(
+        &knowledge,
+        policy,
+        auto_mode,
+        request.cancellation.clone(),
+    );
+    let report = pipeline.apply_draft(draft)?;
 
     // 把知识库确认项映射成 runtime 确认项，使工作流按需暂停。
     let mut confirmations = Vec::new();
@@ -481,7 +895,7 @@ pub fn execute_summarizer_node<L: CostLedger>(
     );
     outputs.insert("paused".to_owned(), PortValue::inline(json!(report.paused)));
 
-    Ok(WorkflowNodeExecutionOutput {
+    let output = WorkflowNodeExecutionOutput {
         outputs,
         run_control: if has_pending || report.paused {
             Some(RunControl::Pause)
@@ -494,7 +908,29 @@ pub fn execute_summarizer_node<L: CostLedger>(
             "pause_reason": report.pause_reason,
         }),
         ..WorkflowNodeExecutionOutput::default()
-    })
+    };
+    // C2：章节作用域落盘，不 wipe 其它章的故事段/事件。
+    store.save_chapter_knowledge_with_operation_locked(
+        &knowledge,
+        &config.chapter_id,
+        &request.operation_id,
+        &request.request_hash,
+        &serde_json::to_value(&output)?,
+        &request.cancellation,
+        &_writer_lock,
+    )?;
+    Ok(output)
+}
+
+pub fn reconcile_summarizer_operation(
+    request: &WorkflowNodeExecutionRequest,
+    project_root: &Path,
+) -> CoreResult<Option<WorkflowNodeExecutionOutput>> {
+    let store = crate::rag::store::SqliteWritingKnowledgeStore::open(project_root)?;
+    store
+        .load_operation_receipt(&request.operation_id, &request.request_hash)?
+        .map(|receipt| serde_json::from_value(receipt.response_json).map_err(Into::into))
+        .transpose()
 }
 
 /// Search 节点配置。
@@ -519,6 +955,7 @@ pub fn execute_search_node<L: CostLedger>(
         provider,
         &ProviderCallContext {
             provider_id: config.provider_id,
+            operation_id: Some(request.operation_id.clone()),
             workflow_id: Some(request.workflow_id.clone()),
             run_id: Some(request.run_id.clone()),
             node_id: Some(request.node_id.clone()),
@@ -526,6 +963,9 @@ pub fn execute_search_node<L: CostLedger>(
             timeout_ms: 60_000,
             max_retries: 0,
             metadata: request.metadata.clone(),
+            cancellation: request.cancellation.clone(),
+            // F12-b：搜索节点同样在真实副作用边界复核 control/lease。
+            dispatch_authorization: request.dispatch_authorization.clone(),
         },
         SearchProviderRequest {
             query,
@@ -554,15 +994,81 @@ pub struct WorkflowProjectSearchNodeConfig {
     pub limit: Option<usize>,
 }
 
-/// 使用项目混合索引执行 search 节点。
+/// 使用项目混合索引执行 search 节点（无项目根时不做磁盘新鲜度门禁，供内存夹具）。
 pub fn execute_project_search_node(
     request: WorkflowNodeExecutionRequest,
     retrieval: &dyn HybridSearch,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_project_search_node_inner(request, retrieval, None)
+}
+
+/// F2-b：产品路径 — 绑定项目根，应用 outbox 门禁与 source_version 过滤。
+pub fn execute_project_search_node_for_project(
+    project_root: &std::path::Path,
+    request: WorkflowNodeExecutionRequest,
+    retrieval: &dyn HybridSearch,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_project_search_node_inner(request, retrieval, Some(project_root))
+}
+
+/// F1/F2 产品组合根入口：将 workflow 身份、取消和 dispatch 栅栏传入项目级检索运行时。
+pub fn execute_project_retrieval_node_for_project(
+    project_root: &std::path::Path,
+    request: WorkflowNodeExecutionRequest,
+    retrieval: &crate::retrieval::ProjectRetrievalRuntime,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
+    let config = serde_json::from_value::<WorkflowProjectSearchNodeConfig>(request.config.clone())?;
+    let query = input_text(&request.inputs, &config.query_alias)?;
+    let limit = config.limit.unwrap_or(10);
+    validate_product_search_limit(limit)?;
+    let context = ProviderCallContext {
+        provider_id: "project_retrieval".to_owned(),
+        operation_id: Some(request.operation_id.clone()),
+        workflow_id: Some(request.workflow_id.clone()),
+        run_id: Some(request.run_id.clone()),
+        node_id: Some(request.node_id.clone()),
+        tool_call_id: None,
+        timeout_ms: 60_000,
+        max_retries: 0,
+        metadata: request.metadata,
+        cancellation: request.cancellation,
+        dispatch_authorization: request.dispatch_authorization,
+    };
+    let results = retrieval.search(query, limit, context)?;
+    let mut outputs = PortMap::new();
+    outputs.insert("results".to_owned(), PortValue::inline(json!(results)));
+    Ok(WorkflowNodeExecutionOutput {
+        outputs,
+        metadata: json!({
+            "retrieval_scope": "project",
+            "result_count": results.len(),
+            "vector_enabled": retrieval.vector_enabled(),
+            "project_root": project_root,
+        }),
+        ..WorkflowNodeExecutionOutput::default()
+    })
+}
+
+fn execute_project_search_node_inner(
+    request: WorkflowNodeExecutionRequest,
+    retrieval: &dyn HybridSearch,
+    project_root: Option<&std::path::Path>,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
     let config = serde_json::from_value::<WorkflowProjectSearchNodeConfig>(request.config)?;
     let query = input_text(&request.inputs, &config.query_alias)?;
     let limit = config.limit.unwrap_or(10);
-    let results = retrieval.search(HybridSearchRequest::new(query, None, limit))?;
+    if let Some(root) = project_root {
+        let outbox = crate::documents::IndexInvalidationOutbox::new(
+            root.join(".runtime").join("index_invalidation.db"),
+        );
+        crate::retrieval::ensure_search_not_blocked_by_pending_index(&outbox)?;
+    }
+    request.dispatch_authorization.authorize_dispatch()?;
+    let mut results = retrieval.search(HybridSearchRequest::new(query, None, limit))?;
+    if project_root.is_some() {
+        results = crate::retrieval::filter_fresh_retrieval_results(results)?;
+    }
+    validate_product_search_result_budget(&results)?;
     let mut outputs = PortMap::new();
     outputs.insert("results".to_owned(), PortValue::inline(json!(results)));
     Ok(WorkflowNodeExecutionOutput {
@@ -640,13 +1146,15 @@ pub fn execute_executor_adapter_node<L: CostLedger>(
             config.skill_id, manifest.skill_id
         )));
     }
-    let output = executor.execute(
+    let output = executor.execute_with_control(
         manifest,
         SkillRunRequest {
             skill_id: config.skill_id,
             inputs: request.inputs,
             metadata: request.metadata,
         },
+        &request.cancellation,
+        &request.dispatch_authorization,
     )?;
     Ok(WorkflowNodeExecutionOutput {
         outputs: output.outputs,

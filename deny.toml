@@ -1,0 +1,38 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+  { id = "RUSTSEC-2024-0384", reason = "instant 0.1.13 is a transitive dependency of Tantivy 0.22.1; the advisory has no safe upgrade and does not report a vulnerability" },
+]
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "NCSA",
+  "OpenSSL",
+  "PolyForm-Noncommercial-1.0.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

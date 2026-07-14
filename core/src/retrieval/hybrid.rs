@@ -13,6 +13,12 @@ use crate::retrieval::traits::{FullTextStore, HybridSearch, ResultReranker, Vect
 pub const MAX_HYBRID_SEARCH_LIMIT: usize = 10_000;
 /// 单次混合检索允许进入 reranker 的最大候选数量。
 pub const MAX_HYBRID_CANDIDATE_LIMIT: usize = MAX_HYBRID_SEARCH_LIMIT * 3;
+/// 产品 Search 允许内联到运行快照的最大结果数。
+pub const MAX_PRODUCT_SEARCH_LIMIT: usize = 50;
+/// 产品 Search 允许内联到运行快照的最大序列化字节数。
+pub const MAX_PRODUCT_SEARCH_RESULT_BYTES: usize = 128 * 1024;
+/// Reciprocal Rank Fusion 常量；只依赖后端排名，不混加不同量纲的原始分数。
+const RRF_K: f32 = 60.0;
 
 /// 混合检索引擎，组合向量检索、全文检索和可选 reranker。
 pub struct HybridSearchEngine {
@@ -23,7 +29,7 @@ pub struct HybridSearchEngine {
 
 /// 三路混合检索引擎：Qdrant 向量、Tantivy 全文和 SQLite FTS5 全文。
 pub struct ThreeWayHybridSearchEngine {
-    vector_store: Arc<dyn VectorStore>,
+    vector_store: Option<Arc<dyn VectorStore>>,
     tantivy_store: Arc<dyn FullTextStore>,
     sqlite_store: Arc<dyn FullTextStore>,
     reranker: Option<Arc<dyn ResultReranker>>,
@@ -37,7 +43,20 @@ impl ThreeWayHybridSearchEngine {
         sqlite_store: Arc<dyn FullTextStore>,
     ) -> Self {
         Self {
-            vector_store,
+            vector_store: Some(vector_store),
+            tantivy_store,
+            sqlite_store,
+            reranker: None,
+        }
+    }
+
+    /// 创建明确的全文-only 双路检索；不注入伪向量后端，也不报告伪向量健康。
+    pub fn without_vector(
+        tantivy_store: Arc<dyn FullTextStore>,
+        sqlite_store: Arc<dyn FullTextStore>,
+    ) -> Self {
+        Self {
+            vector_store: None,
             tantivy_store,
             sqlite_store,
             reranker: None,
@@ -96,7 +115,7 @@ impl HybridSearch for HybridSearchEngine {
                 limit: candidate_limit,
                 filters: request.filters.clone(),
             })?;
-            merge_results(&mut combined, vector_results, request.vector_weight);
+            merge_ranked_results(&mut combined, vector_results, request.vector_weight)?;
         }
 
         let full_text_results = self.full_text_store.search(FullTextSearchRequest {
@@ -104,7 +123,7 @@ impl HybridSearch for HybridSearchEngine {
             limit: candidate_limit,
             filters: request.filters,
         })?;
-        merge_results(&mut combined, full_text_results, request.full_text_weight);
+        merge_ranked_results(&mut combined, full_text_results, request.full_text_weight)?;
 
         let mut results = combined.into_values().collect::<Vec<_>>();
         sort_and_limit(&mut results, candidate_limit);
@@ -150,12 +169,17 @@ impl HybridSearch for ThreeWayHybridSearchEngine {
         let mut combined: BTreeMap<String, RetrievalResult> = BTreeMap::new();
 
         if let Some(query_embedding) = request.query_embedding.clone() {
-            let vector_results = self.vector_store.search(VectorSearchRequest {
+            let vector_store = self.vector_store.as_ref().ok_or_else(|| {
+                CoreError::validation(
+                    "query_embedding was provided but vector retrieval is not configured",
+                )
+            })?;
+            let vector_results = vector_store.search(VectorSearchRequest {
                 query_embedding,
                 limit: candidate_limit,
                 filters: request.filters.clone(),
             })?;
-            merge_results(&mut combined, vector_results, request.vector_weight);
+            merge_ranked_results(&mut combined, vector_results, request.vector_weight)?;
         }
 
         let text_weight = request.full_text_weight / 2.0;
@@ -164,14 +188,14 @@ impl HybridSearch for ThreeWayHybridSearchEngine {
             limit: candidate_limit,
             filters: request.filters.clone(),
         })?;
-        merge_results(&mut combined, tantivy_results, text_weight);
+        merge_ranked_results(&mut combined, tantivy_results, text_weight)?;
 
         let sqlite_results = self.sqlite_store.search(FullTextSearchRequest {
             query: request.query.clone(),
             limit: candidate_limit,
             filters: request.filters,
         })?;
-        merge_results(&mut combined, sqlite_results, text_weight);
+        merge_ranked_results(&mut combined, sqlite_results, text_weight)?;
 
         let mut results = combined.into_values().collect::<Vec<_>>();
         sort_and_limit(&mut results, candidate_limit);
@@ -190,11 +214,13 @@ impl HybridSearch for ThreeWayHybridSearchEngine {
 
     /// 返回三路底层组件健康状态。
     fn health_check(&self) -> CoreResult<Vec<StoreHealth>> {
-        Ok(vec![
-            self.vector_store.health_check()?,
-            self.tantivy_store.health_check()?,
-            self.sqlite_store.health_check()?,
-        ])
+        let mut health = Vec::with_capacity(3);
+        if let Some(vector_store) = &self.vector_store {
+            health.push(vector_store.health_check()?);
+        }
+        health.push(self.tantivy_store.health_check()?);
+        health.push(self.sqlite_store.health_check()?);
+        Ok(health)
     }
 }
 
@@ -203,6 +229,27 @@ fn validate_limit(limit: usize) -> CoreResult<()> {
     if limit > MAX_HYBRID_SEARCH_LIMIT {
         return Err(CoreError::validation(format!(
             "hybrid search limit {limit} exceeds maximum {MAX_HYBRID_SEARCH_LIMIT}"
+        )));
+    }
+    Ok(())
+}
+
+/// 产品边界使用远低于底层组件防御值的结果上限，避免大数组进入 runtime.db。
+pub fn validate_product_search_limit(limit: usize) -> CoreResult<()> {
+    if limit > MAX_PRODUCT_SEARCH_LIMIT {
+        return Err(CoreError::validation(format!(
+            "project search limit {limit} exceeds product maximum {MAX_PRODUCT_SEARCH_LIMIT}"
+        )));
+    }
+    Ok(())
+}
+
+/// 在写入 PortValue::Inline 或 IPC 响应前校验完整 JSON 字节预算。
+pub fn validate_product_search_result_budget(results: &[RetrievalResult]) -> CoreResult<()> {
+    let bytes = serde_json::to_vec(results)?.len();
+    if bytes > MAX_PRODUCT_SEARCH_RESULT_BYTES {
+        return Err(CoreError::validation(format!(
+            "project search results require {bytes} bytes, exceeding inline budget {MAX_PRODUCT_SEARCH_RESULT_BYTES}; reduce limit or chunk size"
         )));
     }
     Ok(())
@@ -231,14 +278,15 @@ fn validate_weights(vector_weight: f32, full_text_weight: f32) -> CoreResult<()>
     Ok(())
 }
 
-/// 将一组检索结果合并进 combined，同一 chunk 的分数按权重累加。
-fn merge_results(
+/// 用 RRF 将一组有序结果合并进 combined；后端原始 score 不进入跨源计算。
+fn merge_ranked_results(
     combined: &mut BTreeMap<String, RetrievalResult>,
     results: Vec<RetrievalResult>,
     weight: f32,
-) {
-    for mut result in results {
-        result.score *= weight;
+) -> CoreResult<()> {
+    for (rank, mut result) in results.into_iter().enumerate() {
+        let layer_weight = retrieval_layer_weight(&result)?;
+        result.score = weight * layer_weight / (RRF_K + rank as f32 + 1.0);
         match combined.get_mut(&result.chunk_id) {
             Some(existing) => {
                 // 同一 chunk 同时被向量和全文命中时，保留一个结果并累加信号。
@@ -253,6 +301,26 @@ fn merge_results(
             }
         }
     }
+    Ok(())
+}
+
+fn retrieval_layer_weight(result: &RetrievalResult) -> CoreResult<f32> {
+    let Some(value) = result
+        .metadata
+        .get("ariadne_retrieval")
+        .and_then(|value| value.get("layer_weight"))
+    else {
+        return Ok(1.0);
+    };
+    let weight = value.as_f64().ok_or_else(|| {
+        CoreError::validation("retrieval layer_weight must be a finite positive number")
+    })? as f32;
+    if !weight.is_finite() || weight <= 0.0 || weight > 4.0 {
+        return Err(CoreError::validation(
+            "retrieval layer_weight must be finite and in (0,4]",
+        ));
+    }
+    Ok(weight)
 }
 
 #[cfg(test)]
@@ -284,5 +352,63 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].source, RetrievalSource::Hybrid);
+    }
+
+    #[test]
+    fn reciprocal_rank_fusion_ignores_incompatible_backend_score_scales() {
+        let mut first_scale = BTreeMap::new();
+        let mut second_scale = BTreeMap::new();
+        let ranked = |first_score, second_score| {
+            vec![
+                RetrievalResult {
+                    chunk_id: "first".to_owned(),
+                    document_id: "doc".to_owned(),
+                    snippet: "first".to_owned(),
+                    score: first_score,
+                    source: RetrievalSource::FullText,
+                    spans: Vec::new(),
+                    metadata: serde_json::Value::Null,
+                },
+                RetrievalResult {
+                    chunk_id: "second".to_owned(),
+                    document_id: "doc".to_owned(),
+                    snippet: "second".to_owned(),
+                    score: second_score,
+                    source: RetrievalSource::FullText,
+                    spans: Vec::new(),
+                    metadata: serde_json::Value::Null,
+                },
+            ]
+        };
+
+        merge_ranked_results(&mut first_scale, ranked(10_000.0, 0.001), 1.0).unwrap();
+        merge_ranked_results(&mut second_scale, ranked(0.2, -500.0), 1.0).unwrap();
+
+        assert_eq!(
+            first_scale
+                .into_values()
+                .map(|result| (result.chunk_id, result.score))
+                .collect::<Vec<_>>(),
+            second_scale
+                .into_values()
+                .map(|result| (result.chunk_id, result.score))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn product_search_budget_rejects_unbounded_inline_payload() {
+        let results = vec![RetrievalResult {
+            chunk_id: "oversized".to_owned(),
+            document_id: "doc".to_owned(),
+            snippet: "文".repeat(MAX_PRODUCT_SEARCH_RESULT_BYTES),
+            score: 1.0,
+            source: RetrievalSource::FullText,
+            spans: Vec::new(),
+            metadata: serde_json::Value::Null,
+        }];
+
+        let error = validate_product_search_result_budget(&results).unwrap_err();
+        assert!(error.to_string().contains("exceeding inline budget"));
     }
 }

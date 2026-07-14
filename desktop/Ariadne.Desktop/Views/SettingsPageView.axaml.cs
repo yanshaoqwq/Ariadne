@@ -1,5 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Layout;
+using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -10,6 +12,7 @@ namespace Ariadne.Desktop.Views;
 public partial class SettingsPageView : UserControl
 {
     private SettingsPageViewModel? _attached;
+    private Border? _scrollPad;
 
     public SettingsPageView()
     {
@@ -41,7 +44,7 @@ public partial class SettingsPageView : UserControl
             return;
         }
 
-        // 用 Offset 显式滚到目标顶边，避免短页/Panel 叠层时 BringIntoView 贴底无效。
+        // 短页也要把目标区块顶到视口顶部：底部垫高 + Offset 对齐顶边。
         Dispatcher.UIThread.Post(() =>
         {
             var scroll = this.FindControl<ScrollViewer>("SettingsContentScroll")
@@ -59,22 +62,79 @@ public partial class SettingsPageView : UserControl
                 return;
             }
 
-            // 先确保目标参与布局
+            EnsureScrollPad(scroll);
             target.UpdateLayout();
             scroll.UpdateLayout();
 
-            var transform = target.TransformToVisual(scroll);
+            // 相对滚动内容根：目标在内容坐标系中的 Y
+            var contentRoot = scroll.Content as Visual ?? scroll;
+            var transform = target.TransformToVisual(contentRoot);
             if (transform is null)
             {
                 target.BringIntoView();
                 return;
             }
 
-            var topLeft = transform.Value.Transform(new Point(0, 0));
-            var nextY = Math.Max(0, scroll.Offset.Y + topLeft.Y - 12);
+            var topInContent = transform.Value.Transform(new Point(0, 0)).Y;
+            var nextY = Math.Max(0, topInContent - 8);
             var maxY = Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height);
+            if (nextY > maxY + 0.5)
+            {
+                EnsureScrollPad(scroll, extra: nextY - maxY + Math.Max(120, scroll.Viewport.Height * 0.35));
+                scroll.UpdateLayout();
+                maxY = Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height);
+            }
+
             scroll.Offset = new Vector(scroll.Offset.X, Math.Min(nextY, maxY));
         }, DispatcherPriority.Loaded);
+    }
+
+    /// <summary>
+    /// 在当前可见 Tab 内容底部加透明垫高，使任意区块都能滚到视口顶。
+    /// </summary>
+    private void EnsureScrollPad(ScrollViewer scroll, double extra = 0)
+    {
+        var host = this.FindControl<Control>("SettingsContentHost")
+                   ?? this.GetVisualDescendants().OfType<Control>()
+                       .FirstOrDefault(c => c.Name == "SettingsContentHost");
+        if (host is not Panel panel)
+        {
+            return;
+        }
+
+        var visibleStack = panel.Children.OfType<StackPanel>().FirstOrDefault(s => s.IsVisible);
+        if (visibleStack is null)
+        {
+            return;
+        }
+
+        var padH = Math.Max(scroll.Viewport.Height, 280) + Math.Max(0, extra);
+        if (_scrollPad is null)
+        {
+            _scrollPad = new Border
+            {
+                Name = "SettingsScrollPad",
+                Background = Brushes.Transparent,
+                IsHitTestVisible = false,
+                Height = padH,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                MinHeight = 1,
+            };
+        }
+        else
+        {
+            _scrollPad.Height = padH;
+        }
+
+        if (_scrollPad.Parent is Panel old && !ReferenceEquals(old, visibleStack))
+        {
+            old.Children.Remove(_scrollPad);
+        }
+
+        if (_scrollPad.Parent is null)
+        {
+            visibleStack.Children.Add(_scrollPad);
+        }
     }
 
     private Control? FindSectionControl(string sectionId)

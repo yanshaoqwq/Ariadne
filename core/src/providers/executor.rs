@@ -9,11 +9,11 @@ use crate::providers::models::{
 use crate::providers::traits::{EmbeddingProvider, LlmProvider, RerankerProvider, SearchProvider};
 
 /// Provider 调用执行器，负责把 provider 返回的费用写入成本账本。
-pub struct ProviderExecutor<'a, L: CostLedger> {
+pub struct ProviderExecutor<'a, L: CostLedger + ?Sized> {
     ledger: &'a L,
 }
 
-impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
+impl<'a, L: CostLedger + ?Sized> ProviderExecutor<'a, L> {
     /// 创建 provider 执行器。
     pub fn new(ledger: &'a L) -> Self {
         Self { ledger }
@@ -26,18 +26,43 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
         context: &ProviderCallContext,
         request: LlmRequest,
     ) -> CoreResult<LlmResponse> {
+        self.complete_llm_with_response_observer(provider, context, request, |_| Ok(()))
+    }
+
+    /// 在远端响应返回后、成本落账前先执行持久化观察器。需要 response receipt 的
+    /// 调用方可用它关闭“响应已到达但本地成本写入失败”的丢失窗口。
+    pub fn complete_llm_with_response_observer(
+        &self,
+        provider: &dyn LlmProvider,
+        context: &ProviderCallContext,
+        request: LlmRequest,
+        observe_response: impl FnOnce(&LlmResponse) -> CoreResult<()>,
+    ) -> CoreResult<LlmResponse> {
         // 调用前捕获 model_id，保证成本记录能按模型归因；provider 消费 request 后就取不到了。
         let model_id = request.model_id.clone();
+        authorize_provider_dispatch(context)?;
         let response = provider.complete(context, request)?;
+        observe_response(&response)?;
+        self.record_llm_response_cost(context, &model_id, &response)?;
+        Ok(response)
+    }
+
+    /// 根据已持久化的 LLM response 补写成本。operation_id 唯一索引保证重放幂等。
+    pub fn record_llm_response_cost(
+        &self,
+        context: &ProviderCallContext,
+        model_id: &str,
+        response: &LlmResponse,
+    ) -> CoreResult<()> {
         self.record_optional_cost(
             CostCategory::Llm,
             context,
-            Some(model_id),
+            Some(model_id.to_owned()),
             response.cost_usd,
             response.usage,
             response.raw.clone(),
-        )?;
-        Ok(response)
+        )
+        .map(|_| ())
     }
 
     /// 执行 embedding 调用并记录可选费用。
@@ -49,6 +74,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
     ) -> CoreResult<EmbeddingResponse> {
         // 调用前捕获 model_id，供 embedding 成本按模型归因。
         let model_id = request.model_id.clone();
+        authorize_provider_dispatch(context)?;
         let response = provider.embed(context, request)?;
         self.record_optional_cost(
             CostCategory::Embedding,
@@ -70,6 +96,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
     ) -> CoreResult<RerankResponse> {
         // reranker 请求也带 model_id，一并归因到成本记录。
         let model_id = request.model_id.clone();
+        authorize_provider_dispatch(context)?;
         let response = provider.rerank(context, request)?;
         self.record_optional_cost(
             CostCategory::Reranker,
@@ -89,6 +116,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
         context: &ProviderCallContext,
         request: SearchProviderRequest,
     ) -> CoreResult<SearchProviderResponse> {
+        authorize_provider_dispatch(context)?;
         let response = provider.search(context, request)?;
         self.record_optional_cost(
             CostCategory::SearchApi,
@@ -124,6 +152,7 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
         self.ledger
             .record_cost(NewCostRecord {
                 occurred_at_ms: unix_timestamp_ms()?,
+                operation_id: context.operation_id.clone(),
                 category,
                 provider_id: Some(context.provider_id.clone()),
                 model_id,
@@ -138,6 +167,16 @@ impl<'a, L: CostLedger> ProviderExecutor<'a, L> {
             })
             .map(Some)
     }
+}
+
+fn authorize_provider_dispatch(context: &ProviderCallContext) -> CoreResult<()> {
+    if context.cancellation.is_cancelled() {
+        return Err(CoreError::external_cancelled(
+            "provider",
+            crate::contracts::ExternalDispatchOutcome::NotDispatched,
+        ));
+    }
+    context.dispatch_authorization.authorize_dispatch()
 }
 
 /// 返回当前 Unix 毫秒时间戳。

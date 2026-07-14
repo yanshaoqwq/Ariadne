@@ -296,8 +296,9 @@ public sealed class ColorAndProviderHelpersTests
         Assert.Equal("备注给 AI", saved["user_note"]);
         Assert.Equal("new prompt", saved["prompt_template"]);
         Assert.Equal("claude", saved["model_id"]);
-        Assert.Equal("2.5", saved["budget_usd"]);
-        Assert.Equal("30000", saved["timeout_ms"]);
+        // F13：必须写出 JSON number，才能被 core WorkflowLlmNodeConfig (f64/u64) 反序列化。
+        Assert.Equal(2.5, Convert.ToDouble(saved["budget_usd"]));
+        Assert.Equal(30000L, Convert.ToInt64(saved["timeout_ms"]));
         Assert.Equal(true, saved["breakpoint"]);
         // opaque 必须原样保留（同一引用或等价值）
         Assert.Same(loaded["tool_enabled"], saved["tool_enabled"]);
@@ -347,12 +348,17 @@ public sealed class ColorAndProviderHelpersTests
         Assert.Same(toolEnabled, data["tool_enabled"]);
         Assert.Same(aliases, data["input_aliases"]);
         Assert.Equal("polisher", data["skills"]);
+        // F13：ToData（Save/BuildGraph 同源）写出 number，供 core serde 消费
+        Assert.Equal(1.0, Convert.ToDouble(data["budget_usd"]));
+        Assert.Equal(12000L, Convert.ToInt64(data["timeout_ms"]));
 
         // BuildGraph 同源：CanvasNode.Data 必须带 opaque
         var canvas = node.ToCanvasNode();
         Assert.Same(toolEnabled, canvas.Data["tool_enabled"]);
         Assert.Same(aliases, canvas.Data["input_aliases"]);
         Assert.Equal("chapter-writer", canvas.Label);
+        Assert.Equal(1.0, Convert.ToDouble(canvas.Data["budget_usd"]));
+        Assert.Equal(12000L, Convert.ToInt64(canvas.Data["timeout_ms"]));
     }
 
     [Fact]

@@ -118,6 +118,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         nameof(OnboardingSeenText),
         nameof(SavePersonalizationText),
         nameof(RagLabel),
+        nameof(VectorEnabledText),
+        nameof(VectorBackendLabel),
+        nameof(VectorCollectionLabel),
+        nameof(VectorDimensionsLabel),
+        nameof(QdrantHostLabel),
+        nameof(QdrantPortLabel),
+        nameof(QdrantDataDirLabel),
+        nameof(QdrantBinaryPathLabel),
+        nameof(QdrantStartupTimeoutLabel),
         nameof(RerankerEnabledText),
         nameof(ChunkSizeLabel),
         nameof(ChunkOverlapLabel),
@@ -215,12 +224,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private UiPreferences? _uiPreferences;
 
     private string _vectorBackend = "qdrant_sidecar";
+    private bool _vectorEnabled;
+    private string _vectorCollection = "ariadne_chunks";
+    private string _vectorDimensions = "1536";
     private string _qdrantHost = "127.0.0.1";
     private string _qdrantPort = "6333";
     private string _qdrantDataDir = ".indexes/qdrant";
+    private string _qdrantBinaryPath = "qdrant";
+    private string _qdrantStartupTimeoutMs = "10000";
     private string _fullTextBackend = "tantivy";
     private string _fullTextIndexDir = ".indexes/tantivy";
-    private bool _rerankerEnabled = true;
+    private bool _rerankerEnabled;
     private string _chunkSizeChars = "2000";
     private string _chunkOverlapChars = "200";
     private int _ragSchemaVersion = 1;
@@ -246,6 +260,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         LanguageOptions = new ObservableCollection<LanguageOption>(
             displayNames.AvailableLanguages.Select(code => new LanguageOption(code, displayNames.LanguageLabel(code))));
+
+        VectorBackendOptions = new ObservableCollection<SettingsValueOption>
+        {
+            new("qdrant_sidecar", displayNames.Text("ui.settings.misc.vector_backend.sidecar")),
+            new("external_qdrant", displayNames.Text("ui.settings.misc.vector_backend.external")),
+        };
 
         ProviderTypeOptions = new ObservableCollection<string>
         {
@@ -406,7 +426,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -470,6 +490,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool IsSectionLanguageSelected => IsSectionSelected("language");
     public bool IsSectionDiagnosticsSelected => IsSectionSelected("diagnostics");
     public ObservableCollection<LanguageOption> LanguageOptions { get; }
+    public ObservableCollection<SettingsValueOption> VectorBackendOptions { get; }
     public ObservableCollection<string> ProviderTypeOptions { get; }
     public ObservableCollection<ThemeOption> ThemeOptions { get; }
     public ObservableCollection<ThemeGroupViewModel> ThemeGroups { get; }
@@ -666,6 +687,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SavePersonalizationText => _displayNames.Text("ui.settings.personalization.save");
 
     public string RagLabel => _displayNames.Text("ui.settings.misc.rag");
+    public string VectorEnabledText => _displayNames.Text("ui.settings.misc.vector_enabled");
+    public string VectorBackendLabel => _displayNames.Text("ui.settings.misc.vector_backend");
+    public string VectorCollectionLabel => _displayNames.Text("ui.settings.misc.vector_collection");
+    public string VectorDimensionsLabel => _displayNames.Text("ui.settings.misc.vector_dimensions");
+    public string QdrantHostLabel => _displayNames.Text("ui.settings.misc.qdrant_host");
+    public string QdrantPortLabel => _displayNames.Text("ui.settings.misc.qdrant_port");
+    public string QdrantDataDirLabel => _displayNames.Text("ui.settings.misc.qdrant_data_dir");
+    public string QdrantBinaryPathLabel => _displayNames.Text("ui.settings.misc.qdrant_binary_path");
+    public string QdrantStartupTimeoutLabel => _displayNames.Text("ui.settings.misc.qdrant_startup_timeout");
     public string RerankerEnabledText => _displayNames.Text("ui.settings.misc.reranker_enabled");
     public string ChunkSizeLabel => _displayNames.Text("ui.settings.misc.chunk_size");
     public string ChunkOverlapLabel => _displayNames.Text("ui.settings.misc.chunk_overlap");
@@ -1238,6 +1268,26 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool ProjectPanelVisible { get => _projectPanelVisible; set => SetProperty(ref _projectPanelVisible, value); }
     public bool OnboardingSeen { get => _onboardingSeen; set => SetProperty(ref _onboardingSeen, value); }
 
+    public bool VectorEnabled { get => _vectorEnabled; set => SetProperty(ref _vectorEnabled, value); }
+    public string VectorBackend
+    {
+        get => _vectorBackend;
+        set
+        {
+            if (SetProperty(ref _vectorBackend, value))
+            {
+                OnPropertyChanged(nameof(IsQdrantSidecarBackend));
+            }
+        }
+    }
+    public bool IsQdrantSidecarBackend => string.Equals(VectorBackend, "qdrant_sidecar", StringComparison.Ordinal);
+    public string VectorCollection { get => _vectorCollection; set => SetProperty(ref _vectorCollection, value); }
+    public string VectorDimensions { get => _vectorDimensions; set => SetProperty(ref _vectorDimensions, value); }
+    public string QdrantHost { get => _qdrantHost; set => SetProperty(ref _qdrantHost, value); }
+    public string QdrantPort { get => _qdrantPort; set => SetProperty(ref _qdrantPort, value); }
+    public string QdrantDataDir { get => _qdrantDataDir; set => SetProperty(ref _qdrantDataDir, value); }
+    public string QdrantBinaryPath { get => _qdrantBinaryPath; set => SetProperty(ref _qdrantBinaryPath, value); }
+    public string QdrantStartupTimeoutMs { get => _qdrantStartupTimeoutMs; set => SetProperty(ref _qdrantStartupTimeoutMs, value); }
     public bool RerankerEnabled { get => _rerankerEnabled; set => SetProperty(ref _rerankerEnabled, value); }
     public string ChunkSizeChars { get => _chunkSizeChars; set => SetProperty(ref _chunkSizeChars, value); }
     public string ChunkOverlapChars { get => _chunkOverlapChars; set => SetProperty(ref _chunkOverlapChars, value); }
@@ -1494,10 +1544,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
 
             var rag = await _backend.GetRagSettingsAsync().ConfigureAwait(true);
             _ragSchemaVersion = rag.Rag.SchemaVersion;
-            _vectorBackend = rag.Rag.VectorStore.Backend;
-            _qdrantHost = rag.Rag.VectorStore.Sidecar.Host;
-            _qdrantPort = rag.Rag.VectorStore.Sidecar.Port.ToString();
-            _qdrantDataDir = rag.Rag.VectorStore.Sidecar.DataDir;
+            VectorEnabled = rag.Rag.VectorStore.Enabled;
+            VectorBackend = rag.Rag.VectorStore.Backend;
+            VectorCollection = rag.Rag.VectorStore.Collection;
+            VectorDimensions = rag.Rag.VectorStore.VectorDimensions.ToString();
+            QdrantHost = rag.Rag.VectorStore.Sidecar.Host;
+            QdrantPort = rag.Rag.VectorStore.Sidecar.Port.ToString();
+            QdrantDataDir = rag.Rag.VectorStore.Sidecar.DataDir;
+            QdrantBinaryPath = rag.Rag.VectorStore.Sidecar.BinaryPath;
+            QdrantStartupTimeoutMs = rag.Rag.VectorStore.Sidecar.StartupTimeoutMs.ToString();
             _fullTextBackend = rag.Rag.FullTextStore.Backend;
             _fullTextIndexDir = rag.Rag.FullTextStore.IndexDir;
             RerankerEnabled = rag.Rag.RerankerEnabled;
@@ -1528,7 +1583,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                 SeedThemeColorsFromPalette(ThemeCatalog.Resolve(Theme), force: true);
             }
 
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
         finally
         {
@@ -1548,7 +1603,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            ProviderStatus = ex.Message;
+            ProviderStatus = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -1750,7 +1805,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
                     }
                     catch (Exception ex)
                     {
-                        StatusText = ex.Message;
+                        StatusText = UserFacingError.Format(ex, _displayNames);
                         return false;
                     }
                 case UnsavedLeaveChoice.Discard:
@@ -1930,7 +1985,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
         finally
         {
@@ -2180,7 +2235,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
         finally
         {
@@ -2194,7 +2249,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             await _backend.SaveRagSettingsAsync(new RagSettings(new RagConfig(
                 _ragSchemaVersion,
-                new VectorStoreConfig(_vectorBackend, new SidecarConfig(_qdrantHost, ParseInt(_qdrantPort, 6333), _qdrantDataDir)),
+                new VectorStoreConfig(
+                    VectorEnabled,
+                    VectorBackend,
+                    VectorCollection,
+                    ParseInt(VectorDimensions, 1536),
+                    new SidecarConfig(
+                        QdrantHost,
+                        ParseInt(QdrantPort, 6333),
+                        QdrantDataDir,
+                        QdrantBinaryPath,
+                        ParseLong(QdrantStartupTimeoutMs, 10000))),
                 new FullTextStoreConfig(_fullTextBackend, _fullTextIndexDir),
                 RerankerEnabled,
                 ParseInt(ChunkSizeChars, 2000),
@@ -2364,7 +2429,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
         finally
         {
@@ -2557,6 +2622,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
     private static long ParseLong(string text, long fallback) => CultureNumberParse.ParseLong(text, fallback);
     private static double ParseDouble(string text, double fallback) => CultureNumberParse.ParseDouble(text, fallback);
 
+    public string UnsavedChangesPageTitle => Title;
+
     public async Task<bool> ConfirmLeaveIfNeededAsync()
     {
         if (!HasUnsavedChanges)
@@ -2564,18 +2631,99 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             return true;
         }
 
-        var choice = await DialogService.Current.ConfirmUnsavedLeaveAsync().ConfigureAwait(true);
+        var choice = await DialogService.Current.ConfirmUnsavedLeaveAsync(UnsavedChangesPageTitle).ConfigureAwait(true);
         switch (choice)
         {
             case UnsavedLeaveChoice.Save:
-                await SaveCurrentSectionAsync().ConfigureAwait(true);
-                // 保存成功路径会 CaptureSnapshot；若仍脏（保存失败）则不允许跳转
-                return SettingsDirtyHelper.CanNavigateAfterLeaveSave(HasUnsavedChanges);
+                return await SaveUnsavedChangesAsync().ConfigureAwait(true);
             case UnsavedLeaveChoice.Discard:
-                await LoadAsync().ConfigureAwait(true);
+                await DiscardUnsavedChangesAsync().ConfigureAwait(true);
                 return true;
             default:
                 return false;
+        }
+    }
+
+    private bool _leavePrepared;
+    private string? _preparedSectionId;
+
+    public Task<bool> PrepareUnsavedChangesAsync()
+    {
+        if (!HasUnsavedChanges)
+        {
+            _leavePrepared = true;
+            _preparedSectionId = null;
+            return Task.FromResult(true);
+        }
+
+        // Validate: current section must be a known save target; no durable write.
+        var section = SelectedTab.Id;
+        if (section is not ("general" or "models" or "presets" or "automation" or "permissions"
+            or "personalization" or "misc"))
+        {
+            _leavePrepared = false;
+            return Task.FromResult(false);
+        }
+
+        _preparedSectionId = section;
+        _leavePrepared = true;
+        return Task.FromResult(true);
+    }
+
+    public async Task<bool> CommitPreparedUnsavedChangesAsync()
+    {
+        if (!_leavePrepared)
+        {
+            return false;
+        }
+
+        if (!HasUnsavedChanges)
+        {
+            _leavePrepared = false;
+            return true;
+        }
+
+        try
+        {
+            await SaveCurrentSectionAsync().ConfigureAwait(true);
+            var ok = SettingsDirtyHelper.CanNavigateAfterLeaveSave(HasUnsavedChanges);
+            if (ok)
+            {
+                _leavePrepared = false;
+                _preparedSectionId = null;
+            }
+
+            return ok;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public Task AbortPreparedUnsavedChangesAsync()
+    {
+        _leavePrepared = false;
+        _preparedSectionId = null;
+        return Task.CompletedTask;
+    }
+
+    public async Task<bool> SaveUnsavedChangesAsync()
+    {
+        if (!await PrepareUnsavedChangesAsync().ConfigureAwait(true))
+        {
+            return false;
+        }
+
+        return await CommitPreparedUnsavedChangesAsync().ConfigureAwait(true);
+    }
+
+    public async Task DiscardUnsavedChangesAsync()
+    {
+        await AbortPreparedUnsavedChangesAsync().ConfigureAwait(true);
+        if (HasUnsavedChanges)
+        {
+            await LoadAsync().ConfigureAwait(true);
         }
     }
 
@@ -2686,7 +2834,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
         finally
         {
@@ -2728,6 +2876,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
         foreach (var option in LanguageOptions)
         {
             option.Label = _displayNames.LanguageLabel(option.Code);
+        }
+
+        foreach (var option in VectorBackendOptions)
+        {
+            option.Label = _displayNames.Text(option.Value switch
+            {
+                "external_qdrant" => "ui.settings.misc.vector_backend.external",
+                _ => "ui.settings.misc.vector_backend.sidecar",
+            });
         }
 
         foreach (var option in ThemeOptions)
@@ -2836,6 +2993,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             GitManualColor,
             ProjectPanelVisible.ToString(),
             OnboardingSeen.ToString(),
+            VectorEnabled.ToString(),
+            VectorBackend,
+            VectorCollection,
+            VectorDimensions,
+            QdrantHost,
+            QdrantPort,
+            QdrantDataDir,
+            QdrantBinaryPath,
+            QdrantStartupTimeoutMs,
             RerankerEnabled.ToString(),
             ChunkSizeChars,
             ChunkOverlapChars,
@@ -2865,7 +3031,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard
             or nameof(ThemeMainColorDark) or nameof(ThemeSurfaceColorDark) or nameof(ThemeBrandColorDark)
             or nameof(ThemeFollowSystemColors)
             or nameof(GitAutoColor) or nameof(GitManualColor)
-            or nameof(ProjectPanelVisible) or nameof(OnboardingSeen) or nameof(RerankerEnabled)
+            or nameof(ProjectPanelVisible) or nameof(OnboardingSeen) or nameof(VectorEnabled)
+            or nameof(VectorBackend) or nameof(VectorCollection) or nameof(VectorDimensions)
+            or nameof(QdrantHost) or nameof(QdrantPort) or nameof(QdrantDataDir)
+            or nameof(QdrantBinaryPath) or nameof(QdrantStartupTimeoutMs) or nameof(RerankerEnabled)
             or nameof(ChunkSizeChars) or nameof(ChunkOverlapChars) or nameof(TrackDocuments)
             or nameof(TrackWorkflows) or nameof(TrackSkills) or nameof(TrackNonSensitiveConfig)
             or nameof(IgnoredPathsText);
@@ -2883,6 +3052,20 @@ public sealed class LanguageOption : ViewModelBase
     }
 
     public string Code { get; }
+    public string Label { get => _label; set => SetProperty(ref _label, value); }
+}
+
+public sealed class SettingsValueOption : ViewModelBase
+{
+    private string _label;
+
+    public SettingsValueOption(string value, string label)
+    {
+        Value = value;
+        _label = label;
+    }
+
+    public string Value { get; }
     public string Label { get => _label; set => SetProperty(ref _label, value); }
 }
 

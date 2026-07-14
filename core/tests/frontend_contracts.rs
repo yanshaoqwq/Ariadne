@@ -842,7 +842,8 @@ fn works_service_builds_tree_imports_chapters_and_exports_selected_markdown() {
     )
     .unwrap();
     let index = ChapterDocumentIndex::new("v1", vec![import.entry.clone()]).unwrap();
-    let tree = build_works_tree(&index, temp.path().join("planning")).unwrap();
+    let chapter_stage = BTreeMap::from([("stage1:chapter1".to_owned(), "stage1".to_owned())]);
+    let tree = build_works_tree(&index, &chapter_stage, temp.path().join("planning")).unwrap();
     let export = export_chapters_markdown(
         &service,
         &index,
@@ -1026,10 +1027,7 @@ fn node_detail_patch_annotations_and_preferences_are_persisted() {
     assert_eq!(workflow.edges[0].to.port_name, "data-in-上一章");
     assert!(workflow.metadata["canvas_annotations"].is_array());
     assert_eq!(prefs_store.read().unwrap().theme, "dark");
-    assert_eq!(
-        prefs_store.read().unwrap().panel_states["workspace.right_panel"],
-        false
-    );
+    assert!(!prefs_store.read().unwrap().panel_states["workspace.right_panel"]);
 }
 
 fn node(id: &str) -> NodeInstance {
@@ -1102,4 +1100,103 @@ fn test_document_service(root: &std::path::Path) -> FileDocumentService {
         project_document_permission(root),
         root.join(".runtime").join("artifacts"),
     )
+}
+
+/// D4：偏好 / 项目记忆 / 最近项目 覆盖写必须走 atomic_write（临时文件 + rename）。
+#[test]
+fn d4_durable_frontend_writes_use_atomic_replace_not_bare_overwrite() {
+    use ariadne::frontend::{
+        ProjectMemoryStore, ProjectRegistryStore, UiPreferences, UiPreferencesStore,
+    };
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+
+    // Preferences
+    let prefs_store = UiPreferencesStore::default_for_project(temp.path());
+    prefs_store
+        .write(&UiPreferences {
+            theme: "dark".to_owned(),
+            ..UiPreferences::default()
+        })
+        .unwrap();
+    let prefs_path = temp.path().join(".runtime/ui_preferences.json");
+    assert!(prefs_path.is_file());
+    assert!(fs::read_to_string(&prefs_path).unwrap().contains("dark"));
+    // No leftover .tmp from successful atomic write
+    let runtime = temp.path().join(".runtime");
+    let leftovers: Vec<_> = fs::read_dir(&runtime)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "tmp leftovers: {leftovers:?}");
+
+    // Project memory overwrite
+    let memory = ProjectMemoryStore::default_for_project(temp.path());
+    memory.write_all("记忆甲").unwrap();
+    memory.write_all("记忆乙-覆盖").unwrap();
+    assert_eq!(memory.read_all().unwrap(), "记忆乙-覆盖");
+
+    // Recent projects
+    let recent = ProjectRegistryStore::default_for_project(temp.path());
+    recent
+        .record_opened("demo", temp.path().join("proj-a"))
+        .unwrap();
+    let recent_path = temp.path().join(".runtime/recent_projects.json");
+    assert!(fs::read_to_string(&recent_path).unwrap().contains("demo"));
+    // inode change on second write proves replace (atomic rename) rather than in-place truncate
+    let ino1 = fs::metadata(&recent_path).unwrap().ino();
+    recent
+        .record_opened("demo2", temp.path().join("proj-b"))
+        .unwrap();
+    let ino2 = fs::metadata(&recent_path).unwrap().ino();
+    assert_ne!(ino1, ino2, "atomic rename should replace inode on POSIX");
+}
+
+/// D4 residual: product `append_project_memory` must not bare-append in place;
+/// crash mid-write must not leave a half-line (read-modify-atomic_write).
+#[test]
+fn d4_project_memory_append_uses_atomic_replace_not_in_place() {
+    use ariadne::frontend::ProjectMemoryStore;
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryStore::default_for_project(temp.path());
+    let path = temp.path().join(".runtime/project_memory.md");
+
+    memory.write_all("第一行\n").unwrap();
+    let ino1 = fs::metadata(&path).unwrap().ino();
+
+    let after = memory.append("第二行").unwrap();
+    assert!(after.contains("第一行\n第二行\n"), "got: {after:?}");
+    let ino2 = fs::metadata(&path).unwrap().ino();
+    assert_ne!(
+        ino1, ino2,
+        "append must replace via atomic rename, not OpenOptions in-place append"
+    );
+
+    // Re-entry: second append still preserves history and remains atomic
+    let ino3 = fs::metadata(&path).unwrap().ino();
+    let after2 = memory.append("第三行").unwrap();
+    assert!(after2.contains("第二行\n第三行\n"), "got: {after2:?}");
+    let ino4 = fs::metadata(&path).unwrap().ino();
+    assert_ne!(ino3, ino4);
+
+    // Failure path: oversize append must not destroy prior content (limit is 4 MiB)
+    let huge = "x".repeat((4 * 1024 * 1024) + 64);
+    let err = memory.append(&huge).expect_err("oversize append must fail");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("project_memory") || msg.contains("exceed"),
+        "unexpected error: {msg}"
+    );
+    assert_eq!(
+        memory.read_all().unwrap(),
+        after2,
+        "failed append must leave prior memory intact"
+    );
 }

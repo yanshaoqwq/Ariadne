@@ -8,6 +8,7 @@ public sealed class NavigationItemViewModel : ViewModelBase
     private bool _isSelected;
     private int _badgeCount;
     private string _title;
+    private bool _sidebarExpanded = true;
 
     public NavigationItemViewModel(string id, string title, Geometry? icon, Func<object> pageFactory, Action<NavigationItemViewModel> select)
     {
@@ -34,6 +35,21 @@ public sealed class NavigationItemViewModel : ViewModelBase
         get => _isSelected;
         set => SetProperty(ref _isSelected, value);
     }
+
+    /// <summary>侧栏展开态：由主窗同步，驱动导航模板（U66）。</summary>
+    public bool SidebarExpanded
+    {
+        get => _sidebarExpanded;
+        set
+        {
+            if (SetProperty(ref _sidebarExpanded, value))
+            {
+                OnPropertyChanged(nameof(SidebarCollapsed));
+            }
+        }
+    }
+
+    public bool SidebarCollapsed => !SidebarExpanded;
 
     public int BadgeCount
     {

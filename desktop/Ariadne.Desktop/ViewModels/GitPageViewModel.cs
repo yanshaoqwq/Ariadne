@@ -204,7 +204,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         }
         catch (Exception ex)
         {
-            RepositoryStatusText = ex.Message;
+            RepositoryStatusText = UserFacingError.Format(ex, _displayNames);
             CurrentBranchText = _displayNames.Text("ui.common.none");
             HeadText = _displayNames.Text("ui.common.none");
             DirtyStateText = _displayNames.Text("ui.common.none");
@@ -254,7 +254,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
             OnPropertyChanged(nameof(HasCommits));
             OnPropertyChanged(nameof(IsCommitListEmpty));
         }
@@ -265,13 +265,17 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         try
         {
             var checkpoint = await _backend.CreateCheckpointAsync(CheckpointMessage).ConfigureAwait(true);
-            StatusText = checkpoint.Message;
+            // Success feedback uses localization — not backend free-form error text (U1).
+            var summary = (checkpoint.Message ?? string.Empty).Trim();
+            StatusText = summary.Length is > 0 and <= 80
+                ? _displayNames.Format("ui.git.checkpoint_created", new Dictionary<string, string> { ["summary"] = summary })
+                : _displayNames.Text("ui.git.checkpoint_created_plain");
             CheckpointMessage = string.Empty;
             await RefreshAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -313,7 +317,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         }
         catch (Exception ex)
         {
-            StatusText = ex.Message;
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -422,7 +426,9 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
                 new DialogButton(_displayNames.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
             })
         {
+            Severity = DialogSeverity.Danger,
             CancelResultIndex = 1,
+            ConfirmResultIndex = 0,
         };
         return await DialogService.Current.ConfirmAsync(dialog).ConfigureAwait(true) == 0;
     }

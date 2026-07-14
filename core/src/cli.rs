@@ -13,8 +13,6 @@ use crate::config::SystemKeychainSecretStore;
 use crate::contracts::RunStatus;
 use crate::frontend::{UiRunLogKind, UiRunLogLevel};
 
-const APP_STATE_DIR: &str = ".ariadne-app";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliInvocationResult {
     pub exit_code: i32,
@@ -41,6 +39,10 @@ pub fn run_cli_command(args: impl IntoIterator<Item = String>) -> Result<Value, 
     }
 
     match args[0].as_str() {
+        "version" | "--version" | "-V" => Ok(json!({
+            "product_version": crate::PRODUCT_VERSION,
+            "ipc_schema_version": crate::IPC_SCHEMA_VERSION,
+        })),
         "workflow" => run_workflow_command(&args[1..]),
         "tools" => run_tools_command(&args[1..]),
         other => Err(format!("unsupported ariadne command: {other}\n{}", usage())),
@@ -251,7 +253,7 @@ fn state_from_options(options: &CliOptions) -> Result<AriadneAppState, String> {
         .app_state
         .clone()
         .or_else(|| std::env::var_os("ARIADNE_APP_STATE_ROOT").map(PathBuf::from))
-        .unwrap_or_else(|| project_root.join(APP_STATE_DIR));
+        .unwrap_or_else(commands::default_app_state_root);
     Ok(AriadneAppState::new(
         project_root,
         app_state_root.clone(),
@@ -418,6 +420,8 @@ mod tests {
                 }],
                 edges: Vec::new(),
                 metadata: Value::Null,
+                content_revision: None,
+                expected_revision: None,
             },
         )
         .unwrap();

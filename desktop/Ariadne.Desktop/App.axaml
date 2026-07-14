@@ -4,6 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:views="clr-namespace:Ariadne.Desktop.Views"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
+    xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     RequestedThemeVariant="Default">
   <Application.Styles>
     <FluentTheme />
@@ -34,6 +35,43 @@
     </DataTemplate>
     <DataTemplate DataType="{x:Type vm:ConfirmDialogViewModel}">
       <views:ConfirmDialogView />
+    </DataTemplate>
+    <!-- U66：单一 NavigationItem 模板（主/次侧栏共用，禁止双份复制） -->
+    <DataTemplate DataType="{x:Type vm:NavigationItemViewModel}">
+      <Button Classes="nav"
+              ctl:SelectedClass.IsSelected="{Binding IsSelected}"
+              Command="{Binding SelectCommand}"
+              ToolTip.Tip="{Binding Title}"
+              AutomationProperties.Name="{Binding Title}">
+        <Panel>
+          <Grid ColumnDefinitions="3,26,*,Auto" Margin="0,0,10,0"
+                IsVisible="{Binding SidebarExpanded}">
+            <Border Grid.Column="0" Width="3" VerticalAlignment="Stretch"
+                    IsVisible="{Binding IsSelected}"
+                    Background="{DynamicResource Ariadne.AccentPrimary}" />
+            <Path Grid.Column="1" Classes="icon" Width="17" Height="17" Data="{Binding Icon}"
+                  HorizontalAlignment="Center" VerticalAlignment="Center" Margin="8,0,0,0" />
+            <TextBlock Grid.Column="2" Text="{Binding Title}" FontSize="13"
+                       VerticalAlignment="Center" Margin="6,0,0,0" />
+            <Border Grid.Column="3" Classes="badge" IsVisible="{Binding HasBadge}" VerticalAlignment="Center">
+              <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="10"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+          </Grid>
+          <Grid Width="44" Height="36" IsVisible="{Binding SidebarCollapsed}">
+            <Border Width="3" HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                    IsVisible="{Binding IsSelected}"
+                    Background="{DynamicResource Ariadne.AccentPrimary}" />
+            <Path Classes="icon" Width="18" Height="18" Data="{Binding Icon}"
+                  HorizontalAlignment="Center" VerticalAlignment="Center" />
+            <Border Classes="badge" HorizontalAlignment="Right" VerticalAlignment="Top"
+                    Margin="0,2,4,0" IsVisible="{Binding HasBadge}">
+              <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="9"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+          </Grid>
+        </Panel>
+      </Button>
     </DataTemplate>
   </Application.DataTemplates>
 </Application>

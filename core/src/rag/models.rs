@@ -729,6 +729,22 @@ impl RegisteredChange {
             )),
         }
     }
+
+    /// Summarizer 是否应在指定章节核对该 Planner 变化。
+    pub fn applies_to_chapter(&self, chapter_id: &str) -> bool {
+        match &self.content {
+            RegisterContent::CharacterPlan(plan) => plan
+                .chapter_id
+                .as_deref()
+                .map(|id| id == chapter_id)
+                .unwrap_or(true),
+            RegisterContent::ThemeAnchor(anchor) => {
+                anchor.chapter_ids.is_empty()
+                    || anchor.chapter_ids.iter().any(|id| id == chapter_id)
+            }
+            _ => true,
+        }
+    }
 }
 
 /// 伏笔生命周期状态。
@@ -960,6 +976,24 @@ impl WritingConfirmationPolicy {
         }
     }
 
+    /// 覆盖单个确认项模式；设置页与执行器通过 ConfirmationKind 共用同一映射。
+    pub fn set_mode(&mut self, kind: ConfirmationKind, mode: ConfirmationMode) {
+        match kind {
+            ConfirmationKind::OutlinerOutput => self.outliner_output = mode,
+            ConfirmationKind::DesignerOutput => self.designer_output = mode,
+            ConfirmationKind::PlannerOutput => self.planner_output = mode,
+            ConfirmationKind::PlannerRegister => self.planner_register = mode,
+            ConfirmationKind::CriticReview => self.critic_review = mode,
+            ConfirmationKind::PrudentReview => self.prudent_review = mode,
+            ConfirmationKind::SegmentSummary => self.segment_summary = mode,
+            ConfirmationKind::EventSummary => self.event_summary = mode,
+            ConfirmationKind::ChapterSummary => self.chapter_summary = mode,
+            ConfirmationKind::StageSummary => self.stage_summary = mode,
+            ConfirmationKind::WriterCorrectionPatch => self.writer_correction_patch = mode,
+            ConfirmationKind::PolisherCorrectionPatch => self.polisher_correction_patch = mode,
+        }
+    }
+
     /// 根据策略和 Auto Mode 状态计算确认项初始状态。
     pub fn initial_state(
         &self,
@@ -1176,6 +1210,83 @@ pub struct SummaryPipelineReport {
     pub confirmation_ids: Vec<String>,
 }
 
+/// Summarizer 四步生成阶段所需的只读知识投影。
+///
+/// 该投影与提交工作集分离：生成阶段需要全量既有事件以及阶段历史，提交阶段仍只
+/// 加载当前章节关系闭包，避免把长耗时外部调用放进写事务。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SummaryGenerationContext {
+    /// 全部既有事件，供跨章事件复用稳定 event_id。
+    #[serde(default)]
+    pub existing_events: Vec<StoryEvent>,
+    /// 当前章节仍需核对的 Planner 注册变化。
+    #[serde(default)]
+    pub planned_changes: Vec<RegisteredChange>,
+    /// 伏笔当前状态；输出更新只能引用这里的正式 id。
+    #[serde(default)]
+    pub foreshadowing: Vec<ForeshadowingRecord>,
+    /// 已知阶段及其章节总结，用于选择已有阶段或提议新阶段。
+    #[serde(default)]
+    pub stages: Vec<SummaryStageContext>,
+    /// 章节重跑时的既有阶段归属；新章节通常为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_stage_id: Option<String>,
+}
+
+/// 单个阶段的生成上下文。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SummaryStageContext {
+    pub stage_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_summary: Option<String>,
+    /// 仅包含已有正式章节总结；Pending 草稿不得进入下一轮上下文。
+    #[serde(default)]
+    pub chapter_summaries: BTreeMap<String, String>,
+}
+
+/// 作品页使用的正式章节-阶段投影。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChapterStageSummaryView {
+    pub stage_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub chapter_ids: Vec<String>,
+}
+
+/// 作品页展示的总结确认历史；不复制 pending payload 正文。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChapterSummaryConfirmationView {
+    pub confirmation_id: String,
+    pub kind: ConfirmationKind,
+    pub state: ConfirmationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+}
+
+/// F19/F20：作品页读取的章节级正式总结投影。
+///
+/// active 知识与确认历史分开返回：Pending draft 不伪装成正式知识，但作者仍可看到
+/// 对应确认状态。所有来源位置沿用统一 UTF-8 byte SourceSpan 契约。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChapterSummaryView {
+    pub chapter_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<ChapterStageSummaryView>,
+    #[serde(default)]
+    pub segments: Vec<StorySegment>,
+    #[serde(default)]
+    pub events: Vec<StoryEvent>,
+    #[serde(default)]
+    pub realized_changes: Vec<RegisteredChange>,
+    #[serde(default)]
+    pub foreshadowing: Vec<ForeshadowingRecord>,
+    #[serde(default)]
+    pub confirmations: Vec<ChapterSummaryConfirmationView>,
+}
+
 /// Summarizer 流水线输入草稿；真实 LLM 生成后由工作流模块填充。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SummaryPipelineDraft {
@@ -1190,12 +1301,23 @@ pub struct SummaryPipelineDraft {
     pub stage_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_summary: Option<String>,
+    /// F25：是否提议新阶段。`None` 时：已存在 stage 则附着，否则按新阶段提议处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_new_stage: Option<bool>,
     #[serde(default)]
     pub realized_changes: Vec<RealizedChangeLink>,
     #[serde(default)]
     pub foreshadowing_updates: Vec<ForeshadowingUpdate>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+/// 确认项是否已激活知识写入（F14：Pending/Rejected 不得作为 active 事实）。
+pub fn confirmation_state_activates_knowledge(state: ConfirmationState) -> bool {
+    matches!(
+        state,
+        ConfirmationState::Approved | ConfirmationState::AutoAudited | ConfirmationState::Skipped
+    )
 }
 
 /// Summarizer 确认 Planner 注册项已经落地的链接。

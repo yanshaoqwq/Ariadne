@@ -3,6 +3,17 @@ use thiserror::Error;
 /// 项目内部统一 Result 类型。
 pub type CoreResult<T> = Result<T, CoreError>;
 
+/// 外部调用失败时请求相对远端副作用边界的位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalDispatchOutcome {
+    /// 构建请求或建立连接前失败，远端确定未接收。
+    NotDispatched,
+    /// 请求可能已经发送，但没有取得可判定响应。
+    DispatchedUnknown,
+    /// 已收到 HTTP/协议响应，远端结果明确为失败。
+    ResponseReceived,
+}
+
 /// 跨模块共享错误类型。
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -46,7 +57,31 @@ pub enum CoreError {
     #[error("external service error from {service}: {message}")]
     External { service: String, message: String },
 
-    /// 操作被取消。
+    /// 带明确发送阶段的 Provider 传输/协议错误，保留 provider 专用诊断语义。
+    #[error("provider request error from {service} ({outcome:?}): {message}")]
+    ProviderRequest {
+        service: String,
+        outcome: ExternalDispatchOutcome,
+        message: String,
+    },
+
+    /// 非 Provider 外部操作（HTTP Skill 等）的发送阶段错误。
+    #[error("external operation error from {service} ({outcome:?}): {message}")]
+    ExternalOperation {
+        service: String,
+        outcome: ExternalDispatchOutcome,
+        message: String,
+    },
+
+    /// 外部操作取消，显式携带取消发生在 dispatch 边界的哪一侧。
+    #[error("external operation cancelled in {service} ({outcome:?})")]
+    ExternalCancellation {
+        service: String,
+        outcome: ExternalDispatchOutcome,
+    },
+
+    /// 本地操作被取消；不隐含外部请求是否 dispatch。外部适配器必须返回带
+    /// `ExternalDispatchOutcome` 的错误，journal 才能判定安全重试或 in_doubt。
     #[error("operation cancelled")]
     Cancelled,
 
@@ -57,6 +92,28 @@ pub enum CoreError {
     /// 运行已停止。
     #[error("run is stopped: {reason}")]
     Stopped { reason: String },
+
+    /// 工作流快照已被其它命令或 worker 更新，调用方必须重载后重放意图。
+    #[error(
+        "workflow state revision conflict for {workflow_id}/{run_id}: expected {expected}, actual {actual}"
+    )]
+    WorkflowStateRevisionConflict {
+        workflow_id: String,
+        run_id: String,
+        expected: u64,
+        actual: u64,
+    },
+
+    /// 指定工作流运行不存在，save 不得隐式复活已删除记录。
+    #[error("workflow run not found: {workflow_id}/{run_id}")]
+    WorkflowRunNotFound { workflow_id: String, run_id: String },
+
+    /// journaled 节点执行器违反外部副作用协议；operation 已被隔离，禁止静默重试。
+    #[error("workflow executor contract violation for operation {operation_id}: {message}")]
+    WorkflowExecutorContractViolation {
+        operation_id: String,
+        message: String,
+    },
 
     /// IO 错误。
     #[error("io error: {0}")]
@@ -76,6 +133,25 @@ impl CoreError {
     pub fn validation(message: impl Into<String>) -> Self {
         Self::Validation {
             message: message.into(),
+        }
+    }
+
+    pub fn external_cancelled(
+        service: impl Into<String>,
+        outcome: ExternalDispatchOutcome,
+    ) -> Self {
+        Self::ExternalCancellation {
+            service: service.into(),
+            outcome,
+        }
+    }
+
+    pub fn external_dispatch_outcome(&self) -> Option<ExternalDispatchOutcome> {
+        match self {
+            Self::ProviderRequest { outcome, .. }
+            | Self::ExternalOperation { outcome, .. }
+            | Self::ExternalCancellation { outcome, .. } => Some(*outcome),
+            _ => None,
         }
     }
 }

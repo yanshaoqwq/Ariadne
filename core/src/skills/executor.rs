@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -7,7 +6,8 @@ use serde_json::{json, Value};
 
 use crate::config::AutoModeConfig;
 use crate::contracts::{
-    CoreError, CoreResult, ExecutionPolicy, PermissionRequest, PortValue, RunControl,
+    CancellationToken, CoreError, CoreResult, ExecutionPolicy, ExternalDispatchAuthorization,
+    ExternalDispatchOutcome, PermissionRequest, PortValue, RunControl,
 };
 use crate::costs::{evaluate_budget, BudgetLimits, BudgetUsage, CostLedger, CostQuery};
 use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
@@ -28,6 +28,7 @@ pub trait HttpSkillBackend {
         config: &HttpSkillConfig,
         inputs: &crate::contracts::PortMap,
         timeout_ms: u64,
+        cancellation: &CancellationToken,
     ) -> CoreResult<SkillBackendOutput>;
 }
 
@@ -40,6 +41,7 @@ pub trait WasmSkillBackend {
         inputs: &crate::contracts::PortMap,
         timeout_ms: u64,
         max_memory_bytes: Option<u64>,
+        cancellation: &CancellationToken,
     ) -> CoreResult<SkillBackendOutput>;
 }
 
@@ -60,8 +62,9 @@ impl WasmSkillBackend for NativeWasmSkillBackend {
         inputs: &crate::contracts::PortMap,
         timeout_ms: u64,
         max_memory_bytes: Option<u64>,
+        cancellation: &CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
-        execute_native_wasm(config, inputs, timeout_ms, max_memory_bytes)
+        execute_native_wasm(config, inputs, timeout_ms, max_memory_bytes, cancellation)
     }
 }
 
@@ -78,8 +81,9 @@ impl HttpSkillBackend for NativeHttpSkillBackend {
         config: &HttpSkillConfig,
         inputs: &crate::contracts::PortMap,
         timeout_ms: u64,
+        cancellation: &CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
-        execute_native_http(config, inputs, timeout_ms)
+        execute_native_http(config, inputs, timeout_ms, cancellation)
     }
 }
 
@@ -111,6 +115,33 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
         manifest: &SkillManifest,
         request: crate::skills::models::SkillRunRequest,
     ) -> CoreResult<SkillRunOutput> {
+        self.execute_with_cancellation(manifest, request, &CancellationToken::new())
+    }
+
+    /// 使用调用方提供的共享 token 执行 Skill。
+    pub fn execute_with_cancellation(
+        &self,
+        manifest: &SkillManifest,
+        request: crate::skills::models::SkillRunRequest,
+        cancellation: &CancellationToken,
+    ) -> CoreResult<SkillRunOutput> {
+        self.execute_with_control(
+            manifest,
+            request,
+            cancellation,
+            &ExternalDispatchAuthorization::default(),
+        )
+    }
+
+    /// 使用共享取消信号与 workflow 持久化派发栅栏执行 Skill。
+    pub fn execute_with_control(
+        &self,
+        manifest: &SkillManifest,
+        request: crate::skills::models::SkillRunRequest,
+        cancellation: &CancellationToken,
+        dispatch_authorization: &ExternalDispatchAuthorization,
+    ) -> CoreResult<SkillRunOutput> {
+        cancellation.check()?;
         if manifest.skill_id != request.skill_id {
             return Err(CoreError::validation(
                 "skill run request skill_id does not match manifest",
@@ -156,8 +187,9 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
                             run_id: None,
                             node_id: None,
                             metadata: request.metadata.clone(),
+                            dispatch_authorization: dispatch_authorization.clone(),
                         },
-                        &crate::contracts::CancellationToken::new(),
+                        cancellation,
                     )?;
                     SkillBackendOutput {
                         outputs: output_text_port(report.response.message.content),
@@ -175,7 +207,13 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
                     let backend = self.context.http_backend.ok_or_else(|| {
                         CoreError::validation("http skill requires an HTTP backend")
                     })?;
-                    backend.execute(config, &request.inputs, manifest.limits.timeout_ms)?
+                    dispatch_authorization.authorize_dispatch()?;
+                    backend.execute(
+                        config,
+                        &request.inputs,
+                        manifest.limits.timeout_ms,
+                        cancellation,
+                    )?
                 }
                 SkillExecutorConfig::Wasm(config) => {
                     if config.allow_network {
@@ -188,15 +226,18 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
                     let backend = self.context.wasm_backend.ok_or_else(|| {
                         CoreError::validation("wasm skill requires a WASM backend")
                     })?;
+                    dispatch_authorization.authorize_dispatch()?;
                     backend.execute(
                         config,
                         &request.inputs,
                         manifest.limits.timeout_ms,
                         manifest.limits.max_memory_bytes,
+                        cancellation,
                     )?
                 }
             };
         let actual_elapsed_ms = elapsed_millis(started_at);
+        cancellation.check()?;
 
         validate_backend_output(
             &output,
@@ -300,7 +341,9 @@ fn execute_native_http(
     config: &HttpSkillConfig,
     inputs: &crate::contracts::PortMap,
     timeout_ms: u64,
+    cancellation: &CancellationToken,
 ) -> CoreResult<SkillBackendOutput> {
+    cancellation.check()?;
     let started_at = Instant::now();
     let endpoint = HttpEndpoint::parse(&config.host, &config.path)?;
     validate_http_endpoint(&endpoint)?;
@@ -314,21 +357,60 @@ fn execute_native_http(
         )));
     }
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(timeout_ms))
+    let client = reqwest::Client::builder()
         .no_proxy()
         .build()
-        .map_err(|error| http_external(format!("failed to build HTTP client: {error}")))?;
+        .map_err(|error| {
+            http_skill_operation_error(
+                ExternalDispatchOutcome::NotDispatched,
+                format!("failed to build HTTP client: {error}"),
+            )
+        })?;
     let mut request = client
         .request(method.clone(), endpoint.url())
         .header(reqwest::header::ACCEPT, "application/json");
     if method == reqwest::Method::POST {
         request = request.json(inputs);
     }
-    let response = request
-        .send()
-        .map_err(|error| http_external(format!("failed to execute HTTP backend: {error}")))?;
-    parse_http_response(response, elapsed_millis(started_at))
+    request = request.timeout(Duration::from_millis(timeout_ms));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| {
+            http_skill_operation_error(
+                ExternalDispatchOutcome::NotDispatched,
+                format!("failed to build HTTP runtime: {error}"),
+            )
+        })?;
+    runtime.block_on(async {
+        let mut send = Box::pin(request.send());
+        let mut response = loop {
+            match tokio::time::timeout(Duration::from_millis(25), &mut send).await {
+                Ok(result) => {
+                    break result.map_err(|error| {
+                        let outcome = if error.is_builder() || error.is_connect() {
+                            ExternalDispatchOutcome::NotDispatched
+                        } else {
+                            ExternalDispatchOutcome::DispatchedUnknown
+                        };
+                        http_skill_operation_error(
+                            outcome,
+                            format!("failed to execute HTTP backend: {error}"),
+                        )
+                    })?
+                }
+                Err(_) if cancellation.is_cancelled() => {
+                    return Err(CoreError::external_cancelled(
+                        "http_skill",
+                        ExternalDispatchOutcome::DispatchedUnknown,
+                    ));
+                }
+                Err(_) => {}
+            }
+        };
+        parse_http_response_async(&mut response, elapsed_millis(started_at), cancellation).await
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,38 +552,59 @@ fn default_port_for_scheme(scheme: &str) -> CoreResult<u16> {
     }
 }
 
-fn parse_http_response(
-    response: reqwest::blocking::Response,
+async fn parse_http_response_async(
+    response: &mut reqwest::Response,
     elapsed_ms: u64,
+    cancellation: &CancellationToken,
 ) -> CoreResult<SkillBackendOutput> {
     let status = response.status();
     if !status.is_success() {
-        return Err(http_external(format!(
-            "HTTP backend returned status {status}"
-        )));
+        return Err(http_skill_operation_error(
+            ExternalDispatchOutcome::ResponseReceived,
+            format!("HTTP backend returned status {status}"),
+        ));
     }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_HTTP_RESPONSE_BYTES)
     {
-        return Err(CoreError::ResourceLimitExceeded {
-            resource: "http_skill_response".to_owned(),
-            reason: format!("response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"),
-        });
+        return Err(http_skill_operation_error(
+            ExternalDispatchOutcome::DispatchedUnknown,
+            format!("http_skill_response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"),
+        ));
     }
-    let mut limited = response.take(MAX_HTTP_RESPONSE_BYTES.saturating_add(1));
     let mut bytes = Vec::new();
-    limited
-        .read_to_end(&mut bytes)
-        .map_err(|error| http_external(format!("failed to read HTTP response: {error}")))?;
-    if bytes.len() as u64 > MAX_HTTP_RESPONSE_BYTES {
-        return Err(CoreError::ResourceLimitExceeded {
-            resource: "http_skill_response".to_owned(),
-            reason: format!("response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"),
-        });
+    loop {
+        let chunk = match tokio::time::timeout(Duration::from_millis(25), response.chunk()).await {
+            Ok(result) => result.map_err(|error| {
+                http_skill_operation_error(
+                    ExternalDispatchOutcome::DispatchedUnknown,
+                    format!("failed to read HTTP response: {error}"),
+                )
+            })?,
+            Err(_) if cancellation.is_cancelled() => {
+                return Err(CoreError::external_cancelled(
+                    "http_skill",
+                    ExternalDispatchOutcome::DispatchedUnknown,
+                ));
+            }
+            Err(_) => continue,
+        };
+        let Some(chunk) = chunk else { break };
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() as u64 > MAX_HTTP_RESPONSE_BYTES {
+            return Err(http_skill_operation_error(
+                ExternalDispatchOutcome::DispatchedUnknown,
+                format!("http_skill_response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"),
+            ));
+        }
     }
-    let value = serde_json::from_slice::<Value>(&bytes)
-        .map_err(|error| http_external(format!("failed to parse HTTP JSON response: {error}")))?;
+    let value = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+        http_skill_operation_error(
+            ExternalDispatchOutcome::DispatchedUnknown,
+            format!("failed to parse HTTP JSON response: {error}"),
+        )
+    })?;
     let mut output = match serde_json::from_value::<SkillBackendOutput>(value.clone()) {
         Ok(output) if !output.outputs.is_empty() || !output.logs.is_empty() => output,
         _ => {
@@ -521,9 +624,13 @@ fn parse_http_response(
     Ok(output)
 }
 
-fn http_external(message: impl Into<String>) -> CoreError {
-    CoreError::External {
+fn http_skill_operation_error(
+    outcome: ExternalDispatchOutcome,
+    message: impl Into<String>,
+) -> CoreError {
+    CoreError::ExternalOperation {
         service: "http_skill".to_owned(),
+        outcome,
         message: message.into(),
     }
 }
@@ -533,14 +640,16 @@ fn execute_native_wasm(
     inputs: &crate::contracts::PortMap,
     timeout_ms: u64,
     max_memory_bytes: Option<u64>,
+    cancellation: &CancellationToken,
 ) -> CoreResult<SkillBackendOutput> {
+    cancellation.check()?;
     let started_at = Instant::now();
     let module_path = Path::new(&config.module_path);
     let wasm = std::fs::read(module_path)?;
     let mut engine_config = wasmi::Config::default();
     engine_config.consume_fuel(true);
     let engine = wasmi::Engine::new(&engine_config);
-    let module = wasmi::Module::new(&engine, &mut &wasm[..])
+    let module = wasmi::Module::new(&engine, &wasm[..])
         .map_err(|error| wasm_external(format!("failed to compile wasm module: {error}")))?;
     let mut store = wasmi::Store::new(&engine, WasmStoreState::new(max_memory_bytes)?);
     store.limiter(|state| &mut state.limits);
@@ -581,6 +690,7 @@ fn execute_native_wasm(
     let status = run
         .call(&mut store, ())
         .map_err(|error| wasm_runtime_error("wasm run failed", error, timeout_ms))?;
+    cancellation.check()?;
     if status != 0 {
         return Err(wasm_external(format!("wasm run returned status {status}")));
     }

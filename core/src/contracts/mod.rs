@@ -1,4 +1,6 @@
 pub mod artifacts;
+pub mod cancellation;
+pub mod content;
 pub mod errors;
 pub mod events;
 pub mod permissions;
@@ -8,6 +10,8 @@ pub mod resources;
 pub mod workflow;
 
 pub use artifacts::*;
+pub use cancellation::*;
+pub use content::*;
 pub use errors::*;
 pub use events::*;
 pub use permissions::*;

@@ -51,6 +51,9 @@ impl CostCategory {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewCostRecord {
     pub occurred_at_ms: u64,
+    /// 外部副作用的稳定操作 ID；存在时用于成本写入幂等去重。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub category: CostCategory,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
@@ -76,6 +79,13 @@ pub struct NewCostRecord {
 impl NewCostRecord {
     /// 校验成本金额合法。
     pub fn validate(&self) -> CoreResult<()> {
+        if self
+            .operation_id
+            .as_deref()
+            .is_some_and(|operation_id| operation_id.trim().is_empty())
+        {
+            return Err(CoreError::validation("cost operation_id cannot be blank"));
+        }
         if !self.amount_usd.is_finite() || self.amount_usd < 0.0 {
             return Err(CoreError::validation(
                 "amount_usd must be finite and non-negative",
@@ -99,6 +109,7 @@ pub struct CostRecord {
 pub struct CostQuery {
     pub start_ms: Option<u64>,
     pub end_ms: Option<u64>,
+    pub operation_id: Option<String>,
     pub workflow_id: Option<WorkflowId>,
     pub run_id: Option<RunId>,
     pub node_id: Option<NodeId>,
