@@ -489,6 +489,9 @@ pub struct WorkflowRunState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_node_id: Option<NodeId>,
     pub status: RunStatus,
+    /// 运行因节点退避而排队时的持久化唤醒时间；None 表示可立即领取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at_ms: Option<u64>,
     #[serde(default = "default_run_control")]
     pub control: RunControl,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -531,6 +534,7 @@ impl WorkflowRunState {
             prepared_workflow: None,
             start_node_id: None,
             status: RunStatus::Queued,
+            next_retry_at_ms: None,
             control: RunControl::Continue,
             pause_reason: None,
             stop_reason: None,
@@ -697,6 +701,7 @@ impl WorkflowRuntime {
         let reason = reason.into();
         self.state.control = RunControl::Stop;
         self.state.stop_reason = Some(reason.clone());
+        self.state.next_retry_at_ms = None;
         // Paused/Queued：无 in-flight 节点，直接 Stopped；Running：Stopping 触发取消。
         let event_type = if matches!(self.state.status, RunStatus::Paused | RunStatus::Queued) {
             self.state.status = RunStatus::Stopped;
@@ -724,6 +729,7 @@ impl WorkflowRuntime {
         }
         self.state.control = RunControl::Continue;
         self.state.pause_reason = None;
+        self.state.next_retry_at_ms = None;
         if self.state.status == RunStatus::Paused {
             self.state.status = RunStatus::Queued;
         }
@@ -776,6 +782,7 @@ impl WorkflowRuntime {
         if self.state.status == RunStatus::Paused {
             self.state.control = RunControl::Continue;
             self.state.pause_reason = None;
+            self.state.next_retry_at_ms = None;
             self.state.status = RunStatus::Queued;
         }
         Ok(())
@@ -810,6 +817,7 @@ impl WorkflowRuntime {
 
         self.state.control = RunControl::Continue;
         self.state.pause_reason = None;
+        self.state.next_retry_at_ms = None;
         self.state.status = RunStatus::Running;
         self.record_event(
             WorkflowRuntimeEventType::RunStarted,
@@ -849,6 +857,7 @@ impl WorkflowRuntime {
             // 和 Loop 重跑目标，避免链式工作流每完成一步都重新遍历全部节点。
             let Some(node_id) = ready_queue.pop() else {
                 if all_nodes_succeeded(workflow, &self.state) {
+                    self.state.next_retry_at_ms = None;
                     self.state.status = RunStatus::Succeeded;
                     self.record_event(
                         WorkflowRuntimeEventType::RunSucceeded,
@@ -859,7 +868,8 @@ impl WorkflowRuntime {
                     persist_if_needed(store, &mut self.state)?;
                     return Ok(self.state.status);
                 }
-                if has_pending_retry_backoff(&self.state) {
+                if let Some(next_retry_at_ms) = next_pending_retry_at_ms(&self.state) {
+                    self.state.next_retry_at_ms = Some(next_retry_at_ms);
                     self.state.status = RunStatus::Queued;
                     persist_if_needed(store, &mut self.state)?;
                     return Ok(self.state.status);
@@ -916,6 +926,7 @@ impl WorkflowRuntime {
                         persist_if_needed(store, &mut self.state)?;
                         continue;
                     }
+                    self.state.next_retry_at_ms = None;
                     self.state.status = if self
                         .state
                         .nodes
@@ -1109,6 +1120,7 @@ impl WorkflowRuntime {
                         persist_if_needed(store, &mut self.state)?;
                         continue;
                     }
+                    self.state.next_retry_at_ms = None;
                     self.state.status = if self
                         .state
                         .nodes
@@ -1207,6 +1219,7 @@ impl WorkflowRuntime {
         {
             self.state.control = RunControl::Continue;
             self.state.pause_reason = None;
+            self.state.next_retry_at_ms = None;
             self.state.status = RunStatus::Queued;
         }
         Ok(())
@@ -1259,6 +1272,7 @@ impl WorkflowRuntime {
         if self.state.status == RunStatus::Paused {
             self.state.control = RunControl::Continue;
             self.state.pause_reason = None;
+            self.state.next_retry_at_ms = None;
             self.state.status = RunStatus::Queued;
         }
         Ok(())
@@ -1329,6 +1343,7 @@ impl WorkflowRuntime {
         if self.state.status == RunStatus::Paused {
             self.state.control = RunControl::Continue;
             self.state.pause_reason = None;
+            self.state.next_retry_at_ms = None;
             self.state.status = RunStatus::Queued;
         }
         Ok(())
@@ -1995,6 +2010,7 @@ impl WorkflowRuntime {
         let reason = reason.into();
         self.state.control = RunControl::Pause;
         self.state.pause_reason = Some(reason.clone());
+        self.state.next_retry_at_ms = None;
         self.state.events.push(reason);
         self.state.status = RunStatus::Paused;
         self.record_event(
@@ -2010,6 +2026,7 @@ impl WorkflowRuntime {
         let reason = reason.into();
         self.state.control = RunControl::Stop;
         self.state.stop_reason = Some(reason.clone());
+        self.state.next_retry_at_ms = None;
         self.state.events.push(reason);
         self.state.status = RunStatus::Stopped;
         self.record_event(
@@ -2369,6 +2386,7 @@ fn rebase_worker_state_after_conflict(
     latest.retry_policy = worker_state.retry_policy;
     if latest.control == RunControl::Continue {
         latest.status = worker_state.status;
+        latest.next_retry_at_ms = worker_state.next_retry_at_ms;
         latest.failure = worker_state.failure.clone();
     }
     latest.events.extend(local_legacy_tail);
@@ -2799,17 +2817,20 @@ fn retry_backoff_ready(state: &WorkflowRunState, node_id: &NodeId) -> bool {
     unix_timestamp_ms() >= next_retry_at_ms
 }
 
-/// 判断当前运行是否只是等待下一次退避重试。
-fn has_pending_retry_backoff(state: &WorkflowRunState) -> bool {
+/// 返回当前运行最早的未到期退避时间。
+fn next_pending_retry_at_ms(state: &WorkflowRunState) -> Option<u64> {
     let now = unix_timestamp_ms();
-    state.nodes.values().any(|node| {
-        node.status == RunStatus::Queued
-            && node
-                .error_state
+    state
+        .nodes
+        .values()
+        .filter(|node| node.status == RunStatus::Queued)
+        .filter_map(|node| {
+            node.error_state
                 .as_ref()
                 .and_then(|error| error.next_retry_at_ms)
-                .is_some_and(|next_retry_at_ms| next_retry_at_ms > now)
-    })
+        })
+        .filter(|next_retry_at_ms| *next_retry_at_ms > now)
+        .min()
 }
 
 fn should_pause_for_breakpoint(

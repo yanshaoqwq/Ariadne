@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -148,30 +148,14 @@ impl AtomicCommitCoordinator {
         let config_dir = project_root.join(".config");
         validate_real_directory(&config_dir, "project config directory")?;
 
-        let app_state_absolute = absolute_lexical(app_state_root)?;
-        if app_state_absolute.starts_with(&project_root) {
-            return Err(CoreError::validation(
-                "atomic commit authority must be outside the project tree",
-            ));
-        }
-        fs::create_dir_all(&app_state_absolute)?;
-        let app_state_root = app_state_absolute.canonicalize()?;
-        if app_state_root.starts_with(&project_root) {
-            return Err(CoreError::validation(
-                "atomic commit authority resolves inside the project tree",
-            ));
-        }
-
-        let project_identity = project_identity(&project_root);
-        let authority_dir = app_state_root.join(AUTHORITY_DIR).join(&project_identity);
-        fs::create_dir_all(&authority_dir)?;
+        let project_identity = atomic_commit_project_identity(&project_root);
+        let authority_dir = crate::config::app_state::project_authority_dir_with_identity(
+            &project_root,
+            app_state_root,
+            AUTHORITY_DIR,
+            &project_identity,
+        )?;
         validate_real_directory(&authority_dir, "atomic commit authority directory")?;
-        let authority_dir = authority_dir.canonicalize()?;
-        if !authority_dir.starts_with(&app_state_root) || authority_dir.starts_with(&project_root) {
-            return Err(CoreError::validation(
-                "atomic commit authority escaped trusted app state",
-            ));
-        }
 
         Ok(Self {
             config_dir,
@@ -724,7 +708,7 @@ fn manifest_sha256(journal: &AtomicCommitJournal) -> CoreResult<String> {
     Ok(sha256_hex(&manifest))
 }
 
-fn project_identity(project_root: &Path) -> String {
+fn atomic_commit_project_identity(project_root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"ariadne-project-atomic-authority-v1\0");
     #[cfg(unix)]
@@ -740,25 +724,6 @@ fn project_identity(project_root: &Path) -> String {
         }
     }
     hex_encode(&hasher.finalize())
-}
-
-fn absolute_lexical(path: &Path) -> CoreResult<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let _ = normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    Ok(normalized)
 }
 
 fn validate_transaction_id(value: &str) -> CoreResult<()> {

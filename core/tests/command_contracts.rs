@@ -20,14 +20,15 @@ use ariadne::commands::{
     get_workflow_settings_impl, get_works_tree, import_chapter, list_confirmations,
     list_external_workflow_tools_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
     mark_workflow_run_failed_impl, mark_workflow_run_failed_with_lease_impl, open_project,
-    override_confirmation_output, pack_workflow_selection_impl, pause_workflow,
-    process_index_outbox_impl, project_ai_chat, project_ai_chat_impl, query_run_logs,
-    quick_edit_impl, register_executor_adapters_for_project, resolve_confirmation_impl,
-    resolve_project_references, resolve_workflow_operation_in_doubt, restore_to_new_branch,
-    resume_from_node, resume_workflow, run_workflow, run_workflow_impl, save_app_settings_impl,
-    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
-    save_node_preset_settings_impl, save_permissions_settings_impl, save_provider_key_impl,
-    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings,
+    override_confirmation_output, pack_workflow_selection_impl,
+    pack_workflow_selection_impl_with_operation_id, pause_workflow, process_index_outbox_impl,
+    project_ai_chat, project_ai_chat_impl, query_run_logs, quick_edit_impl,
+    register_executor_adapters_for_project, resolve_confirmation_impl, resolve_project_references,
+    resolve_workflow_operation_in_doubt, restore_to_new_branch, resume_from_node, resume_workflow,
+    run_workflow, run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
+    save_document_content_impl, save_git_settings_impl, save_node_preset_settings_impl,
+    save_permissions_settings_impl, save_provider_key_impl, save_provider_settings_impl,
+    save_rag_settings_impl, save_template_repository_settings,
     save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
     search_project_documents_impl, set_project_root, start_workflow_with_request, stop_workflow,
     update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
@@ -403,17 +404,31 @@ fn f10d_open_project_recovers_orphaned_queued_run() {
     state2.status = RunStatus::Queued;
     store.create_state(&state2).unwrap();
     set_project_root(&app, temp.path().to_string_lossy().into_owned()).unwrap();
-    let mut claimed2 = None;
+    let mut recovered2 = false;
     for _ in 0..50 {
         if let Some(lease) = store.load_worker_lease(&workflow.id, &run_id2).unwrap() {
-            claimed2 = Some(lease);
+            assert!(
+                lease.owner_id.starts_with("worker-recover-")
+                    || lease.owner_id.starts_with("worker-")
+            );
+            recovered2 = true;
+            break;
+        }
+        let current = store.load_state(&workflow.id, &run_id2).unwrap().unwrap();
+        if current.status != RunStatus::Queued {
+            assert_eq!(current.status, RunStatus::Succeeded);
+            assert!(current
+                .structured_events
+                .iter()
+                .any(|event| event.event_type == WorkflowRuntimeEventType::RunSucceeded));
+            recovered2 = true;
             break;
         }
         thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        claimed2.is_some(),
-        "set_project_root must also recover orphan Queued runs"
+        recovered2,
+        "set_project_root must claim or finish the orphan Queued run"
     );
 }
 
@@ -469,6 +484,93 @@ fn f10d_open_project_converges_legacy_orphan_to_fenced_failure() {
         .load_worker_lease(&workflow_id, &run_id)
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn f9_open_project_scheduler_wakes_future_retry_without_reopen() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+
+    let workflow_id = WorkflowId::from("f9-auto-retry");
+    let run_id = RunId::from("future-retry");
+    let workflow = WorkflowDefinition {
+        id: workflow_id.clone(),
+        name: "F9 auto retry".to_owned(),
+        nodes: vec![NodeInstance {
+            id: NodeId::from("start"),
+            type_name: "start".to_owned(),
+            label: None,
+            config: json!({}),
+            position: None,
+        }],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let retry_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 600;
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.prepared_workflow = Some(workflow);
+    state.next_retry_at_ms = Some(retry_at_ms);
+    state.nodes.insert(
+        NodeId::from("start"),
+        WorkflowNodeRuntimeState {
+            node_id: NodeId::from("start"),
+            status: RunStatus::Queued,
+            outputs: BTreeMap::new(),
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: Some("retry later".to_owned()),
+            error_state: Some(ariadne::workflow::NodeErrorState {
+                kind: ariadne::workflow::NodeErrorKind::Retryable,
+                message: "retry later".to_owned(),
+                attempts: 1,
+                max_attempts: 3,
+                retryable: true,
+                next_retry_delay_ms: Some(600),
+                next_retry_at_ms: Some(retry_at_ms),
+                recovery_suggestion: "retry".to_owned(),
+            }),
+            execution_attempts: 1,
+        },
+    );
+    let store = SqliteWorkflowRuntimeStore::open(project.path()).unwrap();
+    store.create_state(&state).unwrap();
+
+    let app = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    ariadne::commands::get_current_project(&app).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let before_deadline = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(before_deadline.status, RunStatus::Queued);
+    assert_eq!(
+        before_deadline.nodes[&NodeId::from("start")].execution_attempts,
+        1
+    );
+
+    let mut terminal = None;
+    for _ in 0..250 {
+        let current = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+        if current.status.is_terminal() {
+            terminal = Some(current);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let terminal = terminal.expect("future retry must wake without reopening the project");
+    assert_eq!(terminal.status, RunStatus::Succeeded);
+    assert_eq!(terminal.nodes[&NodeId::from("start")].execution_attempts, 2);
 }
 
 /// F2-a: second bootstrap is idempotent when index already populated.
@@ -810,6 +912,136 @@ fn workflow_graph_commands_save_and_load_canvas_shape() {
     assert_eq!(loaded.workflow_id, "draft-flow");
     assert_eq!(loaded.nodes[0].id, "writer");
     assert_eq!(loaded.nodes[0].data["prompt_template"], "writer.default");
+}
+
+#[test]
+fn n3_concurrent_workflow_saves_with_same_revision_allow_exactly_one_writer() {
+    use std::sync::Barrier;
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().to_path_buf();
+    let base = WorkflowGraphData {
+        workflow_id: "n3-cas".to_owned(),
+        name: "base".to_owned(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        metadata: Value::Null,
+        content_revision: None,
+        expected_revision: None,
+    };
+    let created = save_workflow_graph_impl(&project, base).unwrap();
+    let revision = created
+        .content_revision
+        .expect("created workflow must return its content revision");
+    assert_eq!(revision.len(), 64, "workflow revisions use SHA-256");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+    for name in ["writer-a", "writer-b"] {
+        let project = project.clone();
+        let revision = revision.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let graph = WorkflowGraphData {
+                workflow_id: "n3-cas".to_owned(),
+                name: name.to_owned(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                metadata: Value::Null,
+                content_revision: None,
+                expected_revision: Some(revision),
+            };
+            barrier.wait();
+            save_workflow_graph_impl(&project, graph)
+                .map(|saved| saved.name)
+                .map_err(|error| error.to_string())
+        }));
+    }
+
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("workflow writer thread"))
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    let conflict = results
+        .iter()
+        .find_map(|result| result.as_ref().err())
+        .expect("one concurrent writer must lose the revision CAS");
+    assert!(conflict.contains("revision conflict"), "{conflict}");
+
+    let loaded = load_workflow_graph_impl(&project, Some("n3-cas".to_owned())).unwrap();
+    assert!(loaded.name == "writer-a" || loaded.name == "writer-b");
+    assert_eq!(loaded.content_revision.as_deref().map(str::len), Some(64));
+}
+
+#[test]
+fn n8_pack_operation_id_replays_exact_result_and_rejects_reuse_for_other_request() {
+    let temp = tempfile::tempdir().unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "n8-pack".to_owned(),
+            name: "N8 Pack".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "writer".to_owned(),
+                r#type: "writer".to_owned(),
+                label: None,
+                data: Value::Null,
+                position: json!({"x": 0.0, "y": 0.0}),
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let base_revision = load_workflow_graph_impl(temp.path(), Some("n8-pack".to_owned()))
+        .unwrap()
+        .content_revision
+        .unwrap();
+
+    let first = pack_workflow_selection_impl_with_operation_id(
+        temp.path(),
+        "n8-pack".to_owned(),
+        vec!["writer".to_owned()],
+        Some("sub-writer".to_owned()),
+        Some("Writer Subflow".to_owned()),
+        Some(base_revision.clone()),
+        Some("desktop-pack-replay".to_owned()),
+    )
+    .unwrap();
+    let second = pack_workflow_selection_impl_with_operation_id(
+        temp.path(),
+        "n8-pack".to_owned(),
+        vec!["writer".to_owned()],
+        Some("sub-writer".to_owned()),
+        Some("Writer Subflow".to_owned()),
+        Some(base_revision.clone()),
+        Some("desktop-pack-replay".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        first, second,
+        "same operation id must return the durable receipt"
+    );
+    assert_eq!(first.operation_id.as_deref(), Some("desktop-pack-replay"));
+
+    let conflict = pack_workflow_selection_impl_with_operation_id(
+        temp.path(),
+        "n8-pack".to_owned(),
+        vec!["writer".to_owned()],
+        Some("sub-writer".to_owned()),
+        Some("Different title".to_owned()),
+        Some(base_revision),
+        Some("desktop-pack-replay".to_owned()),
+    )
+    .expect_err("reusing an operation id for another request must be rejected");
+    assert!(
+        conflict.contains("reused with a different request"),
+        "{conflict}"
+    );
 }
 
 #[test]

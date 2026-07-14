@@ -2532,25 +2532,83 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             return;
         }
+        var operationId = $"desktop-pack-{Guid.NewGuid():N}";
+        var title = _displayNames.Format("ui.workspace.subworkflow_title", new Dictionary<string, string>
+        {
+            ["count"] = selected.Length.ToString(),
+        });
         try
         {
-            var title = _displayNames.Format("ui.workspace.subworkflow_title", new Dictionary<string, string>
-            {
-                ["count"] = selected.Length.ToString(),
-            });
-            var report = await _backend.PackWorkflowSelectionAsync(CurrentWorkflowId, selected, null, title).ConfigureAwait(true);
-            ApplyGraph(report.Workflow);
-            CaptureSnapshot();
-            await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
-            StatusText = _displayNames.Format("ui.workspace.packed_selection", new Dictionary<string, string>
-            {
-                ["count"] = selected.Length.ToString(),
-            });
+            var report = await PackSelectionWithRecoveryAsync(
+                CurrentWorkflowId,
+                selected,
+                null,
+                title,
+                _workflowContentRevision,
+                operationId,
+                _backend).ConfigureAwait(true);
+            await ApplyPackReportAsync(report, selected.Length).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
             StatusText = UserFacingError.Format(ex, _displayNames);
         }
+    }
+
+    internal static async Task<WorkflowPackReport> PackSelectionWithRecoveryAsync(
+        string workflowId,
+        IReadOnlyList<string> selectedNodeIds,
+        string? subworkflowNodeId,
+        string? title,
+        string? expectedRevision,
+        string operationId,
+        IAriadneBackendClient backend,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await backend.PackWorkflowSelectionAsync(
+                workflowId,
+                selectedNodeIds,
+                subworkflowNodeId,
+                title,
+                expectedRevision,
+                operationId,
+                cancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            try
+            {
+                return await backend.GetPackOperationAsync(operationId, cancellationToken).ConfigureAwait(true);
+            }
+            catch when (!cancellationToken.IsCancellationRequested)
+            {
+                return await backend.PackWorkflowSelectionAsync(
+                    workflowId,
+                    selectedNodeIds,
+                    subworkflowNodeId,
+                    title,
+                    expectedRevision,
+                    operationId,
+                    cancellationToken).ConfigureAwait(true);
+            }
+        }
+    }
+
+    private async Task ApplyPackReportAsync(WorkflowPackReport report, int selectedCount)
+    {
+        ApplyGraph(report.Workflow);
+        CaptureSnapshot();
+        await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
+        StatusText = _displayNames.Format("ui.workspace.packed_selection", new Dictionary<string, string>
+        {
+            ["count"] = selectedCount.ToString(),
+        });
     }
 
     private async Task LoadConfirmationsAsync()

@@ -360,7 +360,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
-    public Task<WorkflowPackReport> PackWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, string? subworkflowNodeId = null, string? title = null, CancellationToken cancellationToken = default)
+    public Task<WorkflowPackReport> PackWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, string? subworkflowNodeId = null, string? title = null, string? expectedRevision = null, string? operationId = null, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<WorkflowPackReport>("pack_workflow_selection", new
         {
@@ -368,6 +368,16 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             selected_node_ids = selectedNodeIds,
             subworkflow_node_id = subworkflowNodeId,
             title,
+            expected_revision = expectedRevision,
+            operation_id = operationId,
+        }, cancellationToken);
+    }
+
+    public Task<WorkflowPackReport> GetPackOperationAsync(string operationId, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowPackReport>("get_pack_operation", new
+        {
+            operation_id = operationId,
         }, cancellationToken);
     }
 

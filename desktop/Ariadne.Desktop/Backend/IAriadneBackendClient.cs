@@ -127,7 +127,9 @@ public interface IAriadneBackendClient
 
     Task<WorkflowGraphData> ExportWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, CancellationToken cancellationToken = default);
 
-    Task<WorkflowPackReport> PackWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, string? subworkflowNodeId = null, string? title = null, CancellationToken cancellationToken = default);
+    Task<WorkflowPackReport> PackWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, string? subworkflowNodeId = null, string? title = null, string? expectedRevision = null, string? operationId = null, CancellationToken cancellationToken = default);
+
+    Task<WorkflowPackReport> GetPackOperationAsync(string operationId, CancellationToken cancellationToken = default);
 
     Task<WorksTreeNode> GetWorksTreeAsync(CancellationToken cancellationToken = default);
 

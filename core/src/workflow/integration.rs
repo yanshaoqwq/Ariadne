@@ -709,9 +709,14 @@ pub struct WorkflowSummarizerNodeConfig {
 impl WorkflowSummarizerNodeConfig {
     /// 从持久化节点配置解析并执行与产品保存、运行预检相同的业务校验。
     pub fn from_value(value: serde_json::Value) -> CoreResult<Self> {
-        let config = serde_json::from_value::<Self>(value).map_err(|error| {
+        let mut config = serde_json::from_value::<Self>(value).map_err(|error| {
             CoreError::validation(format!("summarizer node config is invalid: {error}"))
         })?;
+        config.provider_id = config.provider_id.trim().to_owned();
+        config.model_id = config.model_id.trim().to_owned();
+        config.chapter_id = config.chapter_id.trim().to_owned();
+        config.chapter_document_id = config.chapter_document_id.trim().to_owned();
+        config.chapter_text_alias = config.chapter_text_alias.trim().to_owned();
         config.validate()?;
         Ok(config)
     }

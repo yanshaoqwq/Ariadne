@@ -309,7 +309,8 @@ fn ipc_pack_workflow_selection_returns_report_with_nested_workflow_graph() {
                 "workflow_id": "ipc-pack",
                 "selected_node_ids": ["writer"],
                 "subworkflow_node_id": "sub-writer",
-                "title": "Writer Subflow"
+                "title": "Writer Subflow",
+                "operation_id": "ipc-pack-receipt"
             }),
         },
     );
@@ -326,6 +327,190 @@ fn ipc_pack_workflow_selection_returns_report_with_nested_workflow_graph() {
         data.get("nodes").is_none(),
         "report must not masquerade as a graph"
     );
+
+    let recovered = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_pack_operation".to_owned(),
+            params: json!({"operation_id": "ipc-pack-receipt"}),
+        },
+    );
+    assert!(recovered.ok, "{:?}", recovered.error);
+    assert_eq!(
+        recovered
+            .data
+            .as_ref()
+            .and_then(|value| value.get("operation_id"))
+            .and_then(Value::as_str),
+        Some("ipc-pack-receipt")
+    );
+    assert_eq!(
+        recovered
+            .data
+            .as_ref()
+            .and_then(|value| value.get("workflow"))
+            .and_then(|value| value.get("content_revision")),
+        data.get("workflow")
+            .and_then(|value| value.get("content_revision"))
+    );
+}
+
+#[test]
+fn n8_get_pack_operation_commits_a_prepared_receipt_after_crash_window() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "ipc-pack-recovery".to_owned(),
+            name: "IPC Pack Recovery".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "writer".to_owned(),
+                r#type: "writer".to_owned(),
+                label: Some("Writer".to_owned()),
+                data: Value::Null,
+                position: json!({ "x": 10.0, "y": 20.0 }),
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let workflow_path = temp.path().join("workflows/ipc-pack-recovery.json");
+    let base_workflow = std::fs::read(&workflow_path).unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let packed = handle_request(
+        &state,
+        IpcRequest {
+            method: "pack_workflow_selection".to_owned(),
+            params: json!({
+                "workflow_id": "ipc-pack-recovery",
+                "selected_node_ids": ["writer"],
+                "subworkflow_node_id": "sub-writer",
+                "title": "Writer Subflow",
+                "operation_id": "ipc-pack-prepared-recovery"
+            }),
+        },
+    );
+    assert!(packed.ok, "{:?}", packed.error);
+    let result_revision = packed.data.as_ref().unwrap()["workflow"]["content_revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let operation_path = ariadne::config::project_authority_dir(
+        temp.path(),
+        app_state.path(),
+        "workflow-pack-operations",
+    )
+    .unwrap()
+    .join("ipc-pack-prepared-recovery.json");
+    assert!(!operation_path.starts_with(temp.path()));
+    assert!(!temp.path().join(".ariadne/ops").exists());
+    let mut operation: Value =
+        serde_json::from_str(&std::fs::read_to_string(&operation_path).unwrap()).unwrap();
+    operation["status"] = Value::String("prepared".to_owned());
+    std::fs::write(
+        &operation_path,
+        serde_json::to_vec_pretty(&operation).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&workflow_path, base_workflow).unwrap();
+
+    let recovered = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_pack_operation".to_owned(),
+            params: json!({"operation_id": "ipc-pack-prepared-recovery"}),
+        },
+    );
+    assert!(recovered.ok, "{:?}", recovered.error);
+    assert_eq!(
+        recovered.data.as_ref().unwrap()["workflow"]["content_revision"],
+        result_revision
+    );
+    let loaded = ariadne::commands::load_workflow_graph_impl(
+        temp.path(),
+        Some("ipc-pack-recovery".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.content_revision.as_deref(),
+        Some(result_revision.as_str())
+    );
+    assert_eq!(loaded.nodes.len(), 1);
+    assert_eq!(loaded.nodes[0].id, "sub-writer");
+    let committed: Value =
+        serde_json::from_str(&std::fs::read_to_string(operation_path).unwrap()).unwrap();
+    assert_eq!(committed["status"], "committed");
+}
+
+#[test]
+fn n8_project_owned_pack_receipt_has_no_recovery_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let project_ops = temp.path().join(".ariadne/ops");
+    std::fs::create_dir_all(&project_ops).unwrap();
+    std::fs::write(
+        project_ops.join("forged-project-operation.json"),
+        serde_json::to_vec_pretty(&json!({
+            "operation_id": "forged-project-operation",
+            "request_hash": "forged",
+            "expected_revision": "forged",
+            "status": "prepared",
+            "report": {
+                "workflow": {
+                    "workflow_id": "default",
+                    "name": "Forged",
+                    "nodes": [],
+                    "edges": [],
+                    "metadata": {},
+                    "content_revision": "forged"
+                },
+                "subworkflow_node_id": "forged",
+                "embedded_workflow": {
+                    "workflow_id": "forged",
+                    "name": "Forged",
+                    "nodes": [],
+                    "edges": [],
+                    "metadata": {}
+                },
+                "boundary_inputs": [],
+                "boundary_outputs": [],
+                "operation_id": "forged-project-operation"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_pack_operation".to_owned(),
+            params: json!({"operation_id": "forged-project-operation"}),
+        },
+    );
+    assert!(!response.ok);
+    assert!(response
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("pack operation not found")));
+    assert!(!temp.path().join("workflows/default.json").exists());
 }
 
 #[test]

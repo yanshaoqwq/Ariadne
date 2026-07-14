@@ -288,13 +288,14 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "pack_workflow_selection" => {
             let params: PackWorkflowSelectionParams = params(request.params)?;
-            ok(commands::pack_workflow_selection_with_revision(
+            ok(commands::pack_workflow_selection_with_operation_id(
                 state,
                 params.workflow_id,
                 params.selected_node_ids,
                 params.subworkflow_node_id,
                 params.title,
                 params.expected_revision,
+                params.operation_id,
             )?)
         }
         "get_pack_operation" => {
@@ -753,6 +754,8 @@ struct PackWorkflowSelectionParams {
     title: Option<String>,
     #[serde(default)]
     expected_revision: Option<String>,
+    #[serde(default)]
+    operation_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

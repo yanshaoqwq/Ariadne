@@ -66,13 +66,17 @@ use crate::workflow::{
     execute_project_retrieval_node_for_project, execute_summarizer_node,
     validate_workflow_execution_contracts, BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink,
     RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
-    SqliteWorkflowRuntimeStore, WorkflowRunFailure, WorkflowRuntime, WorkflowRuntimeEvent,
-    WorkflowRuntimeEventType, WorkflowRuntimeStore, WorkflowStopRequestResult, WorkflowWorkerLease,
+    SqliteWorkflowRuntimeStore, WorkflowRunFailure, WorkflowRunnableClaimResult, WorkflowRuntime,
+    WorkflowRuntimeEvent, WorkflowRuntimeEventType, WorkflowRuntimeStore,
+    WorkflowStopRequestResult, WorkflowWorkerLease,
 };
 
 const WORKFLOW_WORKER_LEASE_TTL_MS: u64 = 30_000;
 const WORKFLOW_WORKER_HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 const WORKFLOW_WORKER_LEASE_LOST_ERROR: &str = "workflow worker lease was lost during execution";
+const WORKFLOW_SCHEDULER_LEASE_TTL_MS: u64 = 3_000;
+const WORKFLOW_SCHEDULER_MAX_SLEEP_MS: u64 = 1_000;
+const WORKFLOW_SCHEDULER_MAX_CLAIMS_PER_TICK: usize = 64;
 
 pub const WORKFLOW_STATUS_UPDATE_EVENT: &str = "workflow_status_update";
 pub const RUN_LOG_APPENDED_EVENT: &str = "run_log_appended";
@@ -91,6 +95,21 @@ const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = "";
 const PROVIDER_MODEL_FETCH_TIMEOUT_SECS: u64 = 30;
 const MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
+struct WorkflowSchedulerHandle {
+    project_root: PathBuf,
+    stop_sender: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for WorkflowSchedulerHandle {
+    fn drop(&mut self) {
+        let _ = self.stop_sender.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// 桌面前端共享状态。project_root 可由 Avalonia IPC 显式设置，也可用环境变量/当前目录兜底。
 #[derive(Clone)]
 pub struct AriadneAppState {
@@ -98,6 +117,7 @@ pub struct AriadneAppState {
     app_state_root: PathBuf,
     secret_store: Arc<dyn SecretStore>,
     retrieval_runtime: Arc<Mutex<Option<Arc<ProjectRetrievalRuntime>>>>,
+    workflow_scheduler: Arc<Mutex<Option<WorkflowSchedulerHandle>>>,
 }
 
 impl AriadneAppState {
@@ -111,6 +131,7 @@ impl AriadneAppState {
             app_state_root: app_state_root.into(),
             secret_store,
             retrieval_runtime: Arc::new(Mutex::new(None)),
+            workflow_scheduler: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -133,6 +154,40 @@ impl AriadneAppState {
         &self.app_state_root
     }
 
+    fn ensure_workflow_scheduler(&self) -> CommandResult<()> {
+        let project_root = canonicalize_initialized_project_root(&self.project_root()?)?;
+        let retrieval_runtime = self.retrieval_runtime()?;
+        let mut slot = self
+            .workflow_scheduler
+            .lock()
+            .map_err(|_| "workflow scheduler lock poisoned".to_owned())?;
+        if slot.as_ref().is_some_and(|scheduler| {
+            scheduler.project_root == project_root
+                && scheduler
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| !thread.is_finished())
+        }) {
+            return Ok(());
+        }
+        drop(slot.take());
+        let (stop_sender, stop_receiver) = std::sync::mpsc::channel::<()>();
+        let scheduler_root = project_root.clone();
+        let secrets = Arc::clone(&self.secret_store);
+        let thread = std::thread::Builder::new()
+            .name("ariadne-workflow-scheduler".to_owned())
+            .spawn(move || {
+                workflow_scheduler_loop(scheduler_root, secrets, retrieval_runtime, stop_receiver);
+            })
+            .map_err(error_to_string)?;
+        *slot = Some(WorkflowSchedulerHandle {
+            project_root,
+            stop_sender,
+            thread: Some(thread),
+        });
+        Ok(())
+    }
+
     pub fn set_project_root(&self, project_root: impl Into<PathBuf>) -> CommandResult<()> {
         let project_root = project_root.into();
         let project_root = canonicalize_initialized_project_root(&project_root)?;
@@ -151,6 +206,11 @@ impl AriadneAppState {
                 .lock()
                 .map_err(|_| "project root lock poisoned".to_owned())?;
             *locked = project_root;
+            drop(locked);
+            drop(runtime_slot);
+            if let Ok(mut scheduler_slot) = self.workflow_scheduler.lock() {
+                drop(scheduler_slot.take());
+            }
             return Ok(());
         }
         let runtime = Arc::new(
@@ -165,6 +225,9 @@ impl AriadneAppState {
         let previous = runtime_slot.replace(runtime);
         drop(locked);
         drop(runtime_slot);
+        if let Ok(mut scheduler_slot) = self.workflow_scheduler.lock() {
+            drop(scheduler_slot.take());
+        }
         // 旧运行时可能仍被已领取的索引任务持有；最后一个 Arc 释放时再停止 sidecar，
         // 避免项目切换在任务中途杀掉其基础设施。
         drop(previous);
@@ -436,6 +499,23 @@ pub struct WorkflowPackGraphReport {
     /// Stable id so clients can re-fetch the pack result if IPC response is lost (N8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowPackOperationStatus {
+    Prepared,
+    Committed,
+}
+
+/// N8：打包先持久化可恢复意图，再替换工作流，避免“文件已写、回执未写”的盲区。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WorkflowPackOperationRecord {
+    operation_id: String,
+    request_hash: String,
+    expected_revision: String,
+    status: WorkflowPackOperationStatus,
+    report: WorkflowPackGraphReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -942,11 +1022,15 @@ pub fn open_project(
         Arc::clone(&state.secret_store),
         Some(state.retrieval_runtime()?),
     )?;
+    state.ensure_workflow_scheduler()?;
     current_project_status(&project_root)
 }
 
 pub fn get_current_project(state: &AriadneAppState) -> CommandResult<CurrentProjectStatus> {
-    current_project_status(&project_root_from_state(state, None)?)
+    let project_root = project_root_from_state(state, None)?;
+    state.retrieval_runtime()?;
+    state.ensure_workflow_scheduler()?;
+    current_project_status(&project_root)
 }
 
 pub fn get_app_status(state: &AriadneAppState) -> CommandResult<AppStatus> {
@@ -967,10 +1051,14 @@ pub fn get_app_status(state: &AriadneAppState) -> CommandResult<AppStatus> {
     .map_err(error_to_string)?;
 
     let (current_project, badges) = match active_project {
-        Some(project_root) => (
-            current_project_status(&project_root)?,
-            get_sidebar_badges_impl(&project_root)?,
-        ),
+        Some(project_root) => {
+            state.retrieval_runtime()?;
+            state.ensure_workflow_scheduler()?;
+            (
+                current_project_status(&project_root)?,
+                get_sidebar_badges_impl(&project_root)?,
+            )
+        }
         None => (
             CurrentProjectStatus {
                 project_root: PathBuf::new(),
@@ -1045,6 +1133,7 @@ pub fn set_project_root(state: &AriadneAppState, project_root: String) -> Comman
         Arc::clone(&state.secret_store),
         Some(state.retrieval_runtime()?),
     )?;
+    state.ensure_workflow_scheduler()?;
     Ok(())
 }
 
@@ -1259,9 +1348,92 @@ pub fn pack_workflow_selection_impl(
     title: Option<String>,
     expected_revision: Option<String>,
 ) -> CommandResult<WorkflowPackGraphReport> {
+    let app_state_root = crate::config::trusted_app_state_for_project(project_root);
+    pack_workflow_selection_impl_with_operation_id_and_app_state(
+        project_root,
+        &app_state_root,
+        workflow_id,
+        selected_node_ids,
+        subworkflow_node_id,
+        title,
+        expected_revision,
+        None,
+    )
+}
+
+pub fn pack_workflow_selection_impl_with_operation_id(
+    project_root: &Path,
+    workflow_id: String,
+    selected_node_ids: Vec<String>,
+    subworkflow_node_id: Option<String>,
+    title: Option<String>,
+    expected_revision: Option<String>,
+    operation_id: Option<String>,
+) -> CommandResult<WorkflowPackGraphReport> {
+    let app_state_root = crate::config::trusted_app_state_for_project(project_root);
+    pack_workflow_selection_impl_with_operation_id_and_app_state(
+        project_root,
+        &app_state_root,
+        workflow_id,
+        selected_node_ids,
+        subworkflow_node_id,
+        title,
+        expected_revision,
+        operation_id,
+    )
+}
+
+pub fn pack_workflow_selection_impl_with_operation_id_and_app_state(
+    project_root: &Path,
+    app_state_root: &Path,
+    workflow_id: String,
+    selected_node_ids: Vec<String>,
+    subworkflow_node_id: Option<String>,
+    title: Option<String>,
+    expected_revision: Option<String>,
+    operation_id: Option<String>,
+) -> CommandResult<WorkflowPackGraphReport> {
     let _project_mutation = acquire_project_mutation_guard(project_root, "workflow_pack")?;
+    let request_hash = pack_workflow_request_hash(
+        &workflow_id,
+        &selected_node_ids,
+        subworkflow_node_id.as_deref(),
+        title.as_deref(),
+        expected_revision.as_deref(),
+    )?;
     let (mut workflow, loaded_revision) =
-        load_workflow_definition_with_revision(project_root, Some(workflow_id))?;
+        load_workflow_definition_with_revision(project_root, Some(workflow_id.clone()))?;
+    let operation_id = match operation_id {
+        Some(operation_id) => validate_pack_operation_id(operation_id)?,
+        None => generated_pack_operation_id(
+            &workflow_id,
+            &request_hash,
+            expected_revision.as_deref().unwrap_or(&loaded_revision),
+        ),
+    };
+    let operation_path = pack_operation_path(project_root, app_state_root, &operation_id)?;
+    let _operation_write =
+        crate::config::store::PathWriteLock::acquire(&operation_path).map_err(error_to_string)?;
+    if let Some(record) = load_pack_operation_record_if_exists(&operation_path, &operation_id)? {
+        return resume_pack_operation(
+            project_root,
+            &operation_path,
+            record,
+            &request_hash,
+            &loaded_revision,
+        );
+    }
+    if let Some(expected_revision) = expected_revision.as_deref() {
+        if expected_revision != loaded_revision {
+            return Err(format!(
+                "workflow content revision conflict for {workflow_id}: expected {expected_revision}, actual {loaded_revision}"
+            ));
+        }
+    }
+    let base_revision = expected_revision
+        .clone()
+        .unwrap_or_else(|| loaded_revision.clone());
+
     let report = pack_workflow_selection_in_workflow(
         &mut workflow,
         &selected_node_ids,
@@ -1270,25 +1442,36 @@ pub fn pack_workflow_selection_impl(
     )
     .map_err(error_to_string)?;
     let mut graph = workflow_to_graph(report.workflow);
-    graph.expected_revision = expected_revision.or(Some(loaded_revision));
-    let saved = save_workflow_graph_impl(project_root, graph)?;
+    graph.expected_revision = Some(base_revision.clone());
+    let prepared_workflow = graph_to_workflow(graph.clone())?;
+    validate_workflow_execution_contracts(&prepared_workflow).map_err(error_to_string)?;
+    let prepared_body =
+        serde_json::to_string_pretty(&prepared_workflow).map_err(error_to_string)?;
+    let mut prepared_graph = workflow_to_graph(prepared_workflow);
+    prepared_graph.content_revision = Some(content_revision_hash(prepared_body.as_bytes()));
     let pack_report = WorkflowPackGraphReport {
-        workflow: saved.clone(),
+        workflow: prepared_graph,
         subworkflow_node_id: report.subworkflow_node_id.as_str().to_owned(),
         embedded_workflow: workflow_to_graph(report.embedded_workflow),
         boundary_inputs: report.boundary_inputs,
         boundary_outputs: report.boundary_outputs,
-        operation_id: Some(format!(
-            "pack:{}:{}",
-            saved.workflow_id,
-            saved.content_revision.clone().unwrap_or_default()
-        )),
+        operation_id: Some(operation_id.clone()),
     };
-    // Durable pack result for re-fetch after lost IPC (N8).
-    if let Some(op_id) = &pack_report.operation_id {
-        persist_pack_operation(project_root, op_id, &pack_report)?;
-    }
-    Ok(pack_report)
+    let mut operation = WorkflowPackOperationRecord {
+        operation_id,
+        request_hash,
+        expected_revision: base_revision,
+        status: WorkflowPackOperationStatus::Prepared,
+        report: pack_report,
+    };
+    // N8：意图必须先于工作流 replace 落盘。若进程在二者之间退出，同一 operation_id
+    // 可从 prepared 记录继续；若 replace 已完成但状态尚未推进，可按结果 revision 对账。
+    persist_pack_operation_record(&operation_path, &operation)?;
+    let saved = save_workflow_graph_impl(project_root, graph)?;
+    operation.report.workflow = saved;
+    operation.status = WorkflowPackOperationStatus::Committed;
+    persist_pack_operation_record(&operation_path, &operation)?;
+    Ok(operation.report)
 }
 
 pub fn get_pack_operation(
@@ -1296,7 +1479,9 @@ pub fn get_pack_operation(
     operation_id: String,
 ) -> CommandResult<WorkflowPackGraphReport> {
     let project_root = project_root_from_state(state, None)?;
-    load_pack_operation(&project_root, &operation_id)
+    let _project_mutation =
+        acquire_project_mutation_guard(&project_root, "workflow_pack_recovery")?;
+    load_pack_operation(&project_root, state.app_state_root(), &operation_id)
 }
 
 pub fn pack_workflow_selection(
@@ -1324,14 +1509,36 @@ pub fn pack_workflow_selection_with_revision(
     title: Option<String>,
     expected_revision: Option<String>,
 ) -> CommandResult<WorkflowPackGraphReport> {
-    let project_root = project_root_from_state(state, None)?;
-    pack_workflow_selection_impl(
-        &project_root,
+    pack_workflow_selection_with_operation_id(
+        state,
         workflow_id,
         selected_node_ids,
         subworkflow_node_id,
         title,
         expected_revision,
+        None,
+    )
+}
+
+pub fn pack_workflow_selection_with_operation_id(
+    state: &AriadneAppState,
+    workflow_id: String,
+    selected_node_ids: Vec<String>,
+    subworkflow_node_id: Option<String>,
+    title: Option<String>,
+    expected_revision: Option<String>,
+    operation_id: Option<String>,
+) -> CommandResult<WorkflowPackGraphReport> {
+    let project_root = project_root_from_state(state, None)?;
+    pack_workflow_selection_impl_with_operation_id_and_app_state(
+        &project_root,
+        state.app_state_root(),
+        workflow_id,
+        selected_node_ids,
+        subworkflow_node_id,
+        title,
+        expected_revision,
+        operation_id,
     )
 }
 
@@ -1349,7 +1556,7 @@ pub fn start_workflow(
     start_node_id: Option<String>,
 ) -> CommandResult<WorkflowRunStarted> {
     let project_root = project_root_from_state(state, None)?;
-    start_workflow_request(
+    let started = start_workflow_request(
         &project_root,
         Arc::clone(&state.secret_store),
         Some(state.retrieval_runtime()?),
@@ -1358,7 +1565,9 @@ pub fn start_workflow(
             start_node_id,
             initial_inputs: BTreeMap::new(),
         },
-    )
+    )?;
+    state.ensure_workflow_scheduler()?;
+    Ok(started)
 }
 
 pub fn start_workflow_with_request(
@@ -1366,12 +1575,14 @@ pub fn start_workflow_with_request(
     request: RunWorkflowRequest,
 ) -> CommandResult<WorkflowRunStarted> {
     let project_root = project_root_from_state(state, None)?;
-    start_workflow_request(
+    let started = start_workflow_request(
         &project_root,
         Arc::clone(&state.secret_store),
         Some(state.retrieval_runtime()?),
         request,
-    )
+    )?;
+    state.ensure_workflow_scheduler()?;
+    Ok(started)
 }
 
 fn start_workflow_request(
@@ -2472,7 +2683,7 @@ pub fn project_ai_chat(
     let runner_root = project_root.clone();
     let runner_secrets = Arc::clone(&state.secret_store);
     let runner_retrieval = state.retrieval_runtime()?;
-    project_ai_chat_with_runner(
+    let response = project_ai_chat_with_runner(
         &project_root,
         state.secret_store.as_ref(),
         request,
@@ -2484,7 +2695,9 @@ pub fn project_ai_chat(
                 request,
             )
         },
-    )
+    )?;
+    state.ensure_workflow_scheduler()?;
+    Ok(response)
 }
 
 pub fn resolve_project_reference(
@@ -3131,6 +3344,10 @@ pub fn save_workflow_graph_impl(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(error_to_string)?;
     }
+    // N3：revision compare 与最终 replace 必须处于同一写权边界。否则两个调用可同时
+    // 通过同一 expected_revision，再依次覆盖文件并都向调用方报告成功。
+    let _workflow_write =
+        crate::config::store::PathWriteLock::acquire(&path).map_err(error_to_string)?;
     if path.exists() {
         let current_raw = std::fs::read(&path).map_err(error_to_string)?;
         let actual = content_revision_hash(&current_raw);
@@ -6433,6 +6650,115 @@ fn recover_orphaned_workflow_workers(
     Ok(recovered)
 }
 
+/// F9：应用级常驻 runnable scheduler。SQLite scheduler lease 决定唯一扫描者，
+/// 每条任务再通过原子 claim_next_runnable 获取独立 worker lease 与 generation。
+fn workflow_scheduler_loop(
+    project_root: PathBuf,
+    secrets: Arc<dyn SecretStore>,
+    retrieval_runtime: Arc<ProjectRetrievalRuntime>,
+    stop_receiver: std::sync::mpsc::Receiver<()>,
+) {
+    let owner_id = match new_run_id() {
+        Ok(id) => format!("scheduler-{}", id.as_str()),
+        Err(error) => {
+            eprintln!("[ariadne] workflow scheduler id failed: {error}");
+            return;
+        }
+    };
+    loop {
+        let sleep_ms =
+            match workflow_scheduler_tick(&project_root, &secrets, &retrieval_runtime, &owner_id) {
+                Ok(sleep_ms) => sleep_ms,
+                Err(error) => {
+                    eprintln!("[ariadne] workflow scheduler tick failed: {error}");
+                    WORKFLOW_SCHEDULER_MAX_SLEEP_MS
+                }
+            };
+        match stop_receiver.recv_timeout(Duration::from_millis(sleep_ms.max(1))) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+    if let Ok(store) = SqliteWorkflowRuntimeStore::open(&project_root) {
+        let _ = store.release_scheduler_lease(&owner_id);
+    }
+}
+
+fn workflow_scheduler_tick(
+    project_root: &Path,
+    secrets: &Arc<dyn SecretStore>,
+    retrieval_runtime: &Arc<ProjectRetrievalRuntime>,
+    owner_id: &str,
+) -> CommandResult<u64> {
+    let runtime_path = project_root.join(crate::workflow::RUNTIME_DB_FILE);
+    if !runtime_path.exists() {
+        return Ok(WORKFLOW_SCHEDULER_MAX_SLEEP_MS);
+    }
+    ensure_project_not_in_maintenance(project_root)?;
+    let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
+    let now_ms = workflow_lease_now_ms()?;
+    if !store
+        .acquire_scheduler_lease(owner_id, now_ms, WORKFLOW_SCHEDULER_LEASE_TTL_MS)
+        .map_err(error_to_string)?
+    {
+        return Ok(WORKFLOW_SCHEDULER_MAX_SLEEP_MS);
+    }
+    let project_mutation = acquire_project_mutation_guard(project_root, "workflow_scheduler")?;
+    for _ in 0..WORKFLOW_SCHEDULER_MAX_CLAIMS_PER_TICK {
+        let worker_owner = format!("worker-scheduled-{}", new_run_id()?.as_str());
+        let claim = store
+            .claim_next_runnable(
+                owner_id,
+                &worker_owner,
+                workflow_lease_now_ms()?,
+                WORKFLOW_WORKER_LEASE_TTL_MS,
+            )
+            .map_err(error_to_string)?;
+        let (state, lease) = match claim {
+            WorkflowRunnableClaimResult::Claimed { state, lease } => (state, lease),
+            WorkflowRunnableClaimResult::Stopped { .. } => continue,
+            WorkflowRunnableClaimResult::Empty => break,
+        };
+        if state.prepared_workflow.is_none() {
+            mark_workflow_run_failed_with_lease_impl(
+                project_root,
+                state.workflow_id.as_str(),
+                state.run_id.as_str(),
+                "workflow_legacy_snapshot_unrecoverable",
+                "workflow_scheduler",
+                "error.workflow.legacy_snapshot_unrecoverable",
+                "error.workflow.legacy_snapshot_unrecoverable.recovery",
+                &lease,
+            )?;
+            continue;
+        }
+        if let Err(error) = spawn_continue_workflow_worker_with_lease(
+            project_root.to_path_buf(),
+            Arc::clone(&secrets),
+            Some(Arc::clone(retrieval_runtime)),
+            state.workflow_id.as_str().to_owned(),
+            state.run_id.as_str().to_owned(),
+            lease,
+            Arc::clone(&project_mutation),
+        ) {
+            eprintln!(
+                "[ariadne] workflow scheduler spawn failed for {}/{}: {error}",
+                state.workflow_id.as_str(),
+                state.run_id.as_str()
+            );
+            continue;
+        }
+    }
+    let now_ms = workflow_lease_now_ms()?;
+    let sleep_ms = store
+        .next_runnable_at_ms(now_ms)
+        .map_err(error_to_string)?
+        .map(|deadline| deadline.saturating_sub(now_ms))
+        .unwrap_or(WORKFLOW_SCHEDULER_MAX_SLEEP_MS)
+        .min(WORKFLOW_SCHEDULER_MAX_SLEEP_MS);
+    Ok(sleep_ms)
+}
+
 fn spawn_continue_workflow_worker_with_lease(
     project_root: PathBuf,
     secrets: Arc<dyn SecretStore>,
@@ -6753,6 +7079,7 @@ fn mark_workflow_run_failed_in_store(
     }
     state.status = crate::contracts::RunStatus::Failed;
     state.control = RunControl::Stop;
+    state.next_retry_at_ms = None;
     state.failure = Some(WorkflowRunFailure {
         code: code.to_owned(),
         stage: stage.to_owned(),
@@ -7136,14 +7463,8 @@ pub fn resolve_workflow_operation_in_doubt(
 }
 
 fn content_revision_hash(bytes: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    // Stable content identity for CAS (not cryptographic). Prefer SHA when available.
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    // Also fold length so empty/non-empty never collide trivially with different content.
-    bytes.len().hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn confirmation_resolution_operation_id(
@@ -7218,55 +7539,227 @@ fn load_workflow_definition(
     Ok(load_workflow_definition_with_revision(project_root, workflow_id)?.0)
 }
 
-fn pack_ops_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".ariadne").join("ops")
+fn pack_workflow_request_hash(
+    workflow_id: &str,
+    selected_node_ids: &[String],
+    subworkflow_node_id: Option<&str>,
+    title: Option<&str>,
+    expected_revision: Option<&str>,
+) -> CommandResult<String> {
+    use sha2::{Digest, Sha256};
+    let canonical = serde_json::to_vec(&json!({
+        "workflow_id": workflow_id,
+        "selected_node_ids": selected_node_ids,
+        "subworkflow_node_id": subworkflow_node_id,
+        "title": title,
+        "expected_revision": expected_revision,
+    }))
+    .map_err(error_to_string)?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
 }
 
-fn persist_pack_operation(
+fn generated_pack_operation_id(
+    workflow_id: &str,
+    request_hash: &str,
+    base_revision: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in [workflow_id, request_hash, base_revision] {
+        hasher.update(part.len().to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("pack-{:x}", hasher.finalize())
+}
+
+fn validate_pack_operation_id(operation_id: String) -> CommandResult<String> {
+    let operation_id = operation_id.trim().to_owned();
+    if operation_id.is_empty() {
+        return Err("pack operation_id cannot be empty".to_owned());
+    }
+    if operation_id.len() > 128
+        || !operation_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')
+    {
+        return Err(
+            "pack operation_id must be at most 128 ASCII letters, digits, '-', '_' or ':'"
+                .to_owned(),
+        );
+    }
+    Ok(operation_id)
+}
+
+fn pack_operation_path(
     project_root: &Path,
+    app_state_root: &Path,
     operation_id: &str,
-    report: &WorkflowPackGraphReport,
-) -> CommandResult<()> {
-    let dir = pack_ops_dir(project_root);
-    std::fs::create_dir_all(&dir).map_err(error_to_string)?;
-    let safe = operation_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
+) -> CommandResult<PathBuf> {
+    validate_project_root(project_root)?;
+    let safe = validate_pack_operation_id(operation_id.to_owned())?;
+    let dir = crate::config::project_authority_dir(
+        project_root,
+        app_state_root,
+        "workflow-pack-operations",
+    )
+    .map_err(error_to_string)?;
     let path = dir.join(format!("{safe}.json"));
-    let body = serde_json::to_string_pretty(report).map_err(error_to_string)?;
-    crate::config::store::atomic_write(&path, body.as_bytes()).map_err(error_to_string)
+    ensure_path_under_root(&dir, &path).map_err(error_to_string)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(format!(
+                "pack operation record must be a regular file: {}",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error_to_string(error)),
+    }
+    Ok(path)
+}
+
+fn persist_pack_operation_record(
+    path: &Path,
+    record: &WorkflowPackOperationRecord,
+) -> CommandResult<()> {
+    let body = serde_json::to_string_pretty(record).map_err(error_to_string)?;
+    crate::config::store::atomic_write(path, body.as_bytes()).map_err(error_to_string)
+}
+
+fn load_pack_operation_record_if_exists(
+    path: &Path,
+    operation_id: &str,
+) -> CommandResult<Option<WorkflowPackOperationRecord>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error_to_string(error)),
+    };
+    if let Ok(record) = serde_json::from_str::<WorkflowPackOperationRecord>(&raw) {
+        if record.operation_id != operation_id {
+            return Err(format!(
+                "pack operation id mismatch: requested {operation_id}, stored {}",
+                record.operation_id
+            ));
+        }
+        return Ok(Some(record));
+    }
+    // 兼容 2026-07-13 版直接持久化 WorkflowPackGraphReport 的旧回执。
+    let mut report =
+        serde_json::from_str::<WorkflowPackGraphReport>(&raw).map_err(error_to_string)?;
+    if let Some(stored) = report.operation_id.as_deref() {
+        if stored != operation_id {
+            return Err(format!(
+                "pack operation id mismatch: requested {operation_id}, stored {stored}"
+            ));
+        }
+    } else {
+        report.operation_id = Some(operation_id.to_owned());
+    }
+    Ok(Some(WorkflowPackOperationRecord {
+        operation_id: operation_id.to_owned(),
+        request_hash: String::new(),
+        expected_revision: String::new(),
+        status: WorkflowPackOperationStatus::Committed,
+        report,
+    }))
+}
+
+fn resume_pack_operation(
+    project_root: &Path,
+    operation_path: &Path,
+    mut record: WorkflowPackOperationRecord,
+    request_hash: &str,
+    loaded_revision: &str,
+) -> CommandResult<WorkflowPackGraphReport> {
+    if record.request_hash.is_empty() {
+        return Err(format!(
+            "legacy pack operation {} has no request fingerprint and cannot be replayed",
+            record.operation_id
+        ));
+    }
+    if record.request_hash != request_hash {
+        return Err(format!(
+            "pack operation_id {} was reused with a different request",
+            record.operation_id
+        ));
+    }
+    if record.status == WorkflowPackOperationStatus::Committed {
+        return Ok(record.report);
+    }
+
+    let result_revision = record
+        .report
+        .workflow
+        .content_revision
+        .as_deref()
+        .ok_or_else(|| "prepared pack operation is missing result revision".to_owned())?;
+    if loaded_revision == result_revision {
+        record.status = WorkflowPackOperationStatus::Committed;
+        persist_pack_operation_record(operation_path, &record)?;
+        return Ok(record.report);
+    }
+    if loaded_revision != record.expected_revision {
+        return Err(format!(
+            "pack operation {} cannot resume: expected base revision {}, actual {}",
+            record.operation_id, record.expected_revision, loaded_revision
+        ));
+    }
+
+    let mut graph = record.report.workflow.clone();
+    graph.content_revision = None;
+    graph.expected_revision = Some(record.expected_revision.clone());
+    let saved = save_workflow_graph_impl(project_root, graph)?;
+    record.report.workflow = saved;
+    record.status = WorkflowPackOperationStatus::Committed;
+    persist_pack_operation_record(operation_path, &record)?;
+    Ok(record.report)
 }
 
 fn load_pack_operation(
     project_root: &Path,
+    app_state_root: &Path,
     operation_id: &str,
 ) -> CommandResult<WorkflowPackGraphReport> {
-    let safe = operation_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let path = pack_ops_dir(project_root).join(format!("{safe}.json"));
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            format!("pack operation not found: {operation_id}")
-        } else {
-            error_to_string(e)
-        }
-    })?;
-    serde_json::from_str(&raw).map_err(error_to_string)
+    let path = pack_operation_path(project_root, app_state_root, operation_id)?;
+    let _operation_read =
+        crate::config::store::PathWriteLock::acquire(&path).map_err(error_to_string)?;
+    let mut record = load_pack_operation_record_if_exists(&path, operation_id)?
+        .ok_or_else(|| format!("pack operation not found: {operation_id}"))?;
+    if record.status == WorkflowPackOperationStatus::Committed {
+        return Ok(record.report);
+    }
+
+    let (_, current_revision) = load_workflow_definition_with_revision(
+        project_root,
+        Some(record.report.workflow.workflow_id.clone()),
+    )?;
+    let result_revision = record
+        .report
+        .workflow
+        .content_revision
+        .as_deref()
+        .ok_or_else(|| "prepared pack operation is missing result revision".to_owned())?;
+    if current_revision == result_revision {
+        record.status = WorkflowPackOperationStatus::Committed;
+        persist_pack_operation_record(&path, &record)?;
+        return Ok(record.report);
+    }
+    if current_revision == record.expected_revision {
+        let mut graph = record.report.workflow.clone();
+        graph.content_revision = None;
+        graph.expected_revision = Some(record.expected_revision.clone());
+        let saved = save_workflow_graph_impl(project_root, graph)?;
+        record.report.workflow = saved;
+        record.status = WorkflowPackOperationStatus::Committed;
+        persist_pack_operation_record(&path, &record)?;
+        return Ok(record.report);
+    }
+    Err(format!(
+        "pack operation {operation_id} cannot be recovered: expected base revision {}, result revision {result_revision}, actual {current_revision}",
+        record.expected_revision
+    ))
 }
 
 fn default_workflow_definition() -> WorkflowDefinition {

@@ -12,7 +12,7 @@ use crate::contracts::{
 use crate::workflow::{WorkflowRunState, WorkflowRuntimeStore};
 
 pub const RUNTIME_DB_FILE: &str = "runtime.db";
-pub const RUNTIME_SCHEMA_VERSION: i64 = 10;
+pub const RUNTIME_SCHEMA_VERSION: i64 = 11;
 
 /// 可恢复外部副作用的 operation journal 状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +166,20 @@ pub enum WorkflowResumeClaimResult {
     },
 }
 
+/// F9：调度器在同一事务中选取到期 runnable 并领取唯一 worker lease。
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum WorkflowRunnableClaimResult {
+    Claimed {
+        state: WorkflowRunState,
+        lease: WorkflowWorkerLease,
+    },
+    Stopped {
+        state: WorkflowRunState,
+    },
+    Empty,
+}
+
 /// 原子运行态变更与可选 worker claim 的结果。
 ///
 /// 变更后的状态为 Queued/Running 时，`Saved` 必然携带 lease；其他状态不会
@@ -260,6 +274,8 @@ struct PersistedWorkflowRunState<'a> {
     prepared_workflow: &'a Option<WorkflowDefinition>,
     start_node_id: &'a Option<crate::contracts::NodeId>,
     status: RunStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_retry_at_ms: Option<u64>,
     control: crate::contracts::RunControl,
     pause_reason: &'a Option<String>,
     stop_reason: &'a Option<String>,
@@ -288,6 +304,7 @@ impl<'a> From<&'a WorkflowRunState> for PersistedWorkflowRunState<'a> {
             prepared_workflow: &state.prepared_workflow,
             start_node_id: &state.start_node_id,
             status: state.status,
+            next_retry_at_ms: state.next_retry_at_ms,
             control: state.control,
             pause_reason: &state.pause_reason,
             stop_reason: &state.stop_reason,
@@ -389,6 +406,8 @@ impl SqliteWorkflowRuntimeStore {
                     updated_at_ms INTEGER NOT NULL,
                     state_revision INTEGER NOT NULL DEFAULT 0,
                     state_json TEXT NOT NULL,
+                    -- F9：可重试运行的下一次 runnable 时间，避免调度器反序列化全量快照扫描。
+                    next_retry_at_ms INTEGER,
                     -- C10：执行定义单独落库一次；revision>0 的 state_json 不再重复整图。
                     prepared_workflow_json TEXT,
                     PRIMARY KEY(workflow_id, run_id)
@@ -429,6 +448,15 @@ impl SqliteWorkflowRuntimeStore {
 
                 CREATE INDEX IF NOT EXISTS idx_workflow_run_worker_leases_expiry
                     ON workflow_run_worker_leases(expires_at_ms);
+
+                CREATE TABLE IF NOT EXISTS workflow_scheduler_leases (
+                    scheduler_key TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    acquired_at_ms INTEGER NOT NULL,
+                    heartbeat_at_ms INTEGER NOT NULL,
+                    expires_at_ms INTEGER NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS workflow_operations (
                     operation_id TEXT PRIMARY KEY,
@@ -528,6 +556,18 @@ impl SqliteWorkflowRuntimeStore {
             .execute(
                 "CREATE INDEX IF NOT EXISTS idx_workflow_runs_control_status
                  ON workflow_runs(control, status)",
+                [],
+            )
+            .map_err(sqlite_error)?;
+        if previous_version < 11
+            || !sqlite_column_exists(&connection, "workflow_runs", "next_retry_at_ms")?
+        {
+            migrate_workflow_run_retry_v11(&mut connection)?;
+        }
+        connection
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_runs_runnable
+                 ON workflow_runs(status, next_retry_at_ms, updated_at_ms)",
                 [],
             )
             .map_err(sqlite_error)?;
@@ -951,6 +991,7 @@ impl SqliteWorkflowRuntimeStore {
         state.control = RunControl::Stop;
         state.stop_reason = Some(reason.to_owned());
         state.pause_reason = None;
+        state.next_retry_at_ms = None;
         state.status = if has_live_worker {
             RunStatus::Stopping
         } else {
@@ -1419,6 +1460,211 @@ impl SqliteWorkflowRuntimeStore {
         }))
     }
 
+    /// F9：获取或续租项目级 runnable 调度器 lease。
+    ///
+    /// 同一 runtime.db 只有一个未过期 owner 能扫描并领取到期任务；进程崩溃后
+    /// lease 到期即可由另一实例接管。最终重复防护仍由每个 run 的 worker lease
+    /// 与 generation fencing 提供。
+    pub fn acquire_scheduler_lease(
+        &self,
+        owner_id: &str,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> CoreResult<bool> {
+        validate_scheduler_owner(owner_id)?;
+        let expires_at_ms = lease_expiry(now_ms, ttl_ms)?;
+        let now_ms_sql = sqlite_millis(now_ms, "workflow scheduler lease timestamp")?;
+        let expires_at_ms_sql = sqlite_millis(expires_at_ms, "workflow scheduler lease expiry")?;
+        let connection = self.connection.lock().map_err(lock_error)?;
+        let owner = connection
+            .query_row(
+                "
+                INSERT INTO workflow_scheduler_leases(
+                    scheduler_key, owner_id, generation,
+                    acquired_at_ms, heartbeat_at_ms, expires_at_ms
+                ) VALUES('workflow-runnable', ?1, 1, ?2, ?2, ?3)
+                ON CONFLICT(scheduler_key) DO UPDATE SET
+                    owner_id = CASE
+                        WHEN workflow_scheduler_leases.owner_id = excluded.owner_id
+                        THEN workflow_scheduler_leases.owner_id
+                        ELSE excluded.owner_id
+                    END,
+                    generation = CASE
+                        WHEN workflow_scheduler_leases.owner_id = excluded.owner_id
+                        THEN workflow_scheduler_leases.generation
+                        ELSE workflow_scheduler_leases.generation + 1
+                    END,
+                    acquired_at_ms = CASE
+                        WHEN workflow_scheduler_leases.owner_id = excluded.owner_id
+                        THEN workflow_scheduler_leases.acquired_at_ms
+                        ELSE excluded.acquired_at_ms
+                    END,
+                    heartbeat_at_ms = excluded.heartbeat_at_ms,
+                    expires_at_ms = excluded.expires_at_ms
+                WHERE workflow_scheduler_leases.owner_id = excluded.owner_id
+                   OR workflow_scheduler_leases.expires_at_ms <= excluded.acquired_at_ms
+                RETURNING owner_id
+                ",
+                params![owner_id, now_ms_sql, expires_at_ms_sql],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        Ok(owner.as_deref() == Some(owner_id))
+    }
+
+    /// 当前 owner 主动退出时立即让出项目级调度器租约。
+    pub fn release_scheduler_lease(&self, owner_id: &str) -> CoreResult<bool> {
+        validate_scheduler_owner(owner_id)?;
+        let connection = self.connection.lock().map_err(lock_error)?;
+        let changed = connection
+            .execute(
+                "DELETE FROM workflow_scheduler_leases
+                 WHERE scheduler_key = 'workflow-runnable' AND owner_id = ?1",
+                params![owner_id],
+            )
+            .map_err(sqlite_error)?;
+        Ok(changed == 1)
+    }
+
+    /// F9：在一个 IMMEDIATE 事务内选择并领取一条当前可运行任务。
+    ///
+    /// next_retry_at_ms 为 NULL 表示初始 Start handoff 或崩溃恢复，可立即领取；
+    /// 有时间的 Queued 任务必须到期。Running orphan 同样可接管，Paused/Stopping
+    /// 不从此入口恢复。候选若被另一实例先领取，事务内继续尝试后续候选。
+    pub fn claim_next_runnable(
+        &self,
+        scheduler_owner_id: &str,
+        worker_owner_id: &str,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> CoreResult<WorkflowRunnableClaimResult> {
+        validate_scheduler_owner(scheduler_owner_id)?;
+        validate_lease_owner(worker_owner_id)?;
+        let expires_at_ms = lease_expiry(now_ms, ttl_ms)?;
+        let now_ms_sql = sqlite_millis(now_ms, "workflow runnable claim timestamp")?;
+        let expires_at_ms_sql = sqlite_millis(expires_at_ms, "workflow runnable lease expiry")?;
+        let mut connection = self.connection.lock().map_err(lock_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        let mut statement = transaction
+            .prepare(
+                "
+                SELECT r.workflow_id, r.run_id
+                FROM workflow_runs r
+                LEFT JOIN workflow_run_worker_leases l
+                  ON l.workflow_id = r.workflow_id AND l.run_id = r.run_id
+                WHERE (
+                    (
+                      r.control = 'continue'
+                      AND (
+                        r.status = 'running'
+                        OR (
+                          r.status = 'queued'
+                          AND (r.next_retry_at_ms IS NULL OR r.next_retry_at_ms <= ?1)
+                        )
+                      )
+                    )
+                    OR (r.status = 'stopping' AND r.control = 'stop')
+                  )
+                  AND (
+                    l.workflow_id IS NULL
+                    OR l.owner_id IS NULL
+                    OR l.expires_at_ms <= ?1
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM confirmation_resolution_operations c
+                    WHERE c.workflow_id = r.workflow_id AND c.run_id = r.run_id
+                      AND c.status != 'committed'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM workflow_scheduler_leases s
+                    WHERE s.scheduler_key = 'workflow-runnable'
+                      AND s.owner_id = ?2
+                      AND s.expires_at_ms > ?1
+                  )
+                ORDER BY
+                  CASE WHEN r.status = 'running' THEN 0 ELSE 1 END,
+                  COALESCE(r.next_retry_at_ms, r.updated_at_ms),
+                  r.updated_at_ms
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map(params![now_ms_sql, scheduler_owner_id], |row| {
+                Ok((
+                    WorkflowId::from(row.get::<_, String>(0)?),
+                    RunId::from(row.get::<_, String>(1)?),
+                ))
+            })
+            .map_err(sqlite_error)?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            candidates.push(row.map_err(sqlite_error)?);
+        }
+        drop(statement);
+
+        for (workflow_id, run_id) in candidates {
+            let Some(mut state) = load_state_for_mutation(&transaction, &workflow_id, &run_id)?
+            else {
+                continue;
+            };
+            if state.status == RunStatus::Stopping {
+                let reason = state
+                    .stop_reason
+                    .clone()
+                    .unwrap_or_else(|| "stopped after worker lease expired".to_owned());
+                state.status = RunStatus::Stopped;
+                state.control = RunControl::Stop;
+                state.pause_reason = None;
+                state.next_retry_at_ms = None;
+                state.events.push(reason.clone());
+                let sequence = state.next_event_sequence;
+                state.next_event_sequence = state.next_event_sequence.saturating_add(1);
+                state
+                    .structured_events
+                    .push(crate::workflow::WorkflowRuntimeEvent {
+                        sequence,
+                        event_type: crate::workflow::WorkflowRuntimeEventType::RunStopped,
+                        node_id: None,
+                        message: reason,
+                        metadata: Value::Null,
+                    });
+                persist_mutated_state(
+                    &transaction,
+                    &mut state,
+                    now_ms_sql,
+                    "workflow state changed during scheduler stop convergence",
+                )?;
+                transaction
+                    .execute(
+                        "DELETE FROM workflow_run_worker_leases
+                         WHERE workflow_id = ?1 AND run_id = ?2",
+                        params![workflow_id.as_str(), run_id.as_str()],
+                    )
+                    .map_err(sqlite_error)?;
+                transaction.commit().map_err(sqlite_error)?;
+                return Ok(WorkflowRunnableClaimResult::Stopped { state });
+            }
+            if state.has_pending_confirmations() {
+                continue;
+            }
+            let lease = claim_worker_lease(
+                &transaction,
+                &workflow_id,
+                &run_id,
+                worker_owner_id,
+                now_ms_sql,
+                expires_at_ms_sql,
+            )?;
+            transaction.commit().map_err(sqlite_error)?;
+            return Ok(WorkflowRunnableClaimResult::Claimed { state, lease });
+        }
+        transaction.commit().map_err(sqlite_error)?;
+        Ok(WorkflowRunnableClaimResult::Empty)
+    }
+
     /// 仅允许当前 owner 续租；已过期 lease 不可被心跳复活，必须重新 acquire。
     pub fn heartbeat_worker_lease(
         &self,
@@ -1742,6 +1988,7 @@ impl SqliteWorkflowRuntimeStore {
                 state.status = RunStatus::Queued;
                 state.control = crate::contracts::RunControl::Continue;
                 state.pause_reason = None;
+                state.next_retry_at_ms = None;
                 (
                     WorkflowOperationStatus::Aborted,
                     None,
@@ -1755,6 +2002,7 @@ impl SqliteWorkflowRuntimeStore {
                 state.status = RunStatus::Queued;
                 state.control = crate::contracts::RunControl::Continue;
                 state.pause_reason = None;
+                state.next_retry_at_ms = None;
                 (
                     WorkflowOperationStatus::Completed,
                     Some(response),
@@ -1767,6 +2015,7 @@ impl SqliteWorkflowRuntimeStore {
                 state.control = crate::contracts::RunControl::Stop;
                 state.stop_reason = Some(reason.clone());
                 state.pause_reason = None;
+                state.next_retry_at_ms = None;
                 (
                     WorkflowOperationStatus::Aborted,
                     None,
@@ -1889,6 +2138,7 @@ impl SqliteWorkflowRuntimeStore {
 
         state.control = crate::contracts::RunControl::Continue;
         state.pause_reason = None;
+        state.next_retry_at_ms = None;
         if state.status == RunStatus::Paused {
             state.status = RunStatus::Queued;
         }
@@ -1950,6 +2200,34 @@ fn serialize_state_json_for_persist(
             state,
         ))?)
     }
+}
+
+/// 返回运行快照声明的唯一持久化 runnable 时间。
+fn workflow_next_retry_at_ms(state: &WorkflowRunState) -> CoreResult<Option<i64>> {
+    if state.status != RunStatus::Queued {
+        return Ok(None);
+    }
+    state
+        .next_retry_at_ms
+        .map(|value| sqlite_millis(value, "workflow next_retry_at_ms"))
+        .transpose()
+}
+
+/// v10 及更早快照只有节点级退避时间，迁移时取最早值提升到运行级字段。
+fn legacy_workflow_next_retry_at_ms(state: &WorkflowRunState) -> Option<u64> {
+    if state.status != RunStatus::Queued {
+        return None;
+    }
+    state
+        .nodes
+        .values()
+        .filter(|node| node.status == RunStatus::Queued)
+        .filter_map(|node| {
+            node.error_state
+                .as_ref()
+                .and_then(|error| error.next_retry_at_ms)
+        })
+        .min()
 }
 
 /// C10：load 时若 state_json 已瘦身，从独立列补回冻结执行定义。
@@ -2091,6 +2369,7 @@ fn persist_mutated_state(
         .ok_or_else(|| CoreError::validation("workflow state revision overflow"))?;
     // C10：CAS 路径同样瘦身 state_json，避免 rehydrate 后把整图写回放大。
     let state_json = serialize_state_json_for_persist(state, expected_revision > 0)?;
+    let next_retry_at_ms = workflow_next_retry_at_ms(state)?;
     // 若 create 时尚未写入独立列（极旧路径），在首次有 definition 的 mutate 时补写。
     if let Some(workflow) = &state.prepared_workflow {
         let prepared_json = serde_json::to_string(workflow)?;
@@ -2113,15 +2392,16 @@ fn persist_mutated_state(
         .execute(
             "UPDATE workflow_runs
              SET status = ?1, control = ?2, updated_at_ms = ?3,
-                 state_revision = ?4, state_json = ?5
-             WHERE workflow_id = ?6 AND run_id = ?7
-               AND state_revision = ?8",
+                 state_revision = ?4, state_json = ?5, next_retry_at_ms = ?6
+             WHERE workflow_id = ?7 AND run_id = ?8
+               AND state_revision = ?9",
             params![
                 run_status_name(state.status),
                 run_control_name(state.control),
                 updated_at_ms,
                 sqlite_millis(next_revision, "workflow state revision")?,
                 state_json,
+                next_retry_at_ms,
                 state.workflow_id.as_str(),
                 state.run_id.as_str(),
                 sqlite_millis(expected_revision, "workflow state revision")?,
@@ -2140,6 +2420,15 @@ fn validate_lease_owner(owner_id: &str) -> CoreResult<()> {
     if owner_id.trim().is_empty() {
         return Err(CoreError::validation(
             "workflow worker lease owner_id cannot be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scheduler_owner(owner_id: &str) -> CoreResult<()> {
+    if owner_id.trim().is_empty() {
+        return Err(CoreError::validation(
+            "workflow scheduler lease owner_id cannot be empty",
         ));
     }
     Ok(())
@@ -2368,6 +2657,71 @@ fn migrate_workflow_run_control_v9(connection: &mut Connection) -> CoreResult<()
     Ok(())
 }
 
+/// F9：把旧快照中的节点退避时间提升为运行级字段和可索引 runnable 投影。
+fn migrate_workflow_run_retry_v11(connection: &mut Connection) -> CoreResult<()> {
+    if !sqlite_column_exists(connection, "workflow_runs", "next_retry_at_ms")? {
+        connection
+            .execute(
+                "ALTER TABLE workflow_runs ADD COLUMN next_retry_at_ms INTEGER",
+                [],
+            )
+            .map_err(sqlite_error)?;
+    }
+    let mut statement = connection
+        .prepare("SELECT workflow_id, run_id, state_json FROM workflow_runs")
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(sqlite_error)?;
+    let mut backfills = Vec::new();
+    for row in rows {
+        let (workflow_id, run_id, state_json) = row.map_err(sqlite_error)?;
+        let mut state = serde_json::from_str::<WorkflowRunState>(&state_json)?;
+        state.next_retry_at_ms = if state.status == RunStatus::Queued {
+            state
+                .next_retry_at_ms
+                .or_else(|| legacy_workflow_next_retry_at_ms(&state))
+        } else {
+            None
+        };
+        let next_retry_at_ms = workflow_next_retry_at_ms(&state)?;
+        let mut state_value = serde_json::from_str::<Value>(&state_json)?;
+        if let Some(object) = state_value.as_object_mut() {
+            if let Some(next_retry_at_ms) = state.next_retry_at_ms {
+                object.insert(
+                    "next_retry_at_ms".to_owned(),
+                    Value::Number(next_retry_at_ms.into()),
+                );
+            } else {
+                object.remove("next_retry_at_ms");
+            }
+        }
+        backfills.push((
+            workflow_id,
+            run_id,
+            next_retry_at_ms,
+            serde_json::to_string(&state_value)?,
+        ));
+    }
+    drop(statement);
+    for (workflow_id, run_id, next_retry_at_ms, state_json) in backfills {
+        connection
+            .execute(
+                "UPDATE workflow_runs SET next_retry_at_ms = ?1, state_json = ?2
+                 WHERE workflow_id = ?3 AND run_id = ?4",
+                params![next_retry_at_ms, state_json, workflow_id, run_id],
+            )
+            .map_err(sqlite_error)?;
+    }
+    Ok(())
+}
+
 fn migrate_workflow_operations_v7(connection: &mut Connection) -> CoreResult<()> {
     let has_recovery_policy =
         sqlite_column_exists(connection, "workflow_operations", "recovery_policy")?;
@@ -2463,6 +2817,7 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let next_retry_at_ms = workflow_next_retry_at_ms(state)?;
         let mut connection = self.connection.lock().map_err(lock_error)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2481,8 +2836,8 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
             .execute(
                 "INSERT INTO workflow_runs(
                     workflow_id, run_id, status, control, updated_at_ms, state_revision,
-                    state_json, prepared_workflow_json
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)",
+                    state_json, next_retry_at_ms, prepared_workflow_json
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
                 params![
                     state.workflow_id.as_str(),
                     state.run_id.as_str(),
@@ -2490,6 +2845,7 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
                     run_control_name(state.control),
                     unix_timestamp_ms_i64()?,
                     state_json,
+                    next_retry_at_ms,
                     prepared_workflow_json,
                 ],
             )
@@ -2507,6 +2863,7 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
         // C10：revision>0 后不再把完整 prepared_workflow 图重复写入 state_json（写放大）。
         // 内存仍保留 definition；磁盘独立列在 create_state 时已固化。
         let state_json = serialize_state_json_for_persist(state, expected_revision > 0)?;
+        let next_retry_at_ms = workflow_next_retry_at_ms(state)?;
         let mut connection = self.connection.lock().map_err(lock_error)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2568,9 +2925,9 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
                 "
                 UPDATE workflow_runs
                 SET status = ?1, control = ?2, updated_at_ms = ?3,
-                    state_revision = ?4, state_json = ?5
-                WHERE workflow_id = ?6 AND run_id = ?7
-                  AND state_revision = ?8
+                    state_revision = ?4, state_json = ?5, next_retry_at_ms = ?6
+                WHERE workflow_id = ?7 AND run_id = ?8
+                  AND state_revision = ?9
                 ",
                 params![
                     run_status_name(state.status),
@@ -2578,6 +2935,7 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
                     unix_timestamp_ms_i64()?,
                     next_revision_sql,
                     state_json,
+                    next_retry_at_ms,
                     state.workflow_id.as_str(),
                     state.run_id.as_str(),
                     expected_revision_sql,
@@ -2928,7 +3286,10 @@ impl SqliteWorkflowRuntimeStore {
         Ok(states)
     }
 
-    /// F10-d/F12：列出 Queued/Running/Stopping 且无存活 worker lease 的 run。
+    /// F9/F10-d/F12：列出当前已可运行且无存活 worker lease 的 run。
+    ///
+    /// 初始 Queued 没有 retry 时间，create/claim 崩溃后可立即恢复；自动重试
+    /// 只有在 next_retry_at_ms 到期后才进入结果，不能由 open 提前绕过退避。
     pub fn list_orphaned_runnable_states(&self, now_ms: u64) -> CoreResult<Vec<WorkflowRunState>> {
         let now_ms_sql = sqlite_millis(now_ms, "orphan recovery now_ms")?;
         let connection = self.connection.lock().map_err(lock_error)?;
@@ -2939,7 +3300,14 @@ impl SqliteWorkflowRuntimeStore {
                 FROM workflow_runs r
                 LEFT JOIN workflow_run_worker_leases l
                   ON l.workflow_id = r.workflow_id AND l.run_id = r.run_id
-                WHERE r.status IN ('queued', 'running', 'stopping')
+                WHERE (
+                    r.status IN ('running', 'stopping')
+                    OR (
+                        r.status = 'queued'
+                        AND (r.next_retry_at_ms IS NULL OR r.next_retry_at_ms <= ?1)
+                    )
+                  )
+                  AND r.control != 'pause'
                   AND (
                     l.workflow_id IS NULL
                     OR l.owner_id IS NULL
@@ -2967,6 +3335,41 @@ impl SqliteWorkflowRuntimeStore {
             states.push(state);
         }
         Ok(states)
+    }
+
+    /// 返回下一次需要检查 runnable run 的 unix 毫秒时间。
+    ///
+    /// 查询只访问状态、退避投影和 worker lease 索引，不反序列化运行快照。到期的
+    /// retry、无 lease 的初始 Queued 以及 lease 已过期的 Running/Stopping 返回 now。
+    pub fn next_runnable_at_ms(&self, now_ms: u64) -> CoreResult<Option<u64>> {
+        let now_ms_sql = sqlite_millis(now_ms, "workflow scheduler now_ms")?;
+        let connection = self.connection.lock().map_err(lock_error)?;
+        let deadline = connection
+            .query_row(
+                "
+                SELECT MIN(MAX(
+                    ?1,
+                    COALESCE(r.next_retry_at_ms, ?1),
+                    COALESCE(l.expires_at_ms, ?1)
+                ))
+                FROM workflow_runs r
+                LEFT JOIN workflow_run_worker_leases l
+                  ON l.workflow_id = r.workflow_id AND l.run_id = r.run_id
+                WHERE r.status IN ('queued', 'running', 'stopping')
+                  AND r.control != 'pause'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM confirmation_resolution_operations c
+                    WHERE c.workflow_id = r.workflow_id AND c.run_id = r.run_id
+                      AND c.status != 'committed'
+                  )
+                ",
+                params![now_ms_sql],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map_err(sqlite_error)?;
+        deadline
+            .map(|value| sqlite_u64(value, "workflow runnable deadline"))
+            .transpose()
     }
 
     /// Git 回档前把所有持久化非终态运行置为 stopped，避免旧分支运行被恢复入口继续调度。
@@ -3012,6 +3415,7 @@ impl SqliteWorkflowRuntimeStore {
             state.control = crate::contracts::RunControl::Stop;
             state.stop_reason = Some(reason.to_owned());
             state.pause_reason = None;
+            state.next_retry_at_ms = None;
             let sequence = state.next_event_sequence;
             state.next_event_sequence = state.next_event_sequence.saturating_add(1);
             state
@@ -3029,7 +3433,7 @@ impl SqliteWorkflowRuntimeStore {
                     "
                     UPDATE workflow_runs
                     SET status = 'stopped', control = 'stop', updated_at_ms = ?1,
-                        state_revision = ?2, state_json = ?3
+                        state_revision = ?2, state_json = ?3, next_retry_at_ms = NULL
                     WHERE workflow_id = ?4 AND run_id = ?5
                       AND state_revision = ?6
                     ",

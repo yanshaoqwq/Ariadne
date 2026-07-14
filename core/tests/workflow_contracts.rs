@@ -54,6 +54,17 @@ struct RecordingLlmProvider {
 
 #[test]
 fn f8_summarizer_contract_requires_complete_config_and_matching_chapter_text_edge() {
+    let normalized = ariadne::workflow::WorkflowSummarizerNodeConfig::from_value(json!({
+        "provider_id": " provider-main ",
+        "model_id": " model-main ",
+        "chapter_id": " chapter-1 ",
+        "chapter_document_id": " documents/chapter-1.md ",
+        "chapter_text_alias": " chapter_body "
+    }))
+    .unwrap();
+    assert_eq!(normalized.provider_id, "provider-main");
+    assert_eq!(normalized.chapter_text_alias, "chapter_body");
+
     let mut workflow = WorkflowDefinition {
         id: WorkflowId::from("f8-summarizer-contract"),
         name: "F8 Summarizer Contract".to_owned(),
@@ -280,6 +291,214 @@ fn f10d_lists_orphaned_queued_and_running_without_live_lease() {
         )
         .unwrap();
     assert!(matches!(claimed, WorkflowResumeClaimResult::Claimed { .. }));
+}
+
+#[test]
+fn f9_scheduler_lease_and_atomic_claim_respect_retry_deadline() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("f9-scheduler"),
+        name: "F9 scheduler".to_owned(),
+        nodes: vec![node("start", "start")],
+        edges: Vec::new(),
+        metadata: json!({}),
+    };
+    let run_id = RunId::from("retry-run");
+    let mut state = WorkflowRunState::new(workflow.id.clone(), run_id.clone());
+    state.prepared_workflow = Some(workflow.clone());
+    state.next_retry_at_ms = Some(1_500);
+    state.nodes.insert(
+        NodeId::from("start"),
+        ariadne::workflow::WorkflowNodeRuntimeState {
+            node_id: NodeId::from("start"),
+            status: RunStatus::Queued,
+            outputs: PortMap::new(),
+            communication_output: None,
+            communication_control: CommunicationControl::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: Some("retry later".to_owned()),
+            error_state: Some(ariadne::workflow::NodeErrorState {
+                kind: NodeErrorKind::Retryable,
+                message: "retry later".to_owned(),
+                attempts: 1,
+                max_attempts: 3,
+                retryable: true,
+                next_retry_delay_ms: Some(500),
+                next_retry_at_ms: Some(1_500),
+                recovery_suggestion: "retry".to_owned(),
+            }),
+            execution_attempts: 1,
+        },
+    );
+    store.create_state(&state).unwrap();
+
+    assert!(store
+        .acquire_scheduler_lease("scheduler-a", 1_000, 200)
+        .unwrap());
+    assert!(!store
+        .acquire_scheduler_lease("scheduler-b", 1_100, 200)
+        .unwrap());
+    assert!(store
+        .acquire_scheduler_lease("scheduler-b", 1_201, 200)
+        .unwrap());
+    assert_eq!(store.next_runnable_at_ms(1_201).unwrap(), Some(1_500));
+    assert!(matches!(
+        store
+            .claim_next_runnable("scheduler-a", "worker-stale", 1_500, 500)
+            .unwrap(),
+        ariadne::workflow::WorkflowRunnableClaimResult::Empty
+    ));
+    assert!(matches!(
+        store
+            .claim_next_runnable("scheduler-b", "worker-early", 1_499, 500)
+            .unwrap(),
+        ariadne::workflow::WorkflowRunnableClaimResult::Empty
+    ));
+    assert!(store
+        .acquire_scheduler_lease("scheduler-b", 1_500, 200)
+        .unwrap());
+    let ariadne::workflow::WorkflowRunnableClaimResult::Claimed { state, lease } = store
+        .claim_next_runnable("scheduler-b", "worker-due", 1_500, 500)
+        .unwrap()
+    else {
+        panic!("retry must become runnable exactly at its durable deadline");
+    };
+    assert_eq!(state.run_id, run_id);
+    assert_eq!(lease.owner_id, "worker-due");
+    assert!(store.release_scheduler_lease("scheduler-b").unwrap());
+}
+
+#[test]
+fn f9_v11_migration_promotes_legacy_node_retry_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::from("f9-v10-workflow");
+    let run_id = RunId::from("f9-v10-run");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.nodes.insert(
+        NodeId::from("retry-node"),
+        ariadne::workflow::WorkflowNodeRuntimeState {
+            node_id: NodeId::from("retry-node"),
+            status: RunStatus::Queued,
+            outputs: PortMap::new(),
+            communication_output: None,
+            communication_control: CommunicationControl::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: Some("legacy retry".to_owned()),
+            error_state: Some(ariadne::workflow::NodeErrorState {
+                kind: NodeErrorKind::Retryable,
+                message: "legacy retry".to_owned(),
+                attempts: 1,
+                max_attempts: 3,
+                retryable: true,
+                next_retry_delay_ms: Some(500),
+                next_retry_at_ms: Some(4_321),
+                recovery_suggestion: "retry".to_owned(),
+            }),
+            execution_attempts: 1,
+        },
+    );
+    let legacy_state = serde_json::to_value(&state).unwrap();
+    assert!(legacy_state.get("next_retry_at_ms").is_none());
+
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                 name TEXT PRIMARY KEY,
+                 version INTEGER NOT NULL,
+                 applied_at_ms INTEGER NOT NULL
+             );
+             INSERT INTO schema_migrations(name, version, applied_at_ms)
+             VALUES('workflow_runtime', 10, 1);
+             CREATE TABLE workflow_runs (
+                 workflow_id TEXT NOT NULL,
+                 run_id TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 control TEXT NOT NULL DEFAULT 'continue',
+                 updated_at_ms INTEGER NOT NULL,
+                 state_revision INTEGER NOT NULL DEFAULT 0,
+                 state_json TEXT NOT NULL,
+                 prepared_workflow_json TEXT,
+                 PRIMARY KEY(workflow_id, run_id)
+             );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO workflow_runs(
+                 workflow_id, run_id, status, control, updated_at_ms,
+                 state_revision, state_json, prepared_workflow_json
+             ) VALUES(?1, ?2, 'queued', 'continue', 1, 0, ?3, NULL)",
+            rusqlite::params![
+                workflow_id.as_str(),
+                run_id.as_str(),
+                serde_json::to_string(&legacy_state).unwrap()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let loaded = store.load_state(&workflow_id, &run_id).unwrap().unwrap();
+    assert_eq!(loaded.next_retry_at_ms, Some(4_321));
+    assert_eq!(
+        store.schema_version().unwrap(),
+        Some(ariadne::workflow::RUNTIME_SCHEMA_VERSION)
+    );
+    let connection = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    let projected: Option<i64> = connection
+        .query_row(
+            "SELECT next_retry_at_ms FROM workflow_runs
+             WHERE workflow_id = ?1 AND run_id = ?2",
+            rusqlite::params![workflow_id.as_str(), run_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(projected, Some(4_321));
+}
+
+#[test]
+fn f9_scheduler_converges_stopping_run_after_worker_lease_expiry() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow_id = WorkflowId::from("f9-stopping");
+    let run_id = RunId::from("run-1");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.status = RunStatus::Running;
+    store.create_state(&state).unwrap();
+    store
+        .acquire_worker_lease(&workflow_id, &run_id, "dead-worker", 1_000, 100)
+        .unwrap()
+        .unwrap();
+    let stopped = store
+        .request_stop(&workflow_id, &run_id, "stop before crash", 1_050)
+        .unwrap();
+    assert!(matches!(
+        stopped,
+        WorkflowStopRequestResult::Saved { state } if state.status == RunStatus::Stopping
+    ));
+    assert!(store
+        .acquire_scheduler_lease("scheduler-stop", 1_101, 200)
+        .unwrap());
+    let ariadne::workflow::WorkflowRunnableClaimResult::Stopped { state } = store
+        .claim_next_runnable("scheduler-stop", "scheduler-worker", 1_101, 500)
+        .unwrap()
+    else {
+        panic!("expired stopping run must converge without a manual open or stop request");
+    };
+    assert_eq!(state.status, RunStatus::Stopped);
+    assert_eq!(state.control, RunControl::Stop);
+    assert!(store
+        .load_worker_lease(&workflow_id, &run_id)
+        .unwrap()
+        .is_none());
 }
 
 /// F12-c：终态不得被 Pause/Stop 复活。
@@ -4343,6 +4562,14 @@ fn runtime_retries_retryable_external_errors_with_backoff_events() {
 
     assert_eq!(status, RunStatus::Queued);
     assert_eq!(executor.call_count("llm"), 1);
+    assert_eq!(
+        runtime.state.next_retry_at_ms,
+        runtime.state.nodes[&NodeId::from("llm")]
+            .error_state
+            .as_ref()
+            .unwrap()
+            .next_retry_at_ms
+    );
     let retry_events = runtime
         .events_for_node(&NodeId::from("llm"))
         .into_iter()
@@ -4388,6 +4615,7 @@ fn runtime_retries_retryable_external_errors_with_backoff_events() {
     let status = runtime.run(&workflow, &mut executor).unwrap();
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!(executor.call_count("llm"), 3);
+    assert_eq!(runtime.state.next_retry_at_ms, None);
     let node = runtime.state.nodes.get(&NodeId::from("llm")).unwrap();
     assert!(node.error_state.is_none());
     assert_eq!(node.execution_attempts, 3);

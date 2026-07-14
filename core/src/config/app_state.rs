@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
+
+use sha2::{Digest, Sha256};
 
 use crate::contracts::{CoreError, CoreResult};
 
@@ -96,6 +99,127 @@ pub fn trusted_app_state_for_project(project_root: &Path) -> PathBuf {
         .clone()
 }
 
+/// 为项目建立位于可信 app-state 内的隔离 authority 目录。
+///
+/// 项目目录是不可信输入：任何会驱动恢复或继续写入的 journal/operation 均应放在此处，
+/// 并按 canonical project 的无损平台路径身份隔离，不能从项目文件推导可执行授权。
+pub fn project_authority_dir(
+    project_root: &Path,
+    app_state_root: &Path,
+    namespace: &str,
+) -> CoreResult<PathBuf> {
+    project_authority_dir_with_identity(
+        project_root,
+        app_state_root,
+        namespace,
+        &canonical_project_identity(&project_root.canonicalize()?),
+    )
+}
+
+pub(crate) fn project_authority_dir_with_identity(
+    project_root: &Path,
+    app_state_root: &Path,
+    namespace: &str,
+    project_identity: &str,
+) -> CoreResult<PathBuf> {
+    if namespace.is_empty()
+        || !namespace
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(CoreError::validation(
+            "app-state authority namespace must contain only ASCII letters, digits or '-'",
+        ));
+    }
+    let project = project_root.canonicalize()?;
+    if !project.is_dir() {
+        return Err(CoreError::validation("project root must be a directory"));
+    }
+    let app_state = stable_absolute(app_state_root)?;
+    if app_state.starts_with(&project) {
+        return Err(CoreError::validation(
+            "trusted app state must be outside the project tree",
+        ));
+    }
+    fs::create_dir_all(&app_state)?;
+    let app_state = app_state.canonicalize()?;
+    if app_state.starts_with(&project) {
+        return Err(CoreError::validation(
+            "trusted app state resolves inside the project tree",
+        ));
+    }
+    let namespace_dir = app_state.join(namespace);
+    create_real_directory(&namespace_dir, "app-state authority namespace")?;
+    if project_identity.len() != 64
+        || !project_identity
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CoreError::validation(
+            "project authority identity must be a SHA-256 hex digest",
+        ));
+    }
+    let authority = namespace_dir.join(project_identity);
+    create_real_directory(&authority, "project authority")?;
+    let authority = authority.canonicalize()?;
+    if !authority.starts_with(&app_state) || authority.starts_with(&project) {
+        return Err(CoreError::validation(
+            "project authority escaped trusted app state",
+        ));
+    }
+    let metadata = fs::symlink_metadata(&authority)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CoreError::validation(
+            "project authority must be a real directory",
+        ));
+    }
+    Ok(authority)
+}
+
+pub fn canonical_project_identity(project_root: &Path) -> String {
+    let mut hasher = Sha256::new();
+    // 与 atomic_commit v3 已发布 identity 完全兼容，避免升级后遗失待恢复 journal。
+    hasher.update(b"ariadne-project-atomic-authority-v1\0");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        hasher.update(project_root.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in project_root.as_os_str().encode_wide() {
+            hasher.update(unit.to_le_bytes());
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn create_real_directory(path: &Path, label: &str) -> CoreResult<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(CoreError::validation(format!(
+                "{label} must be a real directory"
+            )));
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CoreError::validation(format!(
+            "{label} must be a real directory"
+        )));
+    }
+    Ok(())
+}
+
 fn unbound_process_app_state_root() -> PathBuf {
     let mut random = [0u8; 16];
     let suffix = if getrandom::getrandom(&mut random).is_ok() {
@@ -129,4 +253,37 @@ fn stable_absolute(path: &Path) -> CoreResult<PathBuf> {
         }
     }
     Ok(normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    #[test]
+    fn concurrent_project_authority_creation_is_idempotent() {
+        let project = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let barrier = Arc::clone(&barrier);
+            let project = project.path().to_path_buf();
+            let app_state = app_state.path().to_path_buf();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                project_authority_dir(&project, &app_state, "concurrent-authority")
+            }));
+        }
+
+        let authorities = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert!(authorities.iter().all(|path| path == &authorities[0]));
+        assert!(authorities[0].is_dir());
+        assert!(!authorities[0].starts_with(project.path()));
+    }
 }
