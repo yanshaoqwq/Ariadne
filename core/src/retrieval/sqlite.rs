@@ -9,10 +9,10 @@ use crate::retrieval::models::{
     ChunkDocument, FullTextRecord, FullTextSearchRequest, RebuildReport, RebuildStatus,
     RetrievalResult, RetrievalSource, StoreHealth,
 };
-use crate::retrieval::query::sqlite_fts_literal_query;
+use crate::retrieval::query::{sqlite_fts_index_text, sqlite_fts_literal_query};
 use crate::retrieval::traits::FullTextStore;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// SQLite 持久化全文检索后端，作为真实 metadata/全文存储的基础实现。
 #[derive(Debug)]
@@ -44,7 +44,7 @@ impl SqliteFullTextStore {
     }
 
     fn migrate(&self) -> CoreResult<()> {
-        let connection = self.connection.lock().map_err(lock_error)?;
+        let mut connection = self.connection.lock().map_err(lock_error)?;
         connection
             .execute_batch(
                 "
@@ -71,7 +71,43 @@ impl SqliteFullTextStore {
                 ",
             )
             .map_err(sqlite_error)?;
-        connection
+        let current_version = connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE name = 'sqlite_full_text_store'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .unwrap_or_default();
+        let existing_chunks = if current_version < SCHEMA_VERSION {
+            let mut statement = connection
+                .prepare("SELECT chunk_id, text FROM full_text_chunks ORDER BY chunk_id")
+                .map_err(sqlite_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
+        } else {
+            Vec::new()
+        };
+        let transaction = connection.transaction().map_err(sqlite_error)?;
+        if current_version < SCHEMA_VERSION {
+            transaction
+                .execute("DELETE FROM full_text_chunks_fts", [])
+                .map_err(sqlite_error)?;
+            for (chunk_id, text) in existing_chunks {
+                transaction
+                    .execute(
+                        "INSERT INTO full_text_chunks_fts(chunk_id, text) VALUES(?1, ?2)",
+                        params![chunk_id, sqlite_fts_index_text(&text)?],
+                    )
+                    .map_err(sqlite_error)?;
+            }
+        }
+        transaction
             .execute(
                 "INSERT INTO schema_migrations(name, version)
                  VALUES('sqlite_full_text_store', ?1)
@@ -79,7 +115,7 @@ impl SqliteFullTextStore {
                 params![SCHEMA_VERSION],
             )
             .map_err(sqlite_error)?;
-        Ok(())
+        transaction.commit().map_err(sqlite_error)
     }
 }
 
@@ -92,6 +128,7 @@ impl FullTextStore for SqliteFullTextStore {
             validate_record(&record)?;
             let sources_json = serde_json::to_string(&record.chunk.sources)?;
             let metadata_json = serde_json::to_string(&record.chunk.metadata)?;
+            let indexed_text = sqlite_fts_index_text(&record.chunk.text)?;
             transaction
                 .execute(
                     "
@@ -123,7 +160,7 @@ impl FullTextStore for SqliteFullTextStore {
             transaction
                 .execute(
                     "INSERT INTO full_text_chunks_fts(chunk_id, text) VALUES(?1, ?2)",
-                    params![record.chunk.chunk_id, record.chunk.text],
+                    params![record.chunk.chunk_id, indexed_text],
                 )
                 .map_err(sqlite_error)?;
         }
@@ -278,6 +315,7 @@ impl FullTextStore for SqliteFullTextStore {
             .map_err(sqlite_error)?;
         for record in records {
             validate_record(&record)?;
+            let indexed_text = sqlite_fts_index_text(&record.chunk.text)?;
             transaction
                 .execute(
                     "
@@ -298,7 +336,7 @@ impl FullTextStore for SqliteFullTextStore {
             transaction
                 .execute(
                     "INSERT INTO full_text_chunks_fts(chunk_id, text) VALUES(?1, ?2)",
-                    params![record.chunk.chunk_id, record.chunk.text],
+                    params![record.chunk.chunk_id, indexed_text],
                 )
                 .map_err(sqlite_error)?;
         }

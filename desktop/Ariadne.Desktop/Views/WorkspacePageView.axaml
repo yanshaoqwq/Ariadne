@@ -1002,6 +1002,35 @@
                     </StackPanel>
                   </Border>
 
+                  <!-- Summarizer：与 Rust WorkflowSummarizerNodeConfig 同字段，保存前由后端统一校验 -->
+                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsSummarizerNode}">
+                    <StackPanel Spacing="8">
+                      <TextBlock Text="{Binding SummarizerNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding SummarizerNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                      <TextBlock Text="{Binding SummarizerProviderIdLabel}" Classes="caption" />
+                      <ComboBox ItemsSource="{Binding AvailableProviderIds}"
+                                IsEditable="True"
+                                Text="{Binding SelectedNode.SummarizerProviderId, Mode=TwoWay}"
+                                PlaceholderText="{Binding SummarizerProviderIdPlaceholder}"
+                                HorizontalAlignment="Stretch" />
+                      <TextBlock Text="{Binding SummarizerChapterIdLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.SummarizerChapterId, Mode=TwoWay}"
+                               Classes="mono"
+                               PlaceholderText="{Binding SummarizerChapterIdPlaceholder}" />
+                      <TextBlock Text="{Binding SummarizerChapterDocumentIdLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.SummarizerChapterDocumentId, Mode=TwoWay}"
+                               Classes="mono"
+                               PlaceholderText="{Binding SummarizerChapterDocumentIdPlaceholder}" />
+                      <TextBlock Text="{Binding SummarizerChapterTextAliasLabel}" Classes="caption" />
+                      <TextBox Text="{Binding SelectedNode.SummarizerChapterTextAlias, Mode=TwoWay}"
+                               Classes="mono" />
+                      <TextBlock Text="{Binding SummarizerChapterTextAliasHint}"
+                                 Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                      <CheckBox IsChecked="{Binding SelectedNode.SummarizerAutoMode, Mode=TwoWay}"
+                                Content="{Binding SummarizerAutoModeText}" />
+                    </StackPanel>
+                  </Border>
+
                   <!-- 数据入口：可建可删 -->
                   <Border Classes="panel-section" Padding="0,0,0,18"
                           IsVisible="{Binding SelectedNode.ShowDataInPinEditor}">

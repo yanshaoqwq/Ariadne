@@ -2023,7 +2023,7 @@ impl SqliteWritingKnowledgeStore {
                     || source
                         .version
                         .as_deref()
-                        .is_some_and(|version| version.trim().is_empty())
+                        .is_none_or(|version| version.trim().is_empty())
                 {
                     return Err(CoreError::validation(format!(
                         "story segment contains an invalid source span: {segment_id}"

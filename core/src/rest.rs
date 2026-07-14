@@ -660,10 +660,11 @@ mod tests {
     #[test]
     fn health_route_does_not_require_authentication() {
         let temp = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
         crate::frontend::initialize_project(temp.path()).unwrap();
         let state = AriadneAppState::new(
             temp.path().to_path_buf(),
-            temp.path().join(".app"),
+            app_state.path().to_path_buf(),
             Arc::new(MemorySecretStore::default()),
         );
 
@@ -686,10 +687,11 @@ mod tests {
     #[test]
     fn protected_routes_require_bearer_token() {
         let temp = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
         crate::frontend::initialize_project(temp.path()).unwrap();
         let state = AriadneAppState::new(
             temp.path().to_path_buf(),
-            temp.path().join(".app"),
+            app_state.path().to_path_buf(),
             Arc::new(MemorySecretStore::default()),
         );
 
@@ -710,6 +712,7 @@ mod tests {
     #[test]
     fn workflow_tools_route_lists_exposed_start_nodes() {
         let temp = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
         crate::frontend::initialize_project(temp.path()).unwrap();
         save_workflow_graph_impl(
             temp.path(),
@@ -754,7 +757,7 @@ mod tests {
         .unwrap();
         let state = AriadneAppState::new(
             temp.path().to_path_buf(),
-            temp.path().join(".app"),
+            app_state.path().to_path_buf(),
             Arc::new(MemorySecretStore::default()),
         );
         let mut headers = BTreeMap::new();
@@ -785,6 +788,7 @@ mod tests {
     #[test]
     fn workflow_run_route_accepts_empty_body_for_default_run() {
         let temp = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
         crate::frontend::initialize_project(temp.path()).unwrap();
         save_workflow_graph_impl(
             temp.path(),
@@ -810,7 +814,7 @@ mod tests {
         .unwrap();
         let state = AriadneAppState::new(
             temp.path().to_path_buf(),
-            temp.path().join(".app"),
+            app_state.path().to_path_buf(),
             Arc::new(MemorySecretStore::default()),
         );
         let mut headers = BTreeMap::new();
@@ -839,6 +843,7 @@ mod tests {
     #[test]
     fn run_logs_route_filters_by_run_and_query_params() {
         let temp = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
         crate::frontend::initialize_project(temp.path()).unwrap();
         append_run_log(
             temp.path(),
@@ -874,7 +879,7 @@ mod tests {
         .unwrap();
         let state = AriadneAppState::new(
             temp.path().to_path_buf(),
-            temp.path().join(".app"),
+            app_state.path().to_path_buf(),
             Arc::new(MemorySecretStore::default()),
         );
         let mut headers = BTreeMap::new();

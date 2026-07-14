@@ -89,6 +89,20 @@ impl ConfigStore {
         self.load_internal(true)
     }
 
+    /// 只读加载项目显示所需的 app 配置。
+    ///
+    /// maintenance 期间允许 app.yaml 暂时缺失并由调用方使用目录名回退；但文件一旦
+    /// 存在，IO/YAML 错误必须向上传播，不能把损坏配置伪装成健康项目。
+    pub fn load_app_read_only_optional(&self) -> CoreResult<Option<AppConfig>> {
+        let path = self.config_dir().join(APP_CONFIG_FILE);
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Some(yaml_serde::from_str(&raw)?))
+    }
+
     fn load_internal(&self, reject_project_secret_refs: bool) -> CoreResult<ProjectConfig> {
         let config = ProjectConfig {
             app: self.read_config(APP_CONFIG_FILE)?,
@@ -453,10 +467,10 @@ mod tests {
     }
 
     #[test]
-    fn provider_config_serializes_key_id_not_secret_value() {
+    fn provider_config_rejects_project_owned_secret_ref_without_writing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(temp_dir.path());
-        let mut config = ProjectConfig::default();
+        let mut config = store.load_or_create().unwrap();
         config.providers.providers.push(ProviderConfig {
             provider_id: "local-openai".to_owned(),
             provider_type: ProviderType::OpenAiCompatible,
@@ -473,11 +487,13 @@ mod tests {
             }],
         });
 
-        store.save(&config).unwrap();
+        let error = store.save(&config).unwrap_err();
         let raw = fs::read_to_string(store.config_dir().join(PROVIDERS_CONFIG_FILE)).unwrap();
 
-        assert!(raw.contains("provider.local-openai"));
-        assert!(!raw.contains("sk-"));
+        assert!(error
+            .to_string()
+            .contains("contains an untrusted project SecretRef"));
+        assert!(!raw.contains("provider.local-openai"));
     }
 
     #[test]

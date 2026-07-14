@@ -71,6 +71,26 @@ public sealed class WorkspaceCanvas08Tests
     }
 
     [Fact]
+    public void F8_SummarizerPrimaryDataEdge_UsesAndTracksConfiguredChapterAlias()
+    {
+        var vm = CreateWorkspaceVm();
+        vm.AddNodeAt("writer", 0, 0);
+        vm.AddNodeAt("summarizer", 240, 0);
+        var writer = vm.Nodes[0];
+        var summarizer = vm.Nodes[1];
+        Assert.True(summarizer.IsSummarizerNode);
+        Assert.Equal("chapter_text", summarizer.SummarizerChapterTextAlias);
+
+        Assert.True(vm.TryConnectPorts(
+            writer.Id, NodePortKind.Data, NodePortDirection.Out,
+            summarizer.Id, NodePortKind.Data, NodePortDirection.In));
+        Assert.Equal("chapter_text", vm.Edges[0].Label);
+
+        summarizer.SummarizerChapterTextAlias = "chapter_body";
+        Assert.Equal("chapter_body", vm.Edges[0].Label);
+    }
+
+    [Fact]
     public void W2_FitTransform_UsesBoundsAndViewport_NotOnlyTopLeftNudge()
     {
         // Graph entirely in positive quadrant — old Math.Max(0, 48-min*z) no-ops to 0.

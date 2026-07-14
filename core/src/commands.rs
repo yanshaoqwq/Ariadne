@@ -64,10 +64,10 @@ use crate::skills::{SkillLoader, WorkflowManifest, WORKFLOW_MANIFEST_FILE};
 use crate::workflow::{
     execute_document_read_node_with_root, execute_llm_node_with_defaults,
     execute_project_retrieval_node_for_project, execute_summarizer_node,
-    BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink, RoutedExternalNodeExecutor,
-    RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore, WorkflowRunFailure,
-    WorkflowRuntime, WorkflowRuntimeEvent, WorkflowRuntimeEventType, WorkflowRuntimeStore,
-    WorkflowStopRequestResult, WorkflowWorkerLease,
+    validate_workflow_execution_contracts, BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink,
+    RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
+    SqliteWorkflowRuntimeStore, WorkflowRunFailure, WorkflowRuntime, WorkflowRuntimeEvent,
+    WorkflowRuntimeEventType, WorkflowRuntimeStore, WorkflowStopRequestResult, WorkflowWorkerLease,
 };
 
 const WORKFLOW_WORKER_LEASE_TTL_MS: u64 = 30_000;
@@ -208,9 +208,11 @@ impl AriadneAppState {
         let index_changed = runtime_slot.as_ref().is_some_and(|runtime| {
             ProjectRetrievalRuntime::index_configuration_changed(runtime.config(), &config)
         });
-        let vector_changed = runtime_slot
-            .as_ref()
-            .is_some_and(|runtime| !runtime.uses_vector_pipeline_config(&config));
+        let vector_store_requires_exclusive_reopen = runtime_slot.as_ref().is_some_and(|runtime| {
+            runtime.vector_enabled()
+                && config.rag.vector_store.enabled
+                && !runtime.uses_vector_config(&config.rag.vector_store)
+        });
         if index_changed
             && runtime_slot
                 .as_ref()
@@ -224,7 +226,9 @@ impl AriadneAppState {
         let previous_config = runtime_slot
             .as_ref()
             .map(|runtime| runtime.config().clone());
-        let detached = vector_changed.then(|| runtime_slot.take()).flatten();
+        let detached = vector_store_requires_exclusive_reopen
+            .then(|| runtime_slot.take())
+            .flatten();
         drop(detached);
         let runtime = match ProjectRetrievalRuntime::from_config(
             &project_root,
@@ -286,9 +290,11 @@ impl AriadneAppState {
 
         let index_changed =
             ProjectRetrievalRuntime::index_configuration_changed(expected, &candidate);
-        let vector_changed = runtime_slot
-            .as_ref()
-            .is_some_and(|runtime| !runtime.uses_vector_pipeline_config(&candidate));
+        let vector_store_requires_exclusive_reopen = runtime_slot.as_ref().is_some_and(|runtime| {
+            runtime.vector_enabled()
+                && candidate.rag.vector_store.enabled
+                && !runtime.uses_vector_config(&candidate.rag.vector_store)
+        });
         if index_changed
             && runtime_slot
                 .as_ref()
@@ -300,7 +306,9 @@ impl AriadneAppState {
             );
         }
 
-        let detached = vector_changed.then(|| runtime_slot.take()).flatten();
+        let detached = vector_store_requires_exclusive_reopen
+            .then(|| runtime_slot.take())
+            .flatten();
         drop(detached);
         let runtime = match ProjectRetrievalRuntime::from_config(
             &project_root,
@@ -1172,9 +1180,8 @@ pub fn list_workflow_graphs(state: &AriadneAppState) -> CommandResult<Vec<Workfl
 }
 
 pub fn validate_workflow_graph(graph_data: WorkflowGraphData) -> CommandResult<()> {
-    graph_to_workflow(graph_data)?
-        .validate_topology()
-        .map_err(error_to_string)
+    let workflow = graph_to_workflow(graph_data)?;
+    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)
 }
 
 pub fn save_workflow_graph(
@@ -2268,16 +2275,13 @@ pub fn restore_to_new_branch(
         maintenance
             .update_maintenance_phase("rebuilding_full_text_indexes")
             .map_err(error_to_string)?;
-        let rebuild_event = maintenance
-            .prepare(
+        maintenance
+            .enqueue(
                 &project_root.to_string_lossy(),
                 "git_restore_full_rebuild",
                 &report.base_commit,
                 true,
             )
-            .map_err(error_to_string)?;
-        maintenance
-            .activate(&rebuild_event)
             .map_err(error_to_string)?;
         state
             .reload_retrieval_runtime()?
@@ -2614,62 +2618,86 @@ fn provider_config_diagnostic_items(
         }),
     }
 
-    let embedding_item = if !rag.vector_store.enabled {
-        DiagnosticItem {
-            component: "providers.embedding.default".to_owned(),
-            status: DiagnosticStatus::Healthy,
-            reason: Some("vector retrieval is disabled".to_owned()),
-        }
-    } else {
-        match providers.default_embedding_provider_id.as_deref() {
-            Some(provider_id) => match providers
-                .providers
-                .iter()
-                .find(|provider| provider.provider_id == provider_id)
-            {
-                Some(provider) if !provider.enabled => DiagnosticItem {
-                    component: "providers.embedding.default".to_owned(),
-                    status: DiagnosticStatus::Unavailable,
-                    reason: Some(format!(
-                        "default embedding provider is disabled: {provider_id}"
-                    )),
-                },
-                Some(provider)
-                    if provider
-                        .models
-                        .iter()
-                        .any(|model| model.capability == ProviderCapability::Embedding) =>
-                {
-                    DiagnosticItem {
-                        component: "providers.embedding.default".to_owned(),
-                        status: DiagnosticStatus::Healthy,
-                        reason: None,
-                    }
-                }
-                Some(_) => DiagnosticItem {
-                    component: "providers.embedding.default".to_owned(),
-                    status: DiagnosticStatus::Degraded,
-                    reason: Some(format!(
-                        "default embedding provider has no embedding model: {provider_id}"
-                    )),
-                },
-                None => DiagnosticItem {
-                    component: "providers.embedding.default".to_owned(),
-                    status: DiagnosticStatus::Unavailable,
-                    reason: Some(format!(
-                        "default embedding provider is missing: {provider_id}"
-                    )),
-                },
-            },
-            None => DiagnosticItem {
-                component: "providers.embedding.default".to_owned(),
-                status: DiagnosticStatus::Degraded,
-                reason: Some("retrieval embedding model is not configured".to_owned()),
-            },
-        }
-    };
-    items.push(embedding_item);
+    items.push(provider_capability_config_diagnostic_item(
+        providers,
+        providers.default_embedding_provider_id.as_deref(),
+        ProviderCapability::Embedding,
+        "embedding",
+        rag.vector_store.enabled,
+    ));
+    items.push(provider_capability_config_diagnostic_item(
+        providers,
+        providers.default_reranker_provider_id.as_deref(),
+        ProviderCapability::Reranker,
+        "reranker",
+        rag.reranker_enabled,
+    ));
     items
+}
+
+/// 配置存在只证明可构造条件之一；secret、endpoint 与响应合同由正式运行时健康项证明。
+fn provider_capability_config_diagnostic_item(
+    providers: &crate::config::ProvidersConfig,
+    default_provider_id: Option<&str>,
+    capability: ProviderCapability,
+    label: &str,
+    enabled: bool,
+) -> DiagnosticItem {
+    let component = format!("providers.{label}.default");
+    if !enabled {
+        return DiagnosticItem {
+            component,
+            status: DiagnosticStatus::Healthy,
+            reason: Some(format!("diagnostics.providers.{label}.disabled")),
+        };
+    }
+    let Some(provider_id) = default_provider_id else {
+        return DiagnosticItem {
+            component,
+            status: DiagnosticStatus::Degraded,
+            reason: Some(format!("diagnostics.providers.{label}.default_missing")),
+        };
+    };
+    let Some(provider) = providers
+        .providers
+        .iter()
+        .find(|provider| provider.provider_id == provider_id)
+    else {
+        return DiagnosticItem {
+            component,
+            status: DiagnosticStatus::Unavailable,
+            reason: Some(format!(
+                "diagnostics.providers.{label}.provider_unavailable"
+            )),
+        };
+    };
+    if !provider.enabled {
+        return DiagnosticItem {
+            component,
+            status: DiagnosticStatus::Unavailable,
+            reason: Some(format!(
+                "diagnostics.providers.{label}.provider_unavailable"
+            )),
+        };
+    }
+    if !provider
+        .models
+        .iter()
+        .any(|model| model.capability == capability)
+    {
+        return DiagnosticItem {
+            component,
+            status: DiagnosticStatus::Unavailable,
+            reason: Some(format!("diagnostics.providers.{label}.model_missing")),
+        };
+    }
+    DiagnosticItem {
+        component,
+        status: DiagnosticStatus::Degraded,
+        reason: Some(format!(
+            "diagnostics.providers.{label}.configured_unverified"
+        )),
+    }
 }
 
 pub fn default_project_root() -> PathBuf {
@@ -3098,7 +3126,7 @@ pub fn save_workflow_graph_impl(
     let _project_mutation = acquire_project_mutation_guard(project_root, "workflow_graph_save")?;
     let expected_revision = graph_data.expected_revision.clone();
     let workflow = graph_to_workflow(graph_data)?;
-    workflow.validate_topology().map_err(error_to_string)?;
+    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
     let path = workflow_path(project_root, Some(workflow.id.as_str().to_owned()))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(error_to_string)?;
@@ -3199,6 +3227,7 @@ fn prepare_workflow_run_state(
     } else if !request.initial_inputs.is_empty() {
         return Err("initial_inputs require start_node_id".to_owned());
     }
+    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
     let retrieval_runtime = if workflow.nodes.iter().any(|node| node.type_name == "search") {
         Some(match retrieval_runtime {
@@ -5672,12 +5701,15 @@ fn record_recent_project(
     name: Option<String>,
     project_root: &Path,
 ) -> CommandResult<Vec<RecentProjectEntry>> {
-    let name = name
+    let explicit_name = name
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| project_display_name(project_root));
+        .map(str::to_owned);
+    let name = match explicit_name {
+        Some(name) => name,
+        None => project_display_name(project_root)?,
+    };
     recent_project_store(app_state_root)
         .record_opened(name, project_root)
         .map_err(error_to_string)
@@ -5687,23 +5719,26 @@ pub fn current_project_status(project_root: &Path) -> CommandResult<CurrentProje
     validate_initialized_project_root(project_root)?;
     Ok(CurrentProjectStatus {
         project_root: project_root.to_path_buf(),
-        project_name: project_display_name(project_root),
+        project_name: project_display_name(project_root)?,
     })
 }
 
-fn project_display_name(project_root: &Path) -> String {
-    if let Ok(config) = ConfigStore::new(project_root).load_read_only() {
-        let project_name = config.app.project_name.trim();
+fn project_display_name(project_root: &Path) -> CommandResult<String> {
+    if let Some(config) = ConfigStore::new(project_root)
+        .load_app_read_only_optional()
+        .map_err(error_to_string)?
+    {
+        let project_name = config.project_name.trim();
         if !project_name.is_empty() {
-            return project_name.to_owned();
+            return Ok(project_name.to_owned());
         }
     }
-    project_root
+    Ok(project_root
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("Ariadne Project")
-        .to_owned()
+        .to_owned())
 }
 
 fn ensure_project_config(project_root: &Path) -> CommandResult<()> {

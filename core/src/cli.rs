@@ -396,6 +396,7 @@ mod tests {
     #[test]
     fn cli_tools_list_exposes_workflow_tools() {
         let temp = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
         crate::frontend::initialize_project(temp.path()).unwrap();
         save_workflow_graph_impl(
             temp.path(),
@@ -443,6 +444,8 @@ mod tests {
                 "list",
                 "--project",
                 temp.path().to_str().unwrap(),
+                "--app-state",
+                app_state.path().to_str().unwrap(),
                 "--json",
             ]
             .into_iter()
@@ -458,12 +461,13 @@ mod tests {
     #[test]
     fn cli_workflow_logs_filter_by_run_and_level() {
         let temp = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
         crate::frontend::initialize_project(temp.path()).unwrap();
         append_run_log(
             temp.path(),
             UiRunLogEntry {
                 log_id: "log-a".to_owned(),
-                timestamp_ms: 1,
+                timestamp_ms: 0,
                 kind: UiRunLogKind::Error,
                 level: UiRunLogLevel::Error,
                 message: "writer failed".to_owned(),
@@ -479,7 +483,7 @@ mod tests {
             temp.path(),
             UiRunLogEntry {
                 log_id: "log-b".to_owned(),
-                timestamp_ms: 2,
+                timestamp_ms: 0,
                 kind: UiRunLogKind::Node,
                 level: UiRunLogLevel::Info,
                 message: "other".to_owned(),
@@ -498,6 +502,8 @@ mod tests {
                 "logs",
                 "--project",
                 temp.path().to_str().unwrap(),
+                "--app-state",
+                app_state.path().to_str().unwrap(),
                 "--run",
                 "run-a",
                 "--level",

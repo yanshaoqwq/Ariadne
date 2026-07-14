@@ -147,6 +147,7 @@
                     <TextBox Text="{Binding Text, Mode=TwoWay}"
                              Classes="document-editor"
                              KeyDown="OnDocumentBlockEditorKeyDown"
+                             KeyUp="OnDocumentBlockEditorKeyUp"
                              GotFocus="OnDocumentBlockEditorGotFocus"
                              LostFocus="OnDocumentBlockEditorLostFocus"
                              PointerReleased="OnDocumentBlockEditorPointerReleased"
@@ -271,6 +272,10 @@
                                IsVisible="{Binding ShowSummaryEmpty}" />
 
                     <StackPanel Spacing="8" IsVisible="{Binding ShowSummaryContent}">
+                      <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasActiveSummarySegment}">
+                        <TextBlock Text="{Binding ActiveSummarySegmentText}" Classes="caption" TextWrapping="Wrap" />
+                      </Border>
+
                       <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasChapterSummary}">
                         <StackPanel Spacing="4">
                           <TextBlock Text="{Binding ChapterSummaryLabel}" Classes="caption" FontWeight="SemiBold" />
@@ -293,6 +298,7 @@
                           <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type vm:WorksSummarySegmentItemViewModel}">
                               <Button Classes="nav"
+                                      ctl:SelectedClass.IsSelected="{Binding IsSelected}"
                                       Command="{Binding RevealCommand}"
                                       ToolTip.Tip="{Binding RevealText}"
                                       AutomationProperties.Name="{Binding RevealText}"

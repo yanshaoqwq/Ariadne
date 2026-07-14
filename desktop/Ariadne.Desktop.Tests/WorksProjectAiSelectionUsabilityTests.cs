@@ -90,7 +90,9 @@ public sealed class WorksProjectAiSelectionUsabilityTests
         Assert.Contains("_stickySelection", viewCs, StringComparison.Ordinal);
         Assert.Contains("LostFocus=\"OnDocumentBlockEditorLostFocus\"", viewAxaml, StringComparison.Ordinal);
         Assert.Contains("PointerReleased=\"OnDocumentBlockEditorPointerReleased\"", viewAxaml, StringComparison.Ordinal);
+        Assert.Contains("KeyUp=\"OnDocumentBlockEditorKeyUp\"", viewAxaml, StringComparison.Ordinal);
         Assert.Contains("CaptureStickySelectionFrom", viewCs, StringComparison.Ordinal);
+        Assert.Contains("UpdateSummarySelectionFromEditor", viewCs, StringComparison.Ordinal);
         Assert.Contains("ClearStickyEditorSelection", viewCs, StringComparison.Ordinal);
         Assert.Contains("clearWhenEmpty: true", viewCs, StringComparison.Ordinal);
     }
@@ -170,7 +172,15 @@ public sealed class WorksProjectAiSelectionUsabilityTests
                         new TextRange(3, 7),
                         "v1")),
             },
-            Array.Empty<StoryEventView>(),
+            new[]
+            {
+                new StoryEventView(
+                    "event-1",
+                    "角色在表情处作出决定",
+                    "ongoing",
+                    new[] { "chapter-1::seg-1" },
+                    new[] { "chapter-1" }),
+            },
             new[]
             {
                 new RegisteredChangeView(
@@ -196,15 +206,24 @@ public sealed class WorksProjectAiSelectionUsabilityTests
         Assert.Equal("章节正式总结", vm.ChapterSummaryText);
         Assert.Equal("stage-main", vm.SummaryStageId);
         Assert.Single(vm.SummarySegments);
+        Assert.Single(vm.SummaryEvents);
         Assert.Single(vm.SummaryChanges);
         Assert.Single(vm.SummaryConfirmations);
         Assert.True(vm.SummarySegments[0].IsSourceFresh);
+
+        vm.UpdateSummarySelectionFromEditor(new EditorTextSelection(1, 1, string.Empty));
+        Assert.True(vm.HasActiveSummarySegment);
+        Assert.True(vm.SummarySegments[0].IsSelected);
+        Assert.Contains("chapter-1::seg-1", vm.ActiveSummarySegmentText, StringComparison.Ordinal);
+        Assert.Contains("event-1", vm.ActiveSummarySegmentText, StringComparison.Ordinal);
 
         vm.SummarySegments[0].RevealCommand.Execute(null);
         Assert.Equal((1, 3), Assert.Single(revealed));
 
         vm.DocumentContent = document + "改";
         Assert.False(vm.SummarySegments[0].IsSourceFresh);
+        Assert.False(vm.SummarySegments[0].IsSelected);
+        Assert.False(vm.HasActiveSummarySegment);
         vm.SummarySegments[0].RevealCommand.Execute(null);
         Assert.Single(revealed);
         Assert.Equal(names.Text("ui.works.summary.source_unsaved"), vm.StatusText);

@@ -61,6 +61,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private string? _chapterSummaryText;
     private string? _summaryStageId;
     private string? _stageSummaryText;
+    private string _activeSummarySegmentText = string.Empty;
 
     public WorksPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -312,6 +313,18 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public bool HasSummaryChanges => SummaryChanges.Count > 0;
     public bool HasSummaryForeshadowing => SummaryForeshadowing.Count > 0;
     public bool HasSummaryConfirmations => SummaryConfirmations.Count > 0;
+    public bool HasActiveSummarySegment => !string.IsNullOrWhiteSpace(ActiveSummarySegmentText);
+    public string ActiveSummarySegmentText
+    {
+        get => _activeSummarySegmentText;
+        private set
+        {
+            if (SetProperty(ref _activeSummarySegmentText, value))
+            {
+                OnPropertyChanged(nameof(HasActiveSummarySegment));
+            }
+        }
+    }
     public bool HasSummaryData => HasChapterSummary
                                   || HasStageSummary
                                   || HasSummarySegments
@@ -609,6 +622,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private void ClearSummaryProjection()
     {
+        ActiveSummarySegmentText = string.Empty;
         ChapterSummaryText = null;
         SummaryStageId = null;
         StageSummaryText = null;
@@ -736,7 +750,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                     "ui.works.summary.event_item",
                     new Dictionary<string, string> { ["id"] = storyEvent.EventId }),
                 storyEvent.Summary,
-                LocalizeSummaryStatus(storyEvent.Status)));
+                LocalizeSummaryStatus(storyEvent.Status),
+                storyEvent.SegmentIds));
         }
 
         foreach (var change in summary.RealizedChanges)
@@ -882,6 +897,79 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 : _displayNames.Text("ui.works.summary.source_stale");
             segment.UpdateSourceState(isFresh, stateText);
         }
+        if (SummarySegments.Any(segment => segment.IsSelected && !segment.IsSourceFresh))
+        {
+            SelectSummarySegment(null);
+        }
+    }
+
+    /// <summary>
+    /// 正文 → 总结的反向定位。编辑器传入全局 UTF-16 光标/选区，先转换为
+    /// UTF-8 byte offset，再按同一文档与版本命中唯一故事段。
+    /// </summary>
+    public void UpdateSummarySelectionFromEditor(EditorTextSelection selection)
+    {
+        RefreshSummarySourceFreshness();
+        if (!HasSummaryContext || _documentDirty || HasUnsavedChanges)
+        {
+            SelectSummarySegment(null);
+            return;
+        }
+
+        var utf16Offset = Math.Min(selection.Start, selection.End);
+        var content = AssembleDocumentContent();
+        if (!WorksSummarySourceMapper.TryMapUtf16OffsetToUtf8(
+                content,
+                utf16Offset,
+                out var byteOffset))
+        {
+            SelectSummarySegment(null);
+            return;
+        }
+        if (!WorksSummarySourceMapper.TryMapUtf16OffsetToUtf8(
+                content,
+                content.Length,
+                out var documentByteLength))
+        {
+            SelectSummarySegment(null);
+            return;
+        }
+
+        var selected = SummarySegments.FirstOrDefault(item =>
+            item.IsSourceFresh
+            && SummarySourceMatchesCurrentDocument(item.Source.DocumentId)
+            && item.Source.Range.Start <= byteOffset
+            && (byteOffset < item.Source.Range.End
+                || (byteOffset == documentByteLength
+                    && byteOffset == item.Source.Range.End)));
+        SelectSummarySegment(selected);
+    }
+
+    private void SelectSummarySegment(WorksSummarySegmentItemViewModel? selected)
+    {
+        foreach (var item in SummarySegments)
+        {
+            item.UpdateSelected(ReferenceEquals(item, selected));
+        }
+        if (selected is null)
+        {
+            ActiveSummarySegmentText = string.Empty;
+            return;
+        }
+
+        var eventTitles = SummaryEvents
+            .Where(item => item.RelatedSegmentIds?.Contains(selected.Segment.SegmentId) == true)
+            .Select(item => item.Title)
+            .ToArray();
+        ActiveSummarySegmentText = _displayNames.Format(
+            "ui.works.summary.active_source",
+            new Dictionary<string, string>
+            {
+                ["segment"] = selected.Title,
+                ["events"] = eventTitles.Length == 0
+                    ? _displayNames.Text("ui.common.none")
+                    : string.Join("、", eventTitles),
+            });
     }
 
     private bool SummarySourceMatchesCurrentDocument(string sourceDocumentId)
@@ -928,6 +1016,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             return;
         }
 
+        SelectSummarySegment(SummarySegments.FirstOrDefault(item =>
+            string.Equals(item.Segment.SegmentId, segment.SegmentId, StringComparison.Ordinal)));
         IsEditMode = true;
         RequestRevealEditorRange(start, end);
         StatusText = _displayNames.Text("ui.works.summary.source_revealed");
@@ -1932,9 +2022,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         _summaryLoadCts?.Cancel();
         _summaryLoadCts?.Dispose();
         _summaryLoadCts = null;
+        IsSummaryLoading = false;
         await LoadWorksTreeAsync().ConfigureAwait(true);
         if (string.IsNullOrWhiteSpace(_currentDocumentId))
         {
+            ClearSummaryState();
             return;
         }
 
@@ -2175,6 +2267,7 @@ public sealed class WorksTreeItemViewModel
 public sealed class WorksSummarySegmentItemViewModel : ViewModelBase
 {
     private bool _isSourceFresh;
+    private bool _isSelected;
     private string _sourceStateText = string.Empty;
 
     public WorksSummarySegmentItemViewModel(
@@ -2213,14 +2306,26 @@ public sealed class WorksSummarySegmentItemViewModel : ViewModelBase
         private set => SetProperty(ref _sourceStateText, value);
     }
 
+    public bool IsSelected
+    {
+        get => _isSelected;
+        private set => SetProperty(ref _isSelected, value);
+    }
+
     public void UpdateSourceState(bool isFresh, string stateText)
     {
         IsSourceFresh = isFresh;
         SourceStateText = stateText;
+    }
+
+    public void UpdateSelected(bool isSelected)
+    {
+        IsSelected = isSelected;
     }
 }
 
 public sealed record WorksSummaryDetailItemViewModel(
     string Title,
     string Content,
-    string StatusText);
+    string StatusText,
+    IReadOnlyList<string>? RelatedSegmentIds = null);

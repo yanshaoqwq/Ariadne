@@ -47,6 +47,36 @@ public static class WorksSummarySourceMapper
         }
     }
 
+    public static bool TryMapUtf16OffsetToUtf8(
+        string text,
+        int utf16Offset,
+        out long byteOffset)
+    {
+        byteOffset = 0;
+        text ??= string.Empty;
+        if (utf16Offset < 0 || utf16Offset > text.Length)
+        {
+            return false;
+        }
+        if (utf16Offset > 0
+            && utf16Offset < text.Length
+            && char.IsHighSurrogate(text[utf16Offset - 1])
+            && char.IsLowSurrogate(text[utf16Offset]))
+        {
+            return false;
+        }
+
+        try
+        {
+            byteOffset = StrictUtf8.GetByteCount(text.AsSpan(0, utf16Offset));
+            return true;
+        }
+        catch (EncoderFallbackException)
+        {
+            return false;
+        }
+    }
+
     private static bool IsUtf8Boundary(byte[] bytes, int offset)
     {
         return offset == 0

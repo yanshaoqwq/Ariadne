@@ -28,10 +28,11 @@ use ariadne::retrieval::{
 };
 use ariadne::workflow::{
     apply_confirmed_patch, execute_llm_node, execute_llm_node_with_defaults,
-    execute_project_search_node, execute_summarizer_node, BuiltinWorkflowNodeExecutor,
-    CommunicationControl, DocumentWorkflowExportSink, FilesystemRuntimeReferenceResolver,
-    NewWorkflowOperation, NodeErrorKind, NodeRetryPolicy, NoopExternalNodeExecutor,
-    PatchWriteBackState, RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
+    execute_project_search_node_for_test_fixture, execute_summarizer_node,
+    validate_workflow_execution_contracts, BuiltinWorkflowNodeExecutor, CommunicationControl,
+    DocumentWorkflowExportSink, FilesystemRuntimeReferenceResolver, NewWorkflowOperation,
+    NodeErrorKind, NodeRetryPolicy, NoopExternalNodeExecutor, PatchWriteBackState,
+    RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
     RuntimeReferenceKind, RuntimeReferenceResolver, SqliteWorkflowRuntimeStore,
     WorkflowExportRequest, WorkflowExportSink, WorkflowExternalNodeExecutor,
     WorkflowMutationClaimResult, WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest,
@@ -49,6 +50,60 @@ struct RecordingLlmProvider {
     contexts: Mutex<Vec<ProviderCallContext>>,
     /// 测试可注入返回的 cost_usd（F13 单次预算合同）。
     cost_usd: Mutex<Option<f64>>,
+}
+
+#[test]
+fn f8_summarizer_contract_requires_complete_config_and_matching_chapter_text_edge() {
+    let mut workflow = WorkflowDefinition {
+        id: WorkflowId::from("f8-summarizer-contract"),
+        name: "F8 Summarizer Contract".to_owned(),
+        nodes: vec![
+            node("writer", "writer"),
+            NodeInstance {
+                id: NodeId::from("summarizer"),
+                type_name: "summarizer".to_owned(),
+                label: None,
+                config: json!({
+                    "provider_id": "provider-main",
+                    "model_id": "model-main",
+                    "chapter_id": "chapter-1",
+                    "chapter_document_id": "documents/chapter-1.md",
+                    "chapter_text_alias": "chapter_body",
+                    "auto_mode": true
+                }),
+                position: None,
+            },
+        ],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+
+    let missing_edge = validate_workflow_execution_contracts(&workflow).unwrap_err();
+    assert!(missing_edge
+        .to_string()
+        .contains("incoming data edge with alias chapter_body"));
+
+    workflow.edges.push(Edge {
+        id: EdgeId::from("chapter-body"),
+        kind: WorkflowEdgeKind::Data,
+        from: PortEndpoint {
+            node_id: NodeId::from("writer"),
+            port_name: "output".to_owned(),
+        },
+        to: PortEndpoint {
+            node_id: NodeId::from("summarizer"),
+            port_name: "input".to_owned(),
+        },
+        alias: Some("chapter_body".to_owned()),
+        communication: None,
+    });
+    validate_workflow_execution_contracts(&workflow).unwrap();
+
+    workflow.nodes[1].config["chapter_document_id"] = json!("  ");
+    let missing_document = validate_workflow_execution_contracts(&workflow).unwrap_err();
+    assert!(missing_document
+        .to_string()
+        .contains("chapter_document_id cannot be empty"));
 }
 
 #[test]
@@ -3123,11 +3178,71 @@ fn project_search_node_returns_indexed_project_results() {
         dispatch_authorization: Default::default(),
     };
 
-    let output = execute_project_search_node(request, &retrieval).unwrap();
+    let output = execute_project_search_node_for_test_fixture(request, &retrieval).unwrap();
 
     let results = output.outputs.get("results").unwrap();
     assert!(format!("{results:?}").contains("chapter.md"));
     assert_eq!(output.metadata["retrieval_scope"], "project");
+}
+
+#[test]
+fn project_search_node_rejects_product_limit_before_retrieval_dispatch() {
+    let retrieval = HybridSearchEngine::new(
+        Arc::new(MemoryVectorStore::new()),
+        Arc::new(MemoryFullTextStore::new()),
+    );
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf"),
+        run_id: RunId::from("run"),
+        node_id: NodeId::from("search"),
+        operation_id: "op-search-limit".to_owned(),
+        operation_attempt: 1,
+        request_hash: "request-search-limit".to_owned(),
+        type_name: "search".to_owned(),
+        config: json!({"query_alias": "query", "limit": 51}),
+        inputs: PortMap::from([("query".to_owned(), PortValue::inline(json!("线索")))]),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
+    };
+
+    let error = execute_project_search_node_for_test_fixture(request, &retrieval).unwrap_err();
+
+    assert!(error.to_string().contains("project search limit"));
+}
+
+#[test]
+fn project_search_node_rejects_oversized_inline_results() {
+    let text = Arc::new(MemoryFullTextStore::new());
+    text.upsert(vec![FullTextRecord {
+        chunk: ariadne::retrieval::ChunkDocument::new(
+            "oversized",
+            "chapter.md",
+            format!("线索{}", "文".repeat(128 * 1024)),
+        ),
+    }])
+    .unwrap();
+    let retrieval = HybridSearchEngine::new(Arc::new(MemoryVectorStore::new()), text);
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf"),
+        run_id: RunId::from("run"),
+        node_id: NodeId::from("search"),
+        operation_id: "op-search-budget".to_owned(),
+        operation_attempt: 1,
+        request_hash: "request-search-budget".to_owned(),
+        type_name: "search".to_owned(),
+        config: json!({"query_alias": "query", "limit": 1}),
+        inputs: PortMap::from([("query".to_owned(), PortValue::inline(json!("线索")))]),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
+    };
+
+    let error = execute_project_search_node_for_test_fixture(request, &retrieval).unwrap_err();
+
+    assert!(error.to_string().contains("exceeding inline budget"));
 }
 
 /// 预设节点输出并记录调度请求的测试执行器。

@@ -219,6 +219,112 @@ impl IndexInvalidationOutbox {
         Ok(event_id)
     }
 
+    /// 无外部文件事务需要协调时，直接原子写入 pending 事件，避免 prepare/activate 崩溃窗。
+    pub fn enqueue(
+        &self,
+        document_id: &str,
+        reason: &str,
+        source_version: &str,
+        full_rebuild_required: bool,
+    ) -> CoreResult<String> {
+        self.enqueue_pending(
+            document_id,
+            reason,
+            source_version,
+            full_rebuild_required,
+            false,
+        )?
+        .ok_or_else(|| CoreError::validation("index invalidation event was not enqueued"))
+    }
+
+    /// 原子、幂等地入队 full rebuild；旧版本遗留的 prepared rebuild 会在同一事务中恢复。
+    pub fn enqueue_full_rebuild_if_absent(
+        &self,
+        document_id: &str,
+        reason: &str,
+        source_version: &str,
+    ) -> CoreResult<Option<String>> {
+        self.enqueue_pending(document_id, reason, source_version, true, true)
+    }
+
+    fn enqueue_pending(
+        &self,
+        document_id: &str,
+        reason: &str,
+        source_version: &str,
+        full_rebuild_required: bool,
+        deduplicate_full_rebuild: bool,
+    ) -> CoreResult<Option<String>> {
+        let _db_lock = self.acquire_outbox_write_lock()?;
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+
+        if deduplicate_full_rebuild {
+            let existing = transaction
+                .query_row(
+                    "SELECT event_id, status FROM index_invalidation_events
+                     WHERE full_rebuild_required = 1
+                       AND status IN ('pending', 'processing', 'prepared')
+                     ORDER BY rowid LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(sqlite_error)?;
+            if let Some((event_id, status)) = existing {
+                transaction
+                    .execute(
+                        "UPDATE index_invalidation_events SET status = 'superseded'
+                         WHERE full_rebuild_required = 1
+                           AND status = 'prepared'
+                           AND event_id <> ?1",
+                        params![event_id],
+                    )
+                    .map_err(sqlite_error)?;
+                if status == "prepared" {
+                    transaction
+                        .execute(
+                            "UPDATE index_invalidation_events SET status = 'pending'
+                             WHERE event_id = ?1 AND status = 'prepared'",
+                            params![event_id],
+                        )
+                        .map_err(sqlite_error)?;
+                    transaction.commit().map_err(sqlite_error)?;
+                    return Ok(Some(event_id));
+                }
+                transaction.commit().map_err(sqlite_error)?;
+                return Ok(None);
+            }
+        }
+
+        let event_id = next_event_id();
+        transaction
+            .execute(
+                "UPDATE index_invalidation_events SET status = 'superseded'
+                 WHERE document_id = ?1 AND status = 'pending'",
+                params![document_id],
+            )
+            .map_err(sqlite_error)?;
+        transaction
+            .execute(
+                "INSERT INTO index_invalidation_events
+                 (event_id, document_id, reason, source_version, full_rebuild_required, status, attempt_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 0)",
+                params![
+                    event_id,
+                    document_id,
+                    reason,
+                    source_version,
+                    full_rebuild_required
+                ],
+            )
+            .map_err(sqlite_error)?;
+        transaction.commit().map_err(sqlite_error)?;
+        Ok(Some(event_id))
+    }
+
     pub fn activate(&self, event_id: &str) -> CoreResult<()> {
         let _db_lock = self.acquire_outbox_write_lock()?;
         let mut connection = self.open()?;

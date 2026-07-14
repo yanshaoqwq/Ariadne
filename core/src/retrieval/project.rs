@@ -10,6 +10,7 @@ use crate::config::{
 };
 use crate::contracts::{
     ensure_path_under_root, CoreError, CoreResult, ExternalDispatchOutcome, ProviderCapability,
+    ProviderType,
 };
 use crate::costs::{CostLedger, SqliteCostLedger};
 use crate::documents::IndexInvalidationOutbox;
@@ -285,19 +286,13 @@ impl ProjectRetrievalRuntime {
 
     /// 配置 generation 提交后幂等入队完整重建；pending 事件本身就是搜索门禁。
     pub fn enqueue_configuration_rebuild(&self) -> CoreResult<Option<String>> {
-        if self.outbox.has_incomplete_full_rebuild()? {
-            return Ok(None);
-        }
         let revision = Self::index_configuration_revision(&self.config)?;
         let document_id = self.project_root.to_string_lossy().into_owned();
-        let event_id = self.outbox.prepare(
+        self.outbox.enqueue_full_rebuild_if_absent(
             &document_id,
             "retrieval_configuration_changed",
             &revision,
-            true,
-        )?;
-        self.outbox.activate(&event_id)?;
-        Ok(Some(event_id))
+        )
     }
 
     /// 创建与本运行时共享后端和 provider 的 outbox worker。
@@ -373,6 +368,10 @@ impl ProjectRetrievalRuntime {
                 ExternalDispatchOutcome::NotDispatched,
             ));
         }
+        // 知识同步在启用向量检索时会调用远端 embedding，并随后改写正式索引；
+        // 因此父级 workflow/lease 授权必须在线性化点先消费，不能等同步完成后再补验。
+        // 子 provider 调用继承身份和取消，但使用独立默认派发授权，避免重复 CAS。
+        context.dispatch_authorization.authorize_dispatch()?;
         let knowledge = self.sync_knowledge_index(Some(&context.cancellation))?;
         if context.cancellation.is_cancelled() {
             return Err(CoreError::external_cancelled(
@@ -380,9 +379,6 @@ impl ProjectRetrievalRuntime {
                 ExternalDispatchOutcome::NotDispatched,
             ));
         }
-        // 工作流控制/lease 只在产品检索边界消费一次；子 provider 调用继承身份和取消，
-        // 但使用独立默认派发授权，避免同一 operation 栅栏被重复 CAS。
-        context.dispatch_authorization.authorize_dispatch()?;
         let operation_base = context
             .operation_id
             .clone()
@@ -461,6 +457,22 @@ impl ProjectRetrievalRuntime {
     /// 诊断复用真实运行时组件；未配置向量时只报告两路全文组件。
     pub fn health_check(&self) -> CoreResult<Vec<StoreHealth>> {
         let mut health = Vec::new();
+        let dead_letters = self.outbox.list_dead_letters()?;
+        if !dead_letters.is_empty() {
+            health.push(StoreHealth::unavailable(
+                "retrieval_index_outbox",
+                "diagnostics.retrieval.outbox.dead_letter",
+            ));
+        } else if self.outbox.has_incomplete_invalidation()?
+            || self.outbox.has_incomplete_full_rebuild()?
+        {
+            health.push(StoreHealth::degraded(
+                "retrieval_index_outbox",
+                "diagnostics.retrieval.outbox.pending",
+            ));
+        } else {
+            health.push(StoreHealth::healthy("retrieval_index_outbox"));
+        }
         if let Some(sidecar) = &self.sidecar {
             health.push(sidecar.health_check()?);
         }
@@ -611,9 +623,17 @@ fn vector_pipeline_config_matches(left: &ProjectConfig, right: &ProjectConfig) -
     vector_pipeline_descriptor(left) == vector_pipeline_descriptor(right)
 }
 
-fn vector_pipeline_descriptor(
-    config: &ProjectConfig,
-) -> Option<(&VectorStoreConfig, Option<&str>, Option<&ProviderConfig>)> {
+#[derive(serde::Serialize, PartialEq)]
+struct VectorPipelineDescriptor<'a> {
+    vector_store: &'a VectorStoreConfig,
+    provider_id: Option<&'a str>,
+    provider_type: Option<&'a ProviderType>,
+    provider_enabled: Option<bool>,
+    base_url: Option<&'a str>,
+    model_id: Option<&'a str>,
+}
+
+fn vector_pipeline_descriptor(config: &ProjectConfig) -> Option<VectorPipelineDescriptor<'_>> {
     if !config.rag.vector_store.enabled {
         return None;
     }
@@ -625,7 +645,21 @@ fn vector_pipeline_descriptor(
             .iter()
             .find(|provider| provider.provider_id == provider_id)
     });
-    Some((&config.rag.vector_store, provider_id, provider))
+    let model_id = provider.and_then(|provider| {
+        provider
+            .models
+            .iter()
+            .find(|model| model.capability == ProviderCapability::Embedding)
+            .map(|model| model.model_id.as_str())
+    });
+    Some(VectorPipelineDescriptor {
+        vector_store: &config.rag.vector_store,
+        provider_id,
+        provider_type: provider.map(|provider| &provider.provider_type),
+        provider_enabled: provider.map(|provider| provider.enabled),
+        base_url: provider.and_then(|provider| provider.base_url.as_deref()),
+        model_id,
+    })
 }
 
 fn resolve_project_path(project_root: &Path, configured: &Path) -> CoreResult<PathBuf> {

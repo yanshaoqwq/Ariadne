@@ -9,7 +9,8 @@ use ariadne::providers::{
 use ariadne::rag::{
     insert_lines_to_patch, load_display_name_resources, load_prompt_resources,
     midpoint_segment_number, render_node_prompt, render_prompt_template, replace_lines_to_patch,
-    search_response_to_writing_response, tool_definitions_for_agent, ForeshadowingContent,
+    search_response_to_writing_response, tool_definitions_for_agent, CharacterTraitContent,
+    ConfirmationItem, ConfirmationKind, ConfirmationState, ForeshadowingContent,
     ForeshadowingRecord, ForeshadowingStatus, ForeshadowingUpdate, MemoryWritingKnowledgeBase,
     NodePromptConfig, PatchSession, PromptTemplateContext, RealizedChangeLink, RegisterContent,
     RegisterFunction, RegisterOperation, RegisteredChange, RegisteredChangeStatus,
@@ -3047,4 +3048,200 @@ fn f15_generation_context_loads_events_changes_foreshadowing_and_stage_history()
             .map(String::as_str),
         Some("旧章总结")
     );
+}
+
+/// F19：作品页从 metadata.db 读取唯一正式投影，并把确认历史与 active 知识分开。
+#[test]
+fn f19_chapter_summary_view_projects_formal_knowledge_and_confirmation_history() {
+    let store = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    for segment in [
+        StorySegment {
+            segment_id: "chapter-view::seg-2".to_owned(),
+            number: "2".to_owned(),
+            chapter_id: "chapter-view".to_owned(),
+            summary: "第二段".to_owned(),
+            source: SourceSpan {
+                document_id: "documents/chapter-view.md".to_owned(),
+                range: TextRange { start: 3, end: 7 },
+                version: Some("v1".to_owned()),
+            },
+            metadata: Value::Null,
+        },
+        StorySegment {
+            segment_id: "chapter-view::seg-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "chapter-view".to_owned(),
+            summary: "第一段".to_owned(),
+            source: SourceSpan {
+                document_id: "documents/chapter-view.md".to_owned(),
+                range: TextRange { start: 0, end: 3 },
+                version: Some("v1".to_owned()),
+            },
+            metadata: Value::Null,
+        },
+    ] {
+        knowledge.upsert_segment(segment).unwrap();
+    }
+    knowledge
+        .upsert_event(StoryEvent {
+            event_id: "event-view".to_owned(),
+            summary: "跨越两段的事件".to_owned(),
+            status: StoryEventStatus::Ongoing,
+            segment_ids: vec![
+                "chapter-view::seg-1".to_owned(),
+                "chapter-view::seg-2".to_owned(),
+            ],
+            chapter_ids: vec!["chapter-view".to_owned()],
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_registered_change(RegisteredChange {
+            change_id: "change-view".to_owned(),
+            function: RegisterFunction::CharacterTrait,
+            status: RegisteredChangeStatus::Realized,
+            content: RegisterContent::CharacterTrait(CharacterTraitContent {
+                character: "阿青".to_owned(),
+                trait_name: "勇气".to_owned(),
+                from_value: Some("犹疑".to_owned()),
+                to_value: "坚定".to_owned(),
+                reason: "作出选择".to_owned(),
+            }),
+            linked_segment_ids: vec!["chapter-view::seg-2".to_owned()],
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_foreshadowing(ForeshadowingRecord {
+            foreshadowing_id: "fore-view".to_owned(),
+            title: "旧钥匙".to_owned(),
+            description: "本章完成回收".to_owned(),
+            status: ForeshadowingStatus::Recovered,
+            planted_segment_ids: vec!["chapter-view::seg-1".to_owned()],
+            recovered_segment_ids: vec!["chapter-view::seg-2".to_owned()],
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_chapter_summary("chapter-view", "正式章节总结")
+        .unwrap();
+    knowledge
+        .upsert_stage_summary("stage-official", "正式阶段总结")
+        .unwrap();
+    knowledge
+        .link_chapter_stage("chapter-view", "stage-official")
+        .unwrap();
+
+    for (index, (kind, state)) in [
+        (ConfirmationKind::SegmentSummary, ConfirmationState::Pending),
+        (ConfirmationKind::EventSummary, ConfirmationState::Skipped),
+        (
+            ConfirmationKind::ChapterSummary,
+            ConfirmationState::AutoAudited,
+        ),
+        (ConfirmationKind::StageSummary, ConfirmationState::Approved),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        knowledge
+            .upsert_confirmation(ConfirmationItem {
+                confirmation_id: format!("confirm-{index}"),
+                kind,
+                state,
+                prompt_key: "confirmation.test".to_owned(),
+                metadata: json!({
+                    "chapter_id": "chapter-view",
+                    "revision_id": format!("rev-{index}"),
+                    "pending_payload": { "must_not_be_projected": true },
+                }),
+            })
+            .unwrap();
+    }
+    store.save_knowledge(&knowledge).unwrap();
+
+    let view = store.load_chapter_summary_view("chapter-view").unwrap();
+    assert_eq!(view.chapter_summary.as_deref(), Some("正式章节总结"));
+    let stage = view.stage.unwrap();
+    assert_eq!(stage.stage_id, "stage-official");
+    assert_eq!(stage.summary.as_deref(), Some("正式阶段总结"));
+    assert_eq!(stage.chapter_ids, vec!["chapter-view"]);
+    assert_eq!(
+        view.segments
+            .iter()
+            .map(|segment| segment.number.as_str())
+            .collect::<Vec<_>>(),
+        vec!["1", "2"]
+    );
+    assert_eq!(view.events[0].event_id, "event-view");
+    assert_eq!(view.realized_changes[0].change_id, "change-view");
+    assert_eq!(view.foreshadowing[0].foreshadowing_id, "fore-view");
+    assert_eq!(view.confirmations.len(), 4);
+    assert_eq!(view.confirmations[0].state, ConfirmationState::Pending);
+    assert_eq!(view.confirmations[1].state, ConfirmationState::Skipped);
+    assert_eq!(view.confirmations[2].state, ConfirmationState::AutoAudited);
+    assert_eq!(view.confirmations[3].state, ConfirmationState::Approved);
+}
+
+/// F19：SourceSpan 版本和关系闭包损坏时 fail loud，不把坏数据伪装成空总结。
+#[test]
+fn f19_chapter_summary_view_rejects_missing_source_version_and_dangling_relation() {
+    let missing_version = SqliteWritingKnowledgeStore::open_in_memory().unwrap();
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    knowledge
+        .upsert_segment(StorySegment {
+            segment_id: "chapter-bad::seg-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "chapter-bad".to_owned(),
+            summary: "缺版本".to_owned(),
+            source: SourceSpan {
+                document_id: "documents/chapter-bad.md".to_owned(),
+                range: TextRange { start: 0, end: 3 },
+                version: None,
+            },
+            metadata: Value::Null,
+        })
+        .unwrap();
+    missing_version.save_knowledge(&knowledge).unwrap();
+    let error = missing_version
+        .load_chapter_summary_view("chapter-bad")
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid source span"));
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteWritingKnowledgeStore::open(temp.path()).unwrap();
+    let valid = MemoryWritingKnowledgeBase::new();
+    valid
+        .upsert_segment(StorySegment {
+            segment_id: "chapter-bad::seg-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "chapter-bad".to_owned(),
+            summary: "有效来源".to_owned(),
+            source: SourceSpan {
+                document_id: "documents/chapter-bad.md".to_owned(),
+                range: TextRange { start: 0, end: 3 },
+                version: Some("v1".to_owned()),
+            },
+            metadata: Value::Null,
+        })
+        .unwrap();
+    store.save_knowledge(&valid).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(temp.path().join("metadata.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO event_chapter_links(event_id, chapter_id) VALUES (?1, ?2)",
+            ("missing-event", "chapter-bad"),
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = SqliteWritingKnowledgeStore::open(temp.path()).unwrap();
+    let error = reopened
+        .load_chapter_summary_view("chapter-bad")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("event relation references missing entity"));
 }

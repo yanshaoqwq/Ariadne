@@ -75,6 +75,108 @@ fn ipc_update_budget_returns_saved_budget_status_instead_of_null() {
 }
 
 #[test]
+fn ipc_works_tree_and_summary_share_official_stage_projection() {
+    use ariadne::contracts::{SourceSpan, TextRange};
+    use ariadne::documents::{ChapterDocumentEntry, ChapterDocumentIndex, ChapterDocumentKind};
+    use ariadne::rag::{MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, StorySegment};
+
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let document_path = project.path().join("documents/chapter-ipc.md");
+    std::fs::write(&document_path, "正文").unwrap();
+    let index = ChapterDocumentIndex::new(
+        "v1",
+        vec![ChapterDocumentEntry {
+            chapter_id: "wrong-prefix:chapter-ipc".to_owned(),
+            document_id: "documents/chapter-ipc.md".to_owned(),
+            path: document_path,
+            title: "IPC 章节".to_owned(),
+            order: 1,
+            kind: ChapterDocumentKind::ChapterBody,
+            version: "v1".to_owned(),
+            word_count: None,
+            outline_ref: None,
+        }],
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join(".runtime/chapter_index.json"),
+        serde_json::to_vec_pretty(&index).unwrap(),
+    )
+    .unwrap();
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    knowledge
+        .upsert_segment(StorySegment {
+            segment_id: "wrong-prefix:chapter-ipc::seg-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "wrong-prefix:chapter-ipc".to_owned(),
+            summary: "IPC 故事段".to_owned(),
+            source: SourceSpan {
+                document_id: "documents/chapter-ipc.md".to_owned(),
+                range: TextRange { start: 0, end: 6 },
+                version: Some("v1".to_owned()),
+            },
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_chapter_summary("wrong-prefix:chapter-ipc", "IPC 章节总结")
+        .unwrap();
+    knowledge
+        .upsert_stage_summary("official-ipc-stage", "IPC 阶段总结")
+        .unwrap();
+    knowledge
+        .link_chapter_stage("wrong-prefix:chapter-ipc", "official-ipc-stage")
+        .unwrap();
+    SqliteWritingKnowledgeStore::open(project.path())
+        .unwrap()
+        .save_knowledge(&knowledge)
+        .unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let tree = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_works_tree".to_owned(),
+            params: Value::Null,
+        },
+    );
+    assert!(tree.ok, "{:?}", tree.error);
+    let summary = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_chapter_summary_view".to_owned(),
+            params: json!({ "chapter_id": "wrong-prefix:chapter-ipc" }),
+        },
+    );
+    assert!(summary.ok, "{:?}", summary.error);
+
+    let tree_data = tree.data.unwrap();
+    let tree_stage = tree_data["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["stage_id"] == "official-ipc-stage")
+        .unwrap();
+    assert_eq!(
+        tree_stage["children"][0]["chapter_id"],
+        "wrong-prefix:chapter-ipc"
+    );
+    let summary_data = summary.data.unwrap();
+    assert_eq!(summary_data["stage"]["stage_id"], "official-ipc-stage");
+    assert_eq!(summary_data["chapter_summary"], "IPC 章节总结");
+    assert_eq!(
+        summary_data["segments"][0]["source"]["document_id"],
+        "documents/chapter-ipc.md"
+    );
+}
+
+#[test]
 fn ipc_search_project_documents_uses_project_retrieval_runtime() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();

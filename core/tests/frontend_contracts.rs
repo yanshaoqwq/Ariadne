@@ -723,11 +723,12 @@ fn ui_log_stores_migrate_legacy_json_once_and_use_sqlite_indexes() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join(".runtime");
     std::fs::create_dir_all(&runtime).unwrap();
+    let timestamp_ms = now_timestamp_ms();
     let confirmation = ConfirmationLogEntry {
         confirmation_id: "legacy-confirm".to_owned(),
         kind: "writer_patch".to_owned(),
         node_id: "writer".to_owned(),
-        timestamp_ms: 10,
+        timestamp_ms,
         state: ConfirmationLogState::Pending,
         handling_method: "pending".to_owned(),
         summary: "旧确认".to_owned(),
@@ -737,7 +738,7 @@ fn ui_log_stores_migrate_legacy_json_once_and_use_sqlite_indexes() {
     };
     let run_log = UiRunLogEntry {
         log_id: "legacy-log".to_owned(),
-        timestamp_ms: 11,
+        timestamp_ms: timestamp_ms + 1,
         kind: UiRunLogKind::Error,
         level: UiRunLogLevel::Error,
         message: "legacy failure".to_owned(),
@@ -775,7 +776,12 @@ fn ui_log_stores_migrate_legacy_json_once_and_use_sqlite_indexes() {
 fn run_log_query_supports_stable_cursor_and_limit() {
     let temp = tempfile::tempdir().unwrap();
     let store = UiRunLogStore::default_for_project(temp.path());
-    for (log_id, timestamp_ms) in [("a", 100), ("b", 100), ("c", 101)] {
+    let timestamp_ms = now_timestamp_ms();
+    for (log_id, timestamp_ms) in [
+        ("a", timestamp_ms),
+        ("b", timestamp_ms),
+        ("c", timestamp_ms + 1),
+    ] {
         store
             .append(UiRunLogEntry {
                 log_id: log_id.to_owned(),
@@ -855,6 +861,86 @@ fn works_service_builds_tree_imports_chapters_and_exports_selected_markdown() {
     assert_eq!(tree.children[0].children[0].title, "第一章");
     assert_eq!(export.exported_chapter_ids, vec!["stage1:chapter1"]);
     assert!(export.storage_uri.ends_with("exports/book.md"));
+}
+
+/// F20：作品树只接受 metadata.db 的正式阶段关系，不再从 chapter_id 文本猜测。
+#[test]
+fn f20_works_tree_uses_official_stage_relation_and_preserves_unassigned_chapters() {
+    let index = ChapterDocumentIndex::new(
+        "v1",
+        vec![
+            ChapterDocumentEntry {
+                chapter_id: "misleading-prefix:chapter-1".to_owned(),
+                document_id: "documents/chapter-1.md".to_owned(),
+                path: "documents/chapter-1.md".into(),
+                title: "第一章".to_owned(),
+                order: 1,
+                kind: ChapterDocumentKind::ChapterBody,
+                version: "v1".to_owned(),
+                word_count: None,
+                outline_ref: None,
+            },
+            ChapterDocumentEntry {
+                chapter_id: "chapter-2".to_owned(),
+                document_id: "documents/chapter-2.md".to_owned(),
+                path: "documents/chapter-2.md".into(),
+                title: "第二章".to_owned(),
+                order: 2,
+                kind: ChapterDocumentKind::ChapterBody,
+                version: "v2".to_owned(),
+                word_count: None,
+                outline_ref: None,
+            },
+        ],
+    )
+    .unwrap();
+    let official = BTreeMap::from([(
+        "misleading-prefix:chapter-1".to_owned(),
+        "official-stage".to_owned(),
+    )]);
+
+    let tree = build_works_tree(&index, &official, "planning").unwrap();
+    let official_stage = tree
+        .children
+        .iter()
+        .find(|node| node.stage_id.as_deref() == Some("official-stage"))
+        .unwrap();
+    assert_eq!(official_stage.node_id, "stage:official-stage");
+    assert_eq!(official_stage.title, "official-stage");
+    assert_eq!(
+        official_stage.children[0].chapter_id.as_deref(),
+        Some("misleading-prefix:chapter-1")
+    );
+    assert_eq!(
+        official_stage.children[0].stage_id.as_deref(),
+        Some("official-stage")
+    );
+    assert!(!tree
+        .children
+        .iter()
+        .any(|node| node.stage_id.as_deref() == Some("misleading-prefix")));
+
+    let unassigned = tree
+        .children
+        .iter()
+        .find(|node| node.node_id == "stage:__unassigned__")
+        .unwrap();
+    assert_eq!(unassigned.title, "ui.works.unassigned_stage");
+    assert!(unassigned.path.as_os_str().is_empty());
+    assert_eq!(
+        unassigned.children[0].chapter_id.as_deref(),
+        Some("chapter-2")
+    );
+
+    let error = build_works_tree(
+        &index,
+        &BTreeMap::from([("missing-chapter".to_owned(), "stage-x".to_owned())]),
+        "planning",
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("references missing chapter index entry"));
 }
 
 #[test]

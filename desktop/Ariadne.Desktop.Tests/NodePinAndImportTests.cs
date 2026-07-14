@@ -193,6 +193,41 @@ public sealed class NodePinAndImportTests
         Assert.Equal("Book", e["title"]?.ToString());
     }
 
+    [Fact]
+    public void Summarizer_ToData_UsesDedicatedBusinessConfigAndCanClearStaleProvider()
+    {
+        var node = NewNode("summarizer");
+        Assert.True(node.IsSummarizerNode);
+        node.RetainOpaqueData(new Dictionary<string, object?>
+        {
+            ["provider_id"] = "old-provider",
+            ["chapter_id"] = "old-chapter",
+            ["chapter_document_id"] = "documents/old.md",
+            ["chapter_text_alias"] = "old_text",
+            ["auto_mode"] = false,
+            ["temperature"] = 0.2,
+        });
+        node.SummarizerProviderId = "provider-main";
+        node.ModelId = "model-main";
+        node.SummarizerChapterId = "chapter-1";
+        node.SummarizerChapterDocumentId = "documents/chapter-1.md";
+        node.SummarizerChapterTextAlias = "chapter_body";
+        node.SummarizerAutoMode = true;
+
+        var data = node.ToData();
+
+        Assert.Equal("provider-main", data["provider_id"]);
+        Assert.Equal("model-main", data["model_id"]);
+        Assert.Equal("chapter-1", data["chapter_id"]);
+        Assert.Equal("documents/chapter-1.md", data["chapter_document_id"]);
+        Assert.Equal("chapter_body", data["chapter_text_alias"]);
+        Assert.Equal(true, data["auto_mode"]);
+        Assert.Equal(0.2, data["temperature"]);
+
+        node.SummarizerProviderId = "  ";
+        Assert.False(node.ToData().ContainsKey("provider_id"));
+    }
+
     /// <summary>未实现后端桩：节点构造不调用后端即可测 UI 字段。DispatchProxy 要求非 sealed。</summary>
     private class UnimplementedBackendProxy : DispatchProxy
     {

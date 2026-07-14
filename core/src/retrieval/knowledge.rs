@@ -316,6 +316,7 @@ pub(crate) fn acquire_retrieval_index_lock(path: &Path) -> CoreResult<File> {
     }
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)?;

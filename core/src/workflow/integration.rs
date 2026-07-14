@@ -5,6 +5,7 @@ use serde_json::json;
 
 use crate::contracts::{
     ArtifactKind, CoreError, CoreResult, DocumentPatch, NodeId, PortMap, PortValue,
+    WorkflowDefinition, WorkflowEdgeKind,
 };
 use crate::costs::CostLedger;
 use crate::documents::{
@@ -705,8 +706,68 @@ pub struct WorkflowSummarizerNodeConfig {
     pub single_call_budget_usd: Option<f64>,
 }
 
+impl WorkflowSummarizerNodeConfig {
+    /// 从持久化节点配置解析并执行与产品保存、运行预检相同的业务校验。
+    pub fn from_value(value: serde_json::Value) -> CoreResult<Self> {
+        let config = serde_json::from_value::<Self>(value).map_err(|error| {
+            CoreError::validation(format!("summarizer node config is invalid: {error}"))
+        })?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> CoreResult<()> {
+        validate_summarizer_required_field("provider_id", &self.provider_id)?;
+        validate_summarizer_required_field("model_id", &self.model_id)?;
+        validate_summarizer_required_field("chapter_id", &self.chapter_id)?;
+        validate_summarizer_required_field("chapter_document_id", &self.chapter_document_id)?;
+        validate_summarizer_required_field("chapter_text_alias", &self.chapter_text_alias)?;
+        Ok(())
+    }
+}
+
+fn validate_summarizer_required_field(field: &str, value: &str) -> CoreResult<()> {
+    if value.trim().is_empty() {
+        return Err(CoreError::validation(format!(
+            "summarizer node {field} cannot be empty"
+        )));
+    }
+    Ok(())
+}
+
 fn default_chapter_text_alias() -> String {
     "chapter_text".to_owned()
+}
+
+/// 产品级工作流校验：拓扑与节点业务配置只走这一入口，保存、显式校验和运行预检共用。
+pub fn validate_workflow_execution_contracts(workflow: &WorkflowDefinition) -> CoreResult<()> {
+    workflow.validate_topology()?;
+    for node in &workflow.nodes {
+        if node.type_name != "summarizer" {
+            continue;
+        }
+
+        let config =
+            WorkflowSummarizerNodeConfig::from_value(node.config.clone()).map_err(|error| {
+                CoreError::validation(format!(
+                    "summarizer node {} failed configuration validation: {error}",
+                    node.id.as_str()
+                ))
+            })?;
+        let chapter_text_alias = config.chapter_text_alias.trim();
+        let has_chapter_text_edge = workflow.edges.iter().any(|edge| {
+            edge.kind == WorkflowEdgeKind::Data
+                && edge.to.node_id == node.id
+                && edge.alias.as_deref().map(str::trim) == Some(chapter_text_alias)
+        });
+        if !has_chapter_text_edge {
+            return Err(CoreError::validation(format!(
+                "summarizer node {} requires an incoming data edge with alias {chapter_text_alias}",
+                node.id.as_str()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// F17：把项目保存的双模式策略解析为 Summarizer 四步领域策略。
@@ -767,7 +828,7 @@ pub fn execute_summarizer_node<L: CostLedger>(
     };
     use crate::workflow::{RuntimeConfirmation, RuntimeConfirmationState};
 
-    let config = serde_json::from_value::<WorkflowSummarizerNodeConfig>(request.config.clone())?;
+    let config = WorkflowSummarizerNodeConfig::from_value(request.config.clone())?;
     let chapter_text = input_text(&request.inputs, &config.chapter_text_alias)?;
     let prompts = crate::rag::resources::load_prompt_resources()?;
 
@@ -994,21 +1055,29 @@ pub struct WorkflowProjectSearchNodeConfig {
     pub limit: Option<usize>,
 }
 
-/// 使用项目混合索引执行 search 节点（无项目根时不做磁盘新鲜度门禁，供内存夹具）。
-pub fn execute_project_search_node(
+/// 仅供内存合同夹具使用；正式产品路径必须调用 `execute_project_retrieval_node_for_project`。
+#[doc(hidden)]
+pub fn execute_project_search_node_for_test_fixture(
     request: WorkflowNodeExecutionRequest,
     retrieval: &dyn HybridSearch,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
-    execute_project_search_node_inner(request, retrieval, None)
-}
-
-/// F2-b：产品路径 — 绑定项目根，应用 outbox 门禁与 source_version 过滤。
-pub fn execute_project_search_node_for_project(
-    project_root: &std::path::Path,
-    request: WorkflowNodeExecutionRequest,
-    retrieval: &dyn HybridSearch,
-) -> CoreResult<WorkflowNodeExecutionOutput> {
-    execute_project_search_node_inner(request, retrieval, Some(project_root))
+    let config = serde_json::from_value::<WorkflowProjectSearchNodeConfig>(request.config)?;
+    let query = input_text(&request.inputs, &config.query_alias)?;
+    let limit = config.limit.unwrap_or(10);
+    validate_product_search_limit(limit)?;
+    request.dispatch_authorization.authorize_dispatch()?;
+    let results = retrieval.search(HybridSearchRequest::new(query, None, limit))?;
+    validate_product_search_result_budget(&results)?;
+    let mut outputs = PortMap::new();
+    outputs.insert("results".to_owned(), PortValue::inline(json!(results)));
+    Ok(WorkflowNodeExecutionOutput {
+        outputs,
+        metadata: json!({
+            "retrieval_scope": "project",
+            "result_count": results.len(),
+        }),
+        ..WorkflowNodeExecutionOutput::default()
+    })
 }
 
 /// F1/F2 产品组合根入口：将 workflow 身份、取消和 dispatch 栅栏传入项目级检索运行时。
@@ -1044,38 +1113,6 @@ pub fn execute_project_retrieval_node_for_project(
             "result_count": results.len(),
             "vector_enabled": retrieval.vector_enabled(),
             "project_root": project_root,
-        }),
-        ..WorkflowNodeExecutionOutput::default()
-    })
-}
-
-fn execute_project_search_node_inner(
-    request: WorkflowNodeExecutionRequest,
-    retrieval: &dyn HybridSearch,
-    project_root: Option<&std::path::Path>,
-) -> CoreResult<WorkflowNodeExecutionOutput> {
-    let config = serde_json::from_value::<WorkflowProjectSearchNodeConfig>(request.config)?;
-    let query = input_text(&request.inputs, &config.query_alias)?;
-    let limit = config.limit.unwrap_or(10);
-    if let Some(root) = project_root {
-        let outbox = crate::documents::IndexInvalidationOutbox::new(
-            root.join(".runtime").join("index_invalidation.db"),
-        );
-        crate::retrieval::ensure_search_not_blocked_by_pending_index(&outbox)?;
-    }
-    request.dispatch_authorization.authorize_dispatch()?;
-    let mut results = retrieval.search(HybridSearchRequest::new(query, None, limit))?;
-    if project_root.is_some() {
-        results = crate::retrieval::filter_fresh_retrieval_results(results)?;
-    }
-    validate_product_search_result_budget(&results)?;
-    let mut outputs = PortMap::new();
-    outputs.insert("results".to_owned(), PortValue::inline(json!(results)));
-    Ok(WorkflowNodeExecutionOutput {
-        outputs,
-        metadata: json!({
-            "retrieval_scope": "project",
-            "result_count": results.len(),
         }),
         ..WorkflowNodeExecutionOutput::default()
     })

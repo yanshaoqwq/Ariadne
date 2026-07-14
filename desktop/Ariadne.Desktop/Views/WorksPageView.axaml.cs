@@ -42,6 +42,12 @@ public partial class WorksPageView : UserControl
         e.Handled = true;
     }
 
+    private void OnDocumentBlockEditorKeyUp(object? sender, KeyEventArgs e)
+    {
+        // 键盘移动光标或改变选区后，同步反向定位右栏中的正式总结故事段。
+        CaptureStickySelectionFrom(sender as TextBox, clearWhenEmpty: false);
+    }
+
     private void OnDocumentBlockEditorGotFocus(object? sender, RoutedEventArgs e)
     {
         _activeBlockEditor = sender as TextBox;
@@ -242,11 +248,13 @@ public partial class WorksPageView : UserControl
             selected = editor.Text![start..end];
         }
 
+        var mapped = viewModel.SelectionForBlock(block, start, end, selected);
+        viewModel.UpdateSummarySelectionFromEditor(mapped);
+
         if (end > start && !string.IsNullOrWhiteSpace(selected))
         {
             _activeBlockEditor = editor;
             _activeBlock = block;
-            var mapped = viewModel.SelectionForBlock(block, start, end, selected);
             _stickySelection = EditorStickySelectionPolicy.Update(
                 _stickySelection,
                 mapped.Start,
@@ -259,9 +267,9 @@ public partial class WorksPageView : UserControl
         // Empty caret: only clear when caller says intentional deselect (focused PointerReleased).
         _stickySelection = EditorStickySelectionPolicy.Update(
             _stickySelection,
-            start,
-            end,
-            selected,
+            mapped.Start,
+            mapped.End,
+            mapped.Text,
             clearWhenEmpty);
     }
 

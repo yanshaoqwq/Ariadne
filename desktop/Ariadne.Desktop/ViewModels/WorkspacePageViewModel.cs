@@ -58,6 +58,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private WorkflowEdgeViewModel? _selectedEdge;
     private WorkflowLoadState _workflowLoadState = WorkflowLoadState.NoProject;
     private string? _workflowContentRevision;
+    private string _defaultLlmProviderId = string.Empty;
 
     public WorkspacePageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -149,6 +150,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             new("export", displayNames.Text("ui.node.export"), () => AddNode("export")),
         };
 
+        AvailableProviderIds = new ObservableCollection<string>();
         AvailableModelIds = new ObservableCollection<string>();
         CaptureSnapshot();
         _ = InitializeWorkflowAsync();
@@ -156,6 +158,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         _ = LoadAvailableModelsAsync();
     }
 
+    public ObservableCollection<string> AvailableProviderIds { get; }
+    public bool HasAvailableProviderChoices => AvailableProviderIds.Count > 0;
     public ObservableCollection<string> AvailableModelIds { get; }
     public bool HasAvailableModelChoices => AvailableModelIds.Count > 0;
 
@@ -303,6 +307,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ExportArtifactIdLabel => _displayNames.Text("ui.workspace.export_node.artifact_id");
     public string ExportFormatLabel => _displayNames.Text("ui.workspace.export_node.format");
     public string ExportTitleLabel => _displayNames.Text("ui.workspace.export_node.title_field");
+    public string SummarizerNodeTitle => _displayNames.Text("ui.workspace.summarizer.title");
+    public string SummarizerNodeHint => _displayNames.Text("ui.workspace.summarizer.hint");
+    public string SummarizerProviderIdLabel => _displayNames.Text("ui.workspace.summarizer.provider_id");
+    public string SummarizerProviderIdPlaceholder => _displayNames.Text("ui.workspace.summarizer.provider_id_placeholder");
+    public string SummarizerChapterIdLabel => _displayNames.Text("ui.workspace.summarizer.chapter_id");
+    public string SummarizerChapterIdPlaceholder => _displayNames.Text("ui.workspace.summarizer.chapter_id_placeholder");
+    public string SummarizerChapterDocumentIdLabel => _displayNames.Text("ui.workspace.summarizer.chapter_document_id");
+    public string SummarizerChapterDocumentIdPlaceholder => _displayNames.Text("ui.workspace.summarizer.chapter_document_id_placeholder");
+    public string SummarizerChapterTextAliasLabel => _displayNames.Text("ui.workspace.summarizer.chapter_text_alias");
+    public string SummarizerChapterTextAliasHint => _displayNames.Text("ui.workspace.summarizer.chapter_text_alias_hint");
+    public string SummarizerAutoModeText => _displayNames.Text("ui.workspace.summarizer.auto_mode");
     public string DataInPinsLabel => _displayNames.Text("ui.workspace.port.data_in");
     public string AddDataInPinText => _displayNames.Text("ui.workspace.pin.add_data_in");
     public string RemoveDataInPinText => _displayNames.Text("ui.workspace.pin.remove_data_in");
@@ -958,7 +973,13 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             .Select(edge => string.IsNullOrWhiteSpace(edge.Label) ? edge.TargetHandle : edge.Label)
             .Where(alias => !string.IsNullOrWhiteSpace(alias))
             .ToHashSet(StringComparer.Ordinal);
-        var aliasBase = string.IsNullOrWhiteSpace(targetHandle) ? "input" : targetHandle.Trim();
+        var targetNode = Nodes.FirstOrDefault(node => node.Id == targetNodeId);
+        var summarizerAlias = targetNode?.IsSummarizerNode == true
+            ? targetNode.SummarizerChapterTextAlias.Trim()
+            : string.Empty;
+        var aliasBase = !string.IsNullOrWhiteSpace(summarizerAlias)
+            ? summarizerAlias
+            : string.IsNullOrWhiteSpace(targetHandle) ? "input" : targetHandle.Trim();
         if (!used.Contains(aliasBase))
         {
             return aliasBase;
@@ -972,6 +993,44 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
         }
         return $"{aliasBase}_{Guid.NewGuid():N}"[..16];
+    }
+
+    /// <summary>
+    /// Summarizer 的首个数据入就是章节正文端口；作者改 alias 时同步正式数据边，
+    /// 防止节点配置与边标签各自保存成两套契约。
+    /// </summary>
+    private void OnSummarizerChapterTextAliasChanged(
+        WorkflowNodeViewModel node,
+        string previousAlias,
+        string currentAlias)
+    {
+        if (!node.IsSummarizerNode || string.IsNullOrWhiteSpace(currentAlias))
+        {
+            return;
+        }
+
+        var primaryHandle = node.DataInPins.FirstOrDefault()?.Handle;
+        var edge = Edges.FirstOrDefault(candidate =>
+            candidate.IsData
+            && candidate.Target == node.Id
+            && (string.IsNullOrWhiteSpace(primaryHandle)
+                || string.Equals(candidate.TargetHandle, primaryHandle, StringComparison.OrdinalIgnoreCase)));
+        if (edge is null)
+        {
+            return;
+        }
+
+        var prior = previousAlias.Trim();
+        if (!string.IsNullOrWhiteSpace(edge.Label)
+            && !string.IsNullOrWhiteSpace(prior)
+            && !string.Equals(edge.Label.Trim(), prior, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        edge.Label = currentAlias.Trim();
+        _edges = Edges.Select(item => item.ToCanvasEdge()).ToArray();
+        RefreshDirtyState();
     }
 
     private Dictionary<string, object?> DefaultCommunicationData()
@@ -1152,6 +1211,19 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void SeedUtilityDefaults(WorkflowNodeViewModel node)
     {
+        if (node.IsSummarizerNode)
+        {
+            if (string.IsNullOrWhiteSpace(node.SummarizerProviderId))
+            {
+                node.SummarizerProviderId = _defaultLlmProviderId;
+            }
+
+            if (string.IsNullOrWhiteSpace(node.SummarizerChapterTextAlias))
+            {
+                node.SummarizerChapterTextAlias = "chapter_text";
+            }
+        }
+
         if (node.IsApprovalNode && string.IsNullOrWhiteSpace(node.ApprovalId))
         {
             node.ApprovalId = $"approval-{node.Id}";
@@ -1217,6 +1289,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             ExportArtifactId = ReadString(data, "artifact_id"),
             ExportFormat = ReadString(data, "format", "markdown"),
             ExportTitle = ReadString(data, "title"),
+            SummarizerProviderId = ReadString(data, "provider_id"),
+            SummarizerChapterId = ReadString(data, "chapter_id"),
+            SummarizerChapterDocumentId = ReadString(data, "chapter_document_id"),
+            SummarizerChapterTextAlias = ReadString(data, "chapter_text_alias", "chapter_text"),
+            SummarizerAutoMode = ReadBool(data, "auto_mode", false),
         };
         LoadStopCondition(node, data);
         // 画布已有节点若未存提示词，用 prompt_list 默认补全（不覆盖用户已写内容）；通用/导入节点不填 agent 模板
@@ -1334,6 +1411,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         node.SelectCommand = new RelayCommand(() => SelectNode(node));
         node.RunCommand = new RelayCommand(() => _ = RunNodeAsync(node));
         node.DataInPinRemoved = handle => OnDataInPinRemoved(node, handle);
+        node.SummarizerChapterTextAliasChanged = (previous, current) =>
+            OnSummarizerChapterTextAliasChanged(node, previous, current);
     }
 
     public void SelectNode(WorkflowNodeViewModel? node)
@@ -1725,6 +1804,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             var config = await _backend.GetProviderConfigAsync().ConfigureAwait(true);
+            _defaultLlmProviderId = config.DefaultLlmProviderId?.Trim() ?? string.Empty;
+            AvailableProviderIds.Clear();
+            foreach (var providerId in config.Providers
+                         .Where(provider => provider.Enabled)
+                         .Select(provider => provider.Provider)
+                         .Where(id => !string.IsNullOrWhiteSpace(id))
+                         .Distinct(StringComparer.Ordinal)
+                         .OrderBy(id => id, StringComparer.Ordinal))
+            {
+                AvailableProviderIds.Add(providerId);
+            }
             AvailableModelIds.Clear();
             foreach (var modelId in config.Providers
                          .SelectMany(provider => provider.Models)
@@ -1735,6 +1825,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 AvailableModelIds.Add(modelId);
             }
+            OnPropertyChanged(nameof(HasAvailableProviderChoices));
             OnPropertyChanged(nameof(HasAvailableModelChoices));
         }
         catch
@@ -3599,6 +3690,11 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     private string _exportArtifactId = string.Empty;
     private string _exportFormat = "markdown";
     private string _exportTitle = string.Empty;
+    private string _summarizerProviderId = string.Empty;
+    private string _summarizerChapterId = string.Empty;
+    private string _summarizerChapterDocumentId = string.Empty;
+    private string _summarizerChapterTextAlias = "chapter_text";
+    private bool _summarizerAutoMode;
     private int _nextDataInIndex = 1;
 
     public WorkflowNodeViewModel(
@@ -3649,6 +3745,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public bool IsLoopNode => NodeType is "loop";
     public bool IsApprovalNode => NodeType is "approval";
     public bool IsExportNode => NodeType is "export";
+    public bool IsSummarizerNode => NodeType is "summarizer";
     public bool IsUtilityNode => IsDocumentNode || IsSearchNode || IsConditionNode
         || IsLoopNode || IsApprovalNode || IsExportNode;
     public bool IsAgentNode => NodeType is "outliner" or "designer" or "planner" or "detail"
@@ -3685,6 +3782,23 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public string ExportArtifactId { get => _exportArtifactId; set { if (SetProperty(ref _exportArtifactId, value ?? string.Empty)) _markDirty(); } }
     public string ExportFormat { get => _exportFormat; set { if (SetProperty(ref _exportFormat, value ?? "markdown")) _markDirty(); } }
     public string ExportTitle { get => _exportTitle; set { if (SetProperty(ref _exportTitle, value ?? string.Empty)) _markDirty(); } }
+    public string SummarizerProviderId { get => _summarizerProviderId; set { if (SetProperty(ref _summarizerProviderId, value ?? string.Empty)) _markDirty(); } }
+    public string SummarizerChapterId { get => _summarizerChapterId; set { if (SetProperty(ref _summarizerChapterId, value ?? string.Empty)) _markDirty(); } }
+    public string SummarizerChapterDocumentId { get => _summarizerChapterDocumentId; set { if (SetProperty(ref _summarizerChapterDocumentId, value ?? string.Empty)) _markDirty(); } }
+    public string SummarizerChapterTextAlias
+    {
+        get => _summarizerChapterTextAlias;
+        set
+        {
+            var previous = _summarizerChapterTextAlias;
+            if (SetProperty(ref _summarizerChapterTextAlias, value ?? string.Empty))
+            {
+                _markDirty();
+                SummarizerChapterTextAliasChanged?.Invoke(previous, _summarizerChapterTextAlias);
+            }
+        }
+    }
+    public bool SummarizerAutoMode { get => _summarizerAutoMode; set { if (SetProperty(ref _summarizerAutoMode, value)) _markDirty(); } }
 
     public bool HasImportPath => !string.IsNullOrWhiteSpace(ImportPath);
     public string ImportPathDisplay => HasImportPath ? ImportPath : string.Empty;
@@ -3739,6 +3853,9 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
 
     /// <summary>删除数据入后由宿主拆掉占用该 handle 的边。</summary>
     public Action<string>? DataInPinRemoved { get; set; }
+
+    /// <summary>Summarizer 正文 alias 改动后由宿主同步首个数据入边。</summary>
+    public Action<string, string>? SummarizerChapterTextAliasChanged { get; set; }
 
     /// <summary>从已存配置恢复多数据入列表。</summary>
     public void RestoreDataInPins(IEnumerable<string>? handles)
@@ -3978,7 +4095,17 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public Dictionary<string, object?> BuildUtilityFields()
     {
         var fields = new Dictionary<string, object?>(StringComparer.Ordinal);
-        if (IsDocumentNode)
+        if (IsSummarizerNode)
+        {
+            fields["provider_id"] = SummarizerProviderId.Trim();
+            fields["chapter_id"] = SummarizerChapterId.Trim();
+            fields["chapter_document_id"] = SummarizerChapterDocumentId.Trim();
+            fields["chapter_text_alias"] = string.IsNullOrWhiteSpace(SummarizerChapterTextAlias)
+                ? "chapter_text"
+                : SummarizerChapterTextAlias.Trim();
+            fields["auto_mode"] = SummarizerAutoMode;
+        }
+        else if (IsDocumentNode)
         {
             fields["include_content"] = IncludeContent;
         }

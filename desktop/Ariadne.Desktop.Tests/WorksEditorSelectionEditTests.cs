@@ -122,6 +122,18 @@ public sealed class WorksEditorSelectionEditTests
     }
 
     [Fact]
+    public void SummarySourceMapper_MapsUtf16CaretToUtf8_AndRejectsSurrogateSplit()
+    {
+        const string text = "甲😀乙";
+
+        Assert.True(WorksSummarySourceMapper.TryMapUtf16OffsetToUtf8(text, 1, out var emojiStart));
+        Assert.Equal(3, emojiStart);
+        Assert.True(WorksSummarySourceMapper.TryMapUtf16OffsetToUtf8(text, 3, out var emojiEnd));
+        Assert.Equal(7, emojiEnd);
+        Assert.False(WorksSummarySourceMapper.TryMapUtf16OffsetToUtf8(text, 2, out _));
+    }
+
+    [Fact]
     public void WorksPage_TryResolveBlockSelection_MapsGlobalRangeToFirstIntersectingBlock()
     {
         var backend = System.Reflection.DispatchProxy.Create<IAriadneBackendClient, EmptyBackendProxy>();

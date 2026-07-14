@@ -110,14 +110,11 @@ pub fn enqueue_open_bootstrap_full_rebuild(
         .unwrap_or_else(|_| project_root.to_path_buf())
         .to_string_lossy()
         .into_owned();
-    let event_id = outbox.prepare(
+    outbox.enqueue_full_rebuild_if_absent(
         &root_id,
         "open_project_bootstrap_full_rebuild",
         "bootstrap",
-        true,
-    )?;
-    outbox.activate(&event_id)?;
-    Ok(Some(event_id))
+    )
 }
 
 /// F2-b：丢弃与磁盘正文 `source_version` 不一致的检索结果，禁止旧 chunk 冒充当前事实。

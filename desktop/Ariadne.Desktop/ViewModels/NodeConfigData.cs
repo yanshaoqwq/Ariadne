@@ -35,6 +35,10 @@ public static class NodeConfigData
         "artifact_id",
         "format",
         "title",
+        "chapter_id",
+        "chapter_document_id",
+        "chapter_text_alias",
+        "auto_mode",
     };
 
     public static bool IsUiOwnedKey(string? key) =>
@@ -170,13 +174,14 @@ public static class NodeConfigData
         {
             foreach (var pair in utilityFields)
             {
-                if (string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null)
+                if (string.IsNullOrWhiteSpace(pair.Key))
                 {
                     continue;
                 }
 
-                if (pair.Value is string s && string.IsNullOrWhiteSpace(s))
+                if (pair.Value is null || pair.Value is string s && string.IsNullOrWhiteSpace(s))
                 {
+                    data.Remove(pair.Key);
                     continue;
                 }
 

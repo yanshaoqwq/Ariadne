@@ -12,26 +12,26 @@ use ariadne::commands::{
     create_checkpoint_impl, create_project, ensure_index_bootstrap_on_open, fetch_provider_models,
     fetch_provider_models_impl, get_app_settings_impl, get_app_status,
     get_automation_settings_impl, get_backend_diagnostics, get_budget_status_impl,
-    get_display_name_language_pack_template, get_document_content_impl, get_document_tree_impl,
-    get_git_history_impl, get_git_repository_status_impl, get_git_settings_impl,
-    get_node_preset_settings_impl, get_permissions_settings_impl, get_provider_config_impl,
-    get_rag_settings_impl, get_sidebar_badges, get_template_repository_settings,
-    get_template_repository_settings_impl, get_workflow_settings_impl, import_chapter,
-    list_confirmations, list_external_workflow_tools_impl, list_workflow_graphs_impl,
-    load_workflow_graph_impl, mark_workflow_run_failed_impl,
-    mark_workflow_run_failed_with_lease_impl, open_project, override_confirmation_output,
-    pack_workflow_selection_impl, pause_workflow, process_index_outbox_impl, project_ai_chat,
-    project_ai_chat_impl, query_run_logs, quick_edit_impl, register_executor_adapters_for_project,
-    resolve_confirmation_impl, resolve_project_references, resolve_workflow_operation_in_doubt,
-    restore_to_new_branch, resume_from_node, resume_workflow, run_workflow, run_workflow_impl,
-    save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
-    save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
-    save_provider_key_impl, save_provider_settings_impl, save_rag_settings_impl,
-    save_template_repository_settings, save_template_repository_settings_impl,
-    save_workflow_graph_impl, save_workflow_settings_impl, search_project_documents_impl,
-    set_project_root, start_workflow_with_request, stop_workflow, update_budget_config_impl,
-    validate_display_name_language_pack, AppSettings, AriadneAppState, AutomationSettings,
-    CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
+    get_chapter_summary_view, get_display_name_language_pack_template, get_document_content_impl,
+    get_document_tree_impl, get_git_history_impl, get_git_repository_status_impl,
+    get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
+    get_provider_config_impl, get_rag_settings_impl, get_sidebar_badges,
+    get_template_repository_settings, get_template_repository_settings_impl,
+    get_workflow_settings_impl, get_works_tree, import_chapter, list_confirmations,
+    list_external_workflow_tools_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
+    mark_workflow_run_failed_impl, mark_workflow_run_failed_with_lease_impl, open_project,
+    override_confirmation_output, pack_workflow_selection_impl, pause_workflow,
+    process_index_outbox_impl, project_ai_chat, project_ai_chat_impl, query_run_logs,
+    quick_edit_impl, register_executor_adapters_for_project, resolve_confirmation_impl,
+    resolve_project_references, resolve_workflow_operation_in_doubt, restore_to_new_branch,
+    resume_from_node, resume_workflow, run_workflow, run_workflow_impl, save_app_settings_impl,
+    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
+    save_node_preset_settings_impl, save_permissions_settings_impl, save_provider_key_impl,
+    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings,
+    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
+    search_project_documents_impl, set_project_root, start_workflow_with_request, stop_workflow,
+    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
+    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
     ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, InDoubtDecision,
     NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
     ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate,
@@ -698,6 +698,29 @@ fn app_status_rejects_uninitialized_project_root() {
 }
 
 #[test]
+fn app_status_rejects_corrupt_present_app_config_instead_of_using_directory_name() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    std::fs::write(
+        project.path().join(".config").join("app.yaml"),
+        "project_name: [unterminated",
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let status_error = get_app_status(&state).unwrap_err();
+    let current_error = ariadne::commands::current_project_status(project.path()).unwrap_err();
+
+    assert!(status_error.contains("yaml"));
+    assert!(current_error.contains("yaml"));
+}
+
+#[test]
 fn project_scoped_state_commands_reject_uninitialized_project_root() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -787,6 +810,98 @@ fn workflow_graph_commands_save_and_load_canvas_shape() {
     assert_eq!(loaded.workflow_id, "draft-flow");
     assert_eq!(loaded.nodes[0].id, "writer");
     assert_eq!(loaded.nodes[0].data["prompt_template"], "writer.default");
+}
+
+#[test]
+fn f8_summarizer_graph_is_validated_before_save_and_before_run_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let valid_graph = WorkflowGraphData {
+        workflow_id: "f8-summarizer".to_owned(),
+        name: "F8 Summarizer".to_owned(),
+        nodes: vec![
+            CanvasNode {
+                id: "writer".to_owned(),
+                r#type: "writer".to_owned(),
+                label: Some("Writer".to_owned()),
+                data: json!({ "prompt_template": "write" }),
+                position: Value::Null,
+            },
+            CanvasNode {
+                id: "summarizer".to_owned(),
+                r#type: "summarizer".to_owned(),
+                label: Some("Summarizer".to_owned()),
+                data: json!({
+                    "provider_id": "provider-main",
+                    "model_id": "model-main",
+                    "chapter_id": "chapter-1",
+                    "chapter_document_id": "documents/chapter-1.md",
+                    "chapter_text_alias": "chapter_text",
+                    "auto_mode": false
+                }),
+                position: Value::Null,
+            },
+        ],
+        edges: vec![CanvasEdge {
+            id: "chapter-text".to_owned(),
+            source: "writer".to_owned(),
+            target: "summarizer".to_owned(),
+            source_handle: "output".to_owned(),
+            target_handle: "input".to_owned(),
+            kind: WorkflowEdgeKind::Data,
+            label: Some("chapter_text".to_owned()),
+            data: Value::Null,
+        }],
+        metadata: Value::Null,
+        content_revision: None,
+        expected_revision: None,
+    };
+
+    let mut invalid_graph = valid_graph.clone();
+    invalid_graph.nodes[1]
+        .data
+        .as_object_mut()
+        .unwrap()
+        .remove("chapter_id");
+    let validation_error =
+        ariadne::commands::validate_workflow_graph(invalid_graph.clone()).unwrap_err();
+    assert!(validation_error.contains("chapter_id"));
+    let save_error = save_workflow_graph_impl(temp.path(), invalid_graph).unwrap_err();
+    assert!(save_error.contains("chapter_id"));
+    assert!(!temp.path().join("workflows/f8-summarizer.json").exists());
+
+    save_workflow_graph_impl(temp.path(), valid_graph).unwrap();
+    let workflow_path = temp.path().join("workflows/f8-summarizer.json");
+    let mut persisted: Value =
+        serde_json::from_str(&std::fs::read_to_string(&workflow_path).unwrap()).unwrap();
+    persisted["nodes"][1]["config"]
+        .as_object_mut()
+        .unwrap()
+        .remove("chapter_document_id");
+    std::fs::write(
+        &workflow_path,
+        serde_json::to_vec_pretty(&persisted).unwrap(),
+    )
+    .unwrap();
+
+    let run_error = run_workflow_impl(
+        temp.path(),
+        &MemorySecretStore::default(),
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "f8-summarizer".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap_err();
+    assert!(run_error.contains("chapter_document_id"));
+    assert!(
+        !temp
+            .path()
+            .join(ariadne::workflow::RUNTIME_DB_FILE)
+            .exists(),
+        "invalid Summarizer config must fail before a run snapshot is created"
+    );
 }
 
 #[test]
@@ -2412,6 +2527,59 @@ fn backend_diagnostics_reports_unconstructable_retrieval_runtime_instead_of_fail
 }
 
 #[test]
+fn backend_diagnostics_never_marks_unverified_embedding_configuration_healthy() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let store = ConfigStore::new(project.path());
+    let mut config = store.load_or_create().unwrap();
+    config.rag.vector_store.enabled = true;
+    config.providers.default_embedding_provider_id = Some("embedding".to_owned());
+    config.providers.providers.push(ProviderConfig {
+        provider_id: "embedding".to_owned(),
+        provider_type: ProviderType::OpenAi,
+        display_name: "Embedding".to_owned(),
+        enabled: true,
+        base_url: None,
+        api_key: None,
+        models: vec![ModelConfig {
+            model_id: "text-embedding".to_owned(),
+            capability: ProviderCapability::Embedding,
+            max_context_tokens: None,
+            input_cost_per_million_tokens: None,
+            output_cost_per_million_tokens: None,
+        }],
+    });
+    store.save(&config).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+
+    assert_eq!(report.status, DiagnosticStatus::Unavailable);
+    assert!(report.items.iter().any(|item| {
+        item.component == "project_retrieval_runtime"
+            && item.status == DiagnosticStatus::Unavailable
+            && item
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("project-scoped credential"))
+    }));
+    assert!(report.items.iter().any(|item| {
+        item.component == "providers.embedding.default"
+            && item.status == DiagnosticStatus::Degraded
+            && item.reason.as_deref()
+                == Some("diagnostics.providers.embedding.configured_unverified")
+    }));
+    assert!(!report.items.iter().any(|item| {
+        item.component == "providers.embedding.default" && item.status == DiagnosticStatus::Healthy
+    }));
+}
+
+#[test]
 fn node_preset_settings_are_per_node_type() {
     let temp = tempfile::tempdir().unwrap();
     let mut settings = NodePresetSettings::default();
@@ -2662,6 +2830,11 @@ fn rag_settings_hot_reload_reuses_open_tantivy_generation() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(project.path()).unwrap();
+    std::fs::write(
+        project.path().join("documents").join("chapter.md"),
+        "配置热重载后的检索线索",
+    )
+    .unwrap();
     let state = AriadneAppState::new(
         project.path(),
         app_state.path(),
@@ -2686,6 +2859,59 @@ fn rag_settings_hot_reload_reuses_open_tantivy_generation() {
             .chunk_size_chars,
         3072
     );
+
+    let outbox_path = project
+        .path()
+        .join(".runtime")
+        .join("index_invalidation.db");
+    let mut rebuild_status = String::new();
+    for _ in 0..250 {
+        let connection = rusqlite::Connection::open(&outbox_path).unwrap();
+        rebuild_status = connection
+            .query_row(
+                "SELECT status FROM index_invalidation_events
+                 WHERE reason = 'retrieval_configuration_changed'
+                 ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        if rebuild_status == "completed" {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(rebuild_status, "completed");
+    let results =
+        ariadne::commands::search_project_documents(&state, "检索线索".to_owned(), 10).unwrap();
+    assert!(!results.is_empty());
+}
+
+#[test]
+fn rag_index_configuration_change_is_rejected_while_runtime_arc_is_active() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let active_runtime = state.retrieval_runtime().unwrap();
+    let mut rag = get_rag_settings_impl(project.path()).unwrap().rag;
+    rag.chunk_size_chars = 3072;
+
+    let error = ariadne::commands::save_rag_settings(&state, RagSettings { rag }).unwrap_err();
+
+    assert!(error.contains("retrieval operations are active"));
+    assert_eq!(
+        get_rag_settings_impl(project.path())
+            .unwrap()
+            .rag
+            .chunk_size_chars,
+        2000
+    );
+    assert_eq!(active_runtime.config().rag.chunk_size_chars, 2000);
 }
 
 #[test]
@@ -2702,17 +2928,23 @@ fn failed_vector_enable_keeps_config_and_last_good_runtime() {
     let mut rag = get_rag_settings_impl(project.path()).unwrap().rag;
     rag.vector_store.enabled = true;
 
-    let error = ariadne::commands::save_rag_settings(&state, RagSettings { rag }).unwrap_err();
+    for _ in 0..16 {
+        let error = ariadne::commands::save_rag_settings(&state, RagSettings { rag: rag.clone() })
+            .unwrap_err();
 
-    assert!(error.contains("default_embedding_provider_id"));
-    assert!(
-        !get_rag_settings_impl(project.path())
-            .unwrap()
-            .rag
-            .vector_store
-            .enabled
-    );
-    assert!(!state.retrieval_runtime().unwrap().vector_enabled());
+        assert!(
+            error.contains("default_embedding_provider_id"),
+            "unexpected vector enable failure: {error}"
+        );
+        assert!(
+            !get_rag_settings_impl(project.path())
+                .unwrap()
+                .rag
+                .vector_store
+                .enabled
+        );
+        assert!(!state.retrieval_runtime().unwrap().vector_enabled());
+    }
 }
 
 #[test]
@@ -5471,4 +5703,95 @@ fn resolve_in_doubt_stop_command_atomically_stops_without_claiming_worker() {
         )
         .unwrap()
         .is_none());
+}
+
+/// F19/F20：产品命令从同一个 metadata.db 快照读取正式阶段与章节总结。
+#[test]
+fn works_tree_and_chapter_summary_commands_share_official_stage_projection() {
+    use ariadne::contracts::{SourceSpan, TextRange};
+    use ariadne::documents::{ChapterDocumentEntry, ChapterDocumentIndex, ChapterDocumentKind};
+    use ariadne::rag::{MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, StorySegment};
+
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let document_path = project.path().join("documents").join("chapter-1.md");
+    std::fs::write(&document_path, "甲😀乙").unwrap();
+    let index = ChapterDocumentIndex::new(
+        "v1",
+        vec![ChapterDocumentEntry {
+            chapter_id: "misleading-prefix:chapter-1".to_owned(),
+            document_id: "documents/chapter-1.md".to_owned(),
+            path: document_path,
+            title: "第一章".to_owned(),
+            order: 1,
+            kind: ChapterDocumentKind::ChapterBody,
+            version: "v1".to_owned(),
+            word_count: None,
+            outline_ref: None,
+        }],
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join(".runtime").join("chapter_index.json"),
+        serde_json::to_vec_pretty(&index).unwrap(),
+    )
+    .unwrap();
+
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    knowledge
+        .upsert_segment(StorySegment {
+            segment_id: "misleading-prefix:chapter-1::seg-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "misleading-prefix:chapter-1".to_owned(),
+            summary: "正文故事段".to_owned(),
+            source: SourceSpan {
+                document_id: "documents/chapter-1.md".to_owned(),
+                range: TextRange { start: 0, end: 10 },
+                version: Some("v1".to_owned()),
+            },
+            metadata: Value::Null,
+        })
+        .unwrap();
+    knowledge
+        .upsert_chapter_summary("misleading-prefix:chapter-1", "章节正式总结")
+        .unwrap();
+    knowledge
+        .upsert_stage_summary("official-stage", "阶段正式总结")
+        .unwrap();
+    knowledge
+        .link_chapter_stage("misleading-prefix:chapter-1", "official-stage")
+        .unwrap();
+    SqliteWritingKnowledgeStore::open(project.path())
+        .unwrap()
+        .save_knowledge(&knowledge)
+        .unwrap();
+
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let tree = get_works_tree(&state).unwrap();
+    let stage = tree
+        .children
+        .iter()
+        .find(|node| node.stage_id.as_deref() == Some("official-stage"))
+        .unwrap();
+    assert_eq!(
+        stage.children[0].chapter_id.as_deref(),
+        Some("misleading-prefix:chapter-1")
+    );
+
+    let summary =
+        get_chapter_summary_view(&state, "misleading-prefix:chapter-1".to_owned()).unwrap();
+    assert_eq!(summary.chapter_summary.as_deref(), Some("章节正式总结"));
+    assert_eq!(
+        summary.stage.as_ref().map(|stage| stage.stage_id.as_str()),
+        Some("official-stage")
+    );
+    assert_eq!(
+        summary.segments[0].source.document_id,
+        "documents/chapter-1.md"
+    );
 }
