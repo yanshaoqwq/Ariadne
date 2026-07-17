@@ -185,6 +185,41 @@ def verify_package_security_contract() -> None:
             "loopback REST compatibility server must retain bounded HTTP input and IO")
 
 
+def verify_installer_smoke_contract(ci: str, release: str) -> None:
+    windows_build = read("packaging/windows/build-installer.ps1")
+    require("Get-Command ISCC.exe -ErrorAction SilentlyContinue" in windows_build,
+            "Windows packaging must tolerate Chocolatey PATH propagation delay")
+    require('Inno Setup 6\\ISCC.exe' in windows_build,
+            "Windows packaging must probe the fixed Inno Setup install directory")
+    require("$compilerOutput = & $iscc $arguments 2>&1" in windows_build,
+            "Windows packaging must isolate compiler logs from its output value")
+    require("$compilerOutput | ForEach-Object { Write-Host $_ }" in windows_build,
+            "Windows compiler logs must not enter the installer path pipeline")
+    require("$installers.Count -ne 1" in windows_build,
+            "Windows packaging must require exactly one deterministic installer")
+
+    macos_build = read("packaging/macos/build-installer.sh")
+    macos_smoke = read("packaging/macos/smoke-installer.sh")
+    require("realpath" not in macos_build and "realpath" not in macos_smoke,
+            "macOS packaging must not depend on non-portable realpath availability")
+    require('Ariadne.Desktop" --verify-installation >&2' in macos_build,
+            "macOS pre-install smoke output must not contaminate the package path")
+    require('pkgbuild "${PKG_ARGS[@]}" "$PKG" >&2' in macos_build,
+            "macOS pkgbuild logs must not contaminate the package path")
+    require("printf '%s\\n' \"$PKG\"" in macos_build,
+            "macOS packaging must emit exactly the final pkg path on stdout")
+
+    for workflow, label in ((ci, "CI"), (release, "Release")):
+        require("expected installer is missing" in workflow,
+                f"{label} must locate the Windows installer by its manifest version")
+        require('pkg="artifacts/Ariadne-$version-${{ matrix.rid }}.pkg"' in workflow,
+                f"{label} must locate the macOS package by its manifest version and RID")
+        require('$installer = packaging/windows/build-installer.ps1' not in workflow,
+                f"{label} must not capture Windows build logs as the installer path")
+        require('pkg="$(bash packaging/macos/build-installer.sh' not in workflow,
+                f"{label} must not capture macOS build logs as the package path")
+
+
 def verify_legal_contract() -> None:
     legal = read_json("packaging/release-legal.json")
     require(legal.get("schema_version") == 1, "unsupported release legal schema")
@@ -289,6 +324,7 @@ def main() -> None:
     verify_ci_execution_policy(ci, release)
     verify_readiness_contract()
     verify_package_security_contract()
+    verify_installer_smoke_contract(ci, release)
     verify_legal_contract()
     verify_version_consumers(workspace_version())
     print(f"release engineering contract accepted for Ariadne {workspace_version()}")
