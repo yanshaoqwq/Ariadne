@@ -2,8 +2,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PACKAGE_DIR="$(realpath "${1:?usage: packaging/macos/build-installer.sh <assembled-package> [output-directory]}")"
-OUTPUT_DIR="${2:-$ROOT/artifacts}"
+PACKAGE_INPUT="${1:?usage: packaging/macos/build-installer.sh <assembled-package> [output-directory]}"
+[[ -d "$PACKAGE_INPUT" ]] || { echo "assembled package does not exist: $PACKAGE_INPUT" >&2; exit 1; }
+PACKAGE_DIR="$(cd "$PACKAGE_INPUT" && pwd -P)"
+OUTPUT_INPUT="${2:-$ROOT/artifacts}"
+mkdir -p "$OUTPUT_INPUT"
+OUTPUT_DIR="$(cd "$OUTPUT_INPUT" && pwd -P)"
 MANIFEST="$PACKAGE_DIR/release-manifest.json"
 VERSION="$(jq -er '.version' "$MANIFEST")"
 RID="$(jq -er '.rid' "$MANIFEST")"
@@ -18,7 +22,7 @@ STAGE="$(mktemp -d "${TMPDIR:-/tmp}/ariadne-macos.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 PKG_ROOT="$STAGE/pkgroot"
 APP="$PKG_ROOT/Ariadne.app"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUTPUT_DIR"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp -a "$PACKAGE_DIR/." "$APP/Contents/MacOS/"
 cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
@@ -37,21 +41,21 @@ sips -z 1024 1024 "$PACKAGE_DIR/Integration/icons/ariadne-512.png" --out "$ICONS
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Ariadne.icns"
 
 SIGNING_IDENTITY="${ARIADNE_MACOS_SIGNING_IDENTITY:--}"
-codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP"
-"$APP/Contents/MacOS/Ariadne.Desktop" --verify-installation
+codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP" >&2
+"$APP/Contents/MacOS/Ariadne.Desktop" --verify-installation >&2
 
 PKG="$OUTPUT_DIR/Ariadne-$VERSION-$RID.pkg"
 PKG_ARGS=(--root "$PKG_ROOT" --identifier io.github.yanshaoqwq.ariadne --version "$VERSION" --install-location /Applications)
 if [[ -n "${ARIADNE_MACOS_INSTALLER_IDENTITY:-}" ]]; then
   PKG_ARGS+=(--sign "$ARIADNE_MACOS_INSTALLER_IDENTITY")
 fi
-pkgbuild "${PKG_ARGS[@]}" "$PKG"
+pkgbuild "${PKG_ARGS[@]}" "$PKG" >&2
 
 DMG_ROOT="$STAGE/dmg"
 mkdir -p "$DMG_ROOT"
 cp -a "$APP" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/Applications"
-hdiutil create -quiet -fs HFS+ -srcfolder "$DMG_ROOT" -volname Ariadne "$OUTPUT_DIR/Ariadne-$VERSION-$RID.dmg"
+hdiutil create -quiet -fs HFS+ -srcfolder "$DMG_ROOT" -volname Ariadne "$OUTPUT_DIR/Ariadne-$VERSION-$RID.dmg" >&2
 DMG="$OUTPUT_DIR/Ariadne-$VERSION-$RID.dmg"
 
 NOTARY_ARGS=()
@@ -73,9 +77,9 @@ if [[ "${ARIADNE_REQUIRE_SIGNED_RELEASE:-0}" == "1" && ${#NOTARY_ARGS[@]} -eq 0 
   exit 1
 fi
 if (( ${#NOTARY_ARGS[@]} > 0 )); then
-  xcrun notarytool submit "$PKG" "${NOTARY_ARGS[@]}" --wait
-  xcrun stapler staple "$PKG"
-  xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait
-  xcrun stapler staple "$DMG"
+  xcrun notarytool submit "$PKG" "${NOTARY_ARGS[@]}" --wait >&2
+  xcrun stapler staple "$PKG" >&2
+  xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait >&2
+  xcrun stapler staple "$DMG" >&2
 fi
-echo "$PKG"
+printf '%s\n' "$PKG"

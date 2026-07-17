@@ -238,7 +238,7 @@ internal static class ReleaseTool
         var content = File.ReadAllText(Path.Combine(root, "Cargo.toml"));
         var match = System.Text.RegularExpressions.Regex.Match(
             content,
-            @"(?m)^version\s*=\s*""([^""]+)""");
+            @"(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*""([^""]+)""");
         return match.Success
             ? match.Groups[1].Value
             : throw new InvalidDataException("Cargo.toml has no workspace package version.");

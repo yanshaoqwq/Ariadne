@@ -9,6 +9,8 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::command_error::CommandError;
+
 pub use crate::config::{
     ConfirmationAutoModePolicy, ConfirmationNormalPolicy, ConfirmationPolicySetting,
 };
@@ -24,9 +26,9 @@ use crate::config::{
     SecretValue, WorkflowConfig,
 };
 use crate::contracts::{
-    ensure_path_under_root, ApprovalPolicy, CoreResult, Edge, EdgeId, NodeId, NodeInstance,
-    PermissionPolicy, PortEndpoint, ProviderCapability, ProviderType, RunControl, RunId,
-    WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
+    ensure_path_under_root, ApprovalPolicy, ArtifactKind, CoreResult, Edge, EdgeId, NodeId,
+    NodeInstance, PermissionPolicy, PermissionRequest, PortEndpoint, ProviderCapability,
+    ProviderType, RunControl, RunId, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
 use crate::costs::{budget_limits_from_global_budget, CostLedger, CostQuery, SqliteCostLedger};
 use crate::diagnostics::{BackendDiagnosticsReport, DiagnosticItem, DiagnosticStatus};
@@ -38,37 +40,51 @@ use crate::documents::{
 use crate::frontend::{
     apply_node_detail_patch as apply_node_detail_patch_to_workflow, build_works_tree,
     confirmation_state_from_runtime, export_chapters_combined,
-    export_workflow_selection as export_workflow_selection_from_workflow, import_chapter_document,
-    initialize_project, pack_workflow_selection as pack_workflow_selection_in_workflow,
-    project_document_permission, upsert_canvas_annotation as upsert_canvas_annotation_in_workflow,
+    export_workflow_selection as export_workflow_selection_from_workflow,
+    extract_project_reference_tokens, import_chapter_document, initialize_project,
+    pack_workflow_selection as pack_workflow_selection_in_workflow, project_ai_context_window,
+    project_ai_summary_context, project_document_permission, structured_project_memory_context,
+    upsert_canvas_annotation as upsert_canvas_annotation_in_workflow, ArtifactReferenceEntry,
     CanvasAnnotation, ChapterExportFormat, ChapterImportRequest, CombinedExportReport,
-    ConfirmationLogEntry, FileConfirmationLogStore, NodeDetailPatch, ProjectInitReport,
-    ProjectMemoryStore, ProjectReference, ProjectReferenceResolver, ProjectRegistryStore,
-    QuickEditResult, QuickEditService, RecentProjectEntry, SidebarBadgeCounts, TemplateDetail,
+    ConfirmationLogEntry, FileConfirmationLogStore, NodeDetailPatch, ProjectAiAppendOutcome,
+    ProjectAiContextWindow, ProjectAiConversationStore, ProjectAiMemoryEntry,
+    ProjectAiStoredMessage, ProjectAiSummaryChunk, ProjectInitReport, ProjectMemoryStore,
+    ProjectReference, ProjectReferenceResolver, ProjectRegistryStore, QuickEditResult,
+    QuickEditService, RecentProjectEntry, SidebarBadgeCounts, TemplateDetail,
     TemplateInstallReport, TemplateRepositoryClient, TemplateSummary, UiPreferences,
     UiPreferencesStore, UiRunLogEntry, UiRunLogFilter, UiRunLogKind, UiRunLogLevel, UiRunLogStore,
-    WorksTreeNode,
+    WorksTreeNode, OFFICIAL_TEMPLATE_REPOSITORY_URL,
 };
 use crate::git::{
     ArchivePoint, BranchGraphNode, GitCommitSummary, GitHealthStatus, GitService, GitStagePolicy,
     RestoreReport,
 };
 use crate::llm::{
-    tool_result_message, LlmRunRequest, LlmService, LlmServiceConfig, ToolExecutionOutput,
+    tool_result_message, LlmRunRequest, LlmService, LlmServiceConfig, ToolExecutionContext,
+    ToolExecutionOutput, ToolExecutor,
 };
 use crate::providers::{
-    ContentPart, LlmMessage, LlmRole, OpenAiCompatibleLlmProvider, ProviderProtocol, ToolDefinition,
+    web_search_tool_definition, ContentPart, HttpWebSearchProvider, LlmMessage, LlmRole,
+    OpenAiCompatibleLlmProvider, Provider, ProviderProtocol, SearchProvider, ToolDefinition,
+    WebSearchToolExecutor, EXECUTOR_ADAPTER_WEB_SEARCH_TOOL, GENERIC_LLM_WEB_SEARCH_TOOL,
+    PROJECT_AI_WEB_SEARCH_TOOL, SUMMARIZER_WEB_SEARCH_TOOL,
 };
-use crate::retrieval::{ProjectRetrievalRuntime, RetrievalResult};
+use crate::rag::SqliteWritingKnowledgeStore;
+use crate::retrieval::{
+    project_search_tool_definition, ProjectRetrievalRuntime, ProjectSearchToolExecutor,
+    RetrievalResult, EXECUTOR_ADAPTER_SEARCH_TOOL, GENERIC_LLM_SEARCH_TOOL, PROJECT_AI_SEARCH_TOOL,
+    SUMMARIZER_SEARCH_TOOL,
+};
 use crate::skills::{SkillLoader, WorkflowManifest, WORKFLOW_MANIFEST_FILE};
 use crate::workflow::{
     execute_document_read_node_with_root, execute_llm_node_with_defaults,
-    execute_project_retrieval_node_for_project, execute_summarizer_node,
+    execute_llm_node_with_search_tools, execute_project_retrieval_node_for_project,
+    execute_summarizer_node, execute_summarizer_node_with_search_tools,
     validate_workflow_execution_contracts, BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink,
     RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
-    SqliteWorkflowRuntimeStore, WorkflowRunFailure, WorkflowRunnableClaimResult, WorkflowRuntime,
-    WorkflowRuntimeEvent, WorkflowRuntimeEventType, WorkflowRuntimeStore,
-    WorkflowStopRequestResult, WorkflowWorkerLease,
+    SqliteWorkflowRuntimeStore, WorkflowLlmSearchOptions, WorkflowRunFailure,
+    WorkflowRunnableClaimResult, WorkflowRuntime, WorkflowRuntimeEvent, WorkflowRuntimeEventType,
+    WorkflowRuntimeStore, WorkflowStopRequestResult, WorkflowWorkerLease,
 };
 
 const WORKFLOW_WORKER_LEASE_TTL_MS: u64 = 30_000;
@@ -91,8 +107,10 @@ const BUDGET_CONFIG_FILE: &str = "budget.json";
 const CHAPTER_INDEX_FILE: &str = "chapter_index.json";
 const UI_NODE_PRESETS_FILE: &str = "ui_node_presets.json";
 const TEMPLATE_REPOSITORY_SETTINGS_FILE: &str = "template_repository_settings.json";
-const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = "";
+const PROVIDER_REFERENCE_GRAPH_LOCK: &str = ".provider-reference-graph";
+const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = OFFICIAL_TEMPLATE_REPOSITORY_URL;
 const PROVIDER_MODEL_FETCH_TIMEOUT_SECS: u64 = 30;
+const IPC_GIT_TIMEOUT_SECS: u64 = 120;
 const MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 struct WorkflowSchedulerHandle {
@@ -147,7 +165,7 @@ impl AriadneAppState {
         self.project_root
             .lock()
             .map(|root| root.clone())
-            .map_err(|_| "project root lock poisoned".to_owned())
+            .map_err(|_| CommandError::internal("project root lock poisoned"))
     }
 
     pub fn app_state_root(&self) -> &Path {
@@ -156,11 +174,11 @@ impl AriadneAppState {
 
     fn ensure_workflow_scheduler(&self) -> CommandResult<()> {
         let project_root = canonicalize_initialized_project_root(&self.project_root()?)?;
-        let retrieval_runtime = self.retrieval_runtime()?;
+        let retrieval_runtime = Arc::clone(&self.retrieval_runtime);
         let mut slot = self
             .workflow_scheduler
             .lock()
-            .map_err(|_| "workflow scheduler lock poisoned".to_owned())?;
+            .map_err(|_| CommandError::internal("workflow scheduler lock poisoned"))?;
         if slot.as_ref().is_some_and(|scheduler| {
             scheduler.project_root == project_root
                 && scheduler
@@ -196,7 +214,7 @@ impl AriadneAppState {
         let mut runtime_slot = self
             .retrieval_runtime
             .lock()
-            .map_err(|_| "retrieval runtime lock poisoned".to_owned())?;
+            .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?;
         if runtime_slot
             .as_ref()
             .is_some_and(|runtime| runtime.project_root() == project_root)
@@ -204,7 +222,7 @@ impl AriadneAppState {
             let mut locked = self
                 .project_root
                 .lock()
-                .map_err(|_| "project root lock poisoned".to_owned())?;
+                .map_err(|_| CommandError::internal("project root lock poisoned"))?;
             *locked = project_root;
             drop(locked);
             drop(runtime_slot);
@@ -220,7 +238,7 @@ impl AriadneAppState {
         let mut locked = self
             .project_root
             .lock()
-            .map_err(|_| "project root lock poisoned".to_owned())?;
+            .map_err(|_| CommandError::internal("project root lock poisoned"))?;
         *locked = project_root;
         let previous = runtime_slot.replace(runtime);
         drop(locked);
@@ -241,7 +259,7 @@ impl AriadneAppState {
         let mut runtime_slot = self
             .retrieval_runtime
             .lock()
-            .map_err(|_| "retrieval runtime lock poisoned".to_owned())?;
+            .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?;
         if let Some(runtime) = runtime_slot
             .as_ref()
             .filter(|runtime| runtime.project_root() == canonical_root)
@@ -267,7 +285,7 @@ impl AriadneAppState {
         let mut runtime_slot = self
             .retrieval_runtime
             .lock()
-            .map_err(|_| "retrieval runtime lock poisoned".to_owned())?;
+            .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?;
         let index_changed = runtime_slot.as_ref().is_some_and(|runtime| {
             ProjectRetrievalRuntime::index_configuration_changed(runtime.config(), &config)
         });
@@ -281,10 +299,9 @@ impl AriadneAppState {
                 .as_ref()
                 .is_some_and(|runtime| Arc::strong_count(runtime) > 1)
         {
-            return Err(
-                "cannot reload changed retrieval index configuration while retrieval operations are active"
-                    .to_owned(),
-            );
+            return Err(CommandError::conflict(
+                "cannot reload changed retrieval index configuration while retrieval operations are active",
+            ));
         }
         let previous_config = runtime_slot
             .as_ref()
@@ -345,10 +362,12 @@ impl AriadneAppState {
         let mut runtime_slot = self
             .retrieval_runtime
             .lock()
-            .map_err(|_| "retrieval runtime lock poisoned".to_owned())?;
+            .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?;
         let current = config_store.load_or_create().map_err(error_to_string)?;
         if &current != expected {
-            return Err("project configuration changed concurrently; reload and retry".to_owned());
+            return Err(CommandError::conflict(
+                "project configuration changed concurrently; reload and retry",
+            ));
         }
 
         let index_changed =
@@ -363,10 +382,9 @@ impl AriadneAppState {
                 .as_ref()
                 .is_some_and(|runtime| Arc::strong_count(runtime) > 1)
         {
-            return Err(
-                "cannot change retrieval index configuration while retrieval operations are active"
-                    .to_owned(),
-            );
+            return Err(CommandError::conflict(
+                "cannot change retrieval index configuration while retrieval operations are active",
+            ));
         }
 
         let detached = vector_store_requires_exclusive_reopen
@@ -401,9 +419,9 @@ impl AriadneAppState {
                 expected,
             )?;
             return Err(match rollback_error {
-                Some(rollback_error) => format!(
+                Some(rollback_error) => CommandError::io(format!(
                     "failed to commit retrieval config: {error}; rollback also failed: {rollback_error}"
-                ),
+                )),
                 None => error_to_string(error),
             });
         }
@@ -419,9 +437,9 @@ impl AriadneAppState {
                     expected,
                 )?;
                 return Err(match rollback_error {
-                    Some(rollback_error) => format!(
+                    Some(rollback_error) => CommandError::io(format!(
                         "failed to enqueue retrieval rebuild: {error}; config rollback also failed: {rollback_error}"
-                    ),
+                    )),
                     None => error_to_string(error),
                 });
             }
@@ -449,7 +467,7 @@ fn restore_retrieval_runtime(
     Ok(())
 }
 
-pub type CommandResult<T> = Result<T, String>;
+pub type CommandResult<T> = Result<T, CommandError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentTreeNode {
@@ -498,6 +516,22 @@ pub struct WorkflowPackGraphReport {
     pub boundary_outputs: Vec<PortEndpoint>,
     /// Stable id so clients can re-fetch the pack result if IPC response is lost (N8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+/// 子工作流打包的统一命令请求，避免恢复/CAS 参数在多层入口间按位置漂移。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowPackRequest {
+    pub workflow_id: String,
+    #[serde(default)]
+    pub selected_node_ids: Vec<String>,
+    #[serde(default)]
+    pub subworkflow_node_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub expected_revision: Option<String>,
+    #[serde(default)]
     pub operation_id: Option<String>,
 }
 
@@ -585,6 +619,24 @@ pub struct AutomationSettings {
     pub budget: BudgetStatus,
     #[serde(default)]
     pub confirmation_policies: Vec<ConfirmationPolicySetting>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomationSectionSettings {
+    pub automation: AutomationSettings,
+    pub workflow: WorkflowSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneralSectionSettings {
+    pub app: AppSettings,
+    pub project_memory: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MiscSectionSettings {
+    pub rag: RagSettings,
+    pub git: GitSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -715,6 +767,8 @@ pub struct ProviderConfigStatus {
     pub default_embedding_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reranker_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_search_provider_id: Option<String>,
     #[serde(default)]
     pub providers: Vec<ProviderKeyStatus>,
 }
@@ -724,6 +778,7 @@ pub struct ProviderKeyStatus {
     pub provider: String,
     pub display_name: String,
     pub provider_type: ProviderType,
+    pub configured: bool,
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -748,6 +803,37 @@ pub struct ProviderSettingsUpdate {
     pub make_default_embedding: bool,
     #[serde(default)]
     pub make_default_reranker: bool,
+    #[serde(default)]
+    pub make_default_search: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderSectionSettings {
+    pub provider: ProviderSettingsUpdate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRemovalReference {
+    pub reference_type: String,
+    pub owner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRemovalPreview {
+    pub provider_id: String,
+    pub display_name: String,
+    pub revision: String,
+    pub has_key: bool,
+    #[serde(default)]
+    pub default_roles: Vec<String>,
+    #[serde(default)]
+    pub blocking_references: Vec<ProviderRemovalReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -790,6 +876,8 @@ pub struct RunLogQuery {
     pub after_log_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub descending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -909,22 +997,18 @@ pub struct ProjectAiRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_id_to_run: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_workflow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub append_memory: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectAiChatRole {
-    System,
-    User,
-    Assistant,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectAiChatMessage {
-    pub role: ProjectAiChatRole,
-    pub content: String,
-}
+pub use crate::frontend::{ProjectAiChatMessage, ProjectAiChatRole};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectAiResponse {
@@ -936,10 +1020,25 @@ pub struct ProjectAiResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run: Option<WorkflowRunStarted>,
     pub project_memory: String,
+    pub conversation_id: String,
+    pub conversation_revision: u64,
+    pub summary_revision: u64,
+    #[serde(default)]
+    pub new_messages: Vec<ProjectAiChatMessage>,
+    #[serde(default)]
+    pub conversation_snapshot: Vec<ProjectAiChatMessage>,
+    #[serde(default)]
+    pub conversation_summary: String,
+    #[serde(default)]
+    pub project_memory_revision: String,
     #[serde(default)]
     pub history_truncated: bool,
     #[serde(default)]
     pub memory_truncated: bool,
+    #[serde(default)]
+    pub references_truncated: bool,
+    #[serde(default)]
+    pub summary_truncated: bool,
     #[serde(default)]
     pub estimated_input_tokens: u64,
     #[serde(default)]
@@ -953,16 +1052,6 @@ struct ProjectWorkflowTool {
     workflow_id: String,
     start_node_id: String,
     input_schema: Value,
-}
-
-struct ProjectAiContextWindow {
-    memory: String,
-    reference_context: String,
-    history: Vec<ProjectAiChatMessage>,
-    history_truncated: bool,
-    memory_truncated: bool,
-    estimated_input_tokens: u64,
-    context_limit_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1159,9 +1248,9 @@ pub fn get_chapter_summary_view(
         .iter()
         .any(|entry| entry.chapter_id == chapter_id)
     {
-        return Err(format!(
+        return Err(CommandError::not_found(format!(
             "chapter is not present in the chapter index: {chapter_id}"
-        ));
+        )));
     }
     crate::rag::SqliteWritingKnowledgeStore::open(&project_root)
         .and_then(|store| store.load_chapter_summary_view(&chapter_id))
@@ -1223,9 +1312,18 @@ pub fn import_chapter(
     let _project_mutation = acquire_project_mutation_guard(&project_root, "chapter_import")?;
     request.source_path = project_path_buf(&project_root, &request.source_path)?;
     request.target_path = project_path_buf(&project_root, &request.target_path)?;
+    let mut index = load_chapter_index(&project_root)?;
+    if !request.overwrite
+        && index.entries.iter().any(|entry| {
+            entry.chapter_id == request.chapter_id || entry.path == request.target_path
+        })
+    {
+        return Err(CommandError::conflict(
+            "chapter id or target document already exists; explicit overwrite is required",
+        ));
+    }
     let documents = document_service(&project_root);
     let report = import_chapter_document(&documents, request).map_err(error_to_string)?;
-    let mut index = load_chapter_index(&project_root)?;
     index
         .entries
         .retain(|entry| entry.chapter_id != report.entry.chapter_id);
@@ -1352,12 +1450,14 @@ pub fn pack_workflow_selection_impl(
     pack_workflow_selection_impl_with_operation_id_and_app_state(
         project_root,
         &app_state_root,
-        workflow_id,
-        selected_node_ids,
-        subworkflow_node_id,
-        title,
-        expected_revision,
-        None,
+        WorkflowPackRequest {
+            workflow_id,
+            selected_node_ids,
+            subworkflow_node_id,
+            title,
+            expected_revision,
+            operation_id: None,
+        },
     )
 }
 
@@ -1374,25 +1474,30 @@ pub fn pack_workflow_selection_impl_with_operation_id(
     pack_workflow_selection_impl_with_operation_id_and_app_state(
         project_root,
         &app_state_root,
-        workflow_id,
-        selected_node_ids,
-        subworkflow_node_id,
-        title,
-        expected_revision,
-        operation_id,
+        WorkflowPackRequest {
+            workflow_id,
+            selected_node_ids,
+            subworkflow_node_id,
+            title,
+            expected_revision,
+            operation_id,
+        },
     )
 }
 
 pub fn pack_workflow_selection_impl_with_operation_id_and_app_state(
     project_root: &Path,
     app_state_root: &Path,
-    workflow_id: String,
-    selected_node_ids: Vec<String>,
-    subworkflow_node_id: Option<String>,
-    title: Option<String>,
-    expected_revision: Option<String>,
-    operation_id: Option<String>,
+    request: WorkflowPackRequest,
 ) -> CommandResult<WorkflowPackGraphReport> {
+    let WorkflowPackRequest {
+        workflow_id,
+        selected_node_ids,
+        subworkflow_node_id,
+        title,
+        expected_revision,
+        operation_id,
+    } = request;
     let _project_mutation = acquire_project_mutation_guard(project_root, "workflow_pack")?;
     let request_hash = pack_workflow_request_hash(
         &workflow_id,
@@ -1425,9 +1530,9 @@ pub fn pack_workflow_selection_impl_with_operation_id_and_app_state(
     }
     if let Some(expected_revision) = expected_revision.as_deref() {
         if expected_revision != loaded_revision {
-            return Err(format!(
+            return Err(CommandError::conflict(format!(
                 "workflow content revision conflict for {workflow_id}: expected {expected_revision}, actual {loaded_revision}"
-            ));
+            )));
         }
     }
     let base_revision = expected_revision
@@ -1511,34 +1616,26 @@ pub fn pack_workflow_selection_with_revision(
 ) -> CommandResult<WorkflowPackGraphReport> {
     pack_workflow_selection_with_operation_id(
         state,
-        workflow_id,
-        selected_node_ids,
-        subworkflow_node_id,
-        title,
-        expected_revision,
-        None,
+        WorkflowPackRequest {
+            workflow_id,
+            selected_node_ids,
+            subworkflow_node_id,
+            title,
+            expected_revision,
+            operation_id: None,
+        },
     )
 }
 
 pub fn pack_workflow_selection_with_operation_id(
     state: &AriadneAppState,
-    workflow_id: String,
-    selected_node_ids: Vec<String>,
-    subworkflow_node_id: Option<String>,
-    title: Option<String>,
-    expected_revision: Option<String>,
-    operation_id: Option<String>,
+    request: WorkflowPackRequest,
 ) -> CommandResult<WorkflowPackGraphReport> {
     let project_root = project_root_from_state(state, None)?;
     pack_workflow_selection_impl_with_operation_id_and_app_state(
         &project_root,
         state.app_state_root(),
-        workflow_id,
-        selected_node_ids,
-        subworkflow_node_id,
-        title,
-        expected_revision,
-        operation_id,
+        request,
     )
 }
 
@@ -1593,6 +1690,7 @@ fn start_workflow_request(
 ) -> CommandResult<WorkflowRunStarted> {
     validate_existing_project_root(project_root)?;
     let project_mutation = acquire_project_mutation_guard(project_root, "workflow_start")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let run_id = new_run_id()?;
     let run_id_text = run_id.as_str().to_owned();
     let prepared = prepare_workflow_run_state(
@@ -1610,7 +1708,9 @@ fn start_workflow_request(
     let worker_lease =
         acquire_workflow_worker_lease(&store, &prepared.state.workflow_id, &prepared.state.run_id)?
             .ok_or_else(|| {
-                "new workflow run could not acquire its initial worker lease".to_owned()
+                CommandError::internal(
+                    "new workflow run could not acquire its initial worker lease",
+                )
             })?;
     let worker_workflow_id = request.workflow_id.clone();
     let spawned_workflow_id = worker_workflow_id.clone();
@@ -1639,7 +1739,7 @@ fn start_workflow_request(
                 },
             );
             if let Err(error) = worker_result {
-                if error != WORKFLOW_WORKER_LEASE_LOST_ERROR {
+                if error.diagnostic_text() != WORKFLOW_WORKER_LEASE_LOST_ERROR {
                     record_workflow_worker_error(
                         &worker_root,
                         &spawned_workflow_id,
@@ -1703,7 +1803,7 @@ pub fn stop_workflow(
     let run_id_typed = RunId::from(run_id.clone());
     let reason = reason.unwrap_or_else(|| "stopped by user".to_owned());
     let store = SqliteWorkflowRuntimeStore::open(&project_root).map_err(error_to_string)?;
-    match store
+    let result = match store
         .request_stop(
             &workflow_id_typed,
             &run_id_typed,
@@ -1712,15 +1812,19 @@ pub fn stop_workflow(
         )
         .map_err(error_to_string)?
     {
-        WorkflowStopRequestResult::Saved { state } => Ok(WorkflowActionResult {
+        WorkflowStopRequestResult::Saved { state } => WorkflowActionResult {
             workflow_id,
             run_id,
             status: run_status_label(state.status).to_owned(),
-        }),
+        },
         WorkflowStopRequestResult::NotFound => {
-            Err(format!("workflow run not found: {workflow_id}/{run_id}"))
+            return Err(CommandError::not_found(format!(
+                "workflow run not found: {workflow_id}/{run_id}"
+            )));
         }
-    }
+    };
+    state.ensure_workflow_scheduler()?;
+    Ok(result)
 }
 
 pub fn resume_workflow(
@@ -1734,7 +1838,7 @@ pub fn resume_workflow(
     let run_id_typed = RunId::from(run_id.clone());
     let owner_id = format!("worker-{}", new_run_id()?.as_str());
     let store = SqliteWorkflowRuntimeStore::open(&project_root).map_err(error_to_string)?;
-    match store
+    let result = match store
         .claim_resume(
             &workflow_id_typed,
             &run_id_typed,
@@ -1762,27 +1866,37 @@ pub fn resume_workflow(
                 lease,
                 project_mutation,
             )?;
-            Ok(result)
+            result
         }
         crate::workflow::WorkflowResumeClaimResult::Busy { .. } => {
             let run_state = store
                 .load_state(&workflow_id_typed, &run_id_typed)
                 .map_err(error_to_string)?
-                .ok_or_else(|| format!("workflow run not found: {workflow_id}/{run_id}"))?;
-            Ok(WorkflowActionResult {
+                .ok_or_else(|| {
+                    CommandError::not_found(format!(
+                        "workflow run not found: {workflow_id}/{run_id}"
+                    ))
+                })?;
+            WorkflowActionResult {
                 workflow_id,
                 run_id,
                 status: run_status_label(run_state.status).to_owned(),
-            })
+            }
         }
         crate::workflow::WorkflowResumeClaimResult::NotFound => {
-            Err(format!("workflow run not found: {workflow_id}/{run_id}"))
+            return Err(CommandError::not_found(format!(
+                "workflow run not found: {workflow_id}/{run_id}"
+            )));
         }
-        crate::workflow::WorkflowResumeClaimResult::NotResumable { status } => Err(format!(
-            "workflow run cannot resume from status {}",
-            run_status_label(status)
-        )),
-    }
+        crate::workflow::WorkflowResumeClaimResult::NotResumable { status } => {
+            return Err(CommandError::conflict(format!(
+                "workflow run cannot resume from status {}",
+                run_status_label(status)
+            )));
+        }
+    };
+    state.ensure_workflow_scheduler()?;
+    Ok(result)
 }
 
 /// 路径 B：把交流后同意的 Prudent 输出改写进关联节点并置为通过，解除暂停继续运行。
@@ -1813,6 +1927,7 @@ pub fn override_confirmation_output(
             project_mutation,
         )?;
     }
+    state.ensure_workflow_scheduler()?;
     Ok(result)
 }
 
@@ -1831,10 +1946,10 @@ pub fn resume_from_node(
         .load_state(&workflow_id, &run_id)
         .map_err(error_to_string)?;
     let run_state = run_state.ok_or_else(|| {
-        format!(
+        CommandError::not_found(format!(
             "workflow run not found: {}/{}",
             request.workflow_id, request.run_id
-        )
+        ))
     })?;
     let (workflow, _) = workflow_for_run_state(&project_root, &workflow_id, &run_state)?;
     let (result, lease) = mutate_workflow_run_and_claim(
@@ -1860,6 +1975,7 @@ pub fn resume_from_node(
             project_mutation,
         )?;
     }
+    state.ensure_workflow_scheduler()?;
     Ok(result)
 }
 
@@ -1909,6 +2025,31 @@ pub fn save_app_settings(
     get_app_settings_impl(&project_root)
 }
 
+pub fn save_general_section_settings(
+    state: &AriadneAppState,
+    settings: GeneralSectionSettings,
+) -> CommandResult<GeneralSectionSettings> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation =
+        acquire_project_mutation_guard(&project_root, "general_settings_update")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    crate::frontend::ProjectMemoryStore::validate_content(&settings.project_memory)
+        .map_err(error_to_string)?;
+    let config_store = ConfigStore::with_app_state(&project_root, state.app_state_root());
+    let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    apply_app_settings(&mut config, settings.app.app)?;
+    commit_general_settings_files(
+        &project_root,
+        state.app_state_root(),
+        &config,
+        settings.project_memory.as_bytes(),
+    )?;
+    Ok(GeneralSectionSettings {
+        app: AppSettings { app: config.app },
+        project_memory: settings.project_memory,
+    })
+}
+
 pub fn get_rag_settings(state: &AriadneAppState) -> CommandResult<RagSettings> {
     let project_root = project_root_from_state(state, None)?;
     get_rag_settings_impl(&project_root)
@@ -1920,6 +2061,7 @@ pub fn save_rag_settings(
 ) -> CommandResult<RagSettings> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "rag_settings_update")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
     settings.rag.validate().map_err(error_to_string)?;
     let expected = ConfigStore::new(&project_root)
         .load_or_create()
@@ -1963,6 +2105,33 @@ pub fn save_git_settings(
     get_git_settings_impl(&project_root)
 }
 
+pub fn save_misc_section_settings(
+    state: &AriadneAppState,
+    settings: MiscSectionSettings,
+) -> CommandResult<MiscSectionSettings> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "misc_settings_update")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    settings.rag.rag.validate().map_err(error_to_string)?;
+    let expected = ConfigStore::new(&project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let mut candidate = expected.clone();
+    candidate.rag = settings.rag.rag;
+    candidate.git = settings.git.git;
+    let saved = MiscSectionSettings {
+        rag: RagSettings {
+            rag: candidate.rag.clone(),
+        },
+        git: GitSettings {
+            git: candidate.git.clone(),
+        },
+    };
+    state.commit_retrieval_config(&expected, candidate)?;
+    spawn_indexing_worker_for_state(state)?;
+    Ok(saved)
+}
+
 pub fn get_template_repository_settings(
     state: &AriadneAppState,
 ) -> CommandResult<TemplateRepositorySettings> {
@@ -1974,7 +2143,7 @@ pub fn save_template_repository_settings(
     settings: TemplateRepositorySettings,
 ) -> CommandResult<TemplateRepositorySettings> {
     save_template_repository_settings_impl(state.app_state_root(), &settings)?;
-    get_template_repository_settings_impl(state.app_state_root())
+    Ok(settings)
 }
 
 pub fn update_budget_config(
@@ -2008,6 +2177,21 @@ pub fn save_automation_settings(
         acquire_project_mutation_guard(&project_root, "automation_settings_update")?;
     save_automation_settings_impl_with_app_state(&project_root, state.app_state_root(), settings)?;
     get_automation_settings_impl(&project_root)
+}
+
+pub fn save_automation_section_settings(
+    state: &AriadneAppState,
+    settings: AutomationSectionSettings,
+) -> CommandResult<AutomationSectionSettings> {
+    let project_root = project_root_from_state(state, None)?;
+    let saved = settings.clone();
+    save_automation_settings_impl_with_app_state_and_workflow(
+        &project_root,
+        state.app_state_root(),
+        settings.automation,
+        Some(settings.workflow.workflow),
+    )?;
+    Ok(saved)
 }
 
 pub fn get_permissions_settings(state: &AriadneAppState) -> CommandResult<PermissionsSettings> {
@@ -2048,16 +2232,34 @@ pub fn save_node_preset_settings_impl(
     settings: NodePresetSettings,
 ) -> CommandResult<NodePresetSettings> {
     let _project_mutation = acquire_project_mutation_guard(project_root, "node_preset_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     write_node_preset_settings(project_root, &settings)?;
-    read_node_preset_settings(project_root)
+    Ok(settings)
 }
 
 pub fn fetch_provider_models(
     state: &AriadneAppState,
     provider_id: Option<String>,
 ) -> CommandResult<ProviderModelsResult> {
+    fetch_provider_models_with_cancellation(
+        state,
+        provider_id,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn fetch_provider_models_with_cancellation(
+    state: &AriadneAppState,
+    provider_id: Option<String>,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<ProviderModelsResult> {
     let project_root = project_root_from_state(state, None)?;
-    fetch_provider_models_with_secrets_impl(&project_root, state.secret_store.as_ref(), provider_id)
+    fetch_provider_models_with_secrets_and_cancellation_impl(
+        &project_root,
+        state.secret_store.as_ref(),
+        provider_id,
+        cancellation,
+    )
 }
 
 pub fn fetch_provider_models_with_secrets_impl(
@@ -2065,8 +2267,23 @@ pub fn fetch_provider_models_with_secrets_impl(
     secrets: &dyn SecretStore,
     provider_id: Option<String>,
 ) -> CommandResult<ProviderModelsResult> {
+    fetch_provider_models_with_secrets_and_cancellation_impl(
+        project_root,
+        secrets,
+        provider_id,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn fetch_provider_models_with_secrets_and_cancellation_impl(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    provider_id: Option<String>,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<ProviderModelsResult> {
     validate_project_root(project_root)?;
-    let _project_mutation = acquire_project_mutation_guard(project_root, "provider_model_fetch")?;
+    cancellation.check().map_err(CommandError::from)?;
+    ensure_project_not_in_maintenance(project_root)?;
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
@@ -2076,7 +2293,7 @@ pub fn fetch_provider_models_with_secrets_impl(
         Err(_) => return configured_provider_models_result(&selected),
     };
     let api_key = provider_api_key(project_root, secrets, &selected)?;
-    let fetched = fetch_remote_provider_models(&selected, protocol, api_key)?;
+    let fetched = fetch_remote_provider_models(&selected, protocol, api_key, cancellation)?;
     Ok(ProviderModelsResult {
         provider_id: selected.provider_id,
         models: merge_remote_model_metadata(fetched, &selected.models),
@@ -2128,7 +2345,7 @@ fn select_provider_for_model_fetch(
             .providers
             .iter()
             .find(|provider| provider.provider_id == id)
-            .ok_or_else(|| format!("provider is not configured: {id}"));
+            .ok_or_else(|| CommandError::not_found(format!("provider is not configured: {id}")));
     }
     providers
         .default_llm_provider_id
@@ -2141,7 +2358,7 @@ fn select_provider_for_model_fetch(
         })
         .or_else(|| providers.providers.iter().find(|provider| provider.enabled))
         .or_else(|| providers.providers.first())
-        .ok_or_else(|| "no provider configured".to_owned())
+        .ok_or_else(|| CommandError::not_found("no provider configured"))
 }
 
 fn provider_api_key(
@@ -2150,10 +2367,10 @@ fn provider_api_key(
     provider: &ProviderConfig,
 ) -> CommandResult<Option<String>> {
     if provider.api_key.is_some() {
-        return Err(format!(
+        return Err(CommandError::permission(format!(
             "provider '{}' contains an untrusted project SecretRef; re-enter the credential before network access",
             provider.provider_id
-        ));
+        )));
     }
     ProjectCredentialScope::new(project_root, secrets)
         .map_err(error_to_string)?
@@ -2170,12 +2387,14 @@ fn fetch_remote_provider_models(
     provider: &ProviderConfig,
     protocol: ProviderProtocol,
     api_key: Option<String>,
+    cancellation: &crate::contracts::ExecutionCancellation,
 ) -> CommandResult<Vec<ModelConfig>> {
+    cancellation.check().map_err(CommandError::from)?;
     if provider_requires_api_key(&provider.provider_type) && api_key.is_none() {
-        return Err(format!(
+        return Err(CommandError::validation(format!(
             "provider {} requires an API key before fetching models",
             provider.provider_id
-        ));
+        )));
     }
 
     let base_url = crate::providers::resolve_base_url(provider)
@@ -2199,27 +2418,59 @@ fn fetch_remote_provider_models(
         (ProviderProtocol::Gemini, Some(key)) => request.query(&[("key", key)]),
         _ => request,
     };
-    let response = request.send().map_err(|error| {
-        format!(
-            "failed to fetch models from provider {}: {error}",
-            provider.provider_id
-        )
-    })?;
-    let status = response.status();
-    let text = read_provider_model_response_text(response, &provider.provider_id)?;
+    let provider_id = provider.provider_id.clone();
+    let blocking_permit =
+        crate::contracts::acquire_detached_blocking_task_permit().map_err(CommandError::from)?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("ariadne-provider-model-fetch".to_owned())
+        .spawn(move || {
+            let _blocking_permit = blocking_permit;
+            let result = request
+                .send()
+                .map_err(|error| {
+                    CommandError::network(format!(
+                        "failed to fetch models from provider {provider_id}: {error}"
+                    ))
+                })
+                .and_then(|response| {
+                    let status = response.status();
+                    read_provider_model_response_text(response, &provider_id)
+                        .map(|text| (status, text))
+                });
+            let _ = sender.send(result);
+        })
+        .map_err(CommandError::from)?;
+    let (status, text) = loop {
+        if cancellation.is_cancelled() {
+            return Err(CommandError::new(
+                crate::command_error::CommandErrorCode::Cancelled,
+                "provider model list request cancelled",
+            ));
+        }
+        match receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(result) => break result?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(CommandError::internal(
+                    "provider model list worker disconnected",
+                ));
+            }
+        }
+    };
     if !status.is_success() {
-        return Err(format!(
+        return Err(CommandError::external(format!(
             "provider {} model list request failed with HTTP {}: {}",
             provider.provider_id,
             status.as_u16(),
             truncate_provider_error(&text)
-        ));
+        )));
     }
     let raw: Value = serde_json::from_str(&text).map_err(|error| {
-        format!(
+        CommandError::external(format!(
             "provider {} returned invalid model list JSON: {error}",
             provider.provider_id
-        )
+        ))
     })?;
     parse_remote_provider_models(protocol, &raw)
 }
@@ -2232,24 +2483,29 @@ fn read_provider_model_response_text(
         .content_length()
         .is_some_and(|length| length > MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES)
     {
-        return Err(format!(
+        return Err(CommandError::new(crate::command_error::CommandErrorCode::ResourceLimit, format!(
             "provider {provider_id} model list response exceeds {MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES} bytes"
-        ));
+        )));
     }
 
     let mut limited = response.take(MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES.saturating_add(1));
     let mut bytes = Vec::new();
     limited.read_to_end(&mut bytes).map_err(|error| {
-        format!("failed to read model list from provider {provider_id}: {error}")
+        CommandError::network(format!(
+            "failed to read model list from provider {provider_id}: {error}"
+        ))
     })?;
     if bytes.len() as u64 > MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES {
-        return Err(format!(
+        return Err(CommandError::new(crate::command_error::CommandErrorCode::ResourceLimit, format!(
             "provider {provider_id} model list response exceeds {MAX_PROVIDER_MODEL_LIST_RESPONSE_BYTES} bytes"
-        ));
+        )));
     }
 
-    String::from_utf8(bytes)
-        .map_err(|error| format!("provider {provider_id} returned non-UTF-8 model list: {error}"))
+    String::from_utf8(bytes).map_err(|error| {
+        CommandError::external(format!(
+            "provider {provider_id} returned non-UTF-8 model list: {error}"
+        ))
+    })
 }
 
 fn provider_requires_api_key(provider_type: &ProviderType) -> bool {
@@ -2270,10 +2526,9 @@ fn parse_remote_provider_models(
 }
 
 fn parse_openai_style_models(raw: &Value) -> CommandResult<Vec<ModelConfig>> {
-    let data = raw
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "provider model list response must contain data[]".to_owned())?;
+    let data = raw.get("data").and_then(Value::as_array).ok_or_else(|| {
+        CommandError::external("provider model list response must contain data[]")
+    })?;
     let mut models = Vec::new();
     for item in data {
         if let Some(model_id) = item.get("id").and_then(Value::as_str) {
@@ -2287,10 +2542,9 @@ fn parse_openai_style_models(raw: &Value) -> CommandResult<Vec<ModelConfig>> {
 }
 
 fn parse_gemini_models(raw: &Value) -> CommandResult<Vec<ModelConfig>> {
-    let data = raw
-        .get("models")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "gemini model list response must contain models[]".to_owned())?;
+    let data = raw.get("models").and_then(Value::as_array).ok_or_else(|| {
+        CommandError::external("gemini model list response must contain models[]")
+    })?;
     let mut models = Vec::new();
     for item in data {
         let Some(raw_name) = item.get("name").and_then(Value::as_str) else {
@@ -2351,7 +2605,7 @@ fn deduplicate_remote_models(models: Vec<ModelConfig>) -> CommandResult<Vec<Mode
         deduplicated.push(model);
     }
     if deduplicated.is_empty() {
-        Err("provider returned no usable models".to_owned())
+        Err(CommandError::external("provider returned no usable models"))
     } else {
         Ok(deduplicated)
     }
@@ -2432,32 +2686,74 @@ pub fn resolve_confirmation(
             project_mutation,
         )?;
     }
+    state.ensure_workflow_scheduler()?;
     Ok(result)
 }
 
 pub fn get_git_history(state: &AriadneAppState) -> CommandResult<Vec<GitCommitSummary>> {
+    get_git_history_with_cancellation(state, &crate::contracts::ExecutionCancellation::new())
+}
+
+pub fn get_git_history_with_cancellation(
+    state: &AriadneAppState,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<Vec<GitCommitSummary>> {
     let project_root = project_root_from_state(state, None)?;
-    get_git_history_impl(&project_root)
+    get_git_history_impl_with_cancellation(&project_root, cancellation)
 }
 
 pub fn get_git_repository_status(state: &AriadneAppState) -> CommandResult<GitRepositoryStatus> {
+    get_git_repository_status_with_cancellation(
+        state,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn get_git_repository_status_with_cancellation(
+    state: &AriadneAppState,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<GitRepositoryStatus> {
     let project_root = project_root_from_state(state, None)?;
-    get_git_repository_status_impl(&project_root)
+    get_git_repository_status_impl_with_cancellation(&project_root, cancellation)
 }
 
 pub fn get_git_branch_graph(
     state: &AriadneAppState,
     limit: Option<usize>,
 ) -> CommandResult<Vec<BranchGraphNode>> {
+    get_git_branch_graph_with_cancellation(
+        state,
+        limit,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn get_git_branch_graph_with_cancellation(
+    state: &AriadneAppState,
+    limit: Option<usize>,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<Vec<BranchGraphNode>> {
     let project_root = project_root_from_state(state, None)?;
-    GitService::new(project_root)
+    git_service_with_cancellation(project_root, cancellation)
         .branch_graph(limit.unwrap_or(200))
         .map_err(error_to_string)
 }
 
 pub fn create_checkpoint(state: &AriadneAppState, message: String) -> CommandResult<ArchivePoint> {
+    create_checkpoint_with_cancellation(
+        state,
+        message,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn create_checkpoint_with_cancellation(
+    state: &AriadneAppState,
+    message: String,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<ArchivePoint> {
     let project_root = project_root_from_state(state, None)?;
-    create_checkpoint_impl(&project_root, message)
+    create_checkpoint_impl_with_cancellation(&project_root, message, cancellation)
 }
 
 pub fn restore_to_new_branch(
@@ -2465,13 +2761,29 @@ pub fn restore_to_new_branch(
     commit_id: String,
     new_branch: String,
 ) -> CommandResult<RestoreReport> {
+    restore_to_new_branch_with_cancellation(
+        state,
+        commit_id,
+        new_branch,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn restore_to_new_branch_with_cancellation(
+    state: &AriadneAppState,
+    commit_id: String,
+    new_branch: String,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<RestoreReport> {
     let project_root = project_root_from_state(state, None)?;
+    cancellation.check().map_err(CommandError::from)?;
     let documents = document_service(&project_root);
     let maintenance = documents.invalidation_outbox();
     maintenance
         .begin_maintenance("git_restore", "stopping_runtime")
         .map_err(error_to_string)?;
     let result: CommandResult<RestoreReport> = (|| -> CommandResult<RestoreReport> {
+        cancellation.check().map_err(CommandError::from)?;
         let _maintenance_fence = drain_project_mutations_for_restore(&project_root, maintenance)?;
         maintenance
             .update_maintenance_phase("checking_out_branch")
@@ -2480,9 +2792,10 @@ pub fn restore_to_new_branch(
             .load_or_create()
             .map_err(error_to_string)?;
         let policy = git_stage_policy_from_config(&config.git);
-        let mut report = GitService::new(&project_root)
+        let mut report = git_service_with_cancellation(&project_root, cancellation)
             .restore_to_new_branch_with_policy(&commit_id, &new_branch, &policy)
             .map_err(error_to_string)?;
+        cancellation.check().map_err(CommandError::from)?;
         maintenance
             .update_maintenance_phase("rebuilding_full_text_indexes")
             .map_err(error_to_string)?;
@@ -2496,7 +2809,7 @@ pub fn restore_to_new_branch(
             .map_err(error_to_string)?;
         state
             .reload_retrieval_runtime()?
-            .process_outbox()
+            .process_outbox_with_cancellation(cancellation)
             .map_err(error_to_string)?;
         report.index_rebuild_required = false;
         report.runtime_rebind_required = false;
@@ -2526,18 +2839,27 @@ pub fn save_provider_key(
     state: &AriadneAppState,
     provider: String,
     key: String,
-) -> CommandResult<()> {
+) -> CommandResult<ProviderConfigStatus> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "provider_key_update")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
     let provider = normalize_provider(&provider)?;
     if key.trim().is_empty() {
-        return Err("provider key cannot be empty".to_owned());
+        return Err(CommandError::validation("provider key cannot be empty"));
     }
-    let expected = ConfigStore::new(&project_root)
-        .load_or_create()
+    let config = ConfigStore::new(&project_root)
+        .load()
         .map_err(error_to_string)?;
-    let mut candidate = expected.clone();
-    apply_provider_key_config(&mut candidate, &provider);
+    if !config
+        .providers
+        .providers
+        .iter()
+        .any(|configured| configured.provider_id == provider)
+    {
+        return Err(CommandError::not_found(format!(
+            "provider is not configured: {provider}"
+        )));
+    }
     let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
         .map_err(error_to_string)?;
     let previous_secret = credentials
@@ -2546,14 +2868,41 @@ pub fn save_provider_key(
     credentials
         .set_provider_secret(&provider, SecretValue::new(key))
         .map_err(error_to_string)?;
-    match state.commit_retrieval_config(&expected, candidate) {
+    let status = match provider_config_status_from_config(
+        &project_root,
+        config,
+        state.secret_store.as_ref(),
+    ) {
+        Ok(status) => status,
+        Err(error) => {
+            restore_provider_secret(&credentials, &provider, previous_secret).map_err(
+                |rollback| {
+                    CommandError::internal(format!(
+                        "{error}; provider key rollback failed: {rollback}"
+                    ))
+                },
+            )?;
+            return Err(error);
+        }
+    };
+    match state.reload_retrieval_runtime() {
         Ok(_) => {
             spawn_indexing_worker_for_state(state)?;
-            Ok(())
+            Ok(status)
         }
         Err(error) => {
-            restore_provider_secret(&credentials, &provider, previous_secret)
-                .map_err(|rollback| format!("{error}; provider key rollback failed: {rollback}"))?;
+            restore_provider_secret(&credentials, &provider, previous_secret).map_err(
+                |rollback| {
+                    CommandError::internal(format!(
+                        "{error}; provider key rollback failed: {rollback}"
+                    ))
+                },
+            )?;
+            state.reload_retrieval_runtime().map_err(|rollback| {
+                CommandError::internal(format!(
+                    "{error}; provider runtime rollback failed: {rollback}"
+                ))
+            })?;
             Err(error)
         }
     }
@@ -2582,14 +2931,180 @@ pub fn save_provider_settings(
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation =
         acquire_project_mutation_guard(&project_root, "provider_settings_update")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
     let expected = ConfigStore::new(&project_root)
         .load_or_create()
         .map_err(error_to_string)?;
     let mut candidate = expected.clone();
     apply_provider_settings_update(&mut candidate, update)?;
+    let status = provider_config_status_from_config(
+        &project_root,
+        candidate.clone(),
+        state.secret_store.as_ref(),
+    )?;
     state.commit_retrieval_config(&expected, candidate)?;
     spawn_indexing_worker_for_state(state)?;
-    get_provider_config_impl(&project_root, state.secret_store.as_ref())
+    Ok(status)
+}
+
+pub fn save_provider_section_settings(
+    state: &AriadneAppState,
+    settings: ProviderSectionSettings,
+) -> CommandResult<ProviderConfigStatus> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation =
+        acquire_project_mutation_guard(&project_root, "provider_section_update")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    let provider_id = normalize_provider(&settings.provider.provider_id)?;
+    let expected = ConfigStore::new(&project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let mut candidate = expected.clone();
+    apply_provider_settings_update(&mut candidate, settings.provider)?;
+
+    let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
+        .map_err(error_to_string)?;
+    let previous_secret = if let Some(key) = settings.api_key.as_deref() {
+        if key.trim().is_empty() {
+            return Err(CommandError::validation("provider key cannot be empty"));
+        }
+        let previous = credentials
+            .get_provider_secret(&provider_id)
+            .map_err(error_to_string)?;
+        credentials
+            .set_provider_secret(&provider_id, SecretValue::new(key.to_owned()))
+            .map_err(error_to_string)?;
+        Some(previous)
+    } else {
+        None
+    };
+
+    let status = match provider_config_status_from_config(
+        &project_root,
+        candidate.clone(),
+        state.secret_store.as_ref(),
+    ) {
+        Ok(status) => status,
+        Err(error) => {
+            if let Some(previous) = previous_secret {
+                restore_provider_secret(&credentials, &provider_id, previous).map_err(
+                    |rollback| {
+                        CommandError::internal(format!(
+                            "provider status prepare failed: {error}; key rollback failed: {rollback}"
+                        ))
+                    },
+                )?;
+            }
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = state.commit_retrieval_config(&expected, candidate) {
+        if let Some(previous) = previous_secret {
+            restore_provider_secret(&credentials, &provider_id, previous).map_err(|rollback| {
+                CommandError::internal(format!(
+                    "provider section commit failed: {error}; key rollback failed: {rollback}"
+                ))
+            })?;
+            state.reload_retrieval_runtime().map_err(|rollback| {
+                CommandError::internal(format!(
+                    "provider section commit failed: {error}; runtime rollback failed: {rollback}"
+                ))
+            })?;
+        }
+        return Err(error);
+    }
+    spawn_indexing_worker_for_state(state)?;
+    Ok(status)
+}
+
+pub fn preview_provider_removal(
+    state: &AriadneAppState,
+    provider: String,
+) -> CommandResult<ProviderRemovalPreview> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation =
+        acquire_project_mutation_guard(&project_root, "provider_removal_preview")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    let provider = normalize_provider(&provider)?;
+    let config = ConfigStore::new(&project_root)
+        .load()
+        .map_err(error_to_string)?;
+    provider_removal_preview_from_config(
+        &project_root,
+        state.secret_store.as_ref(),
+        &config,
+        &provider,
+    )
+}
+
+pub fn remove_provider(
+    state: &AriadneAppState,
+    provider: String,
+    expected_revision: String,
+) -> CommandResult<ProviderConfigStatus> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "provider_removal")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    let provider = normalize_provider(&provider)?;
+    let expected = ConfigStore::new(&project_root)
+        .load()
+        .map_err(error_to_string)?;
+    let preview = provider_removal_preview_from_config(
+        &project_root,
+        state.secret_store.as_ref(),
+        &expected,
+        &provider,
+    )?;
+    if preview.revision != expected_revision {
+        return Err(CommandError::conflict(
+            "provider removal impact changed; preview and confirm again",
+        ));
+    }
+    if !preview.blocking_references.is_empty() {
+        return Err(CommandError::conflict(
+            "provider is still referenced; remove the references before deleting it",
+        ));
+    }
+
+    let mut candidate = expected.clone();
+    candidate
+        .providers
+        .providers
+        .retain(|configured| configured.provider_id != provider);
+    clear_provider_defaults(&mut candidate, &provider);
+
+    let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
+        .map_err(error_to_string)?;
+    let previous_secret = credentials
+        .get_provider_secret(&provider)
+        .map_err(error_to_string)?;
+    let mut status = provider_config_status_from_config(
+        &project_root,
+        candidate.clone(),
+        state.secret_store.as_ref(),
+    )?;
+    clear_removed_provider_key_status(&mut status, &provider);
+
+    let runtime = state.commit_retrieval_config(&expected, candidate.clone())?;
+    if let Err(error) = credentials.delete_provider_secret(&provider) {
+        let secret_rollback =
+            restore_provider_secret(&credentials, &provider, previous_secret.clone());
+        let config_rollback = state.commit_retrieval_config(&candidate, expected);
+        return Err(match (secret_rollback, config_rollback) {
+            (Ok(()), Ok(_)) => error_to_string(error),
+            (secret_result, config_result) => CommandError::internal(format!(
+                "provider credential deletion failed: {error}; secret rollback: {}; config/runtime rollback: {}",
+                rollback_result_text(secret_result),
+                rollback_result_text(config_result.map(|_| ()))
+            )),
+        });
+    }
+
+    if let Some(worker_key) = register_indexing_worker(&project_root) {
+        spawn_registered_indexing_worker_with_runtime(project_root, worker_key, runtime);
+    }
+    Ok(status)
 }
 
 pub fn query_run_logs(
@@ -2609,14 +3124,30 @@ pub fn query_run_logs(
             after_timestamp_ms: filter.after_timestamp_ms,
             after_log_id: filter.after_log_id,
             limit: filter.limit,
+            descending: filter.descending,
         })
         .map_err(error_to_string)
 }
 
-pub fn mark_run_logs_read(state: &AriadneAppState) -> CommandResult<()> {
+pub fn mark_run_logs_read(
+    state: &AriadneAppState,
+    filter: Option<RunLogQuery>,
+) -> CommandResult<usize> {
     let project_root = project_root_from_state(state, None)?;
+    let filter = filter.unwrap_or_default();
     UiRunLogStore::default_for_project(project_root)
-        .mark_all_read()
+        .mark_read(UiRunLogFilter {
+            kind: filter.kind,
+            level: filter.level,
+            workflow_id: filter.workflow_id.map(WorkflowId::from),
+            run_id: filter.run_id.map(RunId::from),
+            node_id: filter.node_id.map(NodeId::from),
+            query: filter.query,
+            after_timestamp_ms: None,
+            after_log_id: None,
+            limit: None,
+            descending: false,
+        })
         .map_err(error_to_string)
 }
 
@@ -2647,8 +3178,25 @@ pub fn quick_edit(
     state: &AriadneAppState,
     request: QuickEditRequest,
 ) -> CommandResult<QuickEditResult> {
+    quick_edit_with_cancellation(
+        state,
+        request,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn quick_edit_with_cancellation(
+    state: &AriadneAppState,
+    request: QuickEditRequest,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<QuickEditResult> {
     let project_root = project_root_from_state(state, None)?;
-    quick_edit_impl(&project_root, state.secret_store.as_ref(), request)
+    quick_edit_impl_with_cancellation(
+        &project_root,
+        state.secret_store.as_ref(),
+        request,
+        cancellation,
+    )
 }
 
 pub fn apply_quick_edit(
@@ -2679,21 +3227,39 @@ pub fn project_ai_chat(
     state: &AriadneAppState,
     request: ProjectAiRequest,
 ) -> CommandResult<ProjectAiResponse> {
+    project_ai_chat_with_cancellation(
+        state,
+        request,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn project_ai_chat_with_cancellation(
+    state: &AriadneAppState,
+    request: ProjectAiRequest,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<ProjectAiResponse> {
     let project_root = project_root_from_state(state, None)?;
     let runner_root = project_root.clone();
     let runner_secrets = Arc::clone(&state.secret_store);
     let runner_retrieval = state.retrieval_runtime()?;
+    let project_ai_retrieval = Arc::clone(&runner_retrieval);
+    let scheduler_state = state.clone();
     let response = project_ai_chat_with_runner(
         &project_root,
         state.secret_store.as_ref(),
         request,
+        project_ai_retrieval,
+        cancellation,
         &mut move |request| {
-            start_workflow_request(
+            let started = start_workflow_request(
                 &runner_root,
                 Arc::clone(&runner_secrets),
                 Some(Arc::clone(&runner_retrieval)),
                 request,
-            )
+            )?;
+            scheduler_state.ensure_workflow_scheduler()?;
+            Ok(started)
         },
     )?;
     state.ensure_workflow_scheduler()?;
@@ -2705,15 +3271,10 @@ pub fn resolve_project_reference(
     reference: String,
 ) -> CommandResult<ProjectReference> {
     let project_root = project_root_from_state(state, None)?;
-    let documents = document_service(&project_root);
-    let confirmations = FileConfirmationLogStore::default_for_project(&project_root);
-    let chapter_index = load_chapter_index(&project_root)?;
-    ProjectReferenceResolver::new()
-        .with_documents(&documents)
-        .with_confirmations(&confirmations)
-        .with_chapter_index(&chapter_index)
-        .resolve(&reference)
-        .map_err(error_to_string)
+    resolve_project_references_with_context(&project_root, &[reference], "", None, None)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CommandError::validation("project reference is required"))
 }
 
 pub fn get_ui_preferences(state: &AriadneAppState) -> CommandResult<UiPreferences> {
@@ -2738,7 +3299,23 @@ pub fn search_templates(
     tags: Vec<String>,
     page: u32,
 ) -> CommandResult<Vec<TemplateSummary>> {
-    template_client(request)?
+    search_templates_with_cancellation(
+        request,
+        query,
+        tags,
+        page,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn search_templates_with_cancellation(
+    request: TemplateRepositoryRequest,
+    query: String,
+    tags: Vec<String>,
+    page: u32,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<Vec<TemplateSummary>> {
+    template_client(request, cancellation)?
         .search(&query, &tags, page)
         .map_err(error_to_string)
 }
@@ -2747,7 +3324,19 @@ pub fn get_template_detail(
     request: TemplateRepositoryRequest,
     id: String,
 ) -> CommandResult<TemplateDetail> {
-    template_client(request)?
+    get_template_detail_with_cancellation(
+        request,
+        id,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn get_template_detail_with_cancellation(
+    request: TemplateRepositoryRequest,
+    id: String,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<TemplateDetail> {
+    template_client(request, cancellation)?
         .detail(&id)
         .map_err(error_to_string)
 }
@@ -2757,11 +3346,33 @@ pub fn install_template(
     request: TemplateRepositoryRequest,
     id: String,
 ) -> CommandResult<TemplateInstallReport> {
+    install_template_with_cancellation(
+        state,
+        request,
+        id,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn install_template_with_cancellation(
+    state: &AriadneAppState,
+    request: TemplateRepositoryRequest,
+    id: String,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<TemplateInstallReport> {
     let project_root = project_root_from_state(state, None)?;
+    let manifest = template_client(request, cancellation)?
+        .download(&id)
+        .map_err(error_to_string)?;
+    cancellation.check().map_err(CommandError::from)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "template_install")?;
-    template_client(request)?
-        .download_to_workflows(&id, project_root.join("workflows"))
-        .map_err(error_to_string)
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    crate::frontend::install_workflow_template_manifest(
+        manifest,
+        project_root.join("workflows"),
+        false,
+    )
+    .map_err(error_to_string)
 }
 
 pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<BackendDiagnosticsReport> {
@@ -2777,7 +3388,7 @@ pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<Backend
         }),
         Err(error) => vec![crate::retrieval::StoreHealth::unavailable(
             "project_retrieval_runtime",
-            error,
+            error.to_string(),
         )],
     };
     let mut report = BackendDiagnosticsReport::collect(
@@ -2827,7 +3438,7 @@ fn provider_config_diagnostic_items(
         Err(reason) => items.push(DiagnosticItem {
             component: "providers.llm.default".to_owned(),
             status: DiagnosticStatus::Degraded,
-            reason: Some(reason),
+            reason: Some(reason.to_string()),
         }),
     }
 
@@ -3032,6 +3643,17 @@ fn acquire_project_mutation_guard(
         .map_err(error_to_string)
 }
 
+fn acquire_provider_reference_graph_guard(
+    project_root: &Path,
+) -> CommandResult<crate::config::store::PathWriteLock> {
+    crate::config::store::PathWriteLock::acquire(
+        &project_root
+            .join(".config")
+            .join(PROVIDER_REFERENCE_GRAPH_LOCK),
+    )
+    .map_err(error_to_string)
+}
+
 fn drain_project_mutations_for_restore(
     project_root: &Path,
     maintenance: &IndexInvalidationOutbox,
@@ -3065,9 +3687,9 @@ fn drain_project_mutations_for_restore(
             return Ok(guard);
         }
         if Instant::now() >= deadline {
-            return Err(
-                "timed out draining project workflow workers before Git restore".to_owned(),
-            );
+            return Err(CommandError::conflict(
+                "timed out draining project workflow workers before Git restore",
+            ));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -3119,15 +3741,27 @@ pub fn search_project_documents(
     query: String,
     limit: usize,
 ) -> CommandResult<Vec<RetrievalResult>> {
+    search_project_documents_with_cancellation(
+        state,
+        query,
+        limit,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn search_project_documents_with_cancellation(
+    state: &AriadneAppState,
+    query: String,
+    limit: usize,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<Vec<RetrievalResult>> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "project_search")?;
+    let mut context = crate::providers::ProviderCallContext::new("project_retrieval");
+    context.cancellation = cancellation.clone();
     state
         .retrieval_runtime()?
-        .search(
-            query,
-            limit,
-            crate::providers::ProviderCallContext::new("project_retrieval"),
-        )
+        .search(query, limit, context)
         .map_err(error_to_string)
 }
 
@@ -3144,10 +3778,9 @@ fn process_index_outbox_unfenced_impl(project_root: &Path) -> CommandResult<usiz
         .map_err(error_to_string)?;
     config.rag.validate().map_err(error_to_string)?;
     if config.rag.vector_store.enabled {
-        return Err(
-            "vector retrieval is enabled; product indexing requires AriadneAppState credentials"
-                .to_owned(),
-        );
+        return Err(CommandError::validation(
+            "vector retrieval is enabled; product indexing requires AriadneAppState credentials",
+        ));
     }
     // 无 state 的测试/管理入口只允许显式全文-only 项目，禁止向量配置下悄悄漏写。
     let runtime =
@@ -3170,7 +3803,9 @@ fn process_index_outbox_unfenced_impl(project_root: &Path) -> CommandResult<usiz
         return Err(if processed == 0 {
             error
         } else {
-            format!("index outbox partial failure after {processed} event(s): {error}")
+            CommandError::internal(format!(
+                "index outbox partial failure after {processed} event(s): {error}"
+            ))
         });
     }
     Ok(processed)
@@ -3337,6 +3972,7 @@ pub fn save_workflow_graph_impl(
 ) -> CommandResult<WorkflowGraphData> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "workflow_graph_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let expected_revision = graph_data.expected_revision.clone();
     let workflow = graph_to_workflow(graph_data)?;
     validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
@@ -3354,16 +3990,16 @@ pub fn save_workflow_graph_impl(
         match expected_revision.as_deref() {
             Some(expected) if expected == actual => {}
             Some(expected) => {
-                return Err(format!(
+                return Err(CommandError::conflict(format!(
                     "workflow content revision conflict for {}: expected {expected}, actual {actual}",
                     workflow.id.as_str()
-                ));
+                )));
             }
             None => {
-                return Err(format!(
+                return Err(CommandError::conflict(format!(
                     "expected_revision required to overwrite existing workflow {}",
                     workflow.id.as_str()
-                ));
+                )));
             }
         }
     }
@@ -3390,7 +4026,9 @@ pub fn get_workflow_events_impl(
     let (status, events) = store
         .list_events_since(&workflow_id_typed, &run_id_typed, after_sequence, limit)
         .map_err(error_to_string)?
-        .ok_or_else(|| format!("workflow run not found: {workflow_id}/{run_id}"))?;
+        .ok_or_else(|| {
+            CommandError::not_found(format!("workflow run not found: {workflow_id}/{run_id}"))
+        })?;
     let next_sequence = events
         .last()
         .map(|event| event.sequence.saturating_add(1))
@@ -3442,11 +4080,14 @@ fn prepare_workflow_run_state(
             request.initial_inputs.clone(),
         )?;
     } else if !request.initial_inputs.is_empty() {
-        return Err("initial_inputs require start_node_id".to_owned());
+        return Err(CommandError::validation(
+            "initial_inputs require start_node_id",
+        ));
     }
     validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
-    let retrieval_runtime = if workflow.nodes.iter().any(|node| node.type_name == "search") {
+    let needs_retrieval = workflow_requires_project_retrieval(project_root, &workflow)?;
+    let retrieval_runtime = if needs_retrieval {
         Some(match retrieval_runtime {
             Some(runtime) => runtime,
             None => Arc::new(
@@ -3495,9 +4136,10 @@ fn preflight_workflow_runtime_dependencies(
     if workflow_requires_llm_provider(workflow) {
         llm_runtime(project_root, secrets)?;
     }
-    if workflow.nodes.iter().any(|node| node.type_name == "search") {
-        retrieval_runtime
-            .ok_or_else(|| "search workflow preflight is missing retrieval runtime".to_owned())?;
+    if workflow_requires_project_retrieval(project_root, workflow)? {
+        retrieval_runtime.ok_or_else(|| {
+            CommandError::internal("search-capable workflow preflight is missing retrieval runtime")
+        })?;
     }
     Ok(())
 }
@@ -3549,7 +4191,9 @@ fn continue_workflow_run_impl(
     let state = store
         .load_state(&workflow_id_typed, &run_id_typed)
         .map_err(error_to_string)?
-        .ok_or_else(|| format!("workflow run not found: {workflow_id}/{run_id}"))?;
+        .ok_or_else(|| {
+            CommandError::not_found(format!("workflow run not found: {workflow_id}/{run_id}"))
+        })?;
     if state.status.is_terminal() {
         return Ok(WorkflowRunStarted {
             run_id,
@@ -3590,11 +4234,11 @@ fn workflow_for_run_state(
     let _ = project_root;
     if let Some(workflow) = &state.prepared_workflow {
         if workflow.id != *workflow_id {
-            return Err(format!(
+            return Err(CommandError::conflict(format!(
                 "prepared workflow id mismatch: expected {}, got {}",
                 workflow_id.as_str(),
                 workflow.id.as_str()
-            ));
+            )));
         }
         workflow.validate_topology().map_err(error_to_string)?;
         return Ok((workflow.clone(), state.start_node_id.clone()));
@@ -3602,11 +4246,11 @@ fn workflow_for_run_state(
 
     // F10: do not silently rebuild from live disk — that reintroduces drift.
     // Legacy snapshots without prepared_workflow need an explicit recovery path.
-    Err(format!(
+    Err(CommandError::legacy_run(format!(
         "legacy run snapshot lacks prepared_workflow for {}/{}; cannot safely resume without frozen execution definition",
         workflow_id.as_str(),
         state.run_id.as_str()
-    ))
+    )))
 }
 
 /// F11：将项目 skills 目录中的 ExecutorAdapter 注册到生产 `RoutedExternalNodeExecutor`。
@@ -3616,6 +4260,24 @@ pub fn register_executor_adapters_for_project(
     project_root: &Path,
     provider: OpenAiCompatibleLlmProvider,
     ledger: Arc<SqliteCostLedger>,
+) -> CommandResult<Vec<String>> {
+    register_executor_adapters_for_project_with_search(
+        external,
+        project_root,
+        provider,
+        ledger,
+        None,
+        None,
+    )
+}
+
+fn register_executor_adapters_for_project_with_search(
+    external: &mut RoutedExternalNodeExecutor,
+    project_root: &Path,
+    provider: OpenAiCompatibleLlmProvider,
+    ledger: Arc<SqliteCostLedger>,
+    retrieval: Option<Arc<ProjectRetrievalRuntime>>,
+    web_search_provider: Option<Arc<HttpWebSearchProvider>>,
 ) -> CommandResult<Vec<String>> {
     use crate::contracts::permissions::ExecutionPolicy;
     use crate::contracts::AutoModeState;
@@ -3644,6 +4306,23 @@ pub fn register_executor_adapters_for_project(
         permissions: crate::contracts::permissions::PermissionPolicy::default(),
     };
     let auto_mode_config = project_config.auto_mode.clone();
+    let max_tool_rounds = project_config.workflow.max_tool_rounds;
+    let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls);
+    let project_search_enabled = tool_control_enabled(
+        &tool_controls,
+        "executor_adapter",
+        EXECUTOR_ADAPTER_SEARCH_TOOL,
+    );
+    let web_search_enabled = project_config
+        .permissions
+        .policy
+        .evaluate(&PermissionRequest::WebSearch)
+        .allowed
+        && tool_control_enabled(
+            &tool_controls,
+            "executor_adapter",
+            EXECUTOR_ADAPTER_WEB_SEARCH_TOOL,
+        );
     let mut registered = Vec::new();
     for loaded in manifests {
         let skill_id = loaded.manifest.skill_id.clone();
@@ -3652,14 +4331,35 @@ pub fn register_executor_adapters_for_project(
         let ledger = Arc::clone(&ledger);
         let execution_policy = execution_policy.clone();
         let auto_mode_config = auto_mode_config.clone();
+        let project_search = project_search_enabled
+            .then(|| retrieval.as_ref().map(Arc::clone))
+            .flatten();
+        let web_search = web_search_enabled
+            .then(|| web_search_provider.as_ref().map(Arc::clone))
+            .flatten();
         let type_name = format!("executor_adapter:{skill_id}");
+        let operation_policy = match &manifest.executor {
+            crate::skills::SkillExecutorConfig::Http(config)
+                if config.method.eq_ignore_ascii_case("GET")
+                    || config.idempotency_header.is_some() =>
+            {
+                crate::workflow::WorkflowOperationPolicy::replayable_remote()
+            }
+            crate::skills::SkillExecutorConfig::Wasm(_) => {
+                crate::workflow::WorkflowOperationPolicy::replayable_remote()
+            }
+            crate::skills::SkillExecutorConfig::Llm(_)
+            | crate::skills::SkillExecutorConfig::Http(_) => {
+                crate::workflow::WorkflowOperationPolicy::at_most_once()
+            }
+        };
         external
             .register_handler_with_policy(
                 type_name.clone(),
-                crate::workflow::WorkflowOperationPolicy::remote_response(),
+                operation_policy,
                 Box::new(move |request| {
                     let http_backend = NativeHttpSkillBackend;
-                    let wasm_backend = NativeWasmSkillBackend;
+                    let wasm_backend = NativeWasmSkillBackend::default();
                     let context = SkillExecutionContext {
                         execution_policy: &execution_policy,
                         auto_mode_config: &auto_mode_config,
@@ -3670,6 +4370,28 @@ pub fn register_executor_adapters_for_project(
                         wasm_backend: Some(&wasm_backend),
                     };
                     let executor = SkillExecutor::new(context);
+                    let executor = match project_search.as_ref() {
+                        Some(retrieval) => executor.with_project_search(
+                            retrieval,
+                            project_search_tool_definition(
+                                EXECUTOR_ADAPTER_SEARCH_TOOL,
+                                "检索当前项目文档与已确认知识，为 LLM ExecutorAdapter 补充项目上下文。",
+                            ),
+                            max_tool_rounds,
+                        ),
+                        None => executor,
+                    };
+                    let executor = match web_search.as_ref() {
+                        Some(search_provider) => executor.with_web_search(
+                            search_provider.as_ref(),
+                            web_search_tool_definition(
+                                EXECUTOR_ADAPTER_WEB_SEARCH_TOOL,
+                                "搜索公开互联网，为 LLM ExecutorAdapter 补充外部资料。",
+                            ),
+                            max_tool_rounds,
+                        ),
+                        None => executor,
+                    };
                     crate::workflow::execute_executor_adapter_node(request, &manifest, &executor)
                 }),
             )
@@ -3707,8 +4429,31 @@ fn execute_workflow_runtime(
     std::fs::create_dir_all(document_root.join("documents")).map_err(error_to_string)?;
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
     let ledger = Arc::new(SqliteCostLedger::open(project_root).map_err(error_to_string)?);
+    let project_config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls.clone());
+    let permission_policy = project_config.permissions.policy.clone();
+    let max_tool_rounds = project_config.workflow.max_tool_rounds;
+    let retrieval_runtime = if workflow_requires_project_retrieval(project_root, workflow)? {
+        Some(match retrieval_runtime {
+            Some(runtime) => runtime,
+            None => Arc::new(
+                ProjectRetrievalRuntime::open(project_root, secrets).map_err(error_to_string)?,
+            ),
+        })
+    } else {
+        retrieval_runtime
+    };
     let llm_runtime = if workflow_requires_llm_provider(workflow) {
         Some(llm_runtime(project_root, secrets)?)
+    } else {
+        None
+    };
+    let web_search_runtime = if workflow.nodes.iter().any(|node| {
+        workflow_web_search_tool_enabled(&tool_controls, &permission_policy, &node.type_name)
+    }) {
+        Some(Arc::new(web_search_runtime(project_root, secrets)?))
     } else {
         None
     };
@@ -3727,17 +4472,65 @@ fn execute_workflow_runtime(
             let ledger = Arc::clone(&ledger);
             let default_provider_id = default_provider_id.clone();
             let default_model_id = default_model_id.clone();
+            let project_search = workflow_search_tool_for_node(type_name)
+                .filter(|(scope, tool, _)| tool_control_enabled(&tool_controls, scope, tool))
+                .and_then(|(_, tool, description)| {
+                    retrieval_runtime.as_ref().map(|retrieval| {
+                        (
+                            Arc::clone(retrieval),
+                            project_search_tool_definition(tool, description),
+                        )
+                    })
+                });
+            let web_search = workflow_web_search_tool_for_node(type_name)
+                .filter(|(scope, tool, _)| {
+                    permission_policy
+                        .evaluate(&PermissionRequest::WebSearch)
+                        .allowed
+                        && tool_control_enabled(&tool_controls, scope, tool)
+                })
+                .and_then(|(_, tool, description)| {
+                    web_search_runtime.as_ref().map(|provider| {
+                        (
+                            Arc::clone(provider),
+                            web_search_tool_definition(tool, description),
+                        )
+                    })
+                });
+            let permission_policy = permission_policy.clone();
             external
                 .register_handler_with_policy(
                     type_name,
-                    crate::workflow::WorkflowOperationPolicy::remote_response(),
+                    crate::workflow::WorkflowOperationPolicy::at_most_once(),
                     Box::new(move |request| {
-                        execute_llm_node_with_defaults(
+                        if project_search.is_none() && web_search.is_none() {
+                            return execute_llm_node_with_defaults(
+                                request,
+                                &provider,
+                                ledger.as_ref(),
+                                Some(&default_provider_id),
+                                Some(&default_model_id),
+                            );
+                        }
+                        execute_llm_node_with_search_tools(
                             request,
                             &provider,
                             ledger.as_ref(),
-                            Some(&default_provider_id),
-                            Some(&default_model_id),
+                            WorkflowLlmSearchOptions {
+                                default_provider_id: Some(&default_provider_id),
+                                default_model_id: Some(&default_model_id),
+                                project_search: project_search
+                                    .as_ref()
+                                    .map(|(retrieval, tool)| (retrieval.as_ref(), tool.clone())),
+                                web_search: web_search.as_ref().map(|(search_provider, tool)| {
+                                    (
+                                        search_provider.as_ref() as &dyn SearchProvider,
+                                        &permission_policy,
+                                        tool.clone(),
+                                    )
+                                }),
+                                max_tool_rounds,
+                            },
                         )
                     }),
                 )
@@ -3749,16 +4542,61 @@ fn execute_workflow_runtime(
             let provider = provider.clone();
             let ledger = Arc::clone(&ledger);
             let summarizer_root = project_root.to_path_buf();
+            let project_search = workflow_search_tool_for_node("summarizer")
+                .filter(|(scope, tool, _)| tool_control_enabled(&tool_controls, scope, tool))
+                .and_then(|(_, tool, description)| {
+                    retrieval_runtime.as_ref().map(|retrieval| {
+                        (
+                            Arc::clone(retrieval),
+                            project_search_tool_definition(tool, description),
+                        )
+                    })
+                });
+            let web_search = workflow_web_search_tool_for_node("summarizer")
+                .filter(|(scope, tool, _)| {
+                    permission_policy
+                        .evaluate(&PermissionRequest::WebSearch)
+                        .allowed
+                        && tool_control_enabled(&tool_controls, scope, tool)
+                })
+                .and_then(|(_, tool, description)| {
+                    web_search_runtime.as_ref().map(|provider| {
+                        (
+                            Arc::clone(provider),
+                            web_search_tool_definition(tool, description),
+                        )
+                    })
+                });
+            let permission_policy = permission_policy.clone();
             external
                 .register_handler_with_policy(
                     "summarizer",
                     crate::workflow::WorkflowOperationPolicy::replayable_receipt(),
                     Box::new(move |request| {
-                        execute_summarizer_node(
+                        if project_search.is_none() && web_search.is_none() {
+                            return execute_summarizer_node(
+                                request,
+                                &provider,
+                                ledger.as_ref(),
+                                &summarizer_root,
+                            );
+                        }
+                        execute_summarizer_node_with_search_tools(
                             request,
                             &provider,
                             ledger.as_ref(),
                             &summarizer_root,
+                            project_search
+                                .as_ref()
+                                .map(|(retrieval, tool)| (retrieval.as_ref(), tool.clone())),
+                            web_search.as_ref().map(|(search_provider, tool)| {
+                                (
+                                    search_provider.as_ref() as &dyn SearchProvider,
+                                    &permission_policy,
+                                    tool.clone(),
+                                )
+                            }),
+                            max_tool_rounds,
                         )
                     }),
                 )
@@ -3780,15 +4618,17 @@ fn execute_workflow_runtime(
 
     // F11：生产组合根注册 ExecutorAdapter（失败 fail-loud，不得静默丢弃）。
     if let Some(llm_runtime) = llm_runtime.as_ref() {
-        register_executor_adapters_for_project(
+        register_executor_adapters_for_project_with_search(
             &mut external,
             project_root,
             llm_runtime.provider.clone(),
             Arc::clone(&ledger),
+            retrieval_runtime.clone(),
+            web_search_runtime.clone(),
         )?;
     }
     if workflow.nodes.iter().any(|node| node.type_name == "search") {
-        let retrieval = match retrieval_runtime {
+        let retrieval = match retrieval_runtime.clone() {
             Some(retrieval) => retrieval,
             None => Arc::new(
                 ProjectRetrievalRuntime::open(project_root, secrets).map_err(error_to_string)?,
@@ -3798,7 +4638,7 @@ fn execute_workflow_runtime(
         external
             .register_handler_with_policy(
                 "search",
-                crate::workflow::WorkflowOperationPolicy::remote_response(),
+                crate::workflow::WorkflowOperationPolicy::replayable_remote(),
                 Box::new(move |request| {
                     // F2-b：工作流 Search 节点与 IPC 搜索共用新鲜度门禁。
                     execute_project_retrieval_node_for_project(&search_root, request, &retrieval)
@@ -3829,13 +4669,13 @@ fn inject_start_node_initial_inputs(
         .nodes
         .iter_mut()
         .find(|node| node.id == NodeId::from(start_node_id))
-        .ok_or_else(|| format!("start node not found: {start_node_id}"))?;
+        .ok_or_else(|| CommandError::not_found(format!("start node not found: {start_node_id}")))?;
     if start_node.type_name != "start" {
-        return Err(format!(
+        return Err(CommandError::validation(format!(
             "initial_inputs target must be a start node, got {} ({})",
             start_node.id.as_str(),
             start_node.type_name
-        ));
+        )));
     }
     // F10-c：若 Start 声明了 input schema，校验 initial_inputs 再持久化。
     // 空 map 仍会跑 required 校验；仅在有字段时写入 config，避免无输入时污染节点。
@@ -3866,19 +4706,19 @@ fn validate_start_node_initial_inputs(
             for key in required {
                 let Some(name) = key.as_str() else { continue };
                 if !initial_inputs.contains_key(name) {
-                    return Err(format!(
+                    return Err(CommandError::validation(format!(
                         "initial_inputs missing required field '{name}' for start node {}",
                         start_node.id.as_str()
-                    ));
+                    )));
                 }
             }
         }
         if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
             for (name, value) in initial_inputs {
                 if !properties.contains_key(name) {
-                    return Err(format!(
+                    return Err(CommandError::validation(format!(
                         "initial_inputs field '{name}' is not declared in start node input_schema"
-                    ));
+                    )));
                 }
                 if let Some(expected) = properties
                     .get(name)
@@ -3886,9 +4726,9 @@ fn validate_start_node_initial_inputs(
                     .and_then(|t| t.as_str())
                 {
                     if !json_value_matches_schema_type(value, expected) {
-                        return Err(format!(
+                        return Err(CommandError::validation(format!(
                             "initial_inputs field '{name}' expected type {expected}"
-                        ));
+                        )));
                     }
                 }
             }
@@ -3904,9 +4744,9 @@ fn validate_start_node_initial_inputs(
         if !allowed.is_empty() {
             for name in initial_inputs.keys() {
                 if !allowed.contains(name) {
-                    return Err(format!(
+                    return Err(CommandError::validation(format!(
                         "initial_inputs field '{name}' is not a declared start input"
-                    ));
+                    )));
                 }
             }
         }
@@ -3928,10 +4768,10 @@ fn json_value_matches_schema_type(value: &Value, expected: &str) -> bool {
 }
 
 fn workflow_requires_llm_provider(workflow: &WorkflowDefinition) -> bool {
-    workflow
-        .nodes
-        .iter()
-        .any(|node| is_llm_workflow_node_type(&node.type_name))
+    workflow.nodes.iter().any(|node| {
+        is_llm_workflow_node_type(&node.type_name)
+            || node.type_name.starts_with("executor_adapter:")
+    })
 }
 
 fn is_llm_workflow_node_type(type_name: &str) -> bool {
@@ -3948,6 +4788,167 @@ fn is_llm_workflow_node_type(type_name: &str) -> bool {
             | "polisher"
             | "summarizer"
     )
+}
+
+fn workflow_search_tool_for_node(
+    type_name: &str,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match type_name {
+        "llm" => Some((
+            "llm",
+            GENERIC_LLM_SEARCH_TOOL,
+            "检索当前项目文档与已确认知识，为回答补充可追溯的项目事实。",
+        )),
+        "outliner" => Some((
+            "outliner",
+            "outliner-search",
+            "检索当前项目的正文、规划与已确认知识，为全局总纲补充项目事实。",
+        )),
+        "designer" => Some((
+            "designer",
+            "designer-search",
+            "检索当前项目的正文、规划与已确认知识，为阶段设计补充项目事实。",
+        )),
+        "planner" => Some((
+            "planner",
+            "planner-search",
+            "检索当前项目的正文、规划与已确认知识，为章节规划补充项目事实。",
+        )),
+        "detail" => Some((
+            "detail",
+            "detail-search",
+            "检索当前项目的正文、规划与已确认知识，为细节生成补充上下文。",
+        )),
+        "writer" => Some((
+            "writer",
+            "writer-search",
+            "检索当前项目的前文、规划与已确认知识，保持正文连续性和设定一致性。",
+        )),
+        "critic" => Some((
+            "critic",
+            "critic-search",
+            "检索当前项目的正文、规划与已确认知识，为审稿判断提供依据。",
+        )),
+        "prudent" => Some((
+            "prudent",
+            "prudent-search",
+            "检索当前项目的正文、规划与已确认知识，为审慎判断提供依据。",
+        )),
+        "polisher" => Some((
+            "polisher",
+            "polisher-search",
+            "检索当前项目的前文、规划与已确认知识，为有限返修提供上下文。",
+        )),
+        "summarizer" => Some((
+            "summarizer",
+            SUMMARIZER_SEARCH_TOOL,
+            "检索当前项目的正文与已确认知识，为四层总结补充跨章节上下文。",
+        )),
+        type_name if type_name.starts_with("executor_adapter:") => Some((
+            "executor_adapter",
+            EXECUTOR_ADAPTER_SEARCH_TOOL,
+            "检索当前项目文档与已确认知识，为 LLM ExecutorAdapter 补充项目上下文。",
+        )),
+        _ => None,
+    }
+}
+
+fn workflow_search_tool_enabled(
+    controls: &BTreeMap<String, BTreeMap<String, bool>>,
+    type_name: &str,
+) -> bool {
+    workflow_search_tool_for_node(type_name)
+        .is_some_and(|(scope, tool, _)| tool_control_enabled(controls, scope, tool))
+}
+
+fn workflow_web_search_tool_for_node(
+    type_name: &str,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match type_name {
+        "llm" => Some((
+            "llm",
+            GENERIC_LLM_WEB_SEARCH_TOOL,
+            "搜索公开互联网，为回答补充时效性资料；返回标题、URL 与摘要，不自动写入项目知识库。",
+        )),
+        "outliner" => Some((
+            "outliner",
+            "outliner-web-search",
+            "搜索公开互联网，为全局规划进行现实资料考据。",
+        )),
+        "designer" => Some((
+            "designer",
+            "designer-web-search",
+            "搜索公开互联网，为阶段设计进行现实资料考据。",
+        )),
+        "planner" => Some((
+            "planner",
+            "planner-web-search",
+            "搜索公开互联网，为章节规划进行现实资料考据。",
+        )),
+        "detail" => Some((
+            "detail",
+            "detail-web-search",
+            "搜索公开互联网，为环境、心理或设定细节补充现实资料。",
+        )),
+        "writer" => Some((
+            "writer",
+            "writer-web-search",
+            "搜索公开互联网，核对当前写作位置涉及的现实情况。",
+        )),
+        "critic" => Some((
+            "critic",
+            "critic-web-search",
+            "搜索公开互联网，为合理性与事实性审稿提供外部依据。",
+        )),
+        "prudent" => Some((
+            "prudent",
+            "prudent-web-search",
+            "搜索公开互联网，复核意见者引用的现实事实。",
+        )),
+        "polisher" => Some((
+            "polisher",
+            "polisher-web-search",
+            "搜索公开互联网，为有限返修核对现实资料。",
+        )),
+        "summarizer" => Some((
+            "summarizer",
+            SUMMARIZER_WEB_SEARCH_TOOL,
+            "搜索公开互联网，为总结中涉及的现实事实提供外部核对。",
+        )),
+        type_name if type_name.starts_with("executor_adapter:") => Some((
+            "executor_adapter",
+            EXECUTOR_ADAPTER_WEB_SEARCH_TOOL,
+            "搜索公开互联网，为 LLM ExecutorAdapter 补充外部资料。",
+        )),
+        _ => None,
+    }
+}
+
+fn workflow_web_search_tool_enabled(
+    controls: &BTreeMap<String, BTreeMap<String, bool>>,
+    policy: &PermissionPolicy,
+    type_name: &str,
+) -> bool {
+    policy.evaluate(&PermissionRequest::WebSearch).allowed
+        && workflow_web_search_tool_for_node(type_name)
+            .is_some_and(|(scope, tool, _)| tool_control_enabled(controls, scope, tool))
+}
+
+fn workflow_requires_project_retrieval(
+    project_root: &Path,
+    workflow: &WorkflowDefinition,
+) -> CommandResult<bool> {
+    if workflow.nodes.iter().any(|node| node.type_name == "search") {
+        return Ok(true);
+    }
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let controls = normalize_tool_controls(config.permissions.tool_controls);
+    Ok(workflow
+        .nodes
+        .iter()
+        .any(|node| workflow_search_tool_enabled(&controls, &node.type_name)))
 }
 
 pub fn get_budget_status_impl(project_root: &Path) -> CommandResult<BudgetStatus> {
@@ -3980,15 +4981,104 @@ pub fn get_app_settings_impl(project_root: &Path) -> CommandResult<AppSettings> 
 pub fn save_app_settings_impl(project_root: &Path, settings: AppSettings) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "app_settings_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
-    config.app = settings.app;
-    config.app.project_name = non_empty_or("project_name", config.app.project_name)?;
-    config.app.documents_dir = non_empty_or("documents_dir", config.app.documents_dir)?;
-    config.app.workflows_dir = non_empty_or("workflows_dir", config.app.workflows_dir)?;
-    config.app.skills_dir = non_empty_or("skills_dir", config.app.skills_dir)?;
-    config.app.exports_dir = non_empty_or("exports_dir", config.app.exports_dir)?;
+    apply_app_settings(&mut config, settings.app)?;
     config_store.save(&config).map_err(error_to_string)
+}
+
+fn apply_app_settings(
+    config: &mut crate::config::ProjectConfig,
+    app: crate::config::AppConfig,
+) -> CommandResult<()> {
+    config.app = app;
+    config.app.project_name =
+        non_empty_or("project_name", std::mem::take(&mut config.app.project_name))?;
+    config.app.documents_dir = non_empty_or(
+        "documents_dir",
+        std::mem::take(&mut config.app.documents_dir),
+    )?;
+    config.app.workflows_dir = non_empty_or(
+        "workflows_dir",
+        std::mem::take(&mut config.app.workflows_dir),
+    )?;
+    config.app.skills_dir = non_empty_or("skills_dir", std::mem::take(&mut config.app.skills_dir))?;
+    config.app.exports_dir =
+        non_empty_or("exports_dir", std::mem::take(&mut config.app.exports_dir))?;
+    Ok(())
+}
+
+pub fn commit_general_settings_files(
+    project_root: &Path,
+    app_state_root: &Path,
+    config: &crate::config::ProjectConfig,
+    project_memory: &[u8],
+) -> CommandResult<()> {
+    commit_general_settings_files_with_fail_after(
+        project_root,
+        app_state_root,
+        config,
+        project_memory,
+        None,
+    )
+}
+
+pub fn commit_general_settings_files_with_fail_after(
+    project_root: &Path,
+    app_state_root: &Path,
+    config: &crate::config::ProjectConfig,
+    project_memory: &[u8],
+    fail_after: Option<usize>,
+) -> CommandResult<()> {
+    fn yaml_bytes<T: serde::Serialize>(value: &T) -> CommandResult<Vec<u8>> {
+        let value = yaml_serde::to_value(value).map_err(error_to_string)?;
+        Ok(yaml_serde::to_string(&value)
+            .map_err(error_to_string)?
+            .into_bytes())
+    }
+    let files = vec![
+        (
+            crate::config::AtomicCommitTarget::App,
+            yaml_bytes(&config.app)?,
+        ),
+        (
+            crate::config::AtomicCommitTarget::Providers,
+            yaml_bytes(&config.providers)?,
+        ),
+        (
+            crate::config::AtomicCommitTarget::Permissions,
+            yaml_bytes(&config.permissions)?,
+        ),
+        (
+            crate::config::AtomicCommitTarget::Rag,
+            yaml_bytes(&config.rag)?,
+        ),
+        (
+            crate::config::AtomicCommitTarget::Workflow,
+            yaml_bytes(&config.workflow)?,
+        ),
+        (
+            crate::config::AtomicCommitTarget::Git,
+            yaml_bytes(&config.git)?,
+        ),
+        (
+            crate::config::AtomicCommitTarget::AutoMode,
+            yaml_bytes(&config.auto_mode)?,
+        ),
+        (
+            crate::config::AtomicCommitTarget::ProjectMemory,
+            project_memory.to_vec(),
+        ),
+    ];
+    crate::config::atomic_commit::commit_files_with_fail_after(
+        project_root,
+        app_state_root,
+        crate::config::AtomicCommitProfile::GeneralSettings,
+        &files,
+        fail_after,
+    )
+    .map_err(error_to_string)
 }
 
 pub fn get_rag_settings_impl(project_root: &Path) -> CommandResult<RagSettings> {
@@ -4003,6 +5093,7 @@ pub fn get_rag_settings_impl(project_root: &Path) -> CommandResult<RagSettings> 
 pub fn save_rag_settings_impl(project_root: &Path, settings: RagSettings) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "rag_settings_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     settings.rag.validate().map_err(error_to_string)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
@@ -4027,6 +5118,7 @@ pub fn save_workflow_settings_impl(
 ) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "workflow_settings_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     settings.workflow.validate().map_err(error_to_string)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
@@ -4046,6 +5138,7 @@ pub fn get_git_settings_impl(project_root: &Path) -> CommandResult<GitSettings> 
 pub fn save_git_settings_impl(project_root: &Path, settings: GitSettings) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "git_settings_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     config.git = settings.git;
@@ -4057,7 +5150,15 @@ pub fn get_template_repository_settings_impl(
 ) -> CommandResult<TemplateRepositorySettings> {
     let path = template_repository_settings_path(settings_root);
     match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(error_to_string),
+        Ok(content) => {
+            let settings = serde_json::from_str::<TemplateRepositorySettings>(&content)
+                .map_err(error_to_string)?;
+            if settings.base_url.trim().is_empty() {
+                Ok(TemplateRepositorySettings::default())
+            } else {
+                Ok(settings)
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(TemplateRepositorySettings::default())
         }
@@ -4070,7 +5171,9 @@ pub fn save_template_repository_settings_impl(
     settings: &TemplateRepositorySettings,
 ) -> CommandResult<()> {
     if settings.base_url.trim().is_empty() {
-        return Err("template repository base_url cannot be empty".to_owned());
+        return Err(CommandError::validation(
+            "template repository base_url cannot be empty",
+        ));
     }
     validate_template_url(&settings.base_url)?;
     let path = template_repository_settings_path(settings_root);
@@ -4151,13 +5254,17 @@ fn normalize_language_pack_code(lang_code: Option<&str>) -> CommandResult<String
 
 fn validate_language_pack_code(lang: &str) -> CommandResult<()> {
     if lang == "." || lang == ".." || lang.starts_with('-') || lang.ends_with('-') {
-        return Err(format!("invalid language code: {lang}"));
+        return Err(CommandError::validation(format!(
+            "invalid language code: {lang}"
+        )));
     }
     if lang
         .split('-')
         .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_alphanumeric()))
     {
-        return Err(format!("invalid language code: {lang}"));
+        return Err(CommandError::validation(format!(
+            "invalid language code: {lang}"
+        )));
     }
     Ok(())
 }
@@ -4176,6 +5283,7 @@ pub fn update_budget_config_impl(
     preauthorized_usd: f64,
 ) -> CommandResult<()> {
     let _project_mutation = acquire_project_mutation_guard(project_root, "budget_settings_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     validate_money("budget_usd", budget_usd)?;
     validate_money("preauthorized_usd", preauthorized_usd)?;
     let config_store = ConfigStore::new(project_root);
@@ -4193,6 +5301,7 @@ pub fn update_budget_config_impl(
 pub fn set_auto_mode_impl(project_root: &Path, enabled: bool) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "auto_mode_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     config.auto_mode.enabled_by_default = enabled;
@@ -4234,15 +5343,34 @@ fn save_automation_settings_impl_with_app_state(
     app_state_root: &Path,
     settings: AutomationSettings,
 ) -> CommandResult<()> {
+    save_automation_settings_impl_with_app_state_and_workflow(
+        project_root,
+        app_state_root,
+        settings,
+        None,
+    )
+}
+
+fn save_automation_settings_impl_with_app_state_and_workflow(
+    project_root: &Path,
+    app_state_root: &Path,
+    settings: AutomationSettings,
+    workflow: Option<crate::config::WorkflowConfig>,
+) -> CommandResult<()> {
     // N2: single prepare → commit boundary. Build full in-memory snapshot, then atomic writes only.
     validate_project_root(project_root)?;
     let _project_mutation =
         acquire_project_mutation_guard(project_root, "automation_settings_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     validate_money("budget_usd", settings.budget.budget_usd)?;
     validate_money("preauthorized_usd", settings.budget.preauthorized_usd)?;
 
     let config_store = ConfigStore::with_app_state(project_root, app_state_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    if let Some(workflow) = workflow {
+        workflow.validate().map_err(error_to_string)?;
+        config.workflow = workflow;
+    }
     config.auto_mode.preauthorized_budget_usd = if settings.budget.preauthorized_usd > 0.0 {
         Some(settings.budget.preauthorized_usd)
     } else {
@@ -4385,6 +5513,7 @@ pub fn save_permissions_settings_impl(
     validate_project_root(project_root)?;
     let _project_mutation =
         acquire_project_mutation_guard(project_root, "permissions_settings_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     config.permissions.policy = settings.policy;
@@ -4431,13 +5560,13 @@ fn resolve_confirmation_impl_with_claim(
 ) -> CommandResult<(ResolveConfirmationResult, Option<WorkflowWorkerLease>)> {
     validate_project_root(project_root)?;
     if request.workflow_id.trim().is_empty() {
-        return Err("workflow_id cannot be empty".to_owned());
+        return Err(CommandError::validation("workflow_id cannot be empty"));
     }
     if request.run_id.trim().is_empty() {
-        return Err("run_id cannot be empty".to_owned());
+        return Err(CommandError::validation("run_id cannot be empty"));
     }
     if request.confirmation_id.trim().is_empty() {
-        return Err("confirmation_id cannot be empty".to_owned());
+        return Err(CommandError::validation("confirmation_id cannot be empty"));
     }
 
     let workflow_id = WorkflowId::from(request.workflow_id.clone());
@@ -4473,24 +5602,6 @@ fn resolve_confirmation_impl_with_claim(
         )
         .map_err(error_to_string)?;
 
-    // F14-a：knowledge 副作用前持久化 confirmation pre_image（.runtime，非整库 bak）；
-    // runtime 在 knowledge 提交后 NotFound 时只反向该确认，禁止 metadata.db 整文件覆盖。
-    if operation.knowledge_required
-        && operation.status == crate::workflow::ConfirmationResolutionStatus::Prepared
-    {
-        if let Some(pre_image) = knowledge_store
-            .load_knowledge()
-            .map_err(error_to_string)?
-            .confirmations(None)
-            .map_err(error_to_string)?
-            .into_iter()
-            .find(|item| item.confirmation_id == request.confirmation_id)
-        {
-            persist_confirmation_pre_image(project_root, &operation_id, &pre_image)
-                .map_err(error_to_string)?;
-        }
-    }
-
     if operation.status == crate::workflow::ConfirmationResolutionStatus::Prepared {
         let response = json!({
             "workflow_id": request.workflow_id,
@@ -4511,10 +5622,10 @@ fn resolve_confirmation_impl_with_claim(
             )
             .map_err(error_to_string)?;
         if !applied {
-            return Err(format!(
+            return Err(CommandError::not_found(format!(
                 "knowledge confirmation disappeared after durable prepare: {}",
                 request.confirmation_id
-            ));
+            )));
         }
         operation = store
             .mark_confirmation_knowledge_committed(&operation_id, &request_hash, now_ms)
@@ -4528,46 +5639,41 @@ fn resolve_confirmation_impl_with_claim(
         {
             crate::workflow::ConfirmationResolutionCommitResult::Saved { state }
             | crate::workflow::ConfirmationResolutionCommitResult::AlreadyCommitted { state } => {
-                clear_confirmation_pre_image(project_root, &operation_id);
                 state
             }
             crate::workflow::ConfirmationResolutionCommitResult::NotFound => {
-                if let Some(pre_image) = load_confirmation_pre_image(project_root, &operation_id)
-                    .map_err(error_to_string)?
-                {
-                    compensate_writing_knowledge_confirmation_pre_image(
-                        &knowledge_store,
-                        &pre_image,
-                    )
-                    .map_err(error_to_string)?;
-                    clear_confirmation_pre_image(project_root, &operation_id);
-                }
-                let _ = store.abort_confirmation_resolution(&operation_id, now_ms);
-                return Err(format!(
-                    "workflow run not found after durable confirmation prepare; knowledge compensated: {}/{}",
+                return Err(CommandError::not_found(format!(
+                    "workflow run not found after durable confirmation knowledge commit; knowledge receipt preserved for explicit recovery: {}/{}",
                     request.workflow_id, request.run_id
-                ));
+                )));
             }
         },
         crate::workflow::ConfirmationResolutionStatus::Committed => store
             .load_state(&workflow_id, &run_id)
             .map_err(error_to_string)?
             .ok_or_else(|| {
-                format!(
+                CommandError::not_found(format!(
                     "workflow run not found: {}/{}",
                     workflow_id.as_str(),
                     run_id.as_str()
-                )
+                ))
             })?,
         crate::workflow::ConfirmationResolutionStatus::Prepared => {
-            return Err("confirmation knowledge commit did not advance".to_owned());
+            return Err(CommandError::internal(
+                "confirmation knowledge commit did not advance",
+            ));
         }
     };
 
     let runtime_confirmation = runtime_state
         .confirmations
         .get(&request.confirmation_id)
-        .ok_or_else(|| format!("confirmation item not found: {}", request.confirmation_id))?;
+        .ok_or_else(|| {
+            CommandError::not_found(format!(
+                "confirmation item not found: {}",
+                request.confirmation_id
+            ))
+        })?;
     let confirmation = confirmation_log_entry_from_runtime(
         runtime_confirmation,
         request.review_reason.as_deref(),
@@ -4589,11 +5695,11 @@ fn resolve_confirmation_impl_with_claim(
         crate::workflow::WorkflowResumeClaimResult::Busy { .. }
         | crate::workflow::WorkflowResumeClaimResult::NotResumable { .. } => None,
         crate::workflow::WorkflowResumeClaimResult::NotFound => {
-            return Err(format!(
+            return Err(CommandError::not_found(format!(
                 "workflow run not found: {}/{}",
                 workflow_id.as_str(),
                 run_id.as_str()
-            ));
+            )));
         }
     };
 
@@ -4644,73 +5750,6 @@ fn resolve_confirmation_impl_with_claim(
     ))
 }
 
-/// F14-a：confirmation-scoped pre_image 路径（不在项目 metadata.db 旁做整库 bak）。
-fn confirmation_pre_image_path(project_root: &Path, operation_id: &str) -> PathBuf {
-    project_root
-        .join(".runtime")
-        .join("confirmation_pre_images")
-        .join(format!("{operation_id}.json"))
-}
-
-fn persist_confirmation_pre_image(
-    project_root: &Path,
-    operation_id: &str,
-    pre_image: &crate::rag::ConfirmationItem,
-) -> crate::contracts::CoreResult<()> {
-    let path = confirmation_pre_image_path(project_root, operation_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let body = serde_json::to_vec_pretty(pre_image)?;
-    crate::config::store::atomic_write(&path, &body)
-}
-
-fn load_confirmation_pre_image(
-    project_root: &Path,
-    operation_id: &str,
-) -> crate::contracts::CoreResult<Option<crate::rag::ConfirmationItem>> {
-    let path = confirmation_pre_image_path(project_root, operation_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    Ok(Some(serde_json::from_str(&raw)?))
-}
-
-fn clear_confirmation_pre_image(project_root: &Path, operation_id: &str) {
-    let path = confirmation_pre_image_path(project_root, operation_id);
-    let _ = std::fs::remove_file(path);
-}
-
-/// F14-a：反向单个 confirmation 决策（pre_image upsert + 撤消其 pending_payload 物化），
-/// 绝不整文件 copy/restore metadata.db。
-fn compensate_writing_knowledge_confirmation_pre_image(
-    knowledge_store: &crate::rag::SqliteWritingKnowledgeStore,
-    pre_image: &crate::rag::ConfirmationItem,
-) -> crate::contracts::CoreResult<()> {
-    use crate::rag::models::ConfirmationKind;
-    let knowledge = knowledge_store.load_knowledge()?;
-    // Reverse materialized summary payloads when pre_image still carries them.
-    if let Some(payload) = pre_image.metadata.get("pending_payload") {
-        if matches!(pre_image.kind, ConfirmationKind::SegmentSummary) {
-            if let Ok(segments) = serde_json::from_value::<Vec<crate::rag::StorySegment>>(
-                payload
-                    .get("segments")
-                    .cloned()
-                    .unwrap_or(Value::Array(vec![])),
-            ) {
-                for segment in segments {
-                    let _ = knowledge.delete_segment(&segment.segment_id);
-                }
-            }
-        }
-    }
-    // Confirmation pre_image is authoritative for product retry gate (Pending + payload).
-    knowledge.upsert_confirmation(pre_image.clone())?;
-    knowledge_store.save_knowledge(&knowledge)?;
-    Ok(())
-}
-
 /// F14：打开项目时前向恢复 knowledge/runtime 跨库确认 saga，并重放日志投影。
 fn recover_confirmation_resolution_sagas(project_root: &Path) -> CommandResult<usize> {
     let runtime_store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
@@ -4749,10 +5788,10 @@ fn recover_confirmation_resolution_sagas(project_root: &Path) -> CommandResult<u
                 )
                 .map_err(error_to_string)?;
             if !applied {
-                return Err(format!(
+                return Err(CommandError::not_found(format!(
                     "knowledge confirmation missing during saga recovery: {}",
                     operation.confirmation_id
-                ));
+                )));
             }
             operation = runtime_store
                 .mark_confirmation_knowledge_committed(
@@ -4770,29 +5809,13 @@ fn recover_confirmation_resolution_sagas(project_root: &Path) -> CommandResult<u
                 crate::workflow::ConfirmationResolutionCommitResult::Saved { .. }
                 | crate::workflow::ConfirmationResolutionCommitResult::AlreadyCommitted {
                     ..
-                } => {
-                    clear_confirmation_pre_image(project_root, &operation.operation_id);
-                }
+                } => {}
                 crate::workflow::ConfirmationResolutionCommitResult::NotFound => {
-                    if let Some(pre_image) =
-                        load_confirmation_pre_image(project_root, &operation.operation_id)
-                            .map_err(error_to_string)?
-                    {
-                        compensate_writing_knowledge_confirmation_pre_image(
-                            &knowledge_store,
-                            &pre_image,
-                        )
-                        .map_err(error_to_string)?;
-                        clear_confirmation_pre_image(project_root, &operation.operation_id);
-                    }
-                    runtime_store
-                        .abort_confirmation_resolution(&operation.operation_id, now_ms)
-                        .map_err(error_to_string)?;
-                    return Err(format!(
-                        "workflow run missing during confirmation saga recovery; knowledge compensated: {}/{}",
+                    return Err(CommandError::not_found(format!(
+                        "workflow run missing during confirmation saga recovery; knowledge receipt preserved for explicit recovery: {}/{}",
                         operation.workflow_id.as_str(),
                         operation.run_id.as_str()
-                    ));
+                    )));
                 }
             }
             operation.status = crate::workflow::ConfirmationResolutionStatus::Committed;
@@ -4804,20 +5827,20 @@ fn recover_confirmation_resolution_sagas(project_root: &Path) -> CommandResult<u
                 .load_state(&operation.workflow_id, &operation.run_id)
                 .map_err(error_to_string)?
                 .ok_or_else(|| {
-                    format!(
+                    CommandError::internal(format!(
                         "workflow run missing during confirmation projection recovery: {}/{}",
                         operation.workflow_id.as_str(),
                         operation.run_id.as_str()
-                    )
+                    ))
                 })?;
             let confirmation = state
                 .confirmations
                 .get(&operation.confirmation_id)
                 .ok_or_else(|| {
-                    format!(
+                    CommandError::internal(format!(
                         "confirmation missing during projection recovery: {}",
                         operation.confirmation_id
-                    )
+                    ))
                 })?;
             let entry = confirmation_log_entry_from_runtime(
                 confirmation,
@@ -4838,26 +5861,46 @@ fn recover_confirmation_resolution_sagas(project_root: &Path) -> CommandResult<u
 }
 
 pub fn get_git_history_impl(project_root: &Path) -> CommandResult<Vec<GitCommitSummary>> {
+    get_git_history_impl_with_cancellation(
+        project_root,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+fn get_git_history_impl_with_cancellation(
+    project_root: &Path,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<Vec<GitCommitSummary>> {
     validate_project_root(project_root)?;
-    GitService::new(project_root)
+    git_service_with_cancellation(project_root, cancellation)
         .recent_commits(100)
         .map_err(error_to_string)
 }
 
 pub fn get_git_repository_status_impl(project_root: &Path) -> CommandResult<GitRepositoryStatus> {
+    get_git_repository_status_impl_with_cancellation(
+        project_root,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+fn get_git_repository_status_impl_with_cancellation(
+    project_root: &Path,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<GitRepositoryStatus> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "git_status")?;
-    let service = GitService::new(project_root);
+    let service = git_service_with_cancellation(project_root, cancellation);
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
     let policy = git_stage_policy_from_config(&config.git);
     let (health, status) = service
         .health_check_with_policy(&policy)
-        .map_err(|error| error.to_string())?;
+        .map_err(error_to_string)?;
     let diff = service
         .diff_preview_with_policy(&policy, 4000)
-        .map_err(|error| error.to_string())?;
+        .map_err(error_to_string)?;
     Ok(GitRepositoryStatus {
         status: health.status,
         branch: health.branch,
@@ -4870,6 +5913,18 @@ pub fn get_git_repository_status_impl(project_root: &Path) -> CommandResult<GitR
 }
 
 pub fn create_checkpoint_impl(project_root: &Path, message: String) -> CommandResult<ArchivePoint> {
+    create_checkpoint_impl_with_cancellation(
+        project_root,
+        message,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+fn create_checkpoint_impl_with_cancellation(
+    project_root: &Path,
+    message: String,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<ArchivePoint> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "git_checkpoint")?;
     let name = if message.trim().is_empty() {
@@ -4881,9 +5936,19 @@ pub fn create_checkpoint_impl(project_root: &Path, message: String) -> CommandRe
         .load_or_create()
         .map_err(error_to_string)?;
     let policy = git_stage_policy_from_config(&config.git);
-    GitService::new(project_root)
+    git_service_with_cancellation(project_root, cancellation)
         .create_archive_point_with_policy(&name, Some(&name), &policy)
         .map_err(error_to_string)
+}
+
+fn git_service_with_cancellation(
+    project_root: impl Into<PathBuf>,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> GitService {
+    GitService::new(project_root).with_execution_policy(
+        cancellation.clone(),
+        Duration::from_secs(IPC_GIT_TIMEOUT_SECS),
+    )
 }
 
 fn record_git_restore_log(project_root: &Path, report: &RestoreReport) {
@@ -4949,16 +6014,31 @@ pub fn get_provider_config_impl(
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
+    provider_config_status_from_config(project_root, config, secrets)
+}
+
+fn provider_config_status_from_config(
+    project_root: &Path,
+    config: ProjectConfig,
+    secrets: &dyn SecretStore,
+) -> CommandResult<ProviderConfigStatus> {
     let credentials =
         ProjectCredentialScope::new(project_root, secrets).map_err(error_to_string)?;
+    let configured_ids = config
+        .providers
+        .providers
+        .iter()
+        .map(|provider| provider.provider_id.as_str())
+        .collect::<HashSet<_>>();
     let providers = provider_status_list(project_root, &config.providers.providers)
         .into_iter()
         .map(|provider| {
+            let configured = configured_ids.contains(provider.provider_id.as_str());
             if provider.api_key.is_some() {
-                return Err(format!(
+                return Err(CommandError::permission(format!(
                     "provider '{}' contains an untrusted project SecretRef; re-enter the credential",
                     provider.provider_id
-                ));
+                )));
             }
             let has_key = credentials
                 .get_provider_secret(&provider.provider_id)
@@ -4968,6 +6048,7 @@ pub fn get_provider_config_impl(
                 provider: provider.provider_id,
                 display_name: provider.display_name,
                 provider_type: provider.provider_type,
+                configured,
                 enabled: provider.enabled,
                 base_url: provider.base_url,
                 models: provider.models,
@@ -4989,8 +6070,260 @@ pub fn get_provider_config_impl(
         default_llm_provider_id: config.providers.default_llm_provider_id,
         default_embedding_provider_id: config.providers.default_embedding_provider_id,
         default_reranker_provider_id: config.providers.default_reranker_provider_id,
+        default_search_provider_id: config.providers.default_search_provider_id,
         providers,
     })
+}
+
+fn provider_removal_preview_from_config(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    config: &ProjectConfig,
+    provider_id: &str,
+) -> CommandResult<ProviderRemovalPreview> {
+    let provider = config
+        .providers
+        .providers
+        .iter()
+        .find(|configured| configured.provider_id == provider_id)
+        .ok_or_else(|| {
+            CommandError::not_found(format!("provider is not configured: {provider_id}"))
+        })?;
+    let credentials =
+        ProjectCredentialScope::new(project_root, secrets).map_err(error_to_string)?;
+    let has_key = credentials
+        .get_provider_secret(provider_id)
+        .map(|secret| secret.is_some())
+        .map_err(error_to_string)?;
+    let default_roles = provider_default_roles(config, provider_id);
+    let mut blocking_references = provider_preset_references(project_root, config, provider_id)?;
+    blocking_references.extend(provider_workflow_references(
+        project_root,
+        config,
+        provider_id,
+    )?);
+    blocking_references.sort_by(|left, right| {
+        (
+            left.reference_type.as_str(),
+            left.owner_id.as_str(),
+            left.node_id.as_deref(),
+            left.model_id.as_deref(),
+        )
+            .cmp(&(
+                right.reference_type.as_str(),
+                right.owner_id.as_str(),
+                right.node_id.as_deref(),
+                right.model_id.as_deref(),
+            ))
+    });
+    blocking_references.dedup();
+    let revision_body = serde_json::to_vec(&json!({
+        "provider": provider,
+        "has_key": has_key,
+        "default_roles": &default_roles,
+        "blocking_references": &blocking_references,
+    }))
+    .map_err(error_to_string)?;
+    Ok(ProviderRemovalPreview {
+        provider_id: provider_id.to_owned(),
+        display_name: provider.display_name.clone(),
+        revision: content_revision_hash(&revision_body),
+        has_key,
+        default_roles,
+        blocking_references,
+    })
+}
+
+fn provider_default_roles(config: &ProjectConfig, provider_id: &str) -> Vec<String> {
+    [
+        ("llm", &config.providers.default_llm_provider_id),
+        ("embedding", &config.providers.default_embedding_provider_id),
+        ("reranker", &config.providers.default_reranker_provider_id),
+        ("search", &config.providers.default_search_provider_id),
+    ]
+    .into_iter()
+    .filter(|(_, configured)| configured.as_deref() == Some(provider_id))
+    .map(|(role, _)| role.to_owned())
+    .collect()
+}
+
+fn provider_preset_references(
+    project_root: &Path,
+    config: &ProjectConfig,
+    provider_id: &str,
+) -> CommandResult<Vec<ProviderRemovalReference>> {
+    if !node_preset_settings_path(project_root).exists() {
+        return Ok(Vec::new());
+    }
+    let removed_model_ids = config
+        .providers
+        .providers
+        .iter()
+        .find(|provider| provider.provider_id == provider_id)
+        .into_iter()
+        .flat_map(|provider| provider.models.iter())
+        .map(|model| model.model_id.as_str())
+        .collect::<HashSet<_>>();
+    let remaining_model_ids = config
+        .providers
+        .providers
+        .iter()
+        .filter(|provider| provider.provider_id != provider_id)
+        .flat_map(|provider| provider.models.iter())
+        .map(|model| model.model_id.as_str())
+        .collect::<HashSet<_>>();
+    if remaining_model_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let settings = read_node_preset_settings(project_root)?;
+    let mut references = Vec::new();
+    let mut add_reference = |owner_id: String, model_id: &str| {
+        if removed_model_ids.contains(model_id) && !remaining_model_ids.contains(model_id) {
+            references.push(ProviderRemovalReference {
+                reference_type: "node_preset".to_owned(),
+                owner_id,
+                node_id: None,
+                model_id: Some(model_id.to_owned()),
+            });
+        }
+    };
+    add_reference("default_model_id".to_owned(), &settings.default_model_id);
+    for preset in settings.presets {
+        add_reference(preset.node_type, &preset.model_id);
+    }
+    Ok(references)
+}
+
+fn provider_workflow_references(
+    project_root: &Path,
+    config: &ProjectConfig,
+    provider_id: &str,
+) -> CommandResult<Vec<ProviderRemovalReference>> {
+    let mut references = Vec::new();
+    let workflows_root = absolute_path(&project_root.join("workflows"));
+    reject_symlink_root(&workflows_root)?;
+    if workflows_root.exists() {
+        let mut paths = workflow_json_paths(&workflows_root)?;
+        paths.sort();
+        for path in paths {
+            ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
+            let content = std::fs::read_to_string(path).map_err(error_to_string)?;
+            let workflow = parse_workflow_file(&content)?;
+            collect_workflow_provider_references(
+                &workflow,
+                "workflow",
+                workflow.id.as_str(),
+                config,
+                provider_id,
+                &mut references,
+            );
+        }
+    }
+
+    let runtime_path = project_root.join(crate::workflow::RUNTIME_DB_FILE);
+    if runtime_path.exists() {
+        let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
+        for state in store.list_non_terminal_states().map_err(error_to_string)? {
+            let workflow = state.prepared_workflow.ok_or_else(|| {
+                CommandError::legacy_run(format!(
+                    "non-terminal run {}/{} lacks prepared_workflow",
+                    state.workflow_id.as_str(),
+                    state.run_id.as_str()
+                ))
+            })?;
+            let owner_id = format!("{}/{}", state.workflow_id.as_str(), state.run_id.as_str());
+            collect_workflow_provider_references(
+                &workflow,
+                "active_run",
+                &owner_id,
+                config,
+                provider_id,
+                &mut references,
+            );
+        }
+    }
+    Ok(references)
+}
+
+fn collect_workflow_provider_references(
+    workflow: &WorkflowDefinition,
+    reference_type: &str,
+    owner_id: &str,
+    config: &ProjectConfig,
+    provider_id: &str,
+    references: &mut Vec<ProviderRemovalReference>,
+) {
+    let removes_default_llm =
+        config.providers.default_llm_provider_id.as_deref() == Some(provider_id);
+    for node in &workflow.nodes {
+        if !is_llm_workflow_node_type(&node.type_name) {
+            continue;
+        }
+        let explicit_provider = node
+            .config
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let uses_provider = explicit_provider == Some(provider_id)
+            || (node.type_name != "summarizer"
+                && explicit_provider.is_none()
+                && removes_default_llm);
+        if uses_provider {
+            references.push(ProviderRemovalReference {
+                reference_type: reference_type.to_owned(),
+                owner_id: owner_id.to_owned(),
+                node_id: Some(node.id.as_str().to_owned()),
+                model_id: node
+                    .config
+                    .get("model_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            });
+        }
+    }
+}
+
+fn clear_provider_defaults(config: &mut ProjectConfig, provider_id: &str) {
+    for configured in [
+        &mut config.providers.default_llm_provider_id,
+        &mut config.providers.default_embedding_provider_id,
+        &mut config.providers.default_reranker_provider_id,
+        &mut config.providers.default_search_provider_id,
+    ] {
+        if configured.as_deref() == Some(provider_id) {
+            *configured = None;
+        }
+    }
+}
+
+fn clear_removed_provider_key_status(status: &mut ProviderConfigStatus, provider_id: &str) {
+    for provider in &mut status.providers {
+        if provider.provider == provider_id {
+            provider.has_key = false;
+        }
+    }
+    status.has_openai_key = status
+        .providers
+        .iter()
+        .any(|provider| provider.provider == "openai" && provider.has_key);
+    status.has_anthropic_key = status
+        .providers
+        .iter()
+        .any(|provider| provider.provider == "anthropic" && provider.has_key);
+    status.has_gemini_key = status
+        .providers
+        .iter()
+        .any(|provider| provider.provider == "gemini" && provider.has_key);
+}
+
+fn rollback_result_text(result: CommandResult<()>) -> String {
+    match result {
+        Ok(()) => "ok".to_owned(),
+        Err(error) => error.to_string(),
+    }
 }
 
 pub fn save_provider_key_impl(
@@ -5001,9 +6334,10 @@ pub fn save_provider_key_impl(
 ) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "provider_key_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let provider = normalize_provider(&provider)?;
     if key.trim().is_empty() {
-        return Err("provider key cannot be empty".to_owned());
+        return Err(CommandError::validation("provider key cannot be empty"));
     }
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store
@@ -5020,9 +6354,9 @@ pub fn save_provider_key_impl(
         .map_err(error_to_string)?;
     if let Err(error) = config_store.save(&config) {
         restore_provider_secret(&credentials, &provider, previous_secret).map_err(|rollback| {
-            format!(
+            CommandError::internal(format!(
                 "failed to save provider config: {error}; provider key rollback failed: {rollback}"
-            )
+            ))
         })?;
         return Err(error_to_string(error));
     }
@@ -5035,6 +6369,7 @@ pub fn save_provider_settings_impl(
 ) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "provider_settings_save")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     apply_provider_settings_update(&mut config, update)?;
@@ -5103,7 +6438,10 @@ fn apply_provider_settings_update(
         config.providers.default_embedding_provider_id = Some(provider_id.clone());
     }
     if update.make_default_reranker {
-        config.providers.default_reranker_provider_id = Some(provider_id);
+        config.providers.default_reranker_provider_id = Some(provider_id.clone());
+    }
+    if update.make_default_search {
+        config.providers.default_search_provider_id = Some(provider_id);
     }
     config.validate().map_err(error_to_string)
 }
@@ -5113,16 +6451,31 @@ pub fn quick_edit_impl(
     secrets: &dyn SecretStore,
     request: QuickEditRequest,
 ) -> CommandResult<QuickEditResult> {
+    quick_edit_impl_with_cancellation(
+        project_root,
+        secrets,
+        request,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+pub fn quick_edit_impl_with_cancellation(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    request: QuickEditRequest,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<QuickEditResult> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "quick_edit")?;
     let runtime = llm_runtime(project_root, secrets)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
     let service = LlmService::new(&ledger, runtime.auto_mode.clone());
     QuickEditService::new(service, &runtime.provider, runtime.config)
-        .quick_edit(
+        .quick_edit_with_cancellation(
             &request.selected_text,
             &request.instruction,
             request.context_ref.as_deref(),
+            cancellation,
         )
         .map_err(error_to_string)
 }
@@ -5132,9 +6485,22 @@ pub fn project_ai_chat_impl(
     secrets: &dyn SecretStore,
     request: ProjectAiRequest,
 ) -> CommandResult<ProjectAiResponse> {
-    project_ai_chat_with_runner(project_root, secrets, request, &mut |request| {
-        run_workflow_impl(project_root, secrets, request)
-    })
+    // 检索运行时会打开成本账本；维护门禁必须先于任何复合 AI 本地副作用。
+    ensure_project_not_in_maintenance(project_root)?;
+    let retrieval =
+        Arc::new(ProjectRetrievalRuntime::open(project_root, secrets).map_err(error_to_string)?);
+    project_ai_chat_with_runner(
+        project_root,
+        secrets,
+        request,
+        retrieval,
+        &crate::contracts::ExecutionCancellation::new(),
+        &mut |_request| {
+            Err(CommandError::validation(
+                "project AI workflow start requires the application runtime",
+            ))
+        },
+    )
 }
 
 pub fn list_external_workflow_tools(
@@ -5166,12 +6532,15 @@ fn project_ai_chat_with_runner(
     project_root: &Path,
     secrets: &dyn SecretStore,
     request: ProjectAiRequest,
+    retrieval: Arc<ProjectRetrievalRuntime>,
+    cancellation: &crate::contracts::ExecutionCancellation,
     workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
 ) -> CommandResult<ProjectAiResponse> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "project_ai_chat")?;
     if request.message.trim().is_empty()
         && request.chat_history.is_empty()
+        && request.references.is_empty()
         && request
             .append_memory
             .as_deref()
@@ -5180,9 +6549,57 @@ fn project_ai_chat_with_runner(
             .is_empty()
         && request.workflow_id_to_run.is_none()
     {
-        return Err("project AI request cannot be empty".to_owned());
+        return Err(CommandError::validation(
+            "project AI request cannot be empty",
+        ));
     }
 
+    let conversation_id = request
+        .conversation_id
+        .as_deref()
+        .unwrap_or("default")
+        .trim()
+        .to_owned();
+    let _conversation_guard =
+        ProjectAiConversationStore::try_acquire_conversation(project_root, &conversation_id)
+            .map_err(CommandError::from)?
+            .ok_or_else(|| {
+                CommandError::conflict(format!(
+            "project AI conversation {conversation_id} is already processing another revision"
+        ))
+            })?;
+    let conversation_store =
+        ProjectAiConversationStore::open(project_root).map_err(CommandError::from)?;
+    let seed = request
+        .chat_history
+        .iter()
+        .map(|message| {
+            (
+                project_ai_role_name(message.role).to_owned(),
+                message.content.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let conversation = conversation_store
+        .load_or_seed(&conversation_id, &seed)
+        .map_err(CommandError::from)?;
+    if let Some(expected) = request.conversation_revision {
+        if expected != conversation.revision {
+            return Err(CommandError::conflict(format!(
+                "project AI conversation revision conflict for {conversation_id}: expected {expected}, actual {}",
+                conversation.revision
+            )));
+        }
+    }
+    let pending_client_history = project_ai_pending_client_history(
+        &conversation.messages,
+        &request.chat_history,
+        conversation.revision,
+    )?;
+    let mut persisted_history = project_ai_messages_from_stored(&conversation.messages)?;
+    persisted_history.extend(pending_client_history.iter().cloned());
+
+    let reference_tokens = merge_project_ai_references(&request.references, &request.message);
     let memory_store = ProjectMemoryStore::default_for_project(project_root);
     if let Some(content) = request.append_memory.as_deref() {
         if !content.trim().is_empty() {
@@ -5190,7 +6607,22 @@ fn project_ai_chat_with_runner(
         }
     }
     let project_memory = memory_store.read_all().map_err(error_to_string)?;
-    let resolved_references = resolve_project_references(project_root, &request.references)?;
+    let project_memory_revision = conversation_store
+        .synchronize_project_memory(&project_memory)
+        .map_err(CommandError::from)?;
+    let structured_memory = conversation_store
+        .select_project_memory(&request.message, 64)
+        .map_err(CommandError::from)?;
+    let summary_chunks = conversation_store
+        .select_summary_chunks(&conversation_id, &request.message, 8)
+        .map_err(CommandError::from)?;
+    let resolved_references = resolve_project_references_with_context(
+        project_root,
+        &reference_tokens,
+        &request.message,
+        request.reference_workflow_id.as_deref(),
+        request.reference_run_id.as_deref(),
+    )?;
     let mut workflow_run = if let Some(workflow_id) = request.workflow_id_to_run.clone() {
         Some(workflow_runner(RunWorkflowRequest {
             workflow_id,
@@ -5206,40 +6638,103 @@ fn project_ai_chat_with_runner(
         project_ai_workflow_tools(project_root)?
     };
 
-    let (answer, effective_history, context_window) = if request.message.trim().is_empty() {
-        let memory = take_last_chars(project_memory.trim(), 16_384);
-        let history_start = request.chat_history.len().saturating_sub(64);
-        let history = request.chat_history[history_start..].to_vec();
+    let (answer, context_window) = if request.message.trim().is_empty() {
+        let (memory, memory_truncated) =
+            structured_project_memory_context(&structured_memory, 16_384);
+        let (conversation_summary, summary_truncated) =
+            project_ai_summary_context(&summary_chunks, 8_192);
+        let history_start = persisted_history.len().saturating_sub(64);
+        let history = persisted_history[history_start..].to_vec();
         (
             "已处理项目记忆或工作流请求。".to_owned(),
-            history.clone(),
             ProjectAiContextWindow {
-                memory_truncated: memory.chars().count() < project_memory.trim().chars().count(),
+                memory_truncated,
                 memory,
+                conversation_summary,
                 reference_context: String::new(),
                 history_truncated: history_start > 0,
                 history,
                 estimated_input_tokens: 0,
                 context_limit_tokens: 0,
+                references_truncated: false,
+                summary_truncated,
             },
         )
     } else {
         let (answer, tool_workflow_run, context_window) = project_ai_answer(
             project_root,
             secrets,
-            &project_memory,
+            &structured_memory,
+            &summary_chunks,
             &resolved_references,
-            &request.chat_history,
+            &persisted_history,
             &request.message,
             &workflow_tools,
+            retrieval.as_ref(),
+            cancellation,
             workflow_runner,
         )?;
         if workflow_run.is_none() {
             workflow_run = tool_workflow_run;
         }
-        (answer, context_window.history.clone(), context_window)
+        (answer, context_window)
     };
-    let chat_history = project_ai_response_history(&effective_history, &request.message, &answer)?;
+    let new_messages = project_ai_response_history(&[], &request.message, &answer)?;
+    let mut messages_to_persist = pending_client_history
+        .iter()
+        .map(|message| {
+            (
+                project_ai_role_name(message.role).to_owned(),
+                message.content.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    messages_to_persist.extend(new_messages.iter().map(|message| {
+        (
+            project_ai_role_name(message.role).to_owned(),
+            message.content.clone(),
+        )
+    }));
+    let (conversation, appended) = if messages_to_persist.is_empty() {
+        (conversation, Vec::new())
+    } else {
+        match conversation_store
+            .append_messages(
+                &conversation_id,
+                conversation.revision,
+                &messages_to_persist,
+            )
+            .map_err(CommandError::from)?
+        {
+            ProjectAiAppendOutcome::Saved { snapshot, appended } => (snapshot, appended),
+            ProjectAiAppendOutcome::RevisionConflict { actual_revision } => {
+                return Err(CommandError::conflict(format!(
+                    "project AI conversation revision conflict for {conversation_id}: expected {}, actual {actual_revision}",
+                    conversation.revision
+                )))
+            }
+        }
+    };
+    let appended_current_turn = appended
+        .into_iter()
+        .rev()
+        .take(new_messages.len())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let active_snapshot = project_ai_messages_from_stored(&conversation.messages)?;
+    let revision_protocol = request.conversation_id.is_some();
+    let conversation_snapshot = if revision_protocol && request.conversation_revision.is_none() {
+        active_snapshot.clone()
+    } else {
+        Vec::new()
+    };
+    let chat_history = if revision_protocol {
+        Vec::new()
+    } else {
+        active_snapshot
+    };
 
     Ok(ProjectAiResponse {
         answer,
@@ -5247,8 +6742,17 @@ fn project_ai_chat_with_runner(
         resolved_references,
         workflow_run,
         project_memory: context_window.memory,
-        history_truncated: context_window.history_truncated,
+        conversation_id,
+        conversation_revision: conversation.revision,
+        summary_revision: conversation.summary_revision,
+        new_messages: project_ai_messages_from_stored(&appended_current_turn)?,
+        conversation_snapshot,
+        conversation_summary: context_window.conversation_summary,
+        project_memory_revision,
+        history_truncated: context_window.history_truncated || !summary_chunks.is_empty(),
         memory_truncated: context_window.memory_truncated,
+        references_truncated: context_window.references_truncated,
+        summary_truncated: context_window.summary_truncated,
         estimated_input_tokens: context_window.estimated_input_tokens,
         context_limit_tokens: context_window.context_limit_tokens,
     })
@@ -5258,17 +6762,163 @@ pub fn resolve_project_references(
     project_root: &Path,
     references: &[String],
 ) -> CommandResult<Vec<ProjectReference>> {
+    resolve_project_references_with_context(project_root, references, "", None, None)
+}
+
+fn resolve_project_references_with_context(
+    project_root: &Path,
+    references: &[String],
+    query: &str,
+    reference_workflow_id: Option<&str>,
+    reference_run_id: Option<&str>,
+) -> CommandResult<Vec<ProjectReference>> {
     let documents = document_service(project_root);
     let confirmations = FileConfirmationLogStore::default_for_project(project_root);
     let chapter_index = load_chapter_index(project_root)?;
-    let resolver = ProjectReferenceResolver::new()
+    let knowledge_snapshot = if references
+        .iter()
+        .any(|reference| project_reference_has_prefix(reference, "知识"))
+    {
+        Some(
+            SqliteWritingKnowledgeStore::open(project_root)
+                .map_err(error_to_string)?
+                .load_retrieval_snapshot()
+                .map_err(error_to_string)?,
+        )
+    } else {
+        None
+    };
+    let artifact_root = absolute_path(&project_root.join(".runtime/artifacts"));
+    let artifacts = if references
+        .iter()
+        .any(|reference| project_reference_has_prefix(reference, "artifact"))
+    {
+        artifact_reference_entries(&artifact_root)?
+    } else {
+        Vec::new()
+    };
+    let runtime_state = if references
+        .iter()
+        .any(|reference| project_reference_has_prefix(reference, "节点"))
+    {
+        let (Some(workflow_id), Some(run_id)) = (reference_workflow_id, reference_run_id) else {
+            return Err(CommandError::validation(
+                "node reference requires reference_workflow_id and reference_run_id",
+            ));
+        };
+        Some(
+            SqliteWorkflowRuntimeStore::open(project_root)
+                .map_err(error_to_string)?
+                .load_state(&WorkflowId::from(workflow_id), &RunId::from(run_id))
+                .map_err(error_to_string)?
+                .ok_or_else(|| {
+                    CommandError::not_found(format!(
+                        "workflow run not found for node reference: {workflow_id}/{run_id}"
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
+
+    let mut resolver = ProjectReferenceResolver::new()
         .with_documents(&documents)
         .with_confirmations(&confirmations)
-        .with_chapter_index(&chapter_index);
+        .with_chapter_index(&chapter_index)
+        .with_document_root(project_root)
+        .with_query(query);
+    if let Some(snapshot) = knowledge_snapshot.as_ref() {
+        resolver = resolver.with_knowledge_snapshot(snapshot);
+    }
+    if !artifacts.is_empty() {
+        resolver = resolver
+            .with_artifacts(artifacts)
+            .with_artifact_root(&artifact_root);
+    }
+    if let Some(runtime_state) = runtime_state.as_ref() {
+        resolver = resolver.with_runtime(runtime_state);
+    }
     references
         .iter()
         .map(|reference| resolver.resolve(reference).map_err(error_to_string))
         .collect()
+}
+
+fn merge_project_ai_references(explicit: &[String], message: &str) -> Vec<String> {
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+    for reference in explicit
+        .iter()
+        .cloned()
+        .chain(extract_project_reference_tokens(message))
+    {
+        let normalized = reference.trim().to_owned();
+        if !normalized.is_empty() && seen.insert(normalized.clone()) {
+            merged.push(normalized);
+        }
+    }
+    merged
+}
+
+fn project_reference_has_prefix(reference: &str, expected: &str) -> bool {
+    let trimmed = reference.trim().trim_start_matches('@');
+    trimmed
+        .strip_prefix(expected)
+        .is_some_and(|suffix| suffix.starts_with('/') || suffix.starts_with(':'))
+}
+
+fn artifact_reference_entries(artifact_root: &Path) -> CommandResult<Vec<ArtifactReferenceEntry>> {
+    reject_symlink_root(artifact_root)?;
+    if !artifact_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = artifact_reference_paths(artifact_root)?;
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            ensure_path_under_root(artifact_root, &path).map_err(error_to_string)?;
+            let relative = path.strip_prefix(artifact_root).map_err(|_| {
+                CommandError::validation(format!(
+                    "artifact path is outside artifact root: {}",
+                    path.display()
+                ))
+            })?;
+            let artifact_id = relative.to_string_lossy().replace('\\', "/");
+            let kind = if artifact_id.starts_with("exports/") {
+                ArtifactKind::Export
+            } else {
+                ArtifactKind::Other
+            };
+            Ok(ArtifactReferenceEntry {
+                artifact_id,
+                kind,
+                storage_uri: format!("file://{}", path.display()),
+                summary: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+fn artifact_reference_paths(root: &Path) -> CommandResult<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(root).map_err(error_to_string)? {
+        let entry = entry.map_err(error_to_string)?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(error_to_string)?;
+        if file_type.is_symlink() || entry.file_name() == ".operations" {
+            continue;
+        }
+        if file_type.is_dir() {
+            paths.extend(artifact_reference_paths(&path)?);
+        } else if file_type.is_file() {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 const LIST_START_NODES_TOOL: &str = "list_start_nodes";
@@ -5277,11 +6927,14 @@ const LIST_START_NODES_TOOL: &str = "list_start_nodes";
 fn project_ai_answer(
     project_root: &Path,
     secrets: &dyn SecretStore,
-    project_memory: &str,
+    project_memory: &[ProjectAiMemoryEntry],
+    conversation_summaries: &[ProjectAiSummaryChunk],
     references: &[ProjectReference],
     chat_history: &[ProjectAiChatMessage],
     message: &str,
     workflow_tools: &[ProjectWorkflowTool],
+    retrieval: &ProjectRetrievalRuntime,
+    cancellation: &crate::contracts::ExecutionCancellation,
     workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
 ) -> CommandResult<(String, Option<WorkflowRunStarted>, ProjectAiContextWindow)> {
     let runtime = llm_runtime(project_root, secrets)?;
@@ -5289,20 +6942,42 @@ fn project_ai_answer(
     let service = LlmService::new(&ledger, runtime.auto_mode.clone());
     let context_window = project_ai_context_window(
         project_memory,
+        conversation_summaries,
         references,
         chat_history,
         message,
         runtime.config.max_context_tokens,
         runtime.config.max_output_tokens,
     )?;
+    let project_config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls);
+    let project_search_enabled =
+        tool_control_enabled(&tool_controls, "project_ai", PROJECT_AI_SEARCH_TOOL);
+    let web_search_enabled = project_config
+        .permissions
+        .policy
+        .evaluate(&PermissionRequest::WebSearch)
+        .allowed
+        && tool_control_enabled(&tool_controls, "project_ai", PROJECT_AI_WEB_SEARCH_TOOL);
+    let web_search_provider = if web_search_enabled {
+        Some(web_search_runtime(project_root, secrets)?)
+    } else {
+        None
+    };
     let mut messages = project_ai_llm_messages(
         &context_window.memory,
+        &context_window.conversation_summary,
         &context_window.reference_context,
         &context_window.history,
         message,
+        project_search_enabled,
+        web_search_enabled,
     )?;
     let start_catalog = project_ai_start_node_catalog(project_root)?;
-    let tool_definitions = project_ai_tool_definitions(workflow_tools);
+    let tool_definitions =
+        project_ai_tool_definitions(workflow_tools, project_search_enabled, web_search_enabled);
     let mut config = runtime.config;
     if config.max_tool_rounds < 4 {
         config.max_tool_rounds = 4;
@@ -5328,7 +7003,7 @@ fn project_ai_answer(
                     metadata: json!({ "project_ai": true, "round": round }),
                     dispatch_authorization: Default::default(),
                 },
-                &crate::contracts::CancellationToken::new(),
+                cancellation,
             )
             .map_err(error_to_string)?;
 
@@ -5337,19 +7012,37 @@ fn project_ai_answer(
             break;
         }
         if round >= max_rounds {
-            return Err("project AI tool-use max rounds exceeded before final answer".to_owned());
+            return Err(CommandError::new(
+                crate::command_error::CommandErrorCode::ResourceLimit,
+                "project AI tool-use max rounds exceeded before final answer",
+            ));
         }
 
         messages.push(report.response.message.clone());
         for call in &report.response.tool_calls {
+            let context = ProjectAiToolExecutionContext {
+                start_catalog: &start_catalog,
+                workflow_tools,
+                retrieval,
+                project_search_enabled,
+                web_search_provider: web_search_provider.as_ref(),
+                permission_policy: &project_config.permissions.policy,
+                ledger: &ledger,
+                web_search_enabled,
+                cancellation,
+                round,
+            };
+            let mut state = ProjectAiToolExecutionState {
+                queried_start_nodes: &mut queried_start_nodes,
+                workflow_runner,
+                tool_workflow_run: &mut tool_workflow_run,
+            };
             let output = project_ai_execute_tool_call(
                 call.name.as_str(),
+                &call.tool_call_id,
                 &call.arguments,
-                &start_catalog,
-                workflow_tools,
-                &mut queried_start_nodes,
-                workflow_runner,
-                &mut tool_workflow_run,
+                &context,
+                &mut state,
             )?;
             messages.push(tool_result_message(call, output));
         }
@@ -5363,18 +7056,92 @@ fn project_ai_answer(
     Ok((answer, tool_workflow_run, context_window))
 }
 
+struct ProjectAiToolExecutionContext<'a> {
+    start_catalog: &'a [ProjectAiStartNodeInfo],
+    workflow_tools: &'a [ProjectWorkflowTool],
+    retrieval: &'a ProjectRetrievalRuntime,
+    project_search_enabled: bool,
+    web_search_provider: Option<&'a HttpWebSearchProvider>,
+    permission_policy: &'a PermissionPolicy,
+    ledger: &'a SqliteCostLedger,
+    web_search_enabled: bool,
+    cancellation: &'a crate::contracts::ExecutionCancellation,
+    round: u32,
+}
+
+struct ProjectAiToolExecutionState<'a> {
+    queried_start_nodes: &'a mut bool,
+    workflow_runner: &'a mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
+    tool_workflow_run: &'a mut Option<WorkflowRunStarted>,
+}
+
 fn project_ai_execute_tool_call(
     name: &str,
+    tool_call_id: &str,
     arguments: &Value,
-    start_catalog: &[ProjectAiStartNodeInfo],
-    workflow_tools: &[ProjectWorkflowTool],
-    queried_start_nodes: &mut bool,
-    workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
-    tool_workflow_run: &mut Option<WorkflowRunStarted>,
+    context: &ProjectAiToolExecutionContext<'_>,
+    state: &mut ProjectAiToolExecutionState<'_>,
 ) -> CommandResult<ToolExecutionOutput> {
+    if name == PROJECT_AI_SEARCH_TOOL && context.project_search_enabled {
+        let mut provider_context = crate::providers::ProviderCallContext::new("project_retrieval");
+        provider_context.cancellation = context.cancellation.clone();
+        let executor = ProjectSearchToolExecutor::new(
+            context.retrieval,
+            provider_context,
+            [PROJECT_AI_SEARCH_TOOL.to_owned()],
+        );
+        return executor
+            .execute(
+                &ToolExecutionContext {
+                    provider_id: "project_retrieval".to_owned(),
+                    workflow_id: None,
+                    run_id: None,
+                    node_id: None,
+                    round: context.round,
+                },
+                &crate::providers::ToolCall {
+                    tool_call_id: tool_call_id.to_owned(),
+                    name: name.to_owned(),
+                    arguments: arguments.clone(),
+                },
+            )
+            .map_err(error_to_string);
+    }
+    if name == PROJECT_AI_WEB_SEARCH_TOOL && context.web_search_enabled {
+        let provider = context.web_search_provider.ok_or_else(|| {
+            CommandError::not_found("Project AI Web Search provider is not configured")
+        })?;
+        let mut provider_context =
+            crate::providers::ProviderCallContext::new(provider.definition().provider_id);
+        provider_context.cancellation = context.cancellation.clone();
+        let executor = WebSearchToolExecutor::new(
+            provider,
+            context.ledger,
+            context.permission_policy,
+            provider_context,
+            [PROJECT_AI_WEB_SEARCH_TOOL.to_owned()],
+        );
+        return executor
+            .execute(
+                &ToolExecutionContext {
+                    provider_id: provider.definition().provider_id,
+                    workflow_id: None,
+                    run_id: None,
+                    node_id: None,
+                    round: context.round,
+                },
+                &crate::providers::ToolCall {
+                    tool_call_id: tool_call_id.to_owned(),
+                    name: name.to_owned(),
+                    arguments: arguments.clone(),
+                },
+            )
+            .map_err(error_to_string);
+    }
     if name == LIST_START_NODES_TOOL {
-        *queried_start_nodes = true;
-        let nodes: Vec<Value> = start_catalog
+        *state.queried_start_nodes = true;
+        let nodes: Vec<Value> = context
+            .start_catalog
             .iter()
             .map(|node| {
                 json!({
@@ -5398,7 +7165,8 @@ fn project_ai_execute_tool_call(
         });
     }
 
-    let Some(tool) = workflow_tools
+    let Some(tool) = context
+        .workflow_tools
         .iter()
         .find(|tool| tool.tool_name == name)
         .cloned()
@@ -5412,7 +7180,7 @@ fn project_ai_execute_tool_call(
         });
     };
 
-    if !*queried_start_nodes {
+    if !*state.queried_start_nodes {
         return Ok(ToolExecutionOutput {
             value: json!({
                 "ok": false,
@@ -5427,12 +7195,12 @@ fn project_ai_execute_tool_call(
     }
 
     let initial_inputs = workflow_tool_initial_inputs(arguments.clone())?;
-    let started = workflow_runner(RunWorkflowRequest {
+    let started = (state.workflow_runner)(RunWorkflowRequest {
         workflow_id: tool.workflow_id.clone(),
         start_node_id: Some(tool.start_node_id.clone()),
         initial_inputs,
     })?;
-    *tool_workflow_run = Some(started.clone());
+    *state.tool_workflow_run = Some(started.clone());
     Ok(ToolExecutionOutput {
         value: json!({
             "ok": true,
@@ -5505,129 +7273,42 @@ fn project_ai_start_node_catalog(
     Ok(catalog)
 }
 
-fn project_ai_context_window(
-    project_memory: &str,
-    references: &[ProjectReference],
-    chat_history: &[ProjectAiChatMessage],
-    message: &str,
-    configured_context_tokens: Option<u32>,
-    configured_output_tokens: Option<u32>,
-) -> CommandResult<ProjectAiContextWindow> {
-    const DEFAULT_CONTEXT_TOKENS: u32 = 16_384;
-    const SYSTEM_AND_TOOL_RESERVE_CHARS: usize = 4_000;
-    let context_limit_tokens = configured_context_tokens.unwrap_or(DEFAULT_CONTEXT_TOKENS);
-    let output_reserve_tokens =
-        configured_output_tokens.unwrap_or_else(|| (context_limit_tokens / 4).clamp(256, 4_096));
-    if context_limit_tokens <= output_reserve_tokens.saturating_add(1_024) {
-        return Err(format!(
-            "project AI context limit {context_limit_tokens} leaves insufficient input space after output reserve {output_reserve_tokens}"
-        ));
-    }
-    let input_token_budget = context_limit_tokens - output_reserve_tokens;
-    let input_char_budget = usize::try_from(input_token_budget)
-        .unwrap_or(usize::MAX / 4)
-        .saturating_mul(4);
-    let message_chars = message.trim().chars().count();
-    if message_chars.saturating_add(SYSTEM_AND_TOOL_RESERVE_CHARS) > input_char_budget {
-        return Err(format!(
-            "project AI message is too large for model context: approximately {} input tokens available",
-            input_token_budget
-        ));
-    }
-
-    let available = input_char_budget
-        .saturating_sub(SYSTEM_AND_TOOL_RESERVE_CHARS)
-        .saturating_sub(message_chars);
-    let memory_budget = available / 4;
-    let reference_budget = available / 3;
-    let history_budget = available.saturating_sub(memory_budget + reference_budget);
-
-    let memory = take_last_chars(project_memory.trim(), memory_budget);
-    let memory_truncated = memory.chars().count() < project_memory.trim().chars().count();
-    let full_reference_context = references
-        .iter()
-        .map(|reference| {
-            format!(
-                "- {} [{}]: {}\n  payload: {}",
-                reference.reference, reference.id, reference.summary, reference.payload
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let reference_context = take_first_chars(&full_reference_context, reference_budget);
-
-    let mut selected_reversed = Vec::new();
-    let mut used_history_chars = 0usize;
-    for history in chat_history.iter().rev() {
-        let cost = history.content.chars().count().saturating_add(16);
-        if used_history_chars.saturating_add(cost) > history_budget {
-            break;
-        }
-        used_history_chars = used_history_chars.saturating_add(cost);
-        selected_reversed.push(history.clone());
-    }
-    selected_reversed.reverse();
-    if selected_reversed
-        .first()
-        .is_some_and(|entry| entry.role == ProjectAiChatRole::Assistant)
-    {
-        let first_non_assistant = selected_reversed
-            .iter()
-            .position(|entry| entry.role != ProjectAiChatRole::Assistant)
-            .unwrap_or(selected_reversed.len());
-        selected_reversed.drain(..first_non_assistant);
-    }
-    let history_truncated = selected_reversed.len() < chat_history.len();
-    let estimated_chars = SYSTEM_AND_TOOL_RESERVE_CHARS
-        .saturating_add(message_chars)
-        .saturating_add(memory.chars().count())
-        .saturating_add(reference_context.chars().count())
-        .saturating_add(
-            selected_reversed
-                .iter()
-                .map(|entry| entry.content.chars().count().saturating_add(16))
-                .sum::<usize>(),
-        );
-    Ok(ProjectAiContextWindow {
-        memory,
-        reference_context,
-        history: selected_reversed,
-        history_truncated,
-        memory_truncated,
-        estimated_input_tokens: u64::try_from(estimated_chars.div_ceil(4)).unwrap_or(u64::MAX),
-        context_limit_tokens,
-    })
-}
-
-fn take_first_chars(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
-}
-
-fn take_last_chars(value: &str, limit: usize) -> String {
-    let count = value.chars().count();
-    value.chars().skip(count.saturating_sub(limit)).collect()
-}
-
 fn project_ai_llm_messages(
     project_memory: &str,
+    conversation_summary: &str,
     reference_context: &str,
     chat_history: &[ProjectAiChatMessage],
     message: &str,
+    project_search_enabled: bool,
+    web_search_enabled: bool,
 ) -> CommandResult<Vec<LlmMessage>> {
+    let search_instruction = if project_search_enabled {
+        "Use project-ai-search whenever current project documents or confirmed knowledge are needed, and cite the returned document_id/chunk_id in your reasoning when useful. "
+    } else {
+        ""
+    };
+    let web_search_instruction = if web_search_enabled {
+        "Use project-ai-web-search for current public internet information; preserve and cite returned URLs when useful. "
+    } else {
+        ""
+    };
     let mut messages = vec![
         LlmMessage {
             role: LlmRole::System,
             content: vec![ContentPart::text(
-                "You are the Ariadne Project AI. Only answer based on project memory, explicit references, chat history, and user messages; do not fabricate project facts not provided. \
+                format!("You are the Ariadne Project AI. Only answer based on project memory, explicit references, chat history, and user messages; do not fabricate project facts not provided. \
+{search_instruction}\
+{web_search_instruction}\
 Before starting any workflow tool, you MUST call list_start_nodes once to read every start node's id, name, and user_note, then choose which start tool to run yourself. \
-Do not start a workflow without querying start nodes first.",
+Do not start a workflow without querying start nodes first."),
             )],
             name: None,
             tool_call_id: None,
         },
         LlmMessage::user(format!(
-            "项目记忆：\n{}\n\n引用：\n{}",
+            "项目结构化记忆：\n{}\n\n会话摘要：\n{}\n\n引用：\n{}",
             project_memory.trim(),
+            conversation_summary.trim(),
             reference_context
         )),
     ];
@@ -5790,10 +7471,10 @@ fn workflow_tool_initial_inputs(arguments: Value) -> CommandResult<BTreeMap<Stri
     match arguments {
         Value::Object(map) => Ok(map.into_iter().collect()),
         Value::Null => Ok(BTreeMap::new()),
-        other => Err(format!(
+        other => Err(CommandError::validation(format!(
             "workflow tool arguments must be a JSON object, got {}",
             json_value_kind(&other)
-        )),
+        ))),
     }
 }
 
@@ -5835,18 +7516,34 @@ fn sanitize_tool_name(value: &str) -> String {
     name.trim_matches('_').to_owned()
 }
 
-fn project_ai_tool_definitions(workflow_tools: &[ProjectWorkflowTool]) -> Vec<ToolDefinition> {
-    // 无启动工具时不暴露工具表（权限关闭 / 无 expose 起点）；有启动工具时强制附带 list_start_nodes。
-    if workflow_tools.is_empty() {
-        return Vec::new();
+fn project_ai_tool_definitions(
+    workflow_tools: &[ProjectWorkflowTool],
+    project_search_enabled: bool,
+    web_search_enabled: bool,
+) -> Vec<ToolDefinition> {
+    let mut tools = Vec::new();
+    if project_search_enabled {
+        tools.push(project_search_tool_definition(
+            PROJECT_AI_SEARCH_TOOL,
+            "检索当前项目文档、规划与已确认知识。回答项目事实前应优先使用本工具核对。",
+        ));
     }
-    let mut tools = vec![ToolDefinition {
+    if web_search_enabled {
+        tools.push(web_search_tool_definition(
+            PROJECT_AI_WEB_SEARCH_TOOL,
+            "搜索公开互联网，返回标题、URL 与摘要；结果不自动写入项目知识库。",
+        ));
+    }
+    if workflow_tools.is_empty() {
+        return tools;
+    }
+    tools.push(ToolDefinition {
         name: LIST_START_NODES_TOOL.to_owned(),
         description: "List all start nodes (id, name, user_note, work_dir, expose_as_tool). \
 REQUIRED once before calling any workflow start tool. Use this to decide which start node to run."
             .to_owned(),
         input_schema: empty_tool_input_schema(),
-    }];
+    });
     tools.extend(workflow_tools.iter().map(|tool| ToolDefinition {
         name: tool.tool_name.clone(),
         description: workflow_tool_description(tool),
@@ -5879,6 +7576,81 @@ fn project_ai_history_to_llm_message(history: &ProjectAiChatMessage) -> Option<L
         name: None,
         tool_call_id: None,
     })
+}
+
+fn project_ai_role_name(role: ProjectAiChatRole) -> &'static str {
+    match role {
+        ProjectAiChatRole::System => "system",
+        ProjectAiChatRole::User => "user",
+        ProjectAiChatRole::Assistant => "assistant",
+    }
+}
+
+fn project_ai_role_from_name(role: &str) -> CommandResult<ProjectAiChatRole> {
+    match role {
+        "system" => Ok(ProjectAiChatRole::System),
+        "user" => Ok(ProjectAiChatRole::User),
+        "assistant" => Ok(ProjectAiChatRole::Assistant),
+        other => Err(CommandError::validation(format!(
+            "unsupported persisted project AI role: {other}"
+        ))),
+    }
+}
+
+fn project_ai_messages_from_stored(
+    messages: &[ProjectAiStoredMessage],
+) -> CommandResult<Vec<ProjectAiChatMessage>> {
+    messages
+        .iter()
+        .map(|message| {
+            Ok(ProjectAiChatMessage {
+                role: project_ai_role_from_name(&message.role)?,
+                content: message.content.clone(),
+            })
+        })
+        .collect()
+}
+
+fn project_ai_pending_client_history(
+    persisted: &[ProjectAiStoredMessage],
+    incoming: &[ProjectAiChatMessage],
+    revision: u64,
+) -> CommandResult<Vec<ProjectAiChatMessage>> {
+    let incoming = incoming
+        .iter()
+        .filter(|message| !message.content.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    if incoming.is_empty() {
+        return Ok(Vec::new());
+    }
+    if persisted.is_empty() {
+        return if revision == 0 {
+            Ok(incoming)
+        } else {
+            Err(CommandError::conflict(
+                "project AI client history cannot be reconciled with persisted conversation",
+            ))
+        };
+    }
+    let stored = project_ai_messages_from_stored(persisted)?;
+    if incoming.len() < stored.len() {
+        return Err(CommandError::conflict(
+            "project AI client history is older than persisted conversation",
+        ));
+    }
+    let mut match_start = None;
+    for start in 0..=incoming.len() - stored.len() {
+        if incoming[start..start + stored.len()] == stored[..] {
+            match_start = Some(start);
+        }
+    }
+    let Some(start) = match_start else {
+        return Err(CommandError::conflict(
+            "project AI client history does not match persisted conversation revision",
+        ));
+    };
+    Ok(incoming[start + stored.len()..].to_vec())
 }
 
 fn project_ai_response_history(
@@ -5969,6 +7741,7 @@ fn persist_project_name(project_root: &Path, name: Option<&str>) -> CommandResul
     let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
         return Ok(());
     };
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     config.app.project_name = name.to_owned();
@@ -6124,19 +7897,19 @@ fn write_node_preset_settings(
     let configured_model_ids = configured_model_ids_for_presets(project_root)?;
     for preset in &settings.presets {
         if preset.node_type.trim().is_empty() {
-            return Err("node_type cannot be empty".to_owned());
+            return Err(CommandError::validation("node_type cannot be empty"));
         }
         if preset.model_id.trim().is_empty() {
-            return Err(format!(
+            return Err(CommandError::validation(format!(
                 "model_id cannot be empty for node_type {}",
                 preset.node_type
-            ));
+            )));
         }
         if preset.timeout_ms == 0 {
-            return Err(format!(
+            return Err(CommandError::validation(format!(
                 "timeout_ms cannot be zero for node_type {}",
                 preset.node_type
-            ));
+            )));
         }
         validate_money("budget_usd", preset.budget_usd)?;
         ensure_preset_model_is_configured(
@@ -6146,7 +7919,7 @@ fn write_node_preset_settings(
         )?;
     }
     if settings.default_model_id.trim().is_empty() {
-        return Err("default_model_id cannot be empty".to_owned());
+        return Err(CommandError::validation("default_model_id cannot be empty"));
     }
     ensure_preset_model_is_configured(
         &configured_model_ids,
@@ -6154,7 +7927,9 @@ fn write_node_preset_settings(
         "default_model_id",
     )?;
     if settings.default_timeout_ms == 0 {
-        return Err("default_timeout_ms cannot be zero".to_owned());
+        return Err(CommandError::validation(
+            "default_timeout_ms cannot be zero",
+        ));
     }
     validate_money("default_budget_usd", settings.default_budget_usd)?;
     let path = node_preset_settings_path(project_root);
@@ -6183,9 +7958,9 @@ fn ensure_preset_model_is_configured(
     if configured_model_ids.is_empty() || configured_model_ids.contains(model_id) {
         return Ok(());
     }
-    Err(format!(
+    Err(CommandError::validation(format!(
         "{field} references a model that is not configured in model settings: {model_id}"
-    ))
+    )))
 }
 
 fn default_node_preset_model_id() -> String {
@@ -6437,7 +8212,9 @@ fn approval_policy_from_ui(policy: &str) -> CommandResult<ApprovalPolicy> {
             approval_prompt_id: Some("default-review".to_owned()),
             require_human_on_conflict: true,
         }),
-        other => Err(format!("unknown confirmation policy: {other}")),
+        other => Err(CommandError::validation(format!(
+            "unknown confirmation policy: {other}"
+        ))),
     }
 }
 
@@ -6490,7 +8267,9 @@ fn update_workflow_run_control(
         let state = store
             .load_state(&workflow_id_typed, &run_id_typed)
             .map_err(error_to_string)?
-            .ok_or_else(|| format!("workflow run not found: {workflow_id}/{run_id}"))?;
+            .ok_or_else(|| {
+                CommandError::not_found(format!("workflow run not found: {workflow_id}/{run_id}"))
+            })?;
         let mut runtime = WorkflowRuntime::from_state(state);
         update(&mut runtime).map_err(error_to_string)?;
         match store.save_state(&mut runtime.state, None) {
@@ -6505,7 +8284,9 @@ fn update_workflow_run_control(
             Err(error) => return Err(error_to_string(error)),
         }
     }
-    Err("workflow state CAS retry limit exceeded".to_owned())
+    Err(CommandError::conflict(
+        "workflow state CAS retry limit exceeded",
+    ))
 }
 
 fn mutate_workflow_run_and_claim(
@@ -6542,11 +8323,13 @@ fn mutate_workflow_run_and_claim(
             },
             lease,
         )),
-        crate::workflow::WorkflowMutationClaimResult::Busy { .. } => Err(format!(
+        crate::workflow::WorkflowMutationClaimResult::Busy { .. } => Err(CommandError::conflict(format!(
             "workflow run is busy and the requested mutation was not applied: {workflow_id}/{run_id}"
-        )),
+        ))),
         crate::workflow::WorkflowMutationClaimResult::NotFound => {
-            Err(format!("workflow run not found: {workflow_id}/{run_id}"))
+            Err(CommandError::not_found(format!(
+                "workflow run not found: {workflow_id}/{run_id}"
+            )))
         }
     }
 }
@@ -6655,7 +8438,7 @@ fn recover_orphaned_workflow_workers(
 fn workflow_scheduler_loop(
     project_root: PathBuf,
     secrets: Arc<dyn SecretStore>,
-    retrieval_runtime: Arc<ProjectRetrievalRuntime>,
+    retrieval_runtime: Arc<Mutex<Option<Arc<ProjectRetrievalRuntime>>>>,
     stop_receiver: std::sync::mpsc::Receiver<()>,
 ) {
     let owner_id = match new_run_id() {
@@ -6687,7 +8470,7 @@ fn workflow_scheduler_loop(
 fn workflow_scheduler_tick(
     project_root: &Path,
     secrets: &Arc<dyn SecretStore>,
-    retrieval_runtime: &Arc<ProjectRetrievalRuntime>,
+    retrieval_runtime: &Arc<Mutex<Option<Arc<ProjectRetrievalRuntime>>>>,
     owner_id: &str,
 ) -> CommandResult<u64> {
     let runtime_path = project_root.join(crate::workflow::RUNTIME_DB_FILE);
@@ -6719,7 +8502,7 @@ fn workflow_scheduler_tick(
             WorkflowRunnableClaimResult::Stopped { .. } => continue,
             WorkflowRunnableClaimResult::Empty => break,
         };
-        if state.prepared_workflow.is_none() {
+        let Some(prepared_workflow) = state.prepared_workflow.as_ref() else {
             mark_workflow_run_failed_with_lease_impl(
                 project_root,
                 state.workflow_id.as_str(),
@@ -6731,11 +8514,17 @@ fn workflow_scheduler_tick(
                 &lease,
             )?;
             continue;
-        }
+        };
+        let loaded_retrieval_runtime = scheduled_workflow_retrieval_runtime(
+            project_root,
+            secrets.as_ref(),
+            retrieval_runtime,
+            prepared_workflow,
+        )?;
         if let Err(error) = spawn_continue_workflow_worker_with_lease(
             project_root.to_path_buf(),
-            Arc::clone(&secrets),
-            Some(Arc::clone(retrieval_runtime)),
+            Arc::clone(secrets),
+            loaded_retrieval_runtime,
             state.workflow_id.as_str().to_owned(),
             state.run_id.as_str().to_owned(),
             lease,
@@ -6757,6 +8546,32 @@ fn workflow_scheduler_tick(
         .unwrap_or(WORKFLOW_SCHEDULER_MAX_SLEEP_MS)
         .min(WORKFLOW_SCHEDULER_MAX_SLEEP_MS);
     Ok(sleep_ms)
+}
+
+fn scheduled_workflow_retrieval_runtime(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    retrieval_runtime: &Arc<Mutex<Option<Arc<ProjectRetrievalRuntime>>>>,
+    workflow: &WorkflowDefinition,
+) -> CommandResult<Option<Arc<ProjectRetrievalRuntime>>> {
+    if !workflow.nodes.iter().any(|node| node.type_name == "search") {
+        return Ok(None);
+    }
+    let mut runtime_slot = retrieval_runtime
+        .lock()
+        .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?;
+    if let Some(runtime) = runtime_slot
+        .as_ref()
+        .filter(|runtime| runtime.project_root() == project_root)
+    {
+        return Ok(Some(Arc::clone(runtime)));
+    }
+    let runtime =
+        Arc::new(ProjectRetrievalRuntime::open(project_root, secrets).map_err(error_to_string)?);
+    let previous = runtime_slot.replace(Arc::clone(&runtime));
+    drop(runtime_slot);
+    drop(previous);
+    Ok(Some(runtime))
 }
 
 fn spawn_continue_workflow_worker_with_lease(
@@ -6794,7 +8609,7 @@ fn spawn_continue_workflow_worker_with_lease(
                 },
             );
             if let Err(error) = worker_result {
-                if error != WORKFLOW_WORKER_LEASE_LOST_ERROR {
+                if error.diagnostic_text() != WORKFLOW_WORKER_LEASE_LOST_ERROR {
                     record_workflow_worker_error(
                         &worker_root,
                         &workflow_id,
@@ -6941,7 +8756,7 @@ fn run_with_workflow_worker_lease<T>(
     let _ = heartbeat.join();
     let still_valid = lease_valid.load(Ordering::Acquire);
     if !still_valid {
-        return Err(WORKFLOW_WORKER_LEASE_LOST_ERROR.to_owned());
+        return Err(CommandError::conflict(WORKFLOW_WORKER_LEASE_LOST_ERROR));
     }
     if result.is_ok() {
         let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
@@ -6959,7 +8774,7 @@ fn run_with_workflow_worker_lease<T>(
 
 fn workflow_lease_now_ms() -> CommandResult<u64> {
     u64::try_from(now_timestamp_ms()?)
-        .map_err(|_| "workflow worker lease timestamp exceeds u64".to_owned())
+        .map_err(|_| CommandError::internal("workflow worker lease timestamp exceeds u64"))
 }
 
 fn record_workflow_worker_error(
@@ -7114,17 +8929,20 @@ fn run_status_label(status: crate::contracts::RunStatus) -> &'static str {
     }
 }
 
-fn template_client(request: TemplateRepositoryRequest) -> CommandResult<TemplateRepositoryClient> {
+fn template_client(
+    request: TemplateRepositoryRequest,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<TemplateRepositoryClient> {
     let base_url = request
         .base_url
         .unwrap_or_else(|| DEFAULT_TEMPLATE_REPOSITORY_URL.to_owned());
     if base_url.trim().is_empty() {
-        return Err(
-            "template repository is not configured; please set a base URL in settings".to_owned(),
-        );
+        return Err(CommandError::validation(
+            "template repository is not configured; please set a base URL in settings",
+        ));
     }
-    validate_template_url(&base_url)?;
-    TemplateRepositoryClient::new(base_url).map_err(error_to_string)
+    TemplateRepositoryClient::new_with_cancellation(base_url, cancellation.clone())
+        .map_err(error_to_string)
 }
 
 fn validate_template_url(url: &str) -> CommandResult<()> {
@@ -7137,6 +8955,65 @@ struct CommandLlmRuntime {
     auto_mode: crate::config::AutoModeConfig,
 }
 
+fn web_search_runtime(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+) -> CommandResult<HttpWebSearchProvider> {
+    validate_project_root(project_root)?;
+    let project_config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let provider_config = select_web_search_provider(&project_config.providers)?;
+    if provider_config.api_key.is_some() {
+        return Err(CommandError::permission(format!(
+            "provider '{}' contains an untrusted project SecretRef; re-enter the credential before Web Search use",
+            provider_config.provider_id
+        )));
+    }
+    let api_key = ProjectCredentialScope::new(project_root, secrets)
+        .map_err(error_to_string)?
+        .get_provider_secret(&provider_config.provider_id)
+        .map_err(error_to_string)?
+        .map(|value| value.expose_secret().to_owned());
+    HttpWebSearchProvider::new(provider_config, api_key).map_err(error_to_string)
+}
+
+fn select_web_search_provider(
+    providers: &crate::config::ProvidersConfig,
+) -> CommandResult<ProviderConfig> {
+    if let Some(default_id) = providers.default_search_provider_id.as_deref() {
+        return providers
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == default_id)
+            .filter(|provider| provider.enabled)
+            .cloned()
+            .ok_or_else(|| {
+                CommandError::not_found(format!(
+                    "default Web Search provider is missing or disabled: {default_id}"
+                ))
+            });
+    }
+    providers
+        .providers
+        .iter()
+        .find(|provider| {
+            provider.enabled
+                && provider.models.iter().any(|model| {
+                    matches!(
+                        model.capability,
+                        ProviderCapability::Search | ProviderCapability::Llm
+                    )
+                })
+        })
+        .cloned()
+        .ok_or_else(|| {
+            CommandError::not_found(
+                "no enabled Web Search provider is configured; select a default search provider",
+            )
+        })
+}
+
 fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<CommandLlmRuntime> {
     validate_project_root(project_root)?;
     let project_config = ConfigStore::new(project_root)
@@ -7145,10 +9022,10 @@ fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<
     let provider_config = select_llm_provider(&project_config.providers)?;
     let model_config = select_llm_model(&provider_config)?;
     if provider_config.api_key.is_some() {
-        return Err(format!(
+        return Err(CommandError::permission(format!(
             "provider '{}' contains an untrusted project SecretRef; re-enter the credential before LLM use",
             provider_config.provider_id
-        ));
+        )));
     }
     let api_key = ProjectCredentialScope::new(project_root, secrets)
         .map_err(error_to_string)?
@@ -7181,7 +9058,11 @@ fn select_llm_provider(
             .find(|provider| provider.provider_id == default_id)
             .filter(|provider| provider.enabled)
             .cloned()
-            .ok_or_else(|| format!("default LLM provider is missing or disabled: {default_id}"));
+            .ok_or_else(|| {
+                CommandError::not_found(format!(
+                    "default LLM provider is missing or disabled: {default_id}"
+                ))
+            });
     }
     providers
         .providers
@@ -7194,7 +9075,7 @@ fn select_llm_provider(
                 }) || provider.models.is_empty())
         })
         .cloned()
-        .ok_or_else(|| "no enabled LLM provider is configured".to_owned())
+        .ok_or_else(|| CommandError::not_found("no enabled LLM provider is configured"))
 }
 
 fn select_llm_model(provider: &ProviderConfig) -> CommandResult<ModelConfig> {
@@ -7205,10 +9086,10 @@ fn select_llm_model(provider: &ProviderConfig) -> CommandResult<ModelConfig> {
         .or_else(|| provider.models.first())
         .cloned()
         .ok_or_else(|| {
-            format!(
+            CommandError::not_found(format!(
                 "provider {} has no model configured for LLM calls",
                 provider.provider_id
-            )
+            ))
         })
 }
 
@@ -7278,7 +9159,7 @@ fn workflow_document_root(
         .nodes
         .iter()
         .find(|node| node.id == NodeId::from(start_node_id))
-        .ok_or_else(|| format!("start node not found: {start_node_id}"))?;
+        .ok_or_else(|| CommandError::not_found(format!("start node not found: {start_node_id}")))?;
     let work_dir = start_node
         .config
         .get("work_dir")
@@ -7299,7 +9180,7 @@ fn document_argument_path(
             project_path(project_root, &document_id)
         }
         (_, Some(path)) if !path.trim().is_empty() => project_path(project_root, &path),
-        _ => Err("document_id or path is required".to_owned()),
+        _ => Err(CommandError::validation("document_id or path is required")),
     }
 }
 
@@ -7381,7 +9262,11 @@ pub fn list_in_doubt_operations(
         .map_err(error_to_string)?;
     Ok(ops
         .into_iter()
-        .filter(|op| matches!(op.status, crate::workflow::WorkflowOperationStatus::InDoubt))
+        .filter(|op| {
+            matches!(op.status, crate::workflow::WorkflowOperationStatus::InDoubt)
+                && op.response_policy
+                    == crate::workflow::WorkflowOperationResponsePolicy::AllowExternalResponse
+        })
         .collect())
 }
 
@@ -7401,7 +9286,7 @@ pub fn resolve_workflow_operation_in_doubt(
             response: request
                 .response
                 .clone()
-                .ok_or_else(|| "use_response requires response".to_owned())?,
+                .ok_or_else(|| CommandError::validation("use_response requires response"))?,
         },
         InDoubtDecision::Stop => crate::workflow::InDoubtResolution::Stop {
             reason: request
@@ -7424,19 +9309,22 @@ pub fn resolve_workflow_operation_in_doubt(
     {
         crate::workflow::InDoubtResolutionResult::Saved { state, lease } => (state, lease),
         crate::workflow::InDoubtResolutionResult::NotFound => {
-            return Err(format!("operation not found: {}", request.operation_id));
+            return Err(CommandError::not_found(format!(
+                "operation not found: {}",
+                request.operation_id
+            )));
         }
         crate::workflow::InDoubtResolutionResult::NotInDoubt { status } => {
-            return Err(format!(
+            return Err(CommandError::conflict(format!(
                 "operation {} is not in_doubt (status={status:?})",
                 request.operation_id
-            ));
+            )));
         }
         crate::workflow::InDoubtResolutionResult::Busy { .. } => {
-            return Err(format!(
+            return Err(CommandError::conflict(format!(
                 "workflow run is busy and in_doubt decision was not applied: {}",
                 request.operation_id
-            ));
+            )));
         }
     };
     let workflow = WorkflowActionResult {
@@ -7455,6 +9343,7 @@ pub fn resolve_workflow_operation_in_doubt(
             project_mutation,
         )?;
     }
+    state.ensure_workflow_scheduler()?;
     Ok(ResolveInDoubtOperationResult {
         operation_id: request.operation_id,
         decision: request.decision,
@@ -7522,7 +9411,9 @@ fn load_workflow_definition_with_revision(
             .as_deref()
             .filter(|id| *id != "default")
         {
-            return Err(format!("workflow not found: {workflow_id}"));
+            return Err(CommandError::not_found(format!(
+                "workflow not found: {workflow_id}"
+            )));
         }
         return Ok((default_workflow_definition(), String::new()));
     }
@@ -7575,17 +9466,18 @@ fn generated_pack_operation_id(
 fn validate_pack_operation_id(operation_id: String) -> CommandResult<String> {
     let operation_id = operation_id.trim().to_owned();
     if operation_id.is_empty() {
-        return Err("pack operation_id cannot be empty".to_owned());
+        return Err(CommandError::validation(
+            "pack operation_id cannot be empty",
+        ));
     }
     if operation_id.len() > 128
         || !operation_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')
     {
-        return Err(
-            "pack operation_id must be at most 128 ASCII letters, digits, '-', '_' or ':'"
-                .to_owned(),
-        );
+        return Err(CommandError::validation(
+            "pack operation_id must be at most 128 ASCII letters, digits, '-', '_' or ':'",
+        ));
     }
     Ok(operation_id)
 }
@@ -7607,10 +9499,10 @@ fn pack_operation_path(
     ensure_path_under_root(&dir, &path).map_err(error_to_string)?;
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(format!(
+            return Err(CommandError::permission(format!(
                 "pack operation record must be a regular file: {}",
                 path.display()
-            ));
+            )));
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -7638,10 +9530,10 @@ fn load_pack_operation_record_if_exists(
     };
     if let Ok(record) = serde_json::from_str::<WorkflowPackOperationRecord>(&raw) {
         if record.operation_id != operation_id {
-            return Err(format!(
+            return Err(CommandError::conflict(format!(
                 "pack operation id mismatch: requested {operation_id}, stored {}",
                 record.operation_id
-            ));
+            )));
         }
         return Ok(Some(record));
     }
@@ -7650,9 +9542,9 @@ fn load_pack_operation_record_if_exists(
         serde_json::from_str::<WorkflowPackGraphReport>(&raw).map_err(error_to_string)?;
     if let Some(stored) = report.operation_id.as_deref() {
         if stored != operation_id {
-            return Err(format!(
+            return Err(CommandError::conflict(format!(
                 "pack operation id mismatch: requested {operation_id}, stored {stored}"
-            ));
+            )));
         }
     } else {
         report.operation_id = Some(operation_id.to_owned());
@@ -7674,16 +9566,16 @@ fn resume_pack_operation(
     loaded_revision: &str,
 ) -> CommandResult<WorkflowPackGraphReport> {
     if record.request_hash.is_empty() {
-        return Err(format!(
+        return Err(CommandError::legacy_run(format!(
             "legacy pack operation {} has no request fingerprint and cannot be replayed",
             record.operation_id
-        ));
+        )));
     }
     if record.request_hash != request_hash {
-        return Err(format!(
+        return Err(CommandError::conflict(format!(
             "pack operation_id {} was reused with a different request",
             record.operation_id
-        ));
+        )));
     }
     if record.status == WorkflowPackOperationStatus::Committed {
         return Ok(record.report);
@@ -7694,17 +9586,19 @@ fn resume_pack_operation(
         .workflow
         .content_revision
         .as_deref()
-        .ok_or_else(|| "prepared pack operation is missing result revision".to_owned())?;
+        .ok_or_else(|| {
+            CommandError::internal("prepared pack operation is missing result revision")
+        })?;
     if loaded_revision == result_revision {
         record.status = WorkflowPackOperationStatus::Committed;
         persist_pack_operation_record(operation_path, &record)?;
         return Ok(record.report);
     }
     if loaded_revision != record.expected_revision {
-        return Err(format!(
+        return Err(CommandError::conflict(format!(
             "pack operation {} cannot resume: expected base revision {}, actual {}",
             record.operation_id, record.expected_revision, loaded_revision
-        ));
+        )));
     }
 
     let mut graph = record.report.workflow.clone();
@@ -7725,8 +9619,10 @@ fn load_pack_operation(
     let path = pack_operation_path(project_root, app_state_root, operation_id)?;
     let _operation_read =
         crate::config::store::PathWriteLock::acquire(&path).map_err(error_to_string)?;
-    let mut record = load_pack_operation_record_if_exists(&path, operation_id)?
-        .ok_or_else(|| format!("pack operation not found: {operation_id}"))?;
+    let mut record =
+        load_pack_operation_record_if_exists(&path, operation_id)?.ok_or_else(|| {
+            CommandError::not_found(format!("pack operation not found: {operation_id}"))
+        })?;
     if record.status == WorkflowPackOperationStatus::Committed {
         return Ok(record.report);
     }
@@ -7740,7 +9636,9 @@ fn load_pack_operation(
         .workflow
         .content_revision
         .as_deref()
-        .ok_or_else(|| "prepared pack operation is missing result revision".to_owned())?;
+        .ok_or_else(|| {
+            CommandError::internal("prepared pack operation is missing result revision")
+        })?;
     if current_revision == result_revision {
         record.status = WorkflowPackOperationStatus::Committed;
         persist_pack_operation_record(&path, &record)?;
@@ -7756,10 +9654,10 @@ fn load_pack_operation(
         persist_pack_operation_record(&path, &record)?;
         return Ok(record.report);
     }
-    Err(format!(
+    Err(CommandError::conflict(format!(
         "pack operation {operation_id} cannot be recovered: expected base revision {}, result revision {result_revision}, actual {current_revision}",
         record.expected_revision
-    ))
+    )))
 }
 
 fn default_workflow_definition() -> WorkflowDefinition {
@@ -7777,9 +9675,9 @@ fn parse_workflow_file(content: &str) -> CommandResult<WorkflowDefinition> {
         Ok(workflow) => Ok(workflow),
         Err(workflow_error) => {
             let manifest = serde_json::from_str::<WorkflowManifest>(content).map_err(|error| {
-                format!(
+                CommandError::serialization(format!(
                     "invalid workflow JSON: {workflow_error}; invalid workflow manifest: {error}"
-                )
+                ))
             })?;
             manifest.import_definition().map_err(error_to_string)
         }
@@ -8014,26 +9912,26 @@ fn default_embedding_model_for_provider(provider: &str) -> Option<ModelConfig> {
 fn normalize_provider(provider: &str) -> CommandResult<String> {
     let provider = provider.trim().to_lowercase().replace('-', "_");
     if provider.is_empty() {
-        return Err("provider cannot be empty".to_owned());
+        return Err(CommandError::validation("provider cannot be empty"));
     }
     Ok(provider)
 }
 
 fn validate_project_root(project_root: &Path) -> CommandResult<()> {
     if project_root.as_os_str().is_empty() {
-        return Err("project_root cannot be empty".to_owned());
+        return Err(CommandError::validation("project_root cannot be empty"));
     }
     if !project_root.exists() {
-        return Err(format!(
+        return Err(CommandError::not_found(format!(
             "project root does not exist: {}",
             project_root.display()
-        ));
+        )));
     }
     if !project_root.is_dir() {
-        return Err(format!(
+        return Err(CommandError::validation(format!(
             "project root is not a directory: {}",
             project_root.display()
-        ));
+        )));
     }
     Ok(())
 }
@@ -8046,10 +9944,10 @@ fn validate_initialized_project_root(project_root: &Path) -> CommandResult<()> {
     validate_existing_project_root(project_root)?;
     let config_dir = project_root.join(".config");
     if !config_dir.is_dir() {
-        return Err(format!(
+        return Err(CommandError::validation(format!(
             "project root is not initialized: {}",
             project_root.display()
-        ));
+        )));
     }
     Ok(())
 }
@@ -8063,7 +9961,9 @@ fn validate_money(field: &str, value: f64) -> CommandResult<()> {
     if value.is_finite() && value >= 0.0 {
         Ok(())
     } else {
-        Err(format!("{field} must be finite and non-negative"))
+        Err(CommandError::validation(format!(
+            "{field} must be finite and non-negative"
+        )))
     }
 }
 
@@ -8088,7 +9988,7 @@ fn ensure_no_parent_traversal(path: &Path) -> CommandResult<()> {
         .components()
         .any(|component| matches!(component, Component::ParentDir))
     {
-        return Err("path cannot contain '..'".to_owned());
+        return Err(CommandError::permission("path cannot contain '..'"));
     }
     Ok(())
 }
@@ -8105,10 +10005,12 @@ fn absolute_path(path: &Path) -> PathBuf {
 
 fn reject_symlink_root(path: &Path) -> CommandResult<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
-            "workflow root cannot be a symbolic link: {}",
-            path.display()
-        )),
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CommandError::permission(format!(
+                "workflow root cannot be a symbolic link: {}",
+                path.display()
+            )))
+        }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error_to_string(error)),
@@ -8123,13 +10025,15 @@ fn workflow_branch_from_start(
         .nodes
         .iter()
         .find(|node| node.id == *start_node_id)
-        .ok_or_else(|| format!("start node not found: {}", start_node_id.as_str()))?;
+        .ok_or_else(|| {
+            CommandError::not_found(format!("start node not found: {}", start_node_id.as_str()))
+        })?;
     if start_node.type_name != "start" {
-        return Err(format!(
+        return Err(CommandError::validation(format!(
             "start_node_id must reference a start node, got {} ({})",
             start_node_id.as_str(),
             start_node.type_name
-        ));
+        )));
     }
 
     let reachable = reachable_nodes_from_start(workflow, start_node_id);
@@ -8211,7 +10115,7 @@ fn default_target_handle() -> String {
 
 fn non_empty_or(field: &str, value: String) -> CommandResult<String> {
     if value.trim().is_empty() {
-        Err(format!("{field} cannot be empty"))
+        Err(CommandError::validation(format!("{field} cannot be empty")))
     } else {
         Ok(value)
     }
@@ -8232,8 +10136,8 @@ fn new_run_id() -> CommandResult<RunId> {
     )))
 }
 
-fn error_to_string(error: impl std::fmt::Display) -> String {
-    error.to_string()
+fn error_to_string(error: impl Into<CommandError>) -> CommandError {
+    error.into()
 }
 
 /// 生成一个简单的随机 u16，用于 run_id 后缀防止碰撞。

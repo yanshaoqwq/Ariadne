@@ -393,8 +393,26 @@ fn parse_json_body<T: for<'de> Deserialize<'de>>(
         .map_err(|error| RestRouteError::new(400, format!("invalid JSON body: {error}")))
 }
 
-fn command_error(error: String) -> RestRouteError {
-    RestRouteError::new(400, error)
+fn command_error(error: crate::command_error::CommandError) -> RestRouteError {
+    use crate::command_error::CommandErrorCode;
+
+    let status = match error.code {
+        CommandErrorCode::Validation | CommandErrorCode::Serialization => 400,
+        CommandErrorCode::Permission => 403,
+        CommandErrorCode::NotFound | CommandErrorCode::LegacyRun => 404,
+        CommandErrorCode::Conflict
+        | CommandErrorCode::Cancelled
+        | CommandErrorCode::Paused
+        | CommandErrorCode::Stopped
+        | CommandErrorCode::ExternalOutcomeUnknown => 409,
+        CommandErrorCode::Budget | CommandErrorCode::ResourceLimit => 429,
+        CommandErrorCode::Network | CommandErrorCode::External => 502,
+        CommandErrorCode::Io
+        | CommandErrorCode::Ipc
+        | CommandErrorCode::Internal
+        | CommandErrorCode::Unknown => 500,
+    };
+    RestRouteError::new(status, error.to_string())
 }
 
 fn parse_u64(field: &str, value: &str) -> Result<u64, RestRouteError> {
@@ -440,6 +458,12 @@ fn run_log_query_from_rest(
             .get("limit")
             .map(|value| parse_usize("limit", value))
             .transpose()?,
+        descending: query
+            .get("descending")
+            .map(|value| value.parse::<bool>())
+            .transpose()
+            .map_err(|_| RestRouteError::new(400, "descending must be true or false"))?
+            .unwrap_or(false),
     })
 }
 

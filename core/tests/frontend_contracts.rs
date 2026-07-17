@@ -3,9 +3,10 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 use ariadne::contracts::{
-    ArtifactKind, Edge, EdgeId, NodeId, NodeInstance, PatchHunk, PermissionPolicy, PortEndpoint,
-    PortValue, ProviderCapability, ProviderDefinition, ProviderType, RunId, SourceSpan, TextRange,
-    WorkflowDefinition, WorkflowEdgeKind, WorkflowId, EXECUTION_INPUT_PORT, EXECUTION_OUTPUT_PORT,
+    ArtifactKind, Edge, EdgeId, ExecutionCancellation, NodeId, NodeInstance, PatchHunk,
+    PermissionPolicy, PortEndpoint, PortValue, ProviderCapability, ProviderDefinition,
+    ProviderType, RunId, SourceSpan, TextRange, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
+    EXECUTION_INPUT_PORT, EXECUTION_OUTPUT_PORT,
 };
 use ariadne::costs::{BudgetLimits, SqliteCostLedger};
 use ariadne::diagnostics::{BackendDiagnosticsReport, DiagnosticStatus};
@@ -15,15 +16,17 @@ use ariadne::documents::{
 };
 use ariadne::frontend::{
     apply_node_detail_patch, apply_quick_edit_patch, build_works_tree, export_chapters_combined,
-    export_chapters_markdown, export_workflow_selection, import_chapter_document,
-    initialize_project, install_workflow_template_manifest, node_has_breakpoint, now_timestamp_ms,
-    pack_workflow_selection, project_document_permission, quick_edit_to_patch, set_node_breakpoint,
+    export_chapters_markdown, export_workflow_selection, extract_project_reference_tokens,
+    import_chapter_document, initialize_project, install_workflow_template_manifest,
+    node_has_breakpoint, now_timestamp_ms, pack_workflow_selection, project_ai_context_window,
+    project_document_permission, quick_edit_to_patch, set_node_breakpoint,
     upsert_canvas_annotation, ArtifactReferenceEntry, CanvasAnnotation, ChapterExportFormat,
     ChapterImportRequest, ConfirmationLogEntry, ConfirmationLogState, ConfirmationLogStore,
-    FileConfirmationLogStore, NodeDetailPatch, ProjectMemoryStore, ProjectReferenceKind,
+    FileConfirmationLogStore, NodeDetailPatch, ProjectAiAppendOutcome, ProjectAiChatMessage,
+    ProjectAiChatRole, ProjectAiConversationStore, ProjectMemoryStore, ProjectReferenceKind,
     ProjectReferenceResolver, ProjectRegistryStore, QuickEditService, TemplateRepositoryClient,
     UiPreferences, UiPreferencesStore, UiRunLogEntry, UiRunLogFilter, UiRunLogKind, UiRunLogLevel,
-    UiRunLogStore,
+    UiRunLogStore, OFFICIAL_TEMPLATE_REPOSITORY_URL,
 };
 use ariadne::llm::{LlmService, LlmServiceConfig};
 use ariadne::providers::{
@@ -300,6 +303,52 @@ fn template_repository_client_uses_search_detail_and_download_endpoints() {
 }
 
 #[test]
+fn official_template_repository_is_versioned_offline_and_installable() {
+    let client = TemplateRepositoryClient::new(OFFICIAL_TEMPLATE_REPOSITORY_URL).unwrap();
+
+    let all = client.search("", &[], 0).unwrap();
+    let worldbuilding = client.search("世界观", &[], 0).unwrap();
+    let detail = client.detail("official-novel-starter").unwrap();
+    let manifest = client.download("official-novel-starter").unwrap();
+
+    assert_eq!(all.len(), 3);
+    assert_eq!(worldbuilding.len(), 1);
+    assert_eq!(worldbuilding[0].id, "official-worldbuilding");
+    assert_eq!(detail.version, "1.0.0");
+    assert_eq!(detail.name, "ui.template.builtin.novel_starter.name");
+    assert_eq!(manifest["minimum_ariadne_version"], "0.1.0");
+
+    let temp = tempfile::tempdir().unwrap();
+    let report = client
+        .download_to_workflows("official-novel-starter", temp.path())
+        .unwrap();
+    let loaded = WorkflowTemplateLoader::new()
+        .with_project_root(temp.path())
+        .get("official-novel-starter", "1.0.0")
+        .unwrap();
+    assert_eq!(report.workflow_id, "official-novel-starter");
+    assert_eq!(loaded.manifest.workflow.nodes.len(), 2);
+}
+
+#[test]
+fn template_repository_rejects_unrecognized_internal_scheme_and_future_manifest() {
+    let invalid = TemplateRepositoryClient::new("ariadne://other/v1").unwrap_err();
+    assert!(invalid.to_string().contains("official v1 URL"));
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut manifest = workflow_manifest("future-template", "1.0.0");
+    manifest.minimum_ariadne_version = Some("999.0.0".to_owned());
+    let error = install_workflow_template_manifest(
+        serde_json::to_value(manifest).unwrap(),
+        temp.path(),
+        false,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("requires Ariadne 999.0.0"));
+    assert!(!temp.path().join("future-template").exists());
+}
+
+#[test]
 fn template_repository_client_rejects_oversized_streaming_response() {
     allow_local_template_repository_for_test();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -334,6 +383,50 @@ fn template_repository_client_rejects_oversized_streaming_response() {
     server.join().unwrap();
     assert!(error.contains("template_repository_response"));
     assert!(error.contains("response exceeds"));
+}
+
+#[test]
+fn c9_template_repository_request_can_cancel_stalled_response() {
+    allow_local_template_repository_for_test();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_accepted = std::sync::Arc::clone(&accepted);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 2048];
+        let _ = stream.read(&mut request).unwrap();
+        server_accepted.store(true, std::sync::atomic::Ordering::Release);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    });
+
+    let cancellation = ExecutionCancellation::new();
+    let cancel_from_thread = cancellation.clone();
+    let canceller = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        while !accepted.load(std::sync::atomic::Ordering::Acquire)
+            && started.elapsed() < std::time::Duration::from_secs(2)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cancel_from_thread.cancel();
+    });
+    let client = TemplateRepositoryClient::new_with_cancellation(
+        format!("http://127.0.0.1:{}", addr.port()),
+        cancellation,
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let error = client.search("basic", &[], 0).unwrap_err();
+    let request_elapsed = started.elapsed();
+
+    canceller.join().unwrap();
+    server.join().unwrap();
+    assert!(matches!(
+        error,
+        ariadne::contracts::CoreError::ExternalCancellation { .. }
+    ));
+    assert!(request_elapsed < std::time::Duration::from_millis(300));
 }
 
 #[test]
@@ -448,6 +541,41 @@ fn quick_edit_diff_preview_is_bounded_for_long_chapters() {
     assert!(result.diff.len() <= 16 * 1024);
     assert!(result.diff.starts_with("- 旧"));
     assert!(result.diff.contains("\n+ 新"));
+}
+
+#[test]
+fn quick_edit_diff_marks_changed_lines_and_folds_unchanged_runs() {
+    let original = "共同一\n共同二\n共同三\n旧句\n共同四\n共同五\n共同六";
+    let suggested = "共同一\n共同二\n共同三\n新句\n共同四\n共同五\n共同六";
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let llm = LlmService::new(&ledger, Default::default());
+    let provider = MockLongQuickEditProvider {
+        response: suggested.to_owned(),
+    };
+    let result = QuickEditService::new(
+        llm,
+        &provider,
+        LlmServiceConfig {
+            provider_id: "mock-diff".to_owned(),
+            model_id: "model".to_owned(),
+            max_tool_rounds: 0,
+            timeout_ms: 1_000,
+            max_total_tokens: None,
+            budget_limits: BudgetLimits::default(),
+            input_cost_per_million_tokens: None,
+            output_cost_per_million_tokens: None,
+            max_output_tokens: None,
+            max_context_tokens: None,
+        },
+    )
+    .quick_edit(original, "替换中间一句", None)
+    .unwrap();
+
+    assert_eq!(result.suggested, suggested);
+    assert_eq!(
+        result.diff,
+        "  ... (3 unchanged lines)\n- 旧句\n+ 新句\n  ... (3 unchanged lines)\n"
+    );
 }
 
 #[test]
@@ -632,13 +760,14 @@ fn project_reference_resolver_handles_confirmation_document_chapter_artifact_and
         resolver.resolve("@确认项:confirm-3").unwrap().kind,
         ProjectReferenceKind::Confirmation
     );
-    assert_eq!(
-        resolver
-            .resolve(&format!("@文档/{}", doc_path.display()))
-            .unwrap()
-            .kind,
-        ProjectReferenceKind::Document
-    );
+    let document = resolver
+        .resolve(&format!("@文档/{}", doc_path.display()))
+        .unwrap();
+    assert_eq!(document.kind, ProjectReferenceKind::Document);
+    let fragment = &document.payload["fragments"][0];
+    assert_eq!(fragment["text"], "正文");
+    assert_eq!(fragment["start_line"], 1);
+    assert_eq!(fragment["source_version"], document.payload["version"]);
     assert_eq!(
         resolver.resolve("@章节/stage1:chapter1").unwrap().summary,
         "第一章"
@@ -651,6 +780,57 @@ fn project_reference_resolver_handles_confirmation_document_chapter_artifact_and
         resolver.resolve("@节点/writer/输出/draft").unwrap().kind,
         ProjectReferenceKind::NodeOutput
     );
+}
+
+#[test]
+fn project_reference_tokens_are_extracted_and_deduplicated_from_message() {
+    assert_eq!(
+        extract_project_reference_tokens(
+            "比较 @文档/documents/a.md，引用 @知识/story-segment-1；再看 @文档/documents/a.md。"
+        ),
+        vec![
+            "@文档/documents/a.md".to_owned(),
+            "@知识/story-segment-1".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn project_document_reference_uses_bounded_query_centered_fragments() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = test_document_service(temp.path());
+    let path = temp.path().join("documents/large.md");
+    let content = format!(
+        "{}MIDDLE-DOCUMENT-SENTINEL{}",
+        "a".repeat(20_000),
+        "b".repeat(20_000)
+    );
+    service
+        .save_document(DocumentWriteRequest {
+            path: path.clone(),
+            content,
+            format: None,
+            base_version: None,
+        })
+        .unwrap();
+    let resolver = ProjectReferenceResolver::new()
+        .with_documents(&service)
+        .with_document_root(temp.path())
+        .with_query("MIDDLE-DOCUMENT-SENTINEL");
+    let reference = resolver.resolve("@文档/documents/large.md").unwrap();
+    let fragments = reference.payload["fragments"].as_array().unwrap();
+    let chars = fragments
+        .iter()
+        .filter_map(|fragment| fragment["text"].as_str())
+        .map(|text| text.chars().count())
+        .sum::<usize>();
+    assert!(chars <= 32 * 1024);
+    assert!(fragments.iter().any(|fragment| {
+        fragment["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("MIDDLE-DOCUMENT-SENTINEL"))
+    }));
+    assert_eq!(reference.payload["content_truncated"], true);
 }
 
 #[test]
@@ -826,6 +1006,96 @@ fn run_log_query_supports_stable_cursor_and_limit() {
             .collect::<Vec<_>>(),
         vec!["c"]
     );
+
+    let newest = store
+        .query(UiRunLogFilter {
+            limit: Some(2),
+            descending: true,
+            ..UiRunLogFilter::default()
+        })
+        .unwrap();
+    assert_eq!(
+        newest
+            .iter()
+            .map(|entry| entry.log_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c", "b"]
+    );
+    let older = store
+        .query(UiRunLogFilter {
+            after_timestamp_ms: Some(newest[1].timestamp_ms),
+            after_log_id: Some(newest[1].log_id.clone()),
+            limit: Some(2),
+            descending: true,
+            ..UiRunLogFilter::default()
+        })
+        .unwrap();
+    assert_eq!(
+        older
+            .iter()
+            .map(|entry| entry.log_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a"]
+    );
+}
+
+#[test]
+fn run_log_mark_read_respects_visible_filter_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = UiRunLogStore::default_for_project(temp.path());
+    let timestamp_ms = now_timestamp_ms();
+    for (log_id, run_id, level) in [
+        ("run-a-error", "run-a", UiRunLogLevel::Error),
+        ("run-a-info", "run-a", UiRunLogLevel::Info),
+        ("run-b-error", "run-b", UiRunLogLevel::Error),
+    ] {
+        store
+            .append(UiRunLogEntry {
+                log_id: log_id.to_owned(),
+                timestamp_ms,
+                kind: UiRunLogKind::Node,
+                level,
+                message: log_id.to_owned(),
+                workflow_id: Some(WorkflowId::from("wf")),
+                run_id: Some(RunId::from(run_id)),
+                node_id: Some(NodeId::from("writer")),
+                unread: false,
+                metadata: Value::Null,
+            })
+            .unwrap();
+    }
+
+    let updated = store
+        .mark_read(UiRunLogFilter {
+            level: Some(UiRunLogLevel::Error),
+            run_id: Some(RunId::from("run-a")),
+            ..UiRunLogFilter::default()
+        })
+        .unwrap();
+    assert_eq!(updated, 1);
+
+    let entries = store.read_all().unwrap();
+    assert!(
+        !entries
+            .iter()
+            .find(|entry| entry.log_id == "run-a-error")
+            .unwrap()
+            .unread
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.log_id == "run-a-info")
+            .unwrap()
+            .unread
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.log_id == "run-b-error")
+            .unwrap()
+            .unread
+    );
 }
 
 #[test]
@@ -843,6 +1113,7 @@ fn works_service_builds_tree_imports_chapters_and_exports_selected_markdown() {
             order: 1,
             source_path: source,
             target_path: target,
+            overwrite: false,
             outline_ref: None,
         },
     )
@@ -912,6 +1183,10 @@ fn f20_works_tree_uses_official_stage_relation_and_preserves_unassigned_chapters
         Some("misleading-prefix:chapter-1")
     );
     assert_eq!(
+        official_stage.children[0].document_id.as_deref(),
+        Some("documents/chapter-1.md")
+    );
+    assert_eq!(
         official_stage.children[0].stage_id.as_deref(),
         Some("official-stage")
     );
@@ -930,6 +1205,10 @@ fn f20_works_tree_uses_official_stage_relation_and_preserves_unassigned_chapters
     assert_eq!(
         unassigned.children[0].chapter_id.as_deref(),
         Some("chapter-2")
+    );
+    assert_eq!(
+        unassigned.children[0].document_id.as_deref(),
+        Some("documents/chapter-2.md")
     );
 
     let error = build_works_tree(
@@ -960,6 +1239,7 @@ fn import_chapter_rejects_source_outside_project_root() {
             order: 1,
             source_path: source,
             target_path: target.clone(),
+            overwrite: false,
             outline_ref: None,
         },
     )
@@ -967,6 +1247,44 @@ fn import_chapter_rejects_source_outside_project_root() {
 
     assert!(error.to_string().contains("permission denied"));
     assert!(!target.exists());
+}
+
+#[test]
+fn import_chapter_requires_explicit_overwrite_and_preserves_existing_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = test_document_service(temp.path());
+    let source = temp.path().join("source.md");
+    let target = temp.path().join("documents").join("chapter1.md");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&source, "新正文").unwrap();
+    std::fs::write(&target, "旧正文").unwrap();
+
+    let request = ChapterImportRequest {
+        chapter_id: "chapter1".to_owned(),
+        title: "第一章".to_owned(),
+        order: 1,
+        source_path: source,
+        target_path: target.clone(),
+        overwrite: false,
+        outline_ref: None,
+    };
+    let error = import_chapter_document(&service, request.clone()).unwrap_err();
+    assert!(matches!(
+        error,
+        ariadne::contracts::CoreError::DocumentAlreadyExists { .. }
+    ));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "旧正文");
+
+    let imported = import_chapter_document(
+        &service,
+        ChapterImportRequest {
+            overwrite: true,
+            ..request
+        },
+    )
+    .unwrap();
+    assert_eq!(imported.entry.chapter_id, "chapter1");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "新正文");
 }
 
 #[test]
@@ -1284,5 +1602,141 @@ fn d4_project_memory_append_uses_atomic_replace_not_in_place() {
         memory.read_all().unwrap(),
         after2,
         "failed append must leave prior memory intact"
+    );
+}
+
+#[test]
+fn project_ai_conversation_store_compacts_with_revision_and_structured_memory() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectAiConversationStore::open(temp.path()).unwrap();
+    let seed = (0..60)
+        .map(|index| {
+            (
+                if index % 2 == 0 {
+                    "user".to_owned()
+                } else {
+                    "assistant".to_owned()
+                },
+                format!("历史消息 {index} C4-SUMMARY-SENTINEL"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let snapshot = store.load_or_seed("works", &seed).unwrap();
+    assert_eq!(snapshot.revision, 0);
+    assert!(snapshot.messages.len() <= 48);
+    assert!(!store
+        .select_summary_chunks("works", "C4-SUMMARY-SENTINEL", 8)
+        .unwrap()
+        .is_empty());
+
+    let saved = store
+        .append_messages(
+            "works",
+            snapshot.revision,
+            &[
+                ("user".to_owned(), "新问题".to_owned()),
+                ("assistant".to_owned(), "新回答".to_owned()),
+            ],
+        )
+        .unwrap();
+    let ProjectAiAppendOutcome::Saved {
+        snapshot: saved_snapshot,
+        appended,
+    } = saved
+    else {
+        panic!("conversation append must save at matching revision");
+    };
+    assert_eq!(saved_snapshot.revision, 1);
+    assert_eq!(appended.len(), 2);
+    assert!(matches!(
+        store.append_messages("works", 0, &[("user".to_owned(), "stale".to_owned())]),
+        Ok(ProjectAiAppendOutcome::RevisionConflict { actual_revision: 1 })
+    ));
+
+    let memory_version = store
+        .synchronize_project_memory("叙事视角：第三人称\n时代：近未来")
+        .unwrap();
+    let memory = store.select_project_memory("第三人称", 8).unwrap();
+    assert_eq!(memory.len(), 1);
+    assert_eq!(memory[0].logical_key, "叙事视角");
+    assert_eq!(memory[0].source, "project_memory.md");
+    assert_eq!(memory[0].source_version, memory_version);
+    let entity_id = memory[0].entity_id.clone();
+    let updated_memory_version = store
+        .synchronize_project_memory("前言：保留\n叙事视角：第一人称\n时代：近未来")
+        .unwrap();
+    let updated_memory = store.select_project_memory("第一人称", 8).unwrap();
+    assert_eq!(updated_memory.len(), 1);
+    assert_eq!(updated_memory[0].entity_id, entity_id);
+    assert_ne!(updated_memory[0].source_version, memory_version);
+    assert_eq!(updated_memory[0].source_version, updated_memory_version);
+    assert_eq!(updated_memory[0].source_line, 2);
+
+    let reopened = ProjectAiConversationStore::open(temp.path()).unwrap();
+    assert_eq!(reopened.load("works").unwrap().revision, 1);
+    assert!(!reopened
+        .select_summary_chunks("works", "C4-SUMMARY-SENTINEL", 8)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn project_ai_context_policy_bounds_history_without_orphan_assistant_turn() {
+    let mut history = Vec::new();
+    for index in 0..8 {
+        history.push(ProjectAiChatMessage {
+            role: ProjectAiChatRole::User,
+            content: format!("user-{index}-{}", "u".repeat(400)),
+        });
+        history.push(ProjectAiChatMessage {
+            role: ProjectAiChatRole::Assistant,
+            content: format!("assistant-{index}-{}", "a".repeat(400)),
+        });
+    }
+
+    let window = project_ai_context_window(
+        &[],
+        &[],
+        &[],
+        &history,
+        "current question",
+        Some(2_048),
+        Some(256),
+    )
+    .unwrap();
+
+    assert!(window.history_truncated);
+    assert!(window.history.len() < history.len());
+    assert_ne!(
+        window.history.first().map(|message| message.role),
+        Some(ProjectAiChatRole::Assistant)
+    );
+    assert!(window.estimated_input_tokens <= u64::from(window.context_limit_tokens));
+}
+
+#[test]
+fn project_ai_conversation_guard_serializes_provider_side_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = ProjectAiConversationStore::try_acquire_conversation(temp.path(), "works")
+        .unwrap()
+        .expect("first caller must claim the conversation");
+    assert!(
+        ProjectAiConversationStore::try_acquire_conversation(temp.path(), "works")
+            .unwrap()
+            .is_none(),
+        "a competing caller must not reach provider dispatch"
+    );
+    assert!(
+        ProjectAiConversationStore::try_acquire_conversation(temp.path(), "workspace")
+            .unwrap()
+            .is_some(),
+        "independent conversations must remain concurrent"
+    );
+    drop(first);
+    assert!(
+        ProjectAiConversationStore::try_acquire_conversation(temp.path(), "works")
+            .unwrap()
+            .is_some(),
+        "the OS lock must be released with the request guard"
     );
 }

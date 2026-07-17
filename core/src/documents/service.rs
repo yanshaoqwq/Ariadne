@@ -382,6 +382,24 @@ impl FileDocumentService {
         request: DocumentWriteRequest,
         cancellation: &CancellationToken,
     ) -> CoreResult<DocumentWriteReport> {
+        self.save_document_with_policy(request, cancellation, false)
+    }
+
+    /// 仅在目标不存在时创建文档。存在判定与原子替换共享同一独占路径锁，
+    /// 供导入等必须显式确认覆盖的入口使用。
+    pub fn create_document(
+        &self,
+        request: DocumentWriteRequest,
+    ) -> CoreResult<DocumentWriteReport> {
+        self.save_document_with_policy(request, &CancellationToken::new(), true)
+    }
+
+    fn save_document_with_policy(
+        &self,
+        request: DocumentWriteRequest,
+        cancellation: &CancellationToken,
+        create_only: bool,
+    ) -> CoreResult<DocumentWriteReport> {
         cancellation.check()?;
         self.ensure_write(&request.path)?;
         let _project_mutation = self
@@ -389,6 +407,11 @@ impl FileDocumentService {
             .acquire_project_mutation("document_save")?;
         // D1-a：base_version 校验与替换在独占锁下，防止并发保存静默丢写。
         let _write_lock = crate::config::store::PathWriteLock::acquire(&request.path)?;
+        if create_only && request.path.try_exists()? {
+            return Err(CoreError::DocumentAlreadyExists {
+                path: request.path.clone(),
+            });
+        }
         let format = resolve_format(&request.path, request.format)?;
         validate_content_format(&request.content, format)?;
         validate_write_base_version(

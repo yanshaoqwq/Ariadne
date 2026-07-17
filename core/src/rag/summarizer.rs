@@ -2,17 +2,19 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::contracts::{
     content_version_for_bytes, CoreError, CoreResult, ExecutionCancellation,
-    ExternalDispatchAuthorization, ExternalDispatchOutcome, NodeId, RunId, SourceSpan, WorkflowId,
+    ExternalDispatchAuthorization, ExternalDispatchOutcome, NodeId, PermissionPolicy, RunId,
+    SourceSpan, WorkflowId,
 };
 use crate::costs::CostLedger;
+use crate::llm::{tool_result_message, ToolExecutionContext, ToolExecutor, ToolExecutorRouter};
 use crate::providers::{
     ContentPart, LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderCallContext,
-    ProviderExecutor,
+    ProviderExecutor, SearchProvider, ToolDefinition, WebSearchToolExecutor,
 };
 use crate::rag::line_patch::line_range_to_text_range;
 use crate::rag::models::{
@@ -21,6 +23,7 @@ use crate::rag::models::{
 };
 use crate::rag::resources::PromptResources;
 use crate::rag::store::{SqliteWritingKnowledgeStore, SummarizerStagePreparation};
+use crate::retrieval::{ProjectRetrievalRuntime, ProjectSearchToolExecutor};
 use crate::skills::stable_text_hash;
 
 /// workflow 父 operation 传给四步总结器的持久化身份。
@@ -62,6 +65,21 @@ pub struct SummarizerExecutor<'a, L: CostLedger> {
     ledger: &'a L,
     prompts: &'a PromptResources,
     config: SummarizerConfig,
+    project_search: Option<SummarizerProjectSearch<'a>>,
+    web_search: Option<SummarizerWebSearch<'a>>,
+}
+
+struct SummarizerProjectSearch<'a> {
+    runtime: &'a ProjectRetrievalRuntime,
+    tool: ToolDefinition,
+    max_tool_rounds: u32,
+}
+
+struct SummarizerWebSearch<'a> {
+    provider: &'a dyn SearchProvider,
+    policy: &'a PermissionPolicy,
+    tool: ToolDefinition,
+    max_tool_rounds: u32,
 }
 
 impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
@@ -77,7 +95,41 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
             ledger,
             prompts,
             config,
+            project_search: None,
+            web_search: None,
         }
+    }
+
+    /// 为四步总结器启用项目级 Search tool。
+    pub fn with_project_search(
+        mut self,
+        runtime: &'a ProjectRetrievalRuntime,
+        tool: ToolDefinition,
+        max_tool_rounds: u32,
+    ) -> Self {
+        self.project_search = Some(SummarizerProjectSearch {
+            runtime,
+            tool,
+            max_tool_rounds,
+        });
+        self
+    }
+
+    /// 为四步总结器启用外部 Web Search tool。
+    pub fn with_web_search(
+        mut self,
+        provider: &'a dyn SearchProvider,
+        policy: &'a PermissionPolicy,
+        tool: ToolDefinition,
+        max_tool_rounds: u32,
+    ) -> Self {
+        self.web_search = Some(SummarizerWebSearch {
+            provider,
+            policy,
+            tool,
+            max_tool_rounds,
+        });
+        self
     }
 
     /// 执行四步总结，返回可交给流水线的完整草稿。
@@ -452,18 +504,19 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
         let request = LlmRequest {
             model_id: self.config.model_id.clone(),
             messages: vec![LlmMessage::user(instruction.to_owned())],
-            tools: Vec::new(),
+            tools: self
+                .project_search
+                .iter()
+                .map(|search| search.tool.clone())
+                .chain(self.web_search.iter().map(|search| search.tool.clone()))
+                .collect(),
             temperature: None,
             max_output_tokens: None,
             stream: false,
             metadata: json!({ "summarizer_step": step }),
         };
         let Some(parent) = self.config.workflow_operation.as_ref() else {
-            return executor.complete_llm(
-                self.provider,
-                &self.provider_call_context(step, None),
-                request,
-            );
+            return self.complete_stage_tool_loop(&executor, step, request, None, |_, _| Ok(()));
         };
         let store = stage_store.ok_or_else(|| {
             CoreError::validation("summarizer workflow operation requires a stage store")
@@ -485,9 +538,17 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
                 operation_id,
                 response_json,
             } => {
-                let response = serde_json::from_value::<LlmResponse>(response_json)?;
+                let (response, rounds_completed) = decode_stage_response(response_json)?;
+                let cost_operation_id = if self.search_tools_enabled() {
+                    format!(
+                        "{operation_id}:llm-round-{}",
+                        rounds_completed.saturating_sub(1)
+                    )
+                } else {
+                    operation_id
+                };
                 executor.record_llm_response_cost(
-                    &self.provider_call_context(step, Some(operation_id)),
+                    &self.provider_call_context(step, Some(cost_operation_id)),
                     &self.config.model_id,
                     &response,
                 )?;
@@ -512,14 +573,17 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
                     ));
                 }
                 store.mark_summarizer_stage_dispatched(&operation_id)?;
-                let context = self.provider_call_context(step, Some(operation_id.clone()));
                 let receipt_completed = Cell::new(false);
-                let result = executor.complete_llm_with_response_observer(
-                    self.provider,
-                    &context,
+                let result = self.complete_stage_tool_loop(
+                    &executor,
+                    step,
                     request,
-                    |response| {
-                        let response_json = serde_json::to_value(response)?;
+                    Some(&operation_id),
+                    |response, rounds_completed| {
+                        let response_json = serde_json::to_value(SummarizerStageResponseReceipt {
+                            response: response.clone(),
+                            rounds_completed,
+                        })?;
                         store.complete_summarizer_stage_operation(&operation_id, &response_json)?;
                         receipt_completed.set(true);
                         Ok(())
@@ -553,6 +617,131 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
         }
     }
 
+    fn complete_stage_tool_loop(
+        &self,
+        executor: &ProviderExecutor<'_, L>,
+        step: &str,
+        mut request: LlmRequest,
+        operation_id: Option<&str>,
+        mut observe_final: impl FnMut(&LlmResponse, u32) -> CoreResult<()>,
+    ) -> CoreResult<LlmResponse> {
+        let max_tool_rounds = self
+            .project_search
+            .as_ref()
+            .map(|search| search.max_tool_rounds)
+            .into_iter()
+            .chain(
+                self.web_search
+                    .as_ref()
+                    .map(|search| search.max_tool_rounds),
+            )
+            .max()
+            .unwrap_or(0);
+        if max_tool_rounds > 32 {
+            return Err(CoreError::validation(
+                "summarizer max_tool_rounds cannot exceed 32",
+            ));
+        }
+        let project_search_executor = self.project_search.as_ref().map(|search| {
+            ProjectSearchToolExecutor::new(
+                search.runtime,
+                self.provider_call_context(step, operation_id.map(str::to_owned)),
+                [search.tool.name.clone()],
+            )
+        });
+        let web_search_executor = self.web_search.as_ref().map(|search| {
+            WebSearchToolExecutor::new(
+                search.provider,
+                self.ledger,
+                search.policy,
+                self.provider_call_context(step, operation_id.map(str::to_owned)),
+                [search.tool.name.clone()],
+            )
+        });
+        let mut tool_router = ToolExecutorRouter::new();
+        if let (Some(search), Some(executor)) = (
+            self.project_search.as_ref(),
+            project_search_executor.as_ref(),
+        ) {
+            tool_router.register(search.tool.name.clone(), executor)?;
+        }
+        if let (Some(search), Some(executor)) =
+            (self.web_search.as_ref(), web_search_executor.as_ref())
+        {
+            tool_router.register(search.tool.name.clone(), executor)?;
+        }
+
+        for round in 0..=max_tool_rounds {
+            self.config.cancellation.check()?;
+            let round_operation_id = operation_id.map(|operation_id| {
+                if self.search_tools_enabled() {
+                    format!("{operation_id}:llm-round-{round}")
+                } else {
+                    operation_id.to_owned()
+                }
+            });
+            let context = self.provider_call_context(step, round_operation_id);
+            let response = executor.complete_llm_with_response_observer(
+                self.provider,
+                &context,
+                request.clone(),
+                |response| {
+                    if response.tool_calls.is_empty() {
+                        observe_final(response, round.saturating_add(1))?;
+                    }
+                    Ok(())
+                },
+            )?;
+            if response.tool_calls.is_empty() {
+                return Ok(response);
+            }
+            if round >= max_tool_rounds {
+                return Err(CoreError::validation(
+                    "summarizer search tool max rounds exceeded before final answer",
+                ));
+            }
+            if tool_router.is_empty() {
+                return Err(CoreError::validation(
+                    "summarizer returned tool calls without an enabled tool",
+                ));
+            }
+            request.messages.push(response.message.clone());
+            for call in &response.tool_calls {
+                let output = tool_router.execute(
+                    &ToolExecutionContext {
+                        provider_id: self.config.provider_id.clone(),
+                        workflow_id: self
+                            .config
+                            .workflow_operation
+                            .as_ref()
+                            .map(|operation| operation.workflow_id.clone()),
+                        run_id: self
+                            .config
+                            .workflow_operation
+                            .as_ref()
+                            .map(|operation| operation.run_id.clone())
+                            .or_else(|| self.config.run_id.clone().map(RunId::from)),
+                        node_id: self
+                            .config
+                            .workflow_operation
+                            .as_ref()
+                            .map(|operation| operation.node_id.clone()),
+                        round,
+                    },
+                    call,
+                )?;
+                request.messages.push(tool_result_message(call, output));
+            }
+        }
+        Err(CoreError::validation(
+            "summarizer search tool loop ended unexpectedly",
+        ))
+    }
+
+    fn search_tools_enabled(&self) -> bool {
+        self.project_search.is_some() || self.web_search.is_some()
+    }
+
     fn provider_call_context(
         &self,
         step: &str,
@@ -574,6 +763,19 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
             cancellation: self.config.cancellation.clone(),
             dispatch_authorization: self.config.dispatch_authorization.clone(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SummarizerStageResponseReceipt {
+    response: LlmResponse,
+    rounds_completed: u32,
+}
+
+fn decode_stage_response(value: serde_json::Value) -> CoreResult<(LlmResponse, u32)> {
+    match serde_json::from_value::<SummarizerStageResponseReceipt>(value.clone()) {
+        Ok(receipt) => Ok((receipt.response, receipt.rounds_completed.max(1))),
+        Err(_) => Ok((serde_json::from_value::<LlmResponse>(value)?, 1)),
     }
 }
 

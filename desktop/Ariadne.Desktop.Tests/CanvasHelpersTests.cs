@@ -95,76 +95,57 @@ public sealed class CanvasHelpersTests
     }
 
     [Fact]
-    public void LogicalViewportToMiniMap_BottomRightOrigin_DoesNotThrowAndStaysInBounds()
+    public void W15_DynamicMiniMap_FitsFarNodesWithoutEdgeCollapse()
     {
-        // Viewport origin near bottom-right of logical space → minimap x/y leave little room.
-        // Pre-fix: Math.Clamp(w, 8, maxW) threw when maxW < 8 (ArgumentException).
-        var (x, y, w, h) = NodePortSpec.LogicalViewportToMiniMap(
-            logicalLeft: 1400,
-            logicalTop: 900,
-            logicalWidth: 800,
-            logicalHeight: 600);
+        var transform = CanvasMiniMapHelpers.ComputeTransform(
+            minX: 0,
+            minY: 0,
+            maxX: 10_200,
+            maxY: 5_096);
+        var first = transform.NodeMarkerPosition(0, 0, 200, 96);
+        var far = transform.NodeMarkerPosition(10_000, 5_000, 200, 96);
 
-        Assert.InRange(x, 0, NodePortSpec.MiniMapContentWidth);
-        Assert.InRange(y, 0, NodePortSpec.MiniMapContentHeight);
-        Assert.True(w >= 0);
-        Assert.True(h >= 0);
-        Assert.True(x + w <= NodePortSpec.MiniMapContentWidth + 1e-9);
-        Assert.True(y + h <= NodePortSpec.MiniMapContentHeight + 1e-9);
+        Assert.InRange(first.X, 0, CanvasMiniMapHelpers.ContentWidth - CanvasMiniMapHelpers.MarkerWidth);
+        Assert.InRange(far.X, 0, CanvasMiniMapHelpers.ContentWidth - CanvasMiniMapHelpers.MarkerWidth);
+        Assert.True(far.X - first.X > 100, "far nodes must remain separated instead of clamping to one edge pixel");
+        Assert.True(far.Y - first.Y > 50);
     }
 
     [Fact]
-    public void LogicalViewportToMiniMap_ExactContentEdge_DoesNotThrow()
+    public void W15_DynamicMiniMap_ClickRoundTripsFarLogicalCoordinates()
     {
-        // x maps to MiniMapContentWidth so maxW == 0.
-        var result = NodePortSpec.LogicalViewportToMiniMap(
-            logicalLeft: NodePortSpec.MiniMapContentWidth / NodePortSpec.MiniMapScale,
-            logicalTop: NodePortSpec.MiniMapContentHeight / NodePortSpec.MiniMapScale,
-            logicalWidth: 100,
-            logicalHeight: 100);
+        var transform = CanvasMiniMapHelpers.ComputeTransform(-600, -300, 12_400, 7_200);
+        var mini = transform.LogicalToMiniMap(9_800, 6_100);
+        var logical = transform.MiniMapToLogical(mini.X, mini.Y);
 
-        Assert.Equal(NodePortSpec.MiniMapContentWidth, result.X);
-        Assert.Equal(NodePortSpec.MiniMapContentHeight, result.Y);
-        Assert.Equal(0, result.Width);
-        Assert.Equal(0, result.Height);
+        Assert.Equal(9_800, logical.X, 6);
+        Assert.Equal(6_100, logical.Y, 6);
     }
 
     [Fact]
-    public void LogicalViewportToMiniMap_NormalViewport_HasMinimumFrameWhenRoomAllows()
+    public void W15_DynamicMiniMap_ViewportFrameStaysInsideContent()
     {
-        var (x, y, w, h) = NodePortSpec.LogicalViewportToMiniMap(
-            logicalLeft: 0,
-            logicalTop: 0,
-            logicalWidth: 10, // raw 1.0 after scale — below preferred min 8
-            logicalHeight: 10);
+        var transform = CanvasMiniMapHelpers.ComputeTransform(0, 0, 10_200, 5_096);
+        var frame = transform.ViewportFrame(9_500, 4_700, 1_200, 800);
 
-        Assert.Equal(0, x);
-        Assert.Equal(0, y);
-        Assert.Equal(8, w);
-        Assert.Equal(6, h);
+        Assert.InRange(frame.X, 0, CanvasMiniMapHelpers.ContentWidth);
+        Assert.InRange(frame.Y, 0, CanvasMiniMapHelpers.ContentHeight);
+        Assert.True(frame.Width >= 0 && frame.Height >= 0);
+        Assert.True(frame.X + frame.Width <= CanvasMiniMapHelpers.ContentWidth + 1e-9);
+        Assert.True(frame.Y + frame.Height <= CanvasMiniMapHelpers.ContentHeight + 1e-9);
     }
 
     [Fact]
-    public void MiniMapToLogical_RoundTripsWithScale()
+    public void W15_ShippedView_UsesGraphBoundsTransform_NotFixedPointOneScale()
     {
-        var (lx, ly) = NodePortSpec.MiniMapToLogical(14, 8.4);
-        Assert.Equal(140, lx, 6);
-        Assert.Equal(84, ly, 6);
-    }
+        var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml.cs"));
+        var source = File.ReadAllText(Path.Combine(ResolveDesktopSource("ViewModels"), "WorkspacePageViewModel.cs"));
 
-    [Theory]
-    [InlineData(0, 0, 0, 0)]
-    [InlineData(120, 80, 12, 8)]
-    [InlineData(1400, 900, 130, 78)] // 夹在 140-10 / 84-6
-    public void MiniMapDotPosition_StaysInsideContent(double logicalX, double logicalY, double expectedMaxX, double expectedMaxY)
-    {
-        // 与 WorkflowNodeViewModel.MiniMapX/Y 相同公式（shipped 常量）
-        var mx = Math.Clamp(logicalX * NodePortSpec.MiniMapScale, 0, NodePortSpec.MiniMapContentWidth - 10);
-        var my = Math.Clamp(logicalY * NodePortSpec.MiniMapScale, 0, NodePortSpec.MiniMapContentHeight - 6);
-        Assert.InRange(mx, 0, NodePortSpec.MiniMapContentWidth - 10);
-        Assert.InRange(my, 0, NodePortSpec.MiniMapContentHeight - 6);
-        Assert.True(mx <= expectedMaxX + 1e-9 || expectedMaxX >= NodePortSpec.MiniMapContentWidth - 10);
-        Assert.True(my <= expectedMaxY + 1e-9 || expectedMaxY >= NodePortSpec.MiniMapContentHeight - 6);
+        Assert.Contains("ComputeMiniMapTransform(viewModel)", view, StringComparison.Ordinal);
+        Assert.Contains("_miniMapTransform.MiniMapToLogical", view, StringComparison.Ordinal);
+        Assert.Contains("_miniMapTransform.ViewportFrame", view, StringComparison.Ordinal);
+        Assert.DoesNotContain("MiniMapScale", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("MiniMapX", source, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -2,18 +2,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::{blocking::Client, Url};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::config::ConfigStore;
 use crate::contracts::{
-    ensure_path_under_root, ArtifactKind, CoreError, CoreResult, DocumentPatch, NodeId,
-    NodeInstance, PatchHunk, PermissionPolicy, PortEndpoint, PortValue, RunId, TextRange,
-    WorkflowDefinition, WorkflowId,
+    ensure_path_under_root, ArtifactKind, CoreError, CoreResult, DocumentPatch,
+    ExecutionCancellation, ExternalDispatchOutcome, NodeId, NodeInstance, PatchHunk,
+    PermissionPolicy, PortEndpoint, PortValue, RunId, TextRange, WorkflowDefinition, WorkflowId,
 };
 use crate::diagnostics::{BackendDiagnosticsReport, DiagnosticStatus};
 use crate::documents::{
@@ -23,12 +26,19 @@ use crate::documents::{
 use crate::git::GitService;
 use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
 use crate::providers::{ContentPart, LlmMessage, LlmProvider};
-use crate::rag::{FindRequest, FindScope, MemoryWritingKnowledgeBase};
-use crate::skills::{WorkflowManifest, WORKFLOW_MANIFEST_FILE};
+use crate::rag::{FindRequest, FindScope, KnowledgeRetrievalSnapshot, MemoryWritingKnowledgeBase};
+use crate::skills::{PromptTemplateVersion, WorkflowManifest, WORKFLOW_MANIFEST_FILE};
 use crate::workflow::{RuntimeConfirmationState, WorkflowRunState};
 
 const MAX_TEMPLATE_REPOSITORY_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+const TEMPLATE_REPOSITORY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const TEMPLATE_REPOSITORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TEMPLATE_REPOSITORY_CANCEL_POLL: Duration = Duration::from_millis(25);
 const ALLOW_LOCAL_TEMPLATE_REPOSITORY_ENV: &str = "ARIADNE_ALLOW_LOCAL_TEMPLATE_REPOSITORY";
+/// 随应用版本发布的官方内置模板仓库协议；仅此精确 URL 可使用 ariadne scheme。
+pub const OFFICIAL_TEMPLATE_REPOSITORY_URL: &str = "ariadne://official-templates/v1";
+const OFFICIAL_TEMPLATE_REPOSITORY_SCHEMA_VERSION: u32 = 1;
+const OFFICIAL_TEMPLATE_REPOSITORY_PAGE_SIZE: usize = 20;
 const MAX_QUICK_EDIT_DIFF_BYTES: usize = 16 * 1024;
 const MAX_RUN_LOG_ENTRIES: i64 = 100_000;
 const MAX_RESOLVED_CONFIRMATION_ENTRIES: i64 = 100_000;
@@ -37,6 +47,9 @@ const MAX_RUN_LOG_AGE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 /// C3：ui_logs.db 软上限约 256 MiB（按 page_count * page_size 估算后裁剪最旧日志）。
 const MAX_UI_LOG_DB_BYTES: i64 = 256 * 1024 * 1024;
 const MAX_PROJECT_MEMORY_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PROJECT_REFERENCE_TEXT_CHARS: usize = 32 * 1024;
+const MAX_PROJECT_REFERENCE_MATCH_WINDOWS: usize = 8;
+const MAX_PROJECT_REFERENCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 最近项目和项目初始化状态，默认落在 `.runtime/recent_projects.json`。
 #[derive(Debug, Clone)]
@@ -157,6 +170,19 @@ pub struct ProjectMemoryStore {
 }
 
 impl ProjectMemoryStore {
+    pub fn validate_content(content: &str) -> CoreResult<()> {
+        if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_PROJECT_MEMORY_BYTES {
+            return Err(CoreError::ResourceLimitExceeded {
+                resource: "project_memory_bytes".to_owned(),
+                reason: format!(
+                    "project memory exceeds {} bytes; compact or remove obsolete entries",
+                    MAX_PROJECT_MEMORY_BYTES
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// 创建项目记忆存储。
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -178,15 +204,7 @@ impl ProjectMemoryStore {
 
     /// 覆盖写入项目记忆。
     pub fn write_all(&self, content: &str) -> CoreResult<()> {
-        if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_PROJECT_MEMORY_BYTES {
-            return Err(CoreError::ResourceLimitExceeded {
-                resource: "project_memory_bytes".to_owned(),
-                reason: format!(
-                    "project memory exceeds {} bytes; compact or remove obsolete entries",
-                    MAX_PROJECT_MEMORY_BYTES
-                ),
-            });
-        }
+        Self::validate_content(content)?;
         crate::config::store::atomic_write(&self.path, content.as_bytes())?;
         Ok(())
     }
@@ -438,14 +456,32 @@ pub struct ArtifactReferenceEntry {
     pub summary: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ProjectReferenceTextFragment {
+    source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_version: Option<String>,
+    start_line: u64,
+    end_line: u64,
+    text: String,
+}
+
+enum ProjectKnowledgeReferenceSource<'a> {
+    Memory(&'a MemoryWritingKnowledgeBase),
+    Snapshot(&'a KnowledgeRetrievalSnapshot),
+}
+
 /// 解析项目空间 AI 的 `@...` 引用。
 pub struct ProjectReferenceResolver<'a> {
     confirmations: Option<&'a FileConfirmationLogStore>,
     documents: Option<&'a FileDocumentService>,
     chapter_index: Option<&'a ChapterDocumentIndex>,
-    knowledge: Option<&'a MemoryWritingKnowledgeBase>,
+    knowledge: Option<ProjectKnowledgeReferenceSource<'a>>,
     runtime: Option<&'a WorkflowRunState>,
     artifacts: BTreeMap<String, ArtifactReferenceEntry>,
+    artifact_root: Option<&'a Path>,
+    document_root: Option<&'a Path>,
+    query: Option<&'a str>,
 }
 
 impl<'a> ProjectReferenceResolver<'a> {
@@ -458,6 +494,9 @@ impl<'a> ProjectReferenceResolver<'a> {
             knowledge: None,
             runtime: None,
             artifacts: BTreeMap::new(),
+            artifact_root: None,
+            document_root: None,
+            query: None,
         }
     }
 
@@ -477,7 +516,12 @@ impl<'a> ProjectReferenceResolver<'a> {
     }
 
     pub fn with_knowledge(mut self, knowledge: &'a MemoryWritingKnowledgeBase) -> Self {
-        self.knowledge = Some(knowledge);
+        self.knowledge = Some(ProjectKnowledgeReferenceSource::Memory(knowledge));
+        self
+    }
+
+    pub fn with_knowledge_snapshot(mut self, knowledge: &'a KnowledgeRetrievalSnapshot) -> Self {
+        self.knowledge = Some(ProjectKnowledgeReferenceSource::Snapshot(knowledge));
         self
     }
 
@@ -491,6 +535,21 @@ impl<'a> ProjectReferenceResolver<'a> {
             .into_iter()
             .map(|artifact| (artifact.artifact_id.clone(), artifact))
             .collect();
+        self
+    }
+
+    pub fn with_artifact_root(mut self, artifact_root: &'a Path) -> Self {
+        self.artifact_root = Some(artifact_root);
+        self
+    }
+
+    pub fn with_document_root(mut self, document_root: &'a Path) -> Self {
+        self.document_root = Some(document_root);
+        self
+    }
+
+    pub fn with_query(mut self, query: &'a str) -> Self {
+        self.query = Some(query);
         self
     }
 
@@ -531,10 +590,21 @@ impl<'a> ProjectReferenceResolver<'a> {
         let documents = self
             .documents
             .ok_or_else(|| CoreError::validation("document service is not configured"))?;
-        let content = documents.open_document(DocumentReadRequest {
-            path: PathBuf::from(id),
-            format: None,
-        })?;
+        let requested_path = PathBuf::from(id);
+        let path = if requested_path.is_absolute() {
+            requested_path
+        } else if let Some(document_root) = self.document_root {
+            document_root.join(requested_path)
+        } else {
+            requested_path
+        };
+        let content = documents.open_document(DocumentReadRequest { path, format: None })?;
+        let (fragments, content_truncated) = project_reference_text_fragments(
+            &content.metadata.document_id,
+            Some(content.metadata.version.clone()),
+            &content.content,
+            self.query.unwrap_or_default(),
+        );
         Ok(ProjectReference {
             reference: reference.to_owned(),
             kind: ProjectReferenceKind::Document,
@@ -547,6 +617,9 @@ impl<'a> ProjectReferenceResolver<'a> {
                 "path": content.metadata.path,
                 "media_type": content.metadata.media_type,
                 "version": content.metadata.version,
+                "fragments": fragments,
+                "content_truncated": content_truncated,
+                "content_chars": content.content.chars().count(),
             }),
         })
     }
@@ -572,39 +645,87 @@ impl<'a> ProjectReferenceResolver<'a> {
     fn resolve_knowledge(&self, reference: &str, id: &str) -> CoreResult<ProjectReference> {
         let knowledge = self
             .knowledge
+            .as_ref()
             .ok_or_else(|| CoreError::validation("knowledge base is not configured"))?;
-        let result = [
-            FindScope::CharacterProfile,
-            FindScope::CharacterPlan,
-            FindScope::CharacterTraitPath,
-            FindScope::RelationshipPath,
-            FindScope::EventSegments,
-            FindScope::SegmentText,
-            FindScope::Foreshadowing,
-            FindScope::ThemeAnchor,
-            FindScope::ChapterSummary,
-            FindScope::StageSummary,
-        ]
-        .into_iter()
-        .find_map(|scope| {
-            knowledge
-                .find(FindRequest {
-                    scope,
-                    query: id.to_owned(),
-                    include_text: false,
-                    metadata: Value::Null,
+        match knowledge {
+            ProjectKnowledgeReferenceSource::Memory(knowledge) => {
+                let result = [
+                    FindScope::CharacterProfile,
+                    FindScope::CharacterPlan,
+                    FindScope::CharacterTraitPath,
+                    FindScope::RelationshipPath,
+                    FindScope::EventSegments,
+                    FindScope::SegmentText,
+                    FindScope::Foreshadowing,
+                    FindScope::ThemeAnchor,
+                    FindScope::ChapterSummary,
+                    FindScope::StageSummary,
+                ]
+                .into_iter()
+                .find_map(|scope| {
+                    knowledge
+                        .find(FindRequest {
+                            scope,
+                            query: id.to_owned(),
+                            include_text: true,
+                            metadata: Value::Null,
+                        })
+                        .ok()
+                        .and_then(|response| response.results.into_iter().next())
                 })
-                .ok()
-                .and_then(|response| response.results.into_iter().next())
-        })
-        .ok_or_else(|| CoreError::validation(format!("knowledge item not found: {id}")))?;
-        Ok(ProjectReference {
-            reference: reference.to_owned(),
-            kind: ProjectReferenceKind::Knowledge,
-            id: result.result_id,
-            summary: result.snippet,
-            payload: json!({ "title": result.title, "source": result.source }),
-        })
+                .ok_or_else(|| CoreError::validation(format!("knowledge item not found: {id}")))?;
+                Ok(ProjectReference {
+                    reference: reference.to_owned(),
+                    kind: ProjectReferenceKind::Knowledge,
+                    id: result.result_id,
+                    summary: result.snippet,
+                    payload: json!({
+                        "title": result.title,
+                        "source": result.source,
+                        "spans": result.spans,
+                        "text": result.text,
+                        "metadata": result.metadata,
+                    }),
+                })
+            }
+            ProjectKnowledgeReferenceSource::Snapshot(snapshot) => {
+                let normalized = id.trim();
+                let normalized_lower = normalized.to_lowercase();
+                let entry = snapshot
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.entity_id == normalized
+                            || format!("{}:{}", entry.layer, entry.entity_id) == normalized
+                            || entry.text.to_lowercase().contains(&normalized_lower)
+                    })
+                    .min_by_key(|entry| {
+                        if entry.entity_id == normalized {
+                            0
+                        } else if format!("{}:{}", entry.layer, entry.entity_id) == normalized {
+                            1
+                        } else {
+                            2
+                        }
+                    })
+                    .ok_or_else(|| {
+                        CoreError::validation(format!("knowledge item not found: {id}"))
+                    })?;
+                Ok(ProjectReference {
+                    reference: reference.to_owned(),
+                    kind: ProjectReferenceKind::Knowledge,
+                    id: entry.entity_id.clone(),
+                    summary: format!("{}: {}", entry.layer, take_first_chars(&entry.text, 240)),
+                    payload: json!({
+                        "revision": snapshot.revision,
+                        "layer": entry.layer,
+                        "text": entry.text,
+                        "sources": entry.sources,
+                        "metadata": entry.metadata,
+                    }),
+                })
+            }
+        }
     }
 
     fn resolve_artifact(&self, reference: &str, id: &str) -> CoreResult<ProjectReference> {
@@ -612,6 +733,28 @@ impl<'a> ProjectReferenceResolver<'a> {
             .artifacts
             .get(id)
             .ok_or_else(|| CoreError::validation(format!("artifact not found: {id}")))?;
+        let mut payload = serde_json::to_value(artifact)?;
+        if let Some(artifact_root) = self.artifact_root {
+            if let Some(path) = trusted_artifact_path(artifact_root, &artifact.storage_uri)? {
+                if artifact_path_is_textual(&path) {
+                    let (text, input_truncated) = read_bounded_utf8_artifact(&path)?;
+                    let version = crate::contracts::content_version_for_bytes(text.as_bytes());
+                    let (fragments, fragment_truncated) = project_reference_text_fragments(
+                        &artifact.artifact_id,
+                        Some(version),
+                        &text,
+                        self.query.unwrap_or_default(),
+                    );
+                    if let Some(object) = payload.as_object_mut() {
+                        object.insert("fragments".to_owned(), serde_json::to_value(fragments)?);
+                        object.insert(
+                            "content_truncated".to_owned(),
+                            Value::Bool(input_truncated || fragment_truncated),
+                        );
+                    }
+                }
+            }
+        }
         Ok(ProjectReference {
             reference: reference.to_owned(),
             kind: ProjectReferenceKind::Artifact,
@@ -620,7 +763,7 @@ impl<'a> ProjectReferenceResolver<'a> {
                 .summary
                 .clone()
                 .unwrap_or_else(|| artifact.storage_uri.clone()),
-            payload: serde_json::to_value(artifact)?,
+            payload,
         })
     }
 
@@ -721,6 +864,8 @@ pub struct UiRunLogFilter {
     pub after_timestamp_ms: Option<u64>,
     pub after_log_id: Option<String>,
     pub limit: Option<usize>,
+    /// 为 true 时从最新记录向旧记录翻页；游标表示当前页最后一条记录。
+    pub descending: bool,
 }
 
 /// toast 通知。
@@ -845,20 +990,25 @@ impl UiRunLogStore {
             .transpose()
             .map_err(|_| CoreError::validation("run log query limit exceeds SQLite i64"))?
             .unwrap_or(i64::MAX);
-        let mut statement = connection
-            .prepare(
-                "SELECT entry_json FROM run_logs
+        let (cursor_comparison, order) = if filter.descending {
+            ("<", "DESC")
+        } else {
+            (">", "ASC")
+        };
+        let sql = format!(
+            "SELECT entry_json FROM run_logs
              WHERE (?1 IS NULL OR kind = ?1)
                AND (?2 IS NULL OR level = ?2)
                AND (?3 IS NULL OR workflow_id = ?3)
                AND (?4 IS NULL OR run_id = ?4)
                AND (?5 IS NULL OR node_id = ?5)
                AND (?6 IS NULL OR lower(message) LIKE ?6)
-               AND (?7 IS NULL OR timestamp_ms > ?7 OR (timestamp_ms = ?7 AND log_id > ?8))
-             ORDER BY timestamp_ms, log_id
-             LIMIT ?9",
-            )
-            .map_err(sqlite_frontend_error)?;
+               AND (?7 IS NULL OR timestamp_ms {cursor_comparison} ?7
+                    OR (timestamp_ms = ?7 AND log_id {cursor_comparison} ?8))
+             ORDER BY timestamp_ms {order}, log_id {order}
+             LIMIT ?9"
+        );
+        let mut statement = connection.prepare(&sql).map_err(sqlite_frontend_error)?;
         let rows = statement
             .query_map(
                 params![
@@ -884,14 +1034,35 @@ impl UiRunLogStore {
 
     /// 标记全部日志已读。
     pub fn mark_all_read(&self) -> CoreResult<()> {
+        self.mark_read(UiRunLogFilter::default()).map(|_| ())
+    }
+
+    /// 仅把与当前筛选匹配的日志标为已读，并返回实际更新条数。
+    pub fn mark_read(&self, filter: UiRunLogFilter) -> CoreResult<usize> {
         let connection = self.open_database()?;
+        let kind = filter.kind.map(run_log_kind_str);
+        let level = filter.level.map(run_log_level_str);
+        let workflow_id = filter.workflow_id.as_ref().map(WorkflowId::as_str);
+        let run_id = filter.run_id.as_ref().map(RunId::as_str);
+        let node_id = filter.node_id.as_ref().map(NodeId::as_str);
+        let query = filter
+            .query
+            .map(|value| format!("%{}%", value.to_lowercase()));
         connection
             .execute(
-                "UPDATE run_logs SET unread = 0, entry_json = json_set(entry_json, '$.unread', json('false'))",
-                [],
+                "UPDATE run_logs
+                 SET unread = 0,
+                     entry_json = json_set(entry_json, '$.unread', json('false'))
+                 WHERE unread = 1
+                   AND (?1 IS NULL OR kind = ?1)
+                   AND (?2 IS NULL OR level = ?2)
+                   AND (?3 IS NULL OR workflow_id = ?3)
+                   AND (?4 IS NULL OR run_id = ?4)
+                   AND (?5 IS NULL OR node_id = ?5)
+                   AND (?6 IS NULL OR lower(message) LIKE ?6)",
+                params![kind, level, workflow_id, run_id, node_id, query],
             )
-            .map_err(sqlite_frontend_error)?;
-        Ok(())
+            .map_err(sqlite_frontend_error)
     }
 
     /// 汇总侧栏徽标。
@@ -1223,6 +1394,8 @@ pub struct WorksTreeNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline_ref: Option<crate::contracts::SourceSpan>,
@@ -1238,6 +1411,8 @@ pub struct ChapterImportRequest {
     pub order: u64,
     pub source_path: PathBuf,
     pub target_path: PathBuf,
+    #[serde(default)]
+    pub overwrite: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline_ref: Option<crate::contracts::SourceSpan>,
 }
@@ -1340,6 +1515,7 @@ pub fn build_works_tree(
                 })
                 .unwrap_or_default(),
             chapter_id: None,
+            document_id: None,
             stage_id: stage_id.clone(),
             outline_ref: None,
             children: entries
@@ -1350,6 +1526,7 @@ pub fn build_works_tree(
                     title: entry.title.clone(),
                     path: entry.path.clone(),
                     chapter_id: Some(entry.chapter_id.clone()),
+                    document_id: Some(entry.document_id.clone()),
                     stage_id: stage_id.clone(),
                     outline_ref: entry.outline_ref.clone(),
                     children: Vec::new(),
@@ -1363,6 +1540,7 @@ pub fn build_works_tree(
         title: "ui.works.global_outline".to_owned(),
         path: planning_root.join("global.md"),
         chapter_id: None,
+        document_id: None,
         stage_id: None,
         outline_ref: None,
         children,
@@ -1381,12 +1559,17 @@ pub fn import_chapter_document(
         format: None,
     })?;
     let word_count = count_words_for_ui(&source.content);
-    let report = documents.save_document(DocumentWriteRequest {
+    let write_request = DocumentWriteRequest {
         path: request.target_path.clone(),
         content: source.content,
         format: None,
         base_version: None,
-    })?;
+    };
+    let report = if request.overwrite {
+        documents.save_document(write_request)
+    } else {
+        documents.create_document(write_request)
+    }?;
     let entry = ChapterDocumentEntry {
         chapter_id: request.chapter_id,
         document_id: report.metadata.document_id,
@@ -1484,7 +1667,7 @@ pub fn export_chapters_markdown(
     )
 }
 
-fn render_chapters_markdown(chapters: &[(String, String)]) -> String {
+pub(crate) fn render_chapters_markdown(chapters: &[(String, String)]) -> String {
     let mut combined = String::new();
     for (title, content) in chapters {
         if !combined.is_empty() {
@@ -1497,7 +1680,7 @@ fn render_chapters_markdown(chapters: &[(String, String)]) -> String {
     combined
 }
 
-fn render_chapters_epub(chapters: &[(String, String)]) -> CoreResult<Vec<u8>> {
+pub(crate) fn render_chapters_epub(chapters: &[(String, String)]) -> CoreResult<Vec<u8>> {
     let mut files = Vec::new();
     files.push((
         "mimetype".to_owned(),
@@ -1576,7 +1759,7 @@ fn render_chapters_epub(chapters: &[(String, String)]) -> CoreResult<Vec<u8>> {
 const PDF_MAX_LINE_WIDTH: usize = 68;
 const PDF_LINES_PER_PAGE: usize = 52;
 
-fn render_chapters_pdf(chapters: &[(String, String)]) -> Vec<u8> {
+pub(crate) fn render_chapters_pdf(chapters: &[(String, String)]) -> Vec<u8> {
     let text = render_chapters_markdown(chapters);
     let pages = pdf_pages(&text);
     let page_count = pages.len();
@@ -2343,22 +2526,88 @@ pub struct TemplateInstallReport {
     pub required_permissions: Vec<String>,
 }
 
-/// 在线模板仓库客户端。
+#[derive(Debug, Clone, Copy)]
+struct OfficialTemplateRecord {
+    id: &'static str,
+    name_key: &'static str,
+    tags: &'static [&'static str],
+    search_terms: &'static [&'static str],
+    manifest_bytes: &'static [u8],
+    manifest_sha256: &'static str,
+}
+
+const OFFICIAL_TEMPLATE_RECORDS: &[OfficialTemplateRecord] = &[
+    OfficialTemplateRecord {
+        id: "official-novel-starter",
+        name_key: "ui.template.builtin.novel_starter.name",
+        tags: &["ui.template.tag.novel", "ui.template.tag.outline"],
+        search_terms: &["小说", "写小说", "大纲", "novel", "outline", "小説"],
+        manifest_bytes: include_bytes!("../../resources/template_repository/v1/novel_starter.json"),
+        manifest_sha256: "5493a7ec4d6a943aecf245b2cef37c526a0a6b7d82ae065884d301fce0c61943",
+    },
+    OfficialTemplateRecord {
+        id: "official-worldbuilding",
+        name_key: "ui.template.builtin.worldbuilding.name",
+        tags: &["ui.template.tag.worldbuilding"],
+        search_terms: &[
+            "世界观",
+            "世界观构建",
+            "worldbuilding",
+            "world building",
+            "世界観",
+        ],
+        manifest_bytes: include_bytes!("../../resources/template_repository/v1/worldbuilding.json"),
+        manifest_sha256: "0c1295c7bf3efc394aa6d35c5258dee868c94c95cca4b8ff9bd8e788c0ee09ab",
+    },
+    OfficialTemplateRecord {
+        id: "official-review-polish",
+        name_key: "ui.template.builtin.review_polish.name",
+        tags: &["ui.template.tag.review"],
+        search_terms: &["审查", "润色", "review", "polish", "レビュー", "推敲"],
+        manifest_bytes: include_bytes!("../../resources/template_repository/v1/review_polish.json"),
+        manifest_sha256: "fa7a8d55ca34ff50ce1c9b0fea3387eae5249375cd99e5500c534b9b3fdc961d",
+    },
+];
+
+/// 模板仓库客户端：支持随应用发布的官方内置目录与自定义远端目录。
 #[derive(Debug, Clone)]
 pub struct TemplateRepositoryClient {
     base_url: String,
     client: Client,
+    cancellation: ExecutionCancellation,
 }
 
 impl TemplateRepositoryClient {
     /// 创建模板仓库客户端。
     pub fn new(base_url: impl Into<String>) -> CoreResult<Self> {
+        Self::new_with_cancellation(base_url, ExecutionCancellation::new())
+    }
+
+    pub fn new_with_cancellation(
+        base_url: impl Into<String>,
+        cancellation: ExecutionCancellation,
+    ) -> CoreResult<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
-        validate_template_repository_base_url(&base_url)?;
+        validate_template_repository_base_url_with_policy(
+            &base_url,
+            std::env::var_os(ALLOW_LOCAL_TEMPLATE_REPOSITORY_ENV).is_some(),
+            Some(&cancellation),
+        )?;
         Ok(Self {
             base_url,
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(TEMPLATE_REPOSITORY_CONNECT_TIMEOUT)
+                .timeout(TEMPLATE_REPOSITORY_REQUEST_TIMEOUT)
+                .build()
+                .map_err(template_repo_error)?,
+            cancellation,
         })
+    }
+
+    /// 绑定 IPC 请求的取消令牌；网络线程最多继续到请求超时，不会在取消后写项目文件。
+    pub fn with_cancellation(mut self, cancellation: ExecutionCancellation) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     /// 搜索模板。
@@ -2368,39 +2617,42 @@ impl TemplateRepositoryClient {
         tags: &[String],
         page: u32,
     ) -> CoreResult<Vec<TemplateSummary>> {
-        validate_template_repository_base_url(&self.base_url)?;
-        let response = self
-            .client
-            .get(format!("{}/templates/search", self.base_url))
-            .query(&[("query", query), ("page", &page.to_string())])
-            .query(&[("tags", &tags.join(","))])
-            .send()
-            .map_err(template_repo_error)?;
-        parse_success_json(response)
+        self.validate_base_url()?;
+        if self.is_official_repository() {
+            self.cancellation.check()?;
+            return official_template_search(query, tags, page);
+        }
+        self.send_json(
+            self.client
+                .get(format!("{}/templates/search", self.base_url))
+                .query(&[("query", query), ("page", &page.to_string())])
+                .query(&[("tags", &tags.join(","))]),
+        )
     }
 
     /// 获取模板详情。
     pub fn detail(&self, id: &str) -> CoreResult<TemplateDetail> {
         validate_non_empty("template id", id)?;
-        validate_template_repository_base_url(&self.base_url)?;
-        let response = self
-            .client
-            .get(format!("{}/templates/{id}", self.base_url))
-            .send()
-            .map_err(template_repo_error)?;
-        parse_success_json(response)
+        self.validate_base_url()?;
+        if self.is_official_repository() {
+            self.cancellation.check()?;
+            return official_template_detail(id);
+        }
+        self.send_json(self.client.get(format!("{}/templates/{id}", self.base_url)))
     }
 
     /// 下载模板 manifest。
     pub fn download(&self, id: &str) -> CoreResult<Value> {
         validate_non_empty("template id", id)?;
-        validate_template_repository_base_url(&self.base_url)?;
-        let response = self
-            .client
-            .get(format!("{}/templates/{id}/download", self.base_url))
-            .send()
-            .map_err(template_repo_error)?;
-        parse_success_json(response)
+        self.validate_base_url()?;
+        if self.is_official_repository() {
+            self.cancellation.check()?;
+            return official_template_manifest_value(id);
+        }
+        self.send_json(
+            self.client
+                .get(format!("{}/templates/{id}/download", self.base_url)),
+        )
     }
 
     /// 下载并写入本地 workflows 目录，写入前校验 WorkflowManifest。
@@ -2412,6 +2664,147 @@ impl TemplateRepositoryClient {
         let manifest_value = self.download(id)?;
         install_workflow_template_manifest(manifest_value, workflows_root, false)
     }
+
+    fn send_json<T>(&self, request: reqwest::blocking::RequestBuilder) -> CoreResult<T>
+    where
+        T: serde::de::DeserializeOwned + Send + 'static,
+    {
+        self.cancellation.check()?;
+        let blocking_permit = crate::contracts::acquire_detached_blocking_task_permit()?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("ariadne-template-http".to_owned())
+            .spawn(move || {
+                let _blocking_permit = blocking_permit;
+                let result = request
+                    .send()
+                    .map_err(template_repo_error)
+                    .and_then(parse_success_json);
+                let _ = sender.send(result);
+            })
+            .map_err(CoreError::from)?;
+
+        loop {
+            if self.cancellation.is_cancelled() {
+                return Err(CoreError::external_cancelled(
+                    "template_repository",
+                    ExternalDispatchOutcome::DispatchedUnknown,
+                ));
+            }
+            match receiver.recv_timeout(TEMPLATE_REPOSITORY_CANCEL_POLL) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(template_repo_error(
+                        "template repository request worker disconnected",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn validate_base_url(&self) -> CoreResult<()> {
+        validate_template_repository_base_url_with_policy(
+            &self.base_url,
+            std::env::var_os(ALLOW_LOCAL_TEMPLATE_REPOSITORY_ENV).is_some(),
+            Some(&self.cancellation),
+        )
+    }
+
+    fn is_official_repository(&self) -> bool {
+        self.base_url == OFFICIAL_TEMPLATE_REPOSITORY_URL
+    }
+}
+
+fn official_template_search(
+    query: &str,
+    tags: &[String],
+    page: u32,
+) -> CoreResult<Vec<TemplateSummary>> {
+    let query = query.trim().to_lowercase();
+    let requested_tags = tags
+        .iter()
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    let offset = usize::try_from(page)
+        .ok()
+        .and_then(|value| value.checked_mul(OFFICIAL_TEMPLATE_REPOSITORY_PAGE_SIZE))
+        .ok_or_else(|| CoreError::validation("template repository page is too large"))?;
+    let records = OFFICIAL_TEMPLATE_RECORDS
+        .iter()
+        .filter(|record| {
+            let matches_query = query.is_empty()
+                || record.id.to_lowercase().contains(&query)
+                || record.name_key.to_lowercase().contains(&query)
+                || record
+                    .search_terms
+                    .iter()
+                    .any(|term| term.to_lowercase().contains(&query));
+            let matches_tags = requested_tags.iter().all(|requested| {
+                record
+                    .tags
+                    .iter()
+                    .any(|tag| tag.to_lowercase() == *requested)
+            });
+            matches_query && matches_tags
+        })
+        .skip(offset)
+        .take(OFFICIAL_TEMPLATE_REPOSITORY_PAGE_SIZE)
+        .map(|record| TemplateSummary {
+            id: record.id.to_owned(),
+            name: record.name_key.to_owned(),
+            tags: record.tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            requires_permissions: false,
+        })
+        .collect();
+    Ok(records)
+}
+
+fn official_template_detail(id: &str) -> CoreResult<TemplateDetail> {
+    let record = official_template_record(id)?;
+    let manifest = official_template_manifest(record)?;
+    Ok(TemplateDetail {
+        id: record.id.to_owned(),
+        name: record.name_key.to_owned(),
+        version: manifest.version.clone(),
+        manifest: serde_json::to_value(manifest)?,
+        requires_permissions: false,
+    })
+}
+
+fn official_template_manifest_value(id: &str) -> CoreResult<Value> {
+    serde_json::to_value(official_template_manifest(official_template_record(id)?)?)
+        .map_err(Into::into)
+}
+
+fn official_template_record(id: &str) -> CoreResult<&'static OfficialTemplateRecord> {
+    OFFICIAL_TEMPLATE_RECORDS
+        .iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| CoreError::RegistryMissing {
+            registry: "official_template_repository",
+            key: id.to_owned(),
+        })
+}
+
+fn official_template_manifest(record: &OfficialTemplateRecord) -> CoreResult<WorkflowManifest> {
+    let actual_sha256 = format!("{:x}", Sha256::digest(record.manifest_bytes));
+    if actual_sha256 != record.manifest_sha256 {
+        return Err(CoreError::validation(format!(
+            "official template digest mismatch for {}",
+            record.id
+        )));
+    }
+    let manifest: WorkflowManifest = serde_json::from_slice(record.manifest_bytes)?;
+    manifest.validate()?;
+    if manifest.workflow_id != record.id || manifest.workflow.id.as_str() != record.id {
+        return Err(CoreError::validation(format!(
+            "official template identity mismatch for {}",
+            record.id
+        )));
+    }
+    Ok(manifest)
 }
 
 /// 将下载到的 workflow manifest 写入本地 `workflows/<id>/workflow.json`。
@@ -2422,6 +2815,16 @@ pub fn install_workflow_template_manifest(
 ) -> CoreResult<TemplateInstallReport> {
     let manifest: WorkflowManifest = serde_json::from_value(manifest_value)?;
     manifest.validate()?;
+    if let Some(minimum_version) = manifest.minimum_ariadne_version.as_deref() {
+        let required = PromptTemplateVersion::parse(minimum_version)?;
+        let current = PromptTemplateVersion::parse(crate::PRODUCT_VERSION)?;
+        if current < required {
+            return Err(CoreError::validation(format!(
+                "workflow template {} requires Ariadne {}, current version is {}",
+                manifest.workflow_id, required, current
+            )));
+        }
+    }
     validate_path_component("workflow_id", &manifest.workflow_id)?;
     let workflows_root = absolute_path(workflows_root.as_ref())?;
     reject_symlink_root(&workflows_root)?;
@@ -2476,6 +2879,21 @@ impl<'a, L: crate::costs::CostLedger> QuickEditService<'a, L> {
         instruction: &str,
         context_ref: Option<&str>,
     ) -> CoreResult<QuickEditResult> {
+        self.quick_edit_with_cancellation(
+            selected_text,
+            instruction,
+            context_ref,
+            &crate::contracts::CancellationToken::new(),
+        )
+    }
+
+    pub fn quick_edit_with_cancellation(
+        &self,
+        selected_text: &str,
+        instruction: &str,
+        context_ref: Option<&str>,
+        cancellation: &crate::contracts::CancellationToken,
+    ) -> CoreResult<QuickEditResult> {
         validate_non_empty("selected_text", selected_text)?;
         validate_non_empty("instruction", instruction)?;
         let prompt = format!(
@@ -2494,7 +2912,7 @@ impl<'a, L: crate::costs::CostLedger> QuickEditService<'a, L> {
                 metadata: json!({ "quick_edit": true }),
                 dispatch_authorization: Default::default(),
             },
-            &crate::contracts::CancellationToken::new(),
+            cancellation,
         )?;
         let suggested = report
             .response
@@ -2682,15 +3100,20 @@ pub fn validate_template_repository_base_url(base_url: &str) -> CoreResult<()> {
     validate_template_repository_base_url_with_policy(
         base_url,
         std::env::var_os(ALLOW_LOCAL_TEMPLATE_REPOSITORY_ENV).is_some(),
+        None,
     )
 }
 
 fn validate_template_repository_base_url_with_policy(
     base_url: &str,
     allow_local: bool,
+    cancellation: Option<&ExecutionCancellation>,
 ) -> CoreResult<()> {
     let trimmed = base_url.trim();
     validate_non_empty("template repository base_url", trimmed)?;
+    if trimmed == OFFICIAL_TEMPLATE_REPOSITORY_URL {
+        return Ok(());
+    }
     let url = Url::parse(trimmed).map_err(|error| {
         CoreError::validation(format!(
             "template repository base_url must be a valid URL: {error}"
@@ -2698,7 +3121,8 @@ fn validate_template_repository_base_url_with_policy(
     })?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(CoreError::validation(format!(
-            "template repository base_url must use http or https, got '{}'",
+            "template repository base_url must use the official v{} URL or http/https, got '{}'",
+            OFFICIAL_TEMPLATE_REPOSITORY_SCHEMA_VERSION,
             url.scheme()
         )));
     }
@@ -2728,9 +3152,7 @@ fn validate_template_repository_base_url_with_policy(
         return Ok(());
     }
     if let Some(port) = url.port_or_known_default() {
-        let addresses = (host, port)
-            .to_socket_addrs()
-            .map_err(template_repo_error)?;
+        let addresses = resolve_template_repository_addresses(host, port, cancellation)?;
         for address in addresses {
             if ip_is_private_or_local(address.ip()) {
                 return Err(CoreError::validation(
@@ -2740,6 +3162,55 @@ fn validate_template_repository_base_url_with_policy(
         }
     }
     Ok(())
+}
+
+fn resolve_template_repository_addresses(
+    host: &str,
+    port: u16,
+    cancellation: Option<&ExecutionCancellation>,
+) -> CoreResult<Vec<std::net::SocketAddr>> {
+    let Some(cancellation) = cancellation else {
+        return (host, port)
+            .to_socket_addrs()
+            .map(|addresses| addresses.collect())
+            .map_err(template_repo_error);
+    };
+    cancellation.check()?;
+    let host = host.to_owned();
+    let blocking_permit = crate::contracts::acquire_detached_blocking_task_permit()?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("ariadne-template-dns".to_owned())
+        .spawn(move || {
+            let _blocking_permit = blocking_permit;
+            let result = (host.as_str(), port)
+                .to_socket_addrs()
+                .map(|addresses| addresses.collect::<Vec<_>>())
+                .map_err(template_repo_error);
+            let _ = sender.send(result);
+        })
+        .map_err(CoreError::from)?;
+    let started = std::time::Instant::now();
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        if started.elapsed() >= TEMPLATE_REPOSITORY_CONNECT_TIMEOUT {
+            return Err(template_repo_error(format!(
+                "template repository DNS resolution timed out after {} ms",
+                TEMPLATE_REPOSITORY_CONNECT_TIMEOUT.as_millis()
+            )));
+        }
+        match receiver.recv_timeout(TEMPLATE_REPOSITORY_CANCEL_POLL) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(template_repo_error(
+                    "template repository DNS worker disconnected",
+                ));
+            }
+        }
+    }
 }
 
 fn ip_is_private_or_local(ip: IpAddr) -> bool {
@@ -2841,6 +3312,248 @@ fn reject_symlink_root(path: &Path) -> CoreResult<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+/// 从用户消息中提取受支持的 `@...` 项目引用，保持首次出现顺序。
+pub fn extract_project_reference_tokens(text: &str) -> Vec<String> {
+    const PREFIXES: [&str; 6] = ["确认项", "文档", "章节", "知识", "artifact", "节点"];
+    let mut references = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (offset, character) in text.char_indices() {
+        if character != '@' {
+            continue;
+        }
+        let rest = &text[offset + character.len_utf8()..];
+        if !PREFIXES.iter().any(|prefix| {
+            rest.strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/') || suffix.starts_with(':'))
+        }) {
+            continue;
+        }
+        let end = rest
+            .char_indices()
+            .find_map(|(index, current)| {
+                project_reference_token_terminator(current).then_some(index)
+            })
+            .unwrap_or(rest.len());
+        let token = format!("@{}", &rest[..end]);
+        if parse_project_reference(&token).is_ok() && seen.insert(token.clone()) {
+            references.push(token);
+        }
+    }
+    references
+}
+
+fn project_reference_token_terminator(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            ',' | ';'
+                | '!'
+                | '?'
+                | '，'
+                | '。'
+                | '；'
+                | '！'
+                | '？'
+                | '、'
+                | '"'
+                | '\''
+                | '`'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+        )
+}
+
+fn project_reference_text_fragments(
+    source_id: &str,
+    source_version: Option<String>,
+    text: &str,
+    query: &str,
+) -> (Vec<ProjectReferenceTextFragment>, bool) {
+    if text.is_empty() {
+        return (Vec::new(), false);
+    }
+    let lines = text.lines().collect::<Vec<_>>();
+    let total_lines = u64::try_from(lines.len().max(1)).unwrap_or(u64::MAX);
+    let terms = project_reference_query_terms(query);
+    let matching_lines = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let lower = line.to_lowercase();
+            terms
+                .iter()
+                .any(|term| lower.contains(term))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    let mut fragments = Vec::new();
+    let mut remaining = MAX_PROJECT_REFERENCE_TEXT_CHARS;
+    let mut covered_windows = BTreeSet::new();
+    for line_index in matching_lines
+        .into_iter()
+        .take(MAX_PROJECT_REFERENCE_MATCH_WINDOWS)
+    {
+        let start = line_index.saturating_sub(2);
+        let end = (line_index + 3).min(lines.len());
+        if !covered_windows.insert((start, end)) || remaining == 0 {
+            continue;
+        }
+        let joined = lines[start..end].join("\n");
+        let fragment_text = take_chars_around_query(&joined, &terms, remaining.min(4 * 1024));
+        remaining = remaining.saturating_sub(fragment_text.chars().count());
+        fragments.push(ProjectReferenceTextFragment {
+            source_id: source_id.to_owned(),
+            source_version: source_version.clone(),
+            start_line: u64::try_from(start + 1).unwrap_or(u64::MAX),
+            end_line: u64::try_from(end).unwrap_or(u64::MAX),
+            text: fragment_text,
+        });
+    }
+
+    if fragments.is_empty() {
+        let prefix_budget = MAX_PROJECT_REFERENCE_TEXT_CHARS / 2;
+        let prefix = take_first_chars(text, prefix_budget);
+        let prefix_lines = prefix.matches('\n').count().saturating_add(1);
+        fragments.push(ProjectReferenceTextFragment {
+            source_id: source_id.to_owned(),
+            source_version: source_version.clone(),
+            start_line: 1,
+            end_line: u64::try_from(prefix_lines).unwrap_or(u64::MAX),
+            text: prefix,
+        });
+
+        let included = fragments[0].text.chars().count();
+        let remaining = MAX_PROJECT_REFERENCE_TEXT_CHARS.saturating_sub(included);
+        if text.chars().count() > included && remaining > 0 {
+            let suffix = take_last_chars(text, remaining);
+            let suffix_line_count = suffix.matches('\n').count().saturating_add(1);
+            let start_line = total_lines
+                .saturating_sub(u64::try_from(suffix_line_count).unwrap_or(u64::MAX))
+                .saturating_add(1);
+            fragments.push(ProjectReferenceTextFragment {
+                source_id: source_id.to_owned(),
+                source_version,
+                start_line,
+                end_line: total_lines,
+                text: suffix,
+            });
+        }
+    }
+
+    let included_chars = fragments
+        .iter()
+        .map(|fragment| fragment.text.chars().count())
+        .sum::<usize>();
+    (fragments, text.chars().count() > included_chars)
+}
+
+fn project_reference_query_terms(query: &str) -> Vec<String> {
+    let mut terms = query
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| term.chars().count() >= 2)
+        .filter(|term| {
+            !matches!(
+                *term,
+                "确认项" | "文档" | "章节" | "知识" | "artifact" | "节点"
+            )
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn take_chars_around_query(value: &str, terms: &[String], limit: usize) -> String {
+    if value.chars().count() <= limit || terms.is_empty() {
+        return take_first_chars(value, limit);
+    }
+    let lower = value.to_lowercase();
+    let match_start = terms.iter().find_map(|term| lower.find(term));
+    let Some(match_start) = match_start else {
+        return take_first_chars(value, limit);
+    };
+    let match_start_chars = lower[..match_start].chars().count();
+    let start = match_start_chars.saturating_sub(limit / 2);
+    value.chars().skip(start).take(limit).collect()
+}
+
+fn trusted_artifact_path(artifact_root: &Path, storage_uri: &str) -> CoreResult<Option<PathBuf>> {
+    let Some(path) = storage_uri.strip_prefix("file://") else {
+        return Ok(None);
+    };
+    let root = absolute_path(artifact_root)?;
+    let path = absolute_path(Path::new(path))?;
+    ensure_path_under_root(&root, &path)?;
+    Ok(Some(path))
+}
+
+fn artifact_path_is_textual(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some(
+            "txt"
+                | "md"
+                | "markdown"
+                | "json"
+                | "jsonl"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "csv"
+                | "xml"
+                | "html"
+                | "htm"
+                | "log"
+                | "diff"
+                | "patch"
+        )
+    )
+}
+
+fn read_bounded_utf8_artifact(path: &Path) -> CoreResult<(String, bool)> {
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_PROJECT_REFERENCE_ARTIFACT_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let truncated =
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PROJECT_REFERENCE_ARTIFACT_BYTES;
+    if truncated {
+        bytes.truncate(usize::try_from(MAX_PROJECT_REFERENCE_ARTIFACT_BYTES).unwrap_or(usize::MAX));
+        while std::str::from_utf8(&bytes).is_err() && !bytes.is_empty() {
+            bytes.pop();
+        }
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| CoreError::validation("artifact reference is not valid UTF-8 text"))?;
+    Ok((text, truncated))
+}
+
+fn take_first_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn take_last_chars(value: &str, limit: usize) -> String {
+    let count = value.chars().count();
+    value.chars().skip(count.saturating_sub(limit)).collect()
 }
 
 fn parse_project_reference(reference: &str) -> CoreResult<(&str, &str)> {
@@ -2955,7 +3668,7 @@ mod tests {
     #[test]
     fn template_repository_url_rejects_local_targets_without_override() {
         let local =
-            validate_template_repository_base_url_with_policy("http://127.0.0.1:8080", false)
+            validate_template_repository_base_url_with_policy("http://127.0.0.1:8080", false, None)
                 .unwrap_err();
         assert!(local
             .to_string()
@@ -2964,18 +3677,22 @@ mod tests {
         let userinfo = validate_template_repository_base_url_with_policy(
             "https://user:pass@example.com",
             false,
+            None,
         )
         .unwrap_err();
         assert!(userinfo.to_string().contains("cannot contain userinfo"));
 
         let scheme =
-            validate_template_repository_base_url_with_policy("file:///tmp/templates", false)
+            validate_template_repository_base_url_with_policy("file:///tmp/templates", false, None)
                 .unwrap_err();
-        assert!(scheme.to_string().contains("must use http or https"));
+        assert!(scheme
+            .to_string()
+            .contains("must use the official v1 URL or http/https"));
     }
 
     #[test]
     fn template_repository_url_allows_local_targets_with_explicit_override() {
-        validate_template_repository_base_url_with_policy("http://127.0.0.1:8080", true).unwrap();
+        validate_template_repository_base_url_with_policy("http://127.0.0.1:8080", true, None)
+            .unwrap();
     }
 }

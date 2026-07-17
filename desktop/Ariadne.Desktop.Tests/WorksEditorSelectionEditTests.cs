@@ -134,7 +134,7 @@ public sealed class WorksEditorSelectionEditTests
     }
 
     [Fact]
-    public void WorksPage_TryResolveBlockSelection_MapsGlobalRangeToFirstIntersectingBlock()
+    public void WorksPage_ContinuousDocumentRangeCrossesReadProjectionBoundary()
     {
         var backend = System.Reflection.DispatchProxy.Create<IAriadneBackendClient, EmptyBackendProxy>();
         var vm = new WorksPageViewModel(
@@ -142,11 +142,18 @@ public sealed class WorksEditorSelectionEditTests
             backend);
         var content = new string('甲', 4_100) + new string('乙', 4_100);
         vm.SeedOpenDocumentForTests("documents/ch1.md", "v1", content);
+        var readBoundary = vm.DocumentBlocks[0].Text.Length;
+        var selection = new EditorTextSelection(readBoundary - 50, readBoundary + 50, string.Empty);
 
-        Assert.True(vm.TryResolveBlockSelection(4_050, 4_150, out var block, out var localStart, out var localEnd));
-        Assert.NotNull(block);
-        Assert.True(localEnd > localStart);
-        Assert.Equal(content[4_050..(4_050 + localEnd - localStart)], block!.Text[localStart..localEnd]);
+        Assert.True(WorksEditorSelectionEdit.TryResolve(
+            vm.DocumentContent,
+            selection,
+            out var start,
+            out var end,
+            out var selectedText));
+        Assert.Equal(readBoundary - 50, start);
+        Assert.Equal(readBoundary + 50, end);
+        Assert.Equal(content[(readBoundary - 50)..(readBoundary + 50)], selectedText);
     }
 
     private static string ResolveWorksVmSource()

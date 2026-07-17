@@ -797,11 +797,12 @@ impl WorkflowRuntime {
     ) -> CoreResult<RunStatus> {
         workflow.validate_topology()?;
         let graph_index = WorkflowGraphIndex::build(workflow);
-        let mut ready_queue =
-            ReadyQueue::from_nodes(ready_nodes(workflow, &graph_index, &self.state));
         if self.state.status.is_terminal() {
             return Ok(self.state.status);
         }
+        self.mark_branch_skips(workflow, &graph_index);
+        let mut ready_queue =
+            ReadyQueue::from_nodes(ready_nodes(workflow, &graph_index, &self.state));
 
         // 先处理外部控制信号，避免已经请求 Stop/Pause 的运行在进入调度循环后
         // 又启动新的节点。这里也负责把控制状态写回持久化存储。
@@ -812,6 +813,14 @@ impl WorkflowRuntime {
         }
         if self.state.control == RunControl::Pause && self.state.status == RunStatus::Paused {
             persist_if_needed(store, &mut self.state)?;
+            return Ok(self.state.status);
+        }
+        if self.state.status == RunStatus::Queued
+            && self
+                .state
+                .next_retry_at_ms
+                .is_some_and(|deadline| deadline > unix_timestamp_ms())
+        {
             return Ok(self.state.status);
         }
 
@@ -867,6 +876,13 @@ impl WorkflowRuntime {
                     );
                     persist_if_needed(store, &mut self.state)?;
                     return Ok(self.state.status);
+                }
+                // ready_queue 为空到这里之间，退避窗口可能刚好到期。仅在队列耗尽时
+                // 重新扫描一次全图，避免把已经 runnable 的 retry 误判成死锁暂停。
+                let newly_ready = ready_nodes(workflow, &graph_index, &self.state);
+                if !newly_ready.is_empty() {
+                    ready_queue.extend(newly_ready);
+                    continue;
                 }
                 if let Some(next_retry_at_ms) = next_pending_retry_at_ms(&self.state) {
                     self.state.next_retry_at_ms = Some(next_retry_at_ms);
@@ -996,11 +1012,27 @@ impl WorkflowRuntime {
                 persist_if_needed(store, &mut self.state)?;
                 return Ok(self.state.status);
             }
+            if matches!(journal_action, OperationJournalAction::AtMostOnceUnknown) {
+                self.record_node_started(&node_id, operation_attempt);
+                let error = CoreError::ExternalOutcomeUnknown {
+                    operation_id: request.operation_id.clone(),
+                    message:
+                        "the process ended after dispatch; the operation will not be sent again"
+                            .to_owned(),
+                };
+                self.record_node_error(node_id.clone(), error);
+                self.state.next_retry_at_ms = None;
+                self.state.status = RunStatus::Failed;
+                persist_if_needed(store, &mut self.state)?;
+                return Ok(self.state.status);
+            }
             self.record_node_started(&node_id, operation_attempt);
             let execution_result = match &journal_action {
                 OperationJournalAction::Execute => executor.execute(request.clone()),
                 OperationJournalAction::Replay(output) => Ok(output.as_ref().clone()),
-                OperationJournalAction::InDoubt => unreachable!("handled before execution"),
+                OperationJournalAction::InDoubt | OperationJournalAction::AtMostOnceUnknown => {
+                    unreachable!("handled before execution")
+                }
             };
             let execution_result = match execution_result {
                 Ok(output) if matches!(journal_action, OperationJournalAction::Execute) => {
@@ -1098,6 +1130,67 @@ impl WorkflowRuntime {
                         return Ok(self.state.status);
                     }
                     if operation_in_doubt {
+                        if operation_policy.is_at_most_once() {
+                            let outcome_error = CoreError::ExternalOutcomeUnknown {
+                                operation_id: request.operation_id.clone(),
+                                message: error_text,
+                            };
+                            self.record_node_error(node_id.clone(), outcome_error);
+                            self.state.next_retry_at_ms = None;
+                            self.state.status = RunStatus::Failed;
+                            persist_if_needed(store, &mut self.state)?;
+                            return Ok(self.state.status);
+                        }
+                        if operation_policy.is_automatically_replayable() {
+                            let recovery_attempt = operation_recovery_attempts(
+                                &self.state,
+                                &node_id,
+                                &request.operation_id,
+                            )
+                            .saturating_add(1);
+                            if recovery_attempt < u64::from(self.state.retry_policy.max_attempts) {
+                                let delay_ms = retry_delay_ms(
+                                    self.state.retry_policy,
+                                    u32::try_from(recovery_attempt).unwrap_or(u32::MAX),
+                                );
+                                if let Some(node) = self.state.nodes.get_mut(&node_id) {
+                                    node.status = RunStatus::Queued;
+                                    node.error = Some(error_text);
+                                    node.error_state = None;
+                                }
+                                let next_retry_at_ms = unix_timestamp_ms().saturating_add(delay_ms);
+                                self.state.status = RunStatus::Queued;
+                                self.state.next_retry_at_ms = Some(next_retry_at_ms);
+                                self.record_event(
+                                    WorkflowRuntimeEventType::NodeRetryScheduled,
+                                    Some(node_id.clone()),
+                                    format!(
+                                        "node {} idempotent operation recovery scheduled after {}ms",
+                                        node_id.as_str(),
+                                        delay_ms
+                                    ),
+                                    json!({
+                                        "operation_id": request.operation_id,
+                                        "recovery_attempt": recovery_attempt,
+                                        "next_retry_delay_ms": delay_ms,
+                                        "next_retry_at_ms": next_retry_at_ms,
+                                    }),
+                                );
+                                persist_if_needed(store, &mut self.state)?;
+                                return Ok(self.state.status);
+                            }
+                            let exhausted = CoreError::External {
+                                service: "workflow_operation_recovery".to_owned(),
+                                message: format!(
+                                    "idempotent recovery exhausted after {recovery_attempt} attempts: {error_text}"
+                                ),
+                            };
+                            self.record_node_error(node_id.clone(), exhausted);
+                            self.state.next_retry_at_ms = None;
+                            self.state.status = RunStatus::Failed;
+                            persist_if_needed(store, &mut self.state)?;
+                            return Ok(self.state.status);
+                        }
                         if let Some(node) = self.state.nodes.get_mut(&node_id) {
                             node.status = RunStatus::Paused;
                             node.error = Some(error_text);
@@ -1144,6 +1237,12 @@ impl WorkflowRuntime {
                     }
                     return Ok(self.state.status);
                 }
+            }
+
+            // 分支失活只可能在 condition/eval 成功产出选择后发生；按依赖索引
+            // 一次传播，禁止每执行一个普通节点都重新扫描整图。
+            if graph_index.condition_nodes.contains(&node_id) && self.node_succeeded(&node_id) {
+                self.mark_branch_skips(workflow, &graph_index);
             }
 
             ready_queue.extend(graph_index.dependent_nodes(&node_id).iter().cloned());
@@ -1580,6 +1679,94 @@ impl WorkflowRuntime {
             format!("node {} paused", node_id.as_str()),
             Value::Null,
         );
+    }
+
+    /// 将全部依赖均已失活的节点标记为分支跳过，并向下游传递。
+    fn mark_branch_skips(
+        &mut self,
+        workflow: &WorkflowDefinition,
+        graph_index: &WorkflowGraphIndex,
+    ) {
+        if graph_index.condition_nodes.is_empty() {
+            return;
+        }
+
+        let mut queue = workflow
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<VecDeque<_>>();
+        let mut queued = workflow
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<HashSet<_>>();
+        while let Some(node_id) = queue.pop_front() {
+            queued.remove(&node_id);
+            if self.state.nodes.contains_key(&node_id) {
+                continue;
+            }
+            let dependencies = graph_index.dependency_edge_indices(&node_id);
+            if dependencies.is_empty() {
+                continue;
+            }
+            let mut has_selector = false;
+            let mut all_edges_disabled = true;
+            let mut all_selectors_disabled = true;
+            for edge in dependencies
+                .iter()
+                .filter_map(|index| workflow.edges.get(*index))
+            {
+                let state = control_edge_state(graph_index, &self.state, edge);
+                all_edges_disabled &= state == DependencyEdgeState::Disabled;
+                if is_condition_selector_edge(graph_index, edge) {
+                    has_selector = true;
+                    all_selectors_disabled &= state == DependencyEdgeState::Disabled;
+                }
+            }
+            let all_disabled = if has_selector {
+                all_selectors_disabled
+            } else {
+                all_edges_disabled
+            };
+            if !all_disabled {
+                continue;
+            }
+            let attempts = previous_attempts(&self.state, &node_id);
+            self.state.nodes.insert(
+                node_id.clone(),
+                WorkflowNodeRuntimeState {
+                    node_id: node_id.clone(),
+                    status: RunStatus::Succeeded,
+                    outputs: PortMap::new(),
+                    communication_output: None,
+                    communication_control: CommunicationControl::default(),
+                    prompt_trace_hash: None,
+                    patch_session_commit_id: None,
+                    checkpoint_id: None,
+                    patch_write_back_state: None,
+                    metadata: json!({ "branch_skipped": true }),
+                    error: None,
+                    error_state: None,
+                    execution_attempts: attempts,
+                },
+            );
+            self.state
+                .events
+                .push(format!("node {} skipped by branch", node_id.as_str()));
+            self.record_event(
+                WorkflowRuntimeEventType::NodeSkipped,
+                Some(node_id.clone()),
+                format!("node {} skipped by branch", node_id.as_str()),
+                json!({ "reason": "branch_not_selected" }),
+            );
+
+            for dependent in graph_index.dependent_nodes(&node_id) {
+                if queued.insert(dependent.clone()) {
+                    queue.push_back(dependent.clone());
+                }
+            }
+        }
     }
 
     /// 记录节点输出到指定状态。
@@ -2066,6 +2253,7 @@ enum OperationJournalAction {
     Execute,
     Replay(Box<WorkflowNodeExecutionOutput>),
     InDoubt,
+    AtMostOnceUnknown,
 }
 
 fn operation_is_journaled(policy: crate::workflow::WorkflowOperationPolicy) -> bool {
@@ -2155,7 +2343,11 @@ fn prepare_operation_journal(
                 None,
                 now_ms,
             )?;
-            Ok(OperationJournalAction::InDoubt)
+            if policy.is_at_most_once() {
+                Ok(OperationJournalAction::AtMostOnceUnknown)
+            } else {
+                Ok(OperationJournalAction::InDoubt)
+            }
         }
         crate::workflow::WorkflowOperationStatus::InDoubt => {
             if operation.recovery_policy
@@ -2182,7 +2374,11 @@ fn prepare_operation_journal(
                     return Ok(OperationJournalAction::Replay(Box::new(output)));
                 }
             }
-            Ok(OperationJournalAction::InDoubt)
+            if policy.is_at_most_once() {
+                Ok(OperationJournalAction::AtMostOnceUnknown)
+            } else {
+                Ok(OperationJournalAction::InDoubt)
+            }
         }
         crate::workflow::WorkflowOperationStatus::Aborted => Err(CoreError::validation(
             "aborted workflow operation cannot be dispatched again with the same attempt",
@@ -2438,13 +2634,38 @@ fn previous_attempts(state: &WorkflowRunState, node_id: &NodeId) -> u32 {
 fn next_node_operation_attempt(state: &WorkflowRunState, node_id: &NodeId) -> u32 {
     let previous = previous_attempts(state, node_id);
     let resumes_in_doubt = state.nodes.get(node_id).is_some_and(|node| {
-        node.status == RunStatus::Paused && node.error.is_some() && node.error_state.is_none()
+        matches!(node.status, RunStatus::Paused | RunStatus::Queued)
+            && node.error.is_some()
+            && node.error_state.is_none()
     });
     if resumes_in_doubt && previous > 0 {
         previous
     } else {
         previous.saturating_add(1)
     }
+}
+
+fn operation_recovery_attempts(
+    state: &WorkflowRunState,
+    node_id: &NodeId,
+    operation_id: &str,
+) -> u64 {
+    state
+        .structured_events
+        .iter()
+        .filter(|event| {
+            event.event_type == WorkflowRuntimeEventType::NodeRetryScheduled
+                && event.node_id.as_ref() == Some(node_id)
+                && event.metadata.get("operation_id").and_then(Value::as_str) == Some(operation_id)
+        })
+        .filter_map(|event| {
+            event
+                .metadata
+                .get("recovery_attempt")
+                .and_then(Value::as_u64)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// 将 CoreError 转成节点级错误状态。
@@ -2498,6 +2719,7 @@ fn node_error_kind(error: &CoreError) -> NodeErrorKind {
                 NodeErrorKind::External
             }
         }
+        CoreError::ExternalOutcomeUnknown { .. } => NodeErrorKind::External,
         CoreError::ProviderRequest {
             outcome, message, ..
         }
@@ -2539,6 +2761,7 @@ fn node_error_kind(error: &CoreError) -> NodeErrorKind {
         | CoreError::RegistryMissing { .. }
         | CoreError::PortMissing { .. }
         | CoreError::PortTypeMismatch { .. }
+        | CoreError::DocumentAlreadyExists { .. }
         | CoreError::WorkflowStateRevisionConflict { .. }
         | CoreError::WorkflowRunNotFound { .. }
         | CoreError::WorkflowExecutorContractViolation { .. } => NodeErrorKind::System,
@@ -2599,6 +2822,7 @@ struct WorkflowGraphIndex {
     communication_neighbors: HashMap<NodeId, Vec<NodeId>>,
     communication_nodes: HashSet<NodeId>,
     loop_nodes: HashSet<NodeId>,
+    condition_nodes: HashSet<NodeId>,
 }
 
 impl WorkflowGraphIndex {
@@ -2613,6 +2837,12 @@ impl WorkflowGraphIndex {
             .nodes
             .iter()
             .filter(|node| node.type_name == "loop")
+            .map(|node| node.id.clone())
+            .collect::<HashSet<_>>();
+        let condition_nodes = workflow
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.type_name.as_str(), "condition" | "eval"))
             .map(|node| node.id.clone())
             .collect::<HashSet<_>>();
         let mut dependency_edges = HashMap::<NodeId, Vec<usize>>::new();
@@ -2668,6 +2898,7 @@ impl WorkflowGraphIndex {
             communication_neighbors,
             communication_nodes,
             loop_nodes,
+            condition_nodes,
         }
     }
 
@@ -2877,6 +3108,59 @@ fn should_pause_for_breakpoint(
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DependencyEdgeState {
+    Active,
+    Disabled,
+    Waiting,
+}
+
+/// 计算单条依赖边状态。条件节点的 control alias 是分支选择器；从已跳过
+/// 节点出发的 control/data 边继续失活，使未选分支能够向下游传递。
+fn is_condition_selector_edge(graph_index: &WorkflowGraphIndex, edge: &Edge) -> bool {
+    edge.kind == WorkflowEdgeKind::Control
+        && edge.alias.is_some()
+        && graph_index.condition_nodes.contains(&edge.from.node_id)
+}
+
+fn control_edge_state(
+    graph_index: &WorkflowGraphIndex,
+    state: &WorkflowRunState,
+    edge: &Edge,
+) -> DependencyEdgeState {
+    let Some(source_state) = state.nodes.get(&edge.from.node_id) else {
+        return DependencyEdgeState::Waiting;
+    };
+    if source_state.status != RunStatus::Succeeded {
+        return DependencyEdgeState::Waiting;
+    }
+    if source_state
+        .metadata
+        .get("branch_skipped")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return DependencyEdgeState::Disabled;
+    }
+    if !is_condition_selector_edge(graph_index, edge) {
+        return DependencyEdgeState::Active;
+    }
+    let selected_branch = source_state
+        .outputs
+        .get("branch")
+        .and_then(|value| match value {
+            PortValue::Inline { value } => value.as_str(),
+            _ => None,
+        });
+    match selected_branch {
+        Some(selected) if Some(selected) == edge.alias.as_deref().map(str::trim) => {
+            DependencyEdgeState::Active
+        }
+        Some(_) => DependencyEdgeState::Disabled,
+        None => DependencyEdgeState::Waiting,
+    }
+}
+
 /// control/data 边依赖全部满足后节点才可运行。
 fn dependencies_satisfied(
     workflow: &WorkflowDefinition,
@@ -2896,10 +3180,10 @@ fn dependencies_satisfied(
             {
                 return true;
             }
-            state
-                .nodes
-                .get(&edge.from.node_id)
-                .is_some_and(|node| node.status == RunStatus::Succeeded)
+            matches!(
+                control_edge_state(graph_index, state, edge),
+                DependencyEdgeState::Active | DependencyEdgeState::Disabled
+            )
         })
 }
 

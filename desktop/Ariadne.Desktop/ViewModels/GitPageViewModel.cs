@@ -4,6 +4,14 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
+public enum GitOperationState
+{
+    Idle,
+    Refreshing,
+    Checkpointing,
+    Restoring,
+}
+
 public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
 {
     private readonly DisplayNameService _displayNames;
@@ -22,6 +30,8 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     private string _diffSummaryText = string.Empty;
     private string _diffPreviewText = string.Empty;
     private GitHistoryItemViewModel? _selectedCommit;
+    private GitOperationState _operationState;
+    private long _loadGeneration;
 
     public GitPageViewModel(
         DisplayNameService displayNames,
@@ -35,16 +45,22 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         _reloadProjectData = reloadProjectData ?? (() => Task.CompletedTask);
         Commits = new ObservableCollection<GitHistoryItemViewModel>();
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
-        RefreshCommand = new RelayCommand(() => _ = RefreshAsync());
-        CreateCheckpointCommand = new RelayCommand(() => _ = CreateCheckpointAsync());
+        RefreshCommand = new RelayCommand(() => _ = RefreshAsync(), CanStartOperation);
+        CreateCheckpointCommand = new RelayCommand(() => _ = CreateCheckpointAsync(), CanStartOperation);
         ViewDetailsCommand = new RelayCommand(() => ViewDetails(SelectedCommit), () => HasSelection);
-        RestoreCommand = new RelayCommand(() => _ = RestoreSelectedAsync(), () => HasSelection);
+        RestoreCommand = new RelayCommand(
+            () => _ = RestoreSelectedAsync(),
+            () => HasSelection && CanStartOperation());
         CopyIdCommand = new RelayCommand(() => _ = CopyCommitIdAsync(SelectedCommit), () => HasSelection);
-        _ = RefreshAsync();
     }
 
     public string ToggleRightPanelText => _displayNames.Text("ui.action.toggle_right_panel");
-    public bool IsRightPanelOpen { get => _isRightPanelOpen; set => SetProperty(ref _isRightPanelOpen, value); }
+    public bool IsRightPanelOpen
+    {
+        get => _isRightPanelOpen;
+        set => SetProperty(ref _isRightPanelOpen, value);
+    }
+
     public RelayCommand ToggleRightPanelCommand { get; }
     public RelayCommand RefreshCommand { get; }
     public RelayCommand CreateCheckpointCommand { get; }
@@ -54,23 +70,73 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     public ObservableCollection<GitHistoryItemViewModel> Commits { get; }
     public Func<string, Task>? RequestCopyText { get; set; }
 
-    public string CheckpointMessage { get => _checkpointMessage; set => SetProperty(ref _checkpointMessage, value); }
-    public string RestoreBranchName { get => _restoreBranchName; set => SetProperty(ref _restoreBranchName, value); }
-    public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
-    public string RepositoryStatusText { get => _repositoryStatusText; private set => SetProperty(ref _repositoryStatusText, value); }
-    public string CurrentBranchText { get => _currentBranchText; private set => SetProperty(ref _currentBranchText, value); }
-    public string HeadText { get => _headText; private set => SetProperty(ref _headText, value); }
-    public string DirtyStateText { get => _dirtyStateText; private set => SetProperty(ref _dirtyStateText, value); }
-    public string RepositoryReasonText { get => _repositoryReasonText; private set => SetProperty(ref _repositoryReasonText, value); }
-    public string DiffSummaryText { get => _diffSummaryText; private set => SetProperty(ref _diffSummaryText, value); }
-    public string DiffPreviewText { get => _diffPreviewText; private set => SetProperty(ref _diffPreviewText, value); }
+    public string CheckpointMessage
+    {
+        get => _checkpointMessage;
+        set => SetProperty(ref _checkpointMessage, value);
+    }
+
+    public string RestoreBranchName
+    {
+        get => _restoreBranchName;
+        set => SetProperty(ref _restoreBranchName, value);
+    }
+
+    public string StatusText
+    {
+        get => _statusText;
+        set => SetProperty(ref _statusText, value);
+    }
+
+    public string RepositoryStatusText
+    {
+        get => _repositoryStatusText;
+        private set => SetProperty(ref _repositoryStatusText, value);
+    }
+
+    public string CurrentBranchText
+    {
+        get => _currentBranchText;
+        private set => SetProperty(ref _currentBranchText, value);
+    }
+
+    public string HeadText
+    {
+        get => _headText;
+        private set => SetProperty(ref _headText, value);
+    }
+
+    public string DirtyStateText
+    {
+        get => _dirtyStateText;
+        private set => SetProperty(ref _dirtyStateText, value);
+    }
+
+    public string RepositoryReasonText
+    {
+        get => _repositoryReasonText;
+        private set => SetProperty(ref _repositoryReasonText, value);
+    }
+
+    public string DiffSummaryText
+    {
+        get => _diffSummaryText;
+        private set => SetProperty(ref _diffSummaryText, value);
+    }
+
+    public string DiffPreviewText
+    {
+        get => _diffPreviewText;
+        private set => SetProperty(ref _diffPreviewText, value);
+    }
+
     public bool HasRepositoryReason => !string.IsNullOrWhiteSpace(RepositoryReasonText);
     public bool HasDiffPreview => !string.IsNullOrWhiteSpace(DiffPreviewText);
 
     public GitHistoryItemViewModel? SelectedCommit
     {
         get => _selectedCommit;
-        private set
+        set
         {
             if (SetProperty(ref _selectedCommit, value))
             {
@@ -78,13 +144,43 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
                 OnPropertyChanged(nameof(SelectedCommitId));
                 OnPropertyChanged(nameof(SelectedKind));
                 OnPropertyChanged(nameof(SelectedParents));
+                OnPropertyChanged(nameof(SelectedRefs));
+                OnPropertyChanged(nameof(SelectedAuthor));
+                OnPropertyChanged(nameof(SelectedTime));
                 OnPropertyChanged(nameof(HasSelection));
-                ViewDetailsCommand.NotifyCanExecuteChanged();
-                RestoreCommand.NotifyCanExecuteChanged();
-                CopyIdCommand.NotifyCanExecuteChanged();
+                NotifySelectionCommands();
             }
         }
     }
+
+    public GitOperationState OperationState
+    {
+        get => _operationState;
+        private set
+        {
+            if (SetProperty(ref _operationState, value))
+            {
+                OnPropertyChanged(nameof(IsBusy));
+                OnPropertyChanged(nameof(IsRefreshing));
+                OnPropertyChanged(nameof(IsCheckpointing));
+                OnPropertyChanged(nameof(IsRestoring));
+                OnPropertyChanged(nameof(OperationStatusText));
+                NotifyOperationCommands();
+            }
+        }
+    }
+
+    public bool IsBusy => OperationState != GitOperationState.Idle;
+    public bool IsRefreshing => OperationState == GitOperationState.Refreshing;
+    public bool IsCheckpointing => OperationState == GitOperationState.Checkpointing;
+    public bool IsRestoring => OperationState == GitOperationState.Restoring;
+    public string OperationStatusText => OperationState switch
+    {
+        GitOperationState.Refreshing => _displayNames.Text("ui.git.operation.refreshing"),
+        GitOperationState.Checkpointing => _displayNames.Text("ui.git.operation.checkpointing"),
+        GitOperationState.Restoring => _displayNames.Text("ui.git.operation.restoring"),
+        _ => string.Empty,
+    };
 
     public bool HasSelection => SelectedCommit is not null;
     public bool HasCommits => Commits.Count > 0;
@@ -101,6 +197,11 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     public string SelectedParents => SelectedCommit is null || SelectedCommit.Parents.Count == 0
         ? _displayNames.Text("ui.common.none")
         : string.Join(", ", SelectedCommit.Parents);
+    public string SelectedRefs => SelectedCommit is null || SelectedCommit.Refs.Count == 0
+        ? _displayNames.Text("ui.common.none")
+        : string.Join(", ", SelectedCommit.Refs);
+    public string SelectedAuthor => SelectedCommit?.AuthorText ?? _displayNames.Text("ui.common.none");
+    public string SelectedTime => SelectedCommit?.TimestampText ?? _displayNames.Text("ui.common.none");
 
     public string Title => _displayNames.Text("ui.git.title");
     public string Description => _displayNames.Text("ui.git.desc");
@@ -109,6 +210,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     public string CreateCheckpointText => _displayNames.Text("ui.git.create_checkpoint");
     public string BranchGraphText => _displayNames.Text("ui.git.branch_graph");
     public string DetailsText => _displayNames.Text("ui.git.details");
+    public string TechnicalDetailsText => _displayNames.Text("ui.git.technical_details");
     public string NoSelectionText => _displayNames.Text("ui.git.no_selection");
     public string EmptyText => _displayNames.Text("ui.git.empty");
     public string RestoreBranchNameText => _displayNames.Text("ui.git.restore_branch_name");
@@ -117,6 +219,8 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     public string CommitLabel => _displayNames.Text("ui.git.commit_id");
     public string KindLabel => _displayNames.Text("ui.git.kind");
     public string ParentsLabel => _displayNames.Text("ui.git.parents");
+    public string AuthorLabel => _displayNames.Text("ui.git.author");
+    public string TimeLabel => _displayNames.Text("ui.git.time");
     public string ManualKindText => _displayNames.Text("ui.git.kind.manual");
     public string AutoKindText => _displayNames.Text("ui.git.kind.auto");
     public string BranchRefsLabel => _displayNames.Text("ui.git.refs");
@@ -130,77 +234,90 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     public string CtxViewDetailsText => _displayNames.Text("ui.git.context.view_details");
     public string CtxRestoreText => _displayNames.Text("ui.git.context.restore");
     public string CtxCopyIdText => _displayNames.Text("ui.git.context.copy_id");
+    public string HeadBadgeText => _displayNames.Text("ui.git.head_badge");
+    public string MergeBadgeText => _displayNames.Text("ui.git.merge_badge");
 
-    private async Task RefreshAsync()
+    private async Task RefreshAsync(CancellationToken cancellationToken = default)
     {
+        if (!TryBeginOperation(GitOperationState.Refreshing))
+        {
+            return;
+        }
+        try
+        {
+            await RefreshCoreAsync(cancellationToken).ConfigureAwait(true);
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
+    private async Task RefreshCoreAsync(CancellationToken cancellationToken)
+    {
+        var generation = Interlocked.Increment(ref _loadGeneration);
         if (!_backend.HasProjectRoot)
         {
-            Commits.Clear();
-            SelectedCommit = null;
-            StatusText = string.Empty;
-            RepositoryStatusText = string.Empty;
-            CurrentBranchText = _displayNames.Text("ui.common.none");
-            HeadText = _displayNames.Text("ui.common.none");
-            DirtyStateText = _displayNames.Text("ui.common.none");
-            RepositoryReasonText = string.Empty;
-            DiffSummaryText = _displayNames.Text("ui.common.none");
-            DiffPreviewText = string.Empty;
-            OnPropertyChanged(nameof(HasCommits));
-            OnPropertyChanged(nameof(IsCommitListEmpty));
-            OnPropertyChanged(nameof(EmptyTitle));
-            OnPropertyChanged(nameof(EmptyHint));
+            ClearProjectState();
             return;
         }
 
+        await RefreshRepositoryStatusAsync(cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            await RefreshRepositoryStatusAsync().ConfigureAwait(true);
-            var graph = await _backend.GetGitBranchGraphAsync().ConfigureAwait(true);
-            Commits.Clear();
-            foreach (var node in graph)
+            var graph = await _backend.GetGitBranchGraphAsync(cancellationToken: cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (generation != Interlocked.Read(ref _loadGeneration))
             {
-                Commits.Add(new GitHistoryItemViewModel(
-                    node.CommitId,
-                    node.Summary,
-                    node.Parents,
-                    node.Refs,
-                    KindText(node.Summary),
-                    CtxViewDetailsText,
-                    CtxRestoreText,
-                    CtxCopyIdText,
-                    SelectCommit,
-                    ViewDetails,
-                    RestoreCommitAsync,
-                    CopyCommitIdAsync));
+                return;
             }
-            SelectedCommit = Commits.FirstOrDefault();
-            if (SelectedCommit is not null)
-            {
-                SelectedCommit.IsSelected = true;
-            }
-            StatusText = Commits.Count == 0 ? EmptyText : $"{Commits.Count}";
-            OnPropertyChanged(nameof(HasCommits));
-            OnPropertyChanged(nameof(IsCommitListEmpty));
-            OnPropertyChanged(nameof(EmptyTitle));
-            OnPropertyChanged(nameof(EmptyHint));
+            ApplyBranchGraph(graph);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch
         {
-            await RefreshHistoryFallbackAsync().ConfigureAwait(true);
+            await RefreshHistoryFallbackAsync(cancellationToken, generation).ConfigureAwait(true);
         }
     }
 
-    public async Task ReloadProjectDataAsync()
+    public async Task ReloadProjectDataAsync(CancellationToken cancellationToken = default)
     {
-        await RefreshAsync().ConfigureAwait(true);
+        await RefreshAsync(cancellationToken).ConfigureAwait(true);
     }
 
-    private async Task RefreshRepositoryStatusAsync()
+    public void DeactivateProjectData()
+    {
+        Interlocked.Increment(ref _loadGeneration);
+    }
+
+    private void ClearProjectState()
+    {
+        Commits.Clear();
+        SelectedCommit = null;
+        StatusText = string.Empty;
+        RepositoryStatusText = string.Empty;
+        CurrentBranchText = _displayNames.Text("ui.common.none");
+        HeadText = _displayNames.Text("ui.common.none");
+        DirtyStateText = _displayNames.Text("ui.common.none");
+        RepositoryReasonText = string.Empty;
+        DiffSummaryText = _displayNames.Text("ui.common.none");
+        DiffPreviewText = string.Empty;
+        NotifyHistoryState();
+    }
+
+    private async Task RefreshRepositoryStatusAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            var status = await _backend.GetGitRepositoryStatusAsync().ConfigureAwait(true);
+            var status = await _backend.GetGitRepositoryStatusAsync(cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             ApplyRepositoryStatus(status);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
@@ -215,67 +332,159 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         }
     }
 
-    private async Task RefreshHistoryFallbackAsync()
+    private async Task RefreshHistoryFallbackAsync(CancellationToken cancellationToken, long generation)
     {
         try
         {
-            await RefreshRepositoryStatusAsync().ConfigureAwait(true);
-            var history = await _backend.GetGitHistoryAsync().ConfigureAwait(true);
+            var history = await _backend.GetGitHistoryAsync(cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (generation != Interlocked.Read(ref _loadGeneration))
+            {
+                return;
+            }
+
+            var previousId = SelectedCommit?.CommitId;
             Commits.Clear();
             foreach (var commit in history)
             {
-                Commits.Add(new GitHistoryItemViewModel(
+                Commits.Add(CreateHistoryItem(
                     commit.CommitId,
                     commit.Summary,
                     Array.Empty<string>(),
                     Array.Empty<string>(),
-                    commit.CheckpointKind switch
-                    {
-                        "auto" => AutoKindText,
-                        "manual" => ManualKindText,
-                        _ => _displayNames.Text("ui.common.none"),
-                    },
-                    CtxViewDetailsText,
-                    CtxRestoreText,
-                    CtxCopyIdText,
-                    SelectCommit,
-                    ViewDetails,
-                    RestoreCommitAsync,
-                    CopyCommitIdAsync));
+                    commit.TimestampMs,
+                    commit.Author,
+                    commit.CheckpointKind,
+                    isHead: false,
+                    laneIndex: 0));
             }
-            SelectedCommit = Commits.FirstOrDefault();
-            if (SelectedCommit is not null)
-            {
-                SelectedCommit.IsSelected = true;
-            }
-            StatusText = Commits.Count == 0 ? EmptyText : $"{Commits.Count}";
-            OnPropertyChanged(nameof(HasCommits));
-            OnPropertyChanged(nameof(IsCommitListEmpty));
+            SelectAfterRefresh(previousId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
             StatusText = UserFacingError.Format(ex, _displayNames);
-            OnPropertyChanged(nameof(HasCommits));
-            OnPropertyChanged(nameof(IsCommitListEmpty));
+            NotifyHistoryState();
         }
+    }
+
+    private void ApplyBranchGraph(IReadOnlyList<BranchGraphNode> graph)
+    {
+        var previousId = SelectedCommit?.CommitId;
+        var lanes = new List<string>();
+        Commits.Clear();
+        foreach (var node in graph)
+        {
+            var laneIndex = lanes.FindIndex(id => string.Equals(id, node.CommitId, StringComparison.Ordinal));
+            if (laneIndex < 0)
+            {
+                laneIndex = lanes.Count;
+                lanes.Add(node.CommitId);
+            }
+
+            if (node.Parents.Count == 0)
+            {
+                lanes.RemoveAt(laneIndex);
+            }
+            else
+            {
+                lanes[laneIndex] = node.Parents[0];
+                for (var index = 1; index < node.Parents.Count; index++)
+                {
+                    if (!lanes.Contains(node.Parents[index], StringComparer.Ordinal))
+                    {
+                        lanes.Insert(Math.Min(laneIndex + index, lanes.Count), node.Parents[index]);
+                    }
+                }
+            }
+
+            Commits.Add(CreateHistoryItem(
+                node.CommitId,
+                node.Summary,
+                node.Parents,
+                node.Refs,
+                node.TimestampMs,
+                node.Author,
+                node.CheckpointKind,
+                node.IsHead,
+                laneIndex));
+        }
+        SelectAfterRefresh(previousId);
+    }
+
+    private GitHistoryItemViewModel CreateHistoryItem(
+        string commitId,
+        string summary,
+        IReadOnlyList<string> parents,
+        IReadOnlyList<string> refs,
+        long timestampMs,
+        string? author,
+        string? checkpointKind,
+        bool isHead,
+        int laneIndex)
+    {
+        return new GitHistoryItemViewModel(
+            commitId,
+            summary,
+            parents,
+            refs,
+            timestampMs,
+            author,
+            KindText(checkpointKind, summary),
+            isHead || refs.Any(value => value == "HEAD" || value.StartsWith("HEAD -> ", StringComparison.Ordinal)),
+            laneIndex,
+            HeadBadgeText,
+            MergeBadgeText,
+            CtxViewDetailsText,
+            CtxRestoreText,
+            CtxCopyIdText,
+            _displayNames,
+            SelectCommit,
+            ViewDetails,
+            RestoreCommitAsync,
+            CopyCommitIdAsync,
+            CanStartOperation);
+    }
+
+    private void SelectAfterRefresh(string? previousId)
+    {
+        SelectedCommit = previousId is null
+            ? Commits.FirstOrDefault()
+            : Commits.FirstOrDefault(item => item.CommitId == previousId) ?? Commits.FirstOrDefault();
+        StatusText = Commits.Count == 0
+            ? EmptyText
+            : _displayNames.Format("ui.git.count", new Dictionary<string, string>
+            {
+                ["count"] = Commits.Count.ToString(),
+            });
+        NotifyHistoryState();
     }
 
     private async Task CreateCheckpointAsync()
     {
+        if (!TryBeginOperation(GitOperationState.Checkpointing))
+        {
+            return;
+        }
         try
         {
             var checkpoint = await _backend.CreateCheckpointAsync(CheckpointMessage).ConfigureAwait(true);
-            // Success feedback uses localization — not backend free-form error text (U1).
             var summary = (checkpoint.Message ?? string.Empty).Trim();
             StatusText = summary.Length is > 0 and <= 80
                 ? _displayNames.Format("ui.git.checkpoint_created", new Dictionary<string, string> { ["summary"] = summary })
                 : _displayNames.Text("ui.git.checkpoint_created_plain");
             CheckpointMessage = string.Empty;
-            await RefreshAsync().ConfigureAwait(true);
+            await RefreshCoreAsync(CancellationToken.None).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
             StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+        finally
+        {
+            EndOperation();
         }
     }
 
@@ -286,17 +495,20 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
             StatusText = NoSelectionText;
             return;
         }
-
         await RestoreCommitAsync(SelectedCommit).ConfigureAwait(true);
     }
 
     private async Task RestoreCommitAsync(GitHistoryItemViewModel commit)
     {
+        if (!TryBeginOperation(GitOperationState.Restoring))
+        {
+            return;
+        }
         try
         {
             var branch = string.IsNullOrWhiteSpace(RestoreBranchName)
                 ? $"restore-{commit.ShortCommitId}"
-                : RestoreBranchName;
+                : RestoreBranchName.Trim();
             if (!await ConfirmRestoreAsync(commit, branch).ConfigureAwait(true))
             {
                 return;
@@ -312,18 +524,26 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
                 ["followup"] = RestoreFollowUpText(report),
             });
             RestoreBranchName = string.Empty;
-            await RefreshAsync().ConfigureAwait(true);
+            await RefreshCoreAsync(CancellationToken.None).ConfigureAwait(true);
             await _reloadProjectData().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
             StatusText = UserFacingError.Format(ex, _displayNames);
         }
+        finally
+        {
+            EndOperation();
+        }
     }
 
     private void ViewDetails(GitHistoryItemViewModel? commit)
     {
-        StatusText = commit?.Summary ?? NoSelectionText;
+        if (commit is not null)
+        {
+            SelectedCommit = commit;
+            IsRightPanelOpen = true;
+        }
     }
 
     private string RestoreFollowUpText(RestoreReport report)
@@ -347,9 +567,15 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
             "unavailable" => _displayNames.Text("ui.git.status.unavailable"),
             _ => status.Status,
         };
-        CurrentBranchText = string.IsNullOrWhiteSpace(status.Branch) ? _displayNames.Text("ui.common.none") : status.Branch;
-        HeadText = string.IsNullOrWhiteSpace(status.Head) ? _displayNames.Text("ui.common.none") : ShortHash(status.Head);
-        DirtyStateText = status.Dirty ? _displayNames.Text("ui.git.dirty") : _displayNames.Text("ui.git.clean");
+        CurrentBranchText = string.IsNullOrWhiteSpace(status.Branch)
+            ? _displayNames.Text("ui.common.none")
+            : status.Branch;
+        HeadText = string.IsNullOrWhiteSpace(status.Head)
+            ? _displayNames.Text("ui.common.none")
+            : ShortHash(status.Head);
+        DirtyStateText = status.Dirty
+            ? _displayNames.Text("ui.git.dirty")
+            : _displayNames.Text("ui.git.clean");
         RepositoryReasonText = status.Reason ?? string.Empty;
         DiffSummaryText = _displayNames.Format("ui.git.diff_lines", new Dictionary<string, string>
         {
@@ -377,44 +603,87 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
             StatusText = NoSelectionText;
             return;
         }
-
         if (RequestCopyText is not null)
         {
             await RequestCopyText(commit.CommitId).ConfigureAwait(true);
             StatusText = _displayNames.Text("ui.git.copied_commit_id");
             return;
         }
-
         StatusText = commit.CommitId;
     }
 
     private void SelectCommit(GitHistoryItemViewModel item)
     {
-        foreach (var commit in Commits)
-        {
-            commit.IsSelected = commit == item;
-        }
         SelectedCommit = item;
     }
 
-    private string KindText(string summary)
+    private string KindText(string? checkpointKind, string summary)
     {
-        if (summary.StartsWith("Checkpoint:", StringComparison.OrdinalIgnoreCase))
+        return checkpointKind switch
         {
-            return AutoKindText;
-        }
-        if (summary.StartsWith("Archive:", StringComparison.OrdinalIgnoreCase))
+            "auto" => AutoKindText,
+            "manual" => ManualKindText,
+            _ when summary.StartsWith("Checkpoint:", StringComparison.OrdinalIgnoreCase) => AutoKindText,
+            _ when summary.StartsWith("Archive:", StringComparison.OrdinalIgnoreCase) => ManualKindText,
+            _ => string.Empty,
+        };
+    }
+
+    private bool TryBeginOperation(GitOperationState operation)
+    {
+        if (!CanStartOperation())
         {
-            return ManualKindText;
+            return false;
         }
-        return _displayNames.Text("ui.common.none");
+        OperationState = operation;
+        return true;
+    }
+
+    private void EndOperation()
+    {
+        OperationState = GitOperationState.Idle;
+    }
+
+    private bool CanStartOperation()
+    {
+        return OperationState == GitOperationState.Idle && _backend.HasProjectRoot;
+    }
+
+    private void NotifySelectionCommands()
+    {
+        ViewDetailsCommand.NotifyCanExecuteChanged();
+        RestoreCommand.NotifyCanExecuteChanged();
+        CopyIdCommand.NotifyCanExecuteChanged();
+    }
+
+    private void NotifyOperationCommands()
+    {
+        RefreshCommand.NotifyCanExecuteChanged();
+        CreateCheckpointCommand.NotifyCanExecuteChanged();
+        RestoreCommand.NotifyCanExecuteChanged();
+        foreach (var commit in Commits)
+        {
+            commit.NotifyOperationStateChanged();
+        }
+    }
+
+    private void NotifyHistoryState()
+    {
+        OnPropertyChanged(nameof(HasCommits));
+        OnPropertyChanged(nameof(IsCommitListEmpty));
+        OnPropertyChanged(nameof(EmptyTitle));
+        OnPropertyChanged(nameof(EmptyHint));
+        NotifySelectionCommands();
     }
 
     private async Task<bool> ConfirmRestoreAsync(GitHistoryItemViewModel commit, string branch)
     {
-        var message = _displayNames.Format("ui.dialog.git.restore.message", new Dictionary<string, string>
+        var message = _displayNames.Format("ui.dialog.git.restore.message_detailed", new Dictionary<string, string>
         {
-            ["commit"] = commit.ShortCommitId,
+            ["summary"] = commit.Summary,
+            ["time"] = commit.TimestampText,
+            ["refs"] = commit.Refs.Count == 0 ? _displayNames.Text("ui.common.none") : commit.RefsText,
+            ["commit"] = commit.CommitId,
             ["branch"] = branch,
         });
         var dialog = new ConfirmDialogViewModel(
@@ -434,32 +703,51 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     }
 }
 
-public sealed class GitHistoryItemViewModel : ViewModelBase
+public sealed class GitHistoryItemViewModel
 {
-    private bool _isSelected;
-
     public GitHistoryItemViewModel(
         string commitId,
         string summary,
         IReadOnlyList<string> parents,
         IReadOnlyList<string> refs,
+        long timestampMs,
+        string? author,
         string kindText,
+        bool isHead,
+        int laneIndex,
+        string headBadgeText,
+        string mergeBadgeText,
         string viewDetailsText,
         string restoreText,
         string copyIdText,
+        DisplayNameService displayNames,
         Action<GitHistoryItemViewModel> select,
         Action<GitHistoryItemViewModel> viewDetails,
         Func<GitHistoryItemViewModel, Task> restore,
-        Func<GitHistoryItemViewModel, Task> copyId)
+        Func<GitHistoryItemViewModel, Task> copyId,
+        Func<bool> canStartOperation)
     {
         CommitId = commitId;
         Summary = summary;
         Parents = parents;
         Refs = refs;
+        TimestampMs = timestampMs;
+        AuthorText = string.IsNullOrWhiteSpace(author) ? displayNames.Text("ui.common.none") : author;
         KindText = kindText;
+        IsHead = isHead;
+        LaneIndex = Math.Clamp(laneIndex, 0, 8);
+        LaneOffset = LaneIndex * 14d;
+        HeadBadgeText = headBadgeText;
+        MergeBadgeText = mergeBadgeText;
         ViewDetailsText = viewDetailsText;
         RestoreText = restoreText;
         CopyIdText = copyIdText;
+        TimestampText = timestampMs > 0
+            ? FormatTimestamp(timestampMs)
+            : displayNames.Text("ui.common.none");
+        RelativeTimeText = timestampMs > 0
+            ? FormatRelativeTime(timestampMs, displayNames)
+            : displayNames.Text("ui.common.none");
         SelectCommand = new RelayCommand(() => select(this));
         ViewDetailsCommand = new RelayCommand(() =>
         {
@@ -470,7 +758,7 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         {
             select(this);
             _ = restore(this);
-        });
+        }, canStartOperation);
         CopyIdCommand = new RelayCommand(() =>
         {
             select(this);
@@ -483,8 +771,21 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
     public string Summary { get; }
     public IReadOnlyList<string> Parents { get; }
     public IReadOnlyList<string> Refs { get; }
+    public long TimestampMs { get; }
+    public string TimestampText { get; }
+    public string RelativeTimeText { get; }
+    public string AuthorText { get; }
     public string KindText { get; }
-    public string RefsText => Refs.Count == 0 ? string.Empty : string.Join(", ", Refs);
+    public string RefsText => Refs.Count == 0 ? string.Empty : string.Join(" · ", Refs);
+    public bool HasRefs => Refs.Count > 0;
+    public bool HasKind => !string.IsNullOrWhiteSpace(KindText);
+    public bool IsHead { get; }
+    public bool IsMerge => Parents.Count > 1;
+    public bool HasGraphContinuation => Parents.Count > 0;
+    public int LaneIndex { get; }
+    public double LaneOffset { get; }
+    public string HeadBadgeText { get; }
+    public string MergeBadgeText { get; }
     public string ViewDetailsText { get; }
     public string RestoreText { get; }
     public string CopyIdText { get; }
@@ -492,5 +793,62 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
     public RelayCommand ViewDetailsCommand { get; }
     public RelayCommand RestoreCommand { get; }
     public RelayCommand CopyIdCommand { get; }
-    public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
+
+    public void NotifyOperationStateChanged()
+    {
+        RestoreCommand.NotifyCanExecuteChanged();
+    }
+
+    private static string FormatTimestamp(long timestampMs)
+    {
+        try
+        {
+            return DateTimeOffset.FromUnixTimeMilliseconds(timestampMs)
+                .ToLocalTime()
+                .ToString("yyyy-MM-dd HH:mm:ss zzz");
+        }
+        catch
+        {
+            return timestampMs.ToString();
+        }
+    }
+
+    private static string FormatRelativeTime(long timestampMs, DisplayNameService names)
+    {
+        try
+        {
+            var timestamp = DateTimeOffset.FromUnixTimeMilliseconds(timestampMs);
+            var elapsed = DateTimeOffset.Now - timestamp;
+            if (elapsed < TimeSpan.FromMinutes(1))
+            {
+                return names.Text("ui.git.time.just_now");
+            }
+            if (elapsed < TimeSpan.FromHours(1))
+            {
+                return names.Format("ui.git.time.minutes_ago", new Dictionary<string, string>
+                {
+                    ["count"] = Math.Max(1, (int)elapsed.TotalMinutes).ToString(),
+                });
+            }
+            if (elapsed < TimeSpan.FromDays(1))
+            {
+                return names.Format("ui.git.time.hours_ago", new Dictionary<string, string>
+                {
+                    ["count"] = Math.Max(1, (int)elapsed.TotalHours).ToString(),
+                });
+            }
+            if (elapsed < TimeSpan.FromDays(7))
+            {
+                return names.Format("ui.git.time.days_ago", new Dictionary<string, string>
+                {
+                    ["count"] = Math.Max(1, (int)elapsed.TotalDays).ToString(),
+                });
+            }
+            return timestamp.ToLocalTime().ToString("yyyy-MM-dd");
+        }
+        catch
+        {
+            return timestampMs.ToString();
+        }
+    }
 }

@@ -8,6 +8,20 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        if (args is ["--release-wcag-probe", var outputPath])
+        {
+            try
+            {
+                ThemeAccessibilityAudit.WriteEvidence(outputPath);
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine(error.Message);
+                return 1;
+            }
+        }
+
         if (args is ["--verify-installation"])
         {
             if (!ReleaseLayoutValidator.TryValidate(AppContext.BaseDirectory, out var error))

@@ -10,12 +10,11 @@ public sealed class NavigationItemViewModel : ViewModelBase
     private string _title;
     private bool _sidebarExpanded = true;
 
-    public NavigationItemViewModel(string id, string title, Geometry? icon, Func<object> pageFactory, Action<NavigationItemViewModel> select)
+    public NavigationItemViewModel(string id, string title, Geometry? icon, Action<NavigationItemViewModel> select)
     {
         Id = id;
         _title = title;
         Icon = icon;
-        PageFactory = pageFactory;
         SelectCommand = new RelayCommand(() => select(this));
     }
 
@@ -25,8 +24,6 @@ public sealed class NavigationItemViewModel : ViewModelBase
 
     /// 矢量图标几何（来自主题资源 Ariadne.Icon.*），用 Path 渲染，不依赖任何字体。
     public Geometry? Icon { get; }
-
-    public Func<object> PageFactory { get; }
 
     public ICommand SelectCommand { get; }
 

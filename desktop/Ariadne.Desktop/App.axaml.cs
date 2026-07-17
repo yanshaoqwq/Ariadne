@@ -22,6 +22,12 @@ public partial class App : Application
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            if (ReleaseUiProbe.TryStart(desktop))
+            {
+                base.OnFrameworkInitializationCompleted();
+                return;
+            }
+
             var backend = JsonLineBackendClient.CreateDefault();
             var viewModel = new MainWindowViewModel(DisplayNameService.Current, backend);
             desktop.MainWindow = new MainWindow

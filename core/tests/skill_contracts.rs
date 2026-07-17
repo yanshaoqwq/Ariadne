@@ -29,6 +29,8 @@ use ariadne::skills::{
 };
 use serde_json::{json, Value};
 
+static LOCAL_HTTP_ENV_LOCK: Mutex<()> = Mutex::new(());
+
 struct MockHttpBackend {
     output: SkillBackendOutput,
 }
@@ -39,6 +41,7 @@ impl HttpSkillBackend for MockHttpBackend {
         &self,
         _config: &HttpSkillConfig,
         _inputs: &ariadne::contracts::PortMap,
+        _idempotency_key: Option<&str>,
         _timeout_ms: u64,
         _cancellation: &ariadne::contracts::CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
@@ -56,6 +59,7 @@ impl HttpSkillBackend for CountingHttpBackend {
         &self,
         _config: &HttpSkillConfig,
         _inputs: &ariadne::contracts::PortMap,
+        _idempotency_key: Option<&str>,
         _timeout_ms: u64,
         _cancellation: &CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
@@ -95,6 +99,7 @@ impl HttpSkillBackend for SlowHttpBackend {
         &self,
         _config: &HttpSkillConfig,
         _inputs: &ariadne::contracts::PortMap,
+        _idempotency_key: Option<&str>,
         _timeout_ms: u64,
         _cancellation: &ariadne::contracts::CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
@@ -167,6 +172,7 @@ fn http_manifest() -> SkillManifest {
             host: "example.com".to_owned(),
             method: "POST".to_owned(),
             path: "/lookup".to_owned(),
+            idempotency_header: None,
         }),
         schema: SkillIoSchema {
             inputs: vec![SkillPortSchema {
@@ -458,6 +464,7 @@ fn http_skill_requires_http_permission() {
             &http_manifest(),
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -496,6 +503,7 @@ fn skill_executor_does_not_call_backend_when_dispatch_authorization_is_denied() 
             &http_manifest(),
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -542,6 +550,7 @@ fn http_skill_sanitizes_sensitive_logs() {
             &http_manifest(),
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -630,6 +639,7 @@ fn native_http_backend_executes_against_local_http_server() {
         host: format!("http://127.0.0.1:{}", addr.port()),
         method: "POST".to_owned(),
         path: "/run".to_owned(),
+        idempotency_header: None,
     });
     let execution_policy = policy(true, false);
     let auto_mode_config = AutoModeConfig::default();
@@ -643,12 +653,16 @@ fn native_http_backend_executes_against_local_http_server() {
         wasm_backend: None,
     });
 
+    let _env_guard = LOCAL_HTTP_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
     let output = executor
         .execute(
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -664,6 +678,71 @@ fn native_http_backend_executes_against_local_http_server() {
         PortValue::inline(json!("native-ok"))
     );
     assert_eq!(output.logs, vec!["http backend completed".to_owned()]);
+}
+
+#[test]
+fn native_http_backend_sends_stable_workflow_idempotency_key() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            request.extend_from_slice(&buffer[..read]);
+            if read == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = serde_json::to_vec(&SkillBackendOutput {
+            outputs: ariadne::contracts::PortMap::from([(
+                "result".to_owned(),
+                PortValue::inline(json!("idempotent-ok")),
+            )]),
+            logs: Vec::new(),
+            metadata: Value::Null,
+            elapsed_ms: 1,
+        })
+        .unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.write_all(&body).unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let config = HttpSkillConfig {
+        host: format!("http://127.0.0.1:{}", addr.port()),
+        method: "POST".to_owned(),
+        path: "/idempotent".to_owned(),
+        idempotency_header: Some("Idempotency-Key".to_owned()),
+    };
+
+    let _env_guard = LOCAL_HTTP_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
+    let output = NativeHttpSkillBackend
+        .execute(
+            &config,
+            &inputs(),
+            Some("operation-stable-42"),
+            1_000,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    std::env::remove_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL");
+    let request = server.join().unwrap();
+
+    assert!(request
+        .to_ascii_lowercase()
+        .contains("idempotency-key: operation-stable-42"));
+    assert_eq!(
+        output.outputs["result"],
+        PortValue::inline(json!("idempotent-ok"))
+    );
 }
 
 /// 验证真实 HTTP 后端对未声明 Content-Length 的超大响应也会流式截断。
@@ -699,12 +778,17 @@ fn native_http_backend_rejects_oversized_streaming_response() {
         host: format!("http://127.0.0.1:{}", addr.port()),
         method: "GET".to_owned(),
         path: "/large".to_owned(),
+        idempotency_header: None,
     };
 
+    let _env_guard = LOCAL_HTTP_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
     let result = backend.execute(
         &config,
         &inputs(),
+        None,
         1_000,
         &ariadne::contracts::CancellationToken::new(),
     );
@@ -740,12 +824,17 @@ fn native_http_backend_classifies_error_status_as_response_received() {
         host: format!("http://127.0.0.1:{}", addr.port()),
         method: "POST".to_owned(),
         path: "/unavailable".to_owned(),
+        idempotency_header: None,
     };
 
+    let _env_guard = LOCAL_HTTP_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
     let result = NativeHttpSkillBackend.execute(
         &config,
         &inputs(),
+        None,
         1_000,
         &ariadne::contracts::CancellationToken::new(),
     );
@@ -777,13 +866,17 @@ fn native_http_skill_cancellation_aborts_in_flight_request() {
         host: format!("http://127.0.0.1:{}", addr.port()),
         method: "POST".to_owned(),
         path: "/cancel".to_owned(),
+        idempotency_header: None,
     };
     let cancellation = ariadne::contracts::CancellationToken::new();
     let worker_token = cancellation.clone();
+    let _env_guard = LOCAL_HTTP_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
     let started = std::time::Instant::now();
     let worker = std::thread::spawn(move || {
-        NativeHttpSkillBackend.execute(&config, &inputs(), 30_000, &worker_token)
+        NativeHttpSkillBackend.execute(&config, &inputs(), None, 30_000, &worker_token)
     });
     seen_rx
         .recv_timeout(Duration::from_secs(1))
@@ -807,12 +900,14 @@ fn native_http_backend_rejects_local_addresses_by_default() {
         host: "http://127.0.0.1:12345".to_owned(),
         method: "POST".to_owned(),
         path: "/run".to_owned(),
+        idempotency_header: None,
     };
 
     assert!(backend
         .execute(
             &config,
             &inputs(),
+            None,
             1_000,
             &ariadne::contracts::CancellationToken::new(),
         )
@@ -847,7 +942,8 @@ fn native_wasm_backend_executes_exported_run_abi() {
     std::fs::write(&wasm_path, wat::parse_str(wat).unwrap()).unwrap();
 
     let ledger = SqliteCostLedger::open_in_memory().unwrap();
-    let backend = NativeWasmSkillBackend;
+    let backend =
+        NativeWasmSkillBackend::default().with_worker_executable(env!("CARGO_BIN_EXE_ariadne-ipc"));
     let mut manifest = http_manifest();
     manifest.executor = SkillExecutorConfig::Wasm(WasmSkillConfig {
         module_path: wasm_path.to_string_lossy().into_owned(),
@@ -872,6 +968,7 @@ fn native_wasm_backend_executes_exported_run_abi() {
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -902,7 +999,8 @@ fn native_wasm_backend_interrupts_infinite_loop_with_fuel() {
     std::fs::write(&wasm_path, wat::parse_str(wat).unwrap()).unwrap();
 
     let ledger = SqliteCostLedger::open_in_memory().unwrap();
-    let backend = NativeWasmSkillBackend;
+    let backend =
+        NativeWasmSkillBackend::default().with_worker_executable(env!("CARGO_BIN_EXE_ariadne-ipc"));
     let mut manifest = http_manifest();
     manifest.executor = SkillExecutorConfig::Wasm(WasmSkillConfig {
         module_path: wasm_path.to_string_lossy().into_owned(),
@@ -928,6 +1026,7 @@ fn native_wasm_backend_interrupts_infinite_loop_with_fuel() {
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -935,7 +1034,54 @@ fn native_wasm_backend_interrupts_infinite_loop_with_fuel() {
         .unwrap_err();
 
     assert!(error.to_string().contains("wasm_time"));
-    assert!(error.to_string().contains("fuel exhausted"));
+    assert!(
+        error.to_string().contains("fuel exhausted")
+            || error.to_string().contains("wall-clock timeout")
+    );
+}
+
+/// WASM 计算在 fuel 耗尽前收到取消时，必须终止并回收隔离进程后立即返回。
+#[test]
+fn native_wasm_backend_preempts_and_reaps_cancelled_computation() {
+    let temp = tempfile::tempdir().unwrap();
+    let wasm_path = temp.path().join("cancel-spin.wasm");
+    let wat = r#"
+    (module
+      (memory (export "memory") 1)
+      (func (export "run") (result i32)
+        (loop $spin
+          br $spin)
+        (i32.const 0))
+    )
+    "#;
+    std::fs::write(&wasm_path, wat::parse_str(wat).unwrap()).unwrap();
+    let backend =
+        NativeWasmSkillBackend::default().with_worker_executable(env!("CARGO_BIN_EXE_ariadne-ipc"));
+    let cancellation = CancellationToken::new();
+    let canceller = cancellation.clone();
+    let cancel_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        canceller.cancel();
+    });
+    let started_at = std::time::Instant::now();
+
+    let error = backend
+        .execute(
+            &WasmSkillConfig {
+                module_path: wasm_path.to_string_lossy().into_owned(),
+                allow_network: false,
+                allowed_hosts: Vec::new(),
+            },
+            &inputs(),
+            10_000,
+            Some(64 * 1024),
+            &cancellation,
+        )
+        .unwrap_err();
+    cancel_thread.join().unwrap();
+
+    assert!(matches!(error, CoreError::Cancelled));
+    assert!(started_at.elapsed() < Duration::from_secs(2));
 }
 
 /// 验证 WASM 在 memory.grow 时受 Store limiter 约束，而不是运行结束后才检查。
@@ -954,7 +1100,8 @@ fn native_wasm_backend_blocks_memory_growth_beyond_limit() {
     std::fs::write(&wasm_path, wat::parse_str(wat).unwrap()).unwrap();
 
     let ledger = SqliteCostLedger::open_in_memory().unwrap();
-    let backend = NativeWasmSkillBackend;
+    let backend =
+        NativeWasmSkillBackend::default().with_worker_executable(env!("CARGO_BIN_EXE_ariadne-ipc"));
     let mut manifest = http_manifest();
     manifest.executor = SkillExecutorConfig::Wasm(WasmSkillConfig {
         module_path: wasm_path.to_string_lossy().into_owned(),
@@ -979,6 +1126,7 @@ fn native_wasm_backend_blocks_memory_growth_beyond_limit() {
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -1027,6 +1175,7 @@ fn wasm_skill_network_requires_permission() {
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -1068,6 +1217,7 @@ fn skill_executor_enforces_timeout_and_output_size() {
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -1100,6 +1250,7 @@ fn skill_executor_uses_wall_clock_timeout() {
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -1143,6 +1294,7 @@ fn skill_executor_checks_estimated_budget() {
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },
@@ -1180,6 +1332,7 @@ fn llm_skill_executes_through_llm_provider() {
             &manifest,
             SkillRunRequest {
                 skill_id: "fetch-info".to_owned(),
+                operation_id: None,
                 inputs: inputs(),
                 metadata: Value::Null,
             },

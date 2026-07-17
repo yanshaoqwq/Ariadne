@@ -44,6 +44,7 @@ pub enum AtomicCommitTarget {
     AutoMode,
     Budget,
     ConfirmationPolicies,
+    ProjectMemory,
 }
 
 impl AtomicCommitTarget {
@@ -58,6 +59,7 @@ impl AtomicCommitTarget {
             Self::AutoMode => AUTO_MODE_CONFIG_FILE,
             Self::Budget => "budget.json",
             Self::ConfirmationPolicies => "confirmation_policy_settings.json",
+            Self::ProjectMemory => "project_memory.md",
         }
     }
 
@@ -88,12 +90,24 @@ const AUTOMATION_SETTINGS_TARGETS: [AtomicCommitTarget; 9] = [
     AtomicCommitTarget::ConfirmationPolicies,
 ];
 
+const GENERAL_SETTINGS_TARGETS: [AtomicCommitTarget; 8] = [
+    AtomicCommitTarget::App,
+    AtomicCommitTarget::Providers,
+    AtomicCommitTarget::Permissions,
+    AtomicCommitTarget::Rag,
+    AtomicCommitTarget::Workflow,
+    AtomicCommitTarget::Git,
+    AtomicCommitTarget::AutoMode,
+    AtomicCommitTarget::ProjectMemory,
+];
+
 /// 每类命令拥有固定目标集合；journal 无法自行扩权。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AtomicCommitProfile {
     ProjectConfig,
     AutomationSettings,
+    GeneralSettings,
 }
 
 impl AtomicCommitProfile {
@@ -101,6 +115,7 @@ impl AtomicCommitProfile {
         match self {
             Self::ProjectConfig => &PROJECT_CONFIG_TARGETS,
             Self::AutomationSettings => &AUTOMATION_SETTINGS_TARGETS,
+            Self::GeneralSettings => &GENERAL_SETTINGS_TARGETS,
         }
     }
 }
@@ -134,6 +149,7 @@ struct StageOwner {
 
 struct AtomicCommitCoordinator {
     config_dir: PathBuf,
+    runtime_dir: PathBuf,
     authority_dir: PathBuf,
     project_identity: String,
 }
@@ -147,6 +163,7 @@ impl AtomicCommitCoordinator {
 
         let config_dir = project_root.join(".config");
         validate_real_directory(&config_dir, "project config directory")?;
+        let runtime_dir = project_root.join(".runtime");
 
         let project_identity = atomic_commit_project_identity(&project_root);
         let authority_dir = crate::config::app_state::project_authority_dir_with_identity(
@@ -159,6 +176,7 @@ impl AtomicCommitCoordinator {
 
         Ok(Self {
             config_dir,
+            runtime_dir,
             authority_dir,
             project_identity,
         })
@@ -175,6 +193,23 @@ impl AtomicCommitCoordinator {
 
     fn acquire_writer(&self) -> CoreResult<WriterGuard> {
         WriterGuard::acquire(&self.authority_dir.join(AUTHORITY_LOCK_DB))
+    }
+
+    fn final_path(&self, target: AtomicCommitTarget) -> PathBuf {
+        match target {
+            AtomicCommitTarget::ProjectMemory => self.runtime_dir.join(target.file_name()),
+            _ => self.config_dir.join(target.file_name()),
+        }
+    }
+
+    fn validate_target_roots(&self, targets: &[AtomicCommitTarget]) -> CoreResult<()> {
+        if targets
+            .iter()
+            .any(|target| matches!(target, AtomicCommitTarget::ProjectMemory))
+        {
+            validate_real_directory(&self.runtime_dir, "project runtime directory")?;
+        }
+        Ok(())
     }
 }
 
@@ -239,6 +274,7 @@ pub fn commit_files_with_fail_after(
     reject_project_owned_recovery_artifacts(&coordinator, trusted_transaction)?;
     recover_locked(&coordinator)?;
     validate_payload_set(profile, files)?;
+    coordinator.validate_target_roots(profile.expected_targets())?;
 
     let transaction_id = random_hex_id()?;
     let stage_dir = coordinator.stage_dir(&transaction_id);
@@ -332,7 +368,7 @@ fn apply_trusted_journal(
             continue;
         }
         let staged = stage_dir.join(entry.target.stage_name());
-        let final_path = coordinator.config_dir.join(entry.target.file_name());
+        let final_path = coordinator.final_path(entry.target);
 
         if !path_exists_without_following(&staged)? {
             validate_file_digest(&final_path, entry)?;
@@ -348,7 +384,9 @@ fn apply_trusted_journal(
         }
 
         replace_file(&staged, &final_path)?;
-        sync_directory(&coordinator.config_dir)?;
+        sync_directory(final_path.parent().ok_or_else(|| {
+            CoreError::validation("atomic commit target has no parent directory")
+        })?)?;
         completed.insert(entry.target);
         journal.completed = completed.iter().copied().collect();
         write_json_fsynced(&coordinator.journal_path(), &journal)?;
@@ -395,6 +433,7 @@ fn validate_journal(
             "atomic commit journal target set is not the fixed profile allowlist",
         ));
     }
+    coordinator.validate_target_roots(&targets)?;
     for entry in &journal.entries {
         if entry.size > MAX_PAYLOAD_BYTES || !is_sha256_hex(&entry.sha256) {
             return Err(CoreError::validation(format!(
@@ -425,10 +464,7 @@ fn validate_stage_tree(
     if !path_exists_without_following(stage_dir)? {
         if all_completed {
             for entry in &journal.entries {
-                validate_file_digest(
-                    &coordinator.config_dir.join(entry.target.file_name()),
-                    entry,
-                )?;
+                validate_file_digest(&coordinator.final_path(entry.target), entry)?;
             }
             return Ok(());
         }
@@ -481,7 +517,7 @@ fn validate_stage_tree(
 
     for entry in &journal.entries {
         let staged = stage_dir.join(entry.target.stage_name());
-        let final_path = coordinator.config_dir.join(entry.target.file_name());
+        let final_path = coordinator.final_path(entry.target);
         reject_symlink_if_exists(&final_path, "atomic commit final target")?;
         if journal.completed.contains(&entry.target) {
             if path_exists_without_following(&staged)? {

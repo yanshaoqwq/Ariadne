@@ -13,10 +13,10 @@ use ariadne::contracts::{
 use ariadne::costs::{CostLedger, CostQuery, SqliteCostLedger, TokenUsage};
 use ariadne::providers::{
     resolve_base_url, EmbeddingProvider, EmbeddingRequest, HttpEmbeddingProvider,
-    HttpRerankerProvider, LlmMessage, LlmProvider, LlmRequest, LlmResponse,
+    HttpRerankerProvider, HttpWebSearchProvider, LlmMessage, LlmProvider, LlmRequest, LlmResponse,
     OpenAiCompatibleLlmProvider, Provider, ProviderCallContext, ProviderExecutor, ProviderHealth,
     ProviderKind, ProviderProtocol, ProviderRuntimeRegistry, RerankRequest, RerankerProvider,
-    ToolUseEnvelope,
+    SearchProvider, SearchProviderRequest, ToolUseEnvelope,
 };
 use serde_json::{json, Value};
 
@@ -1078,4 +1078,77 @@ fn openai_compatible_uses_custom_base_url_without_separate_code_path() {
         resolve_base_url(&config).unwrap(),
         "http://127.0.0.1:11434/v1"
     );
+}
+
+#[test]
+fn http_web_search_provider_calls_responses_api_and_returns_citations() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 16384];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /responses "));
+        assert!(request.contains("\"type\":\"web_search\""));
+        assert!(request.contains("2026 lunar mission"));
+        let body = r#"{
+          "output":[{
+            "type":"message",
+            "content":[{
+              "type":"output_text",
+              "text":"A current public summary.",
+              "annotations":[{
+                "type":"url_citation",
+                "url":"https://example.test/lunar",
+                "title":"Lunar Mission"
+              }]
+            }]
+          }]
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let provider = HttpWebSearchProvider::new(
+        ProviderConfig {
+            provider_id: "web".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Web".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            api_key: None,
+            models: vec![ModelConfig {
+                model_id: "search-model".to_owned(),
+                capability: ProviderCapability::Search,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+        },
+        None,
+    )
+    .unwrap();
+    let response = provider
+        .search(
+            &ProviderCallContext::new("web"),
+            SearchProviderRequest {
+                query: "2026 lunar mission".to_owned(),
+                limit: Some(3),
+                metadata: Value::Null,
+            },
+        )
+        .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].title, "Lunar Mission");
+    assert_eq!(response.results[0].url, "https://example.test/lunar");
+    assert!(response.results[0]
+        .snippet
+        .contains("current public summary"));
 }

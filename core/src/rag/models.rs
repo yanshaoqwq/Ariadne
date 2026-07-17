@@ -235,12 +235,15 @@ impl WritingNodeDefinition {
         }
     }
 
-    /// 返回 Summarizer 节点定义；它是节点，但不暴露普通 tool 集合。
+    /// 返回 Summarizer 节点定义；四步总结可按需调用项目检索。
     pub fn summarizer() -> Self {
         Self {
             agent: WritingAgentKind::Summarizer,
             display_name_key: WritingAgentKind::Summarizer.display_name_key().to_owned(),
-            tool_names: Vec::new(),
+            tool_names: expected_tool_names(WritingAgentKind::Summarizer)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
             prompt_keys: expected_prompt_keys(WritingAgentKind::Summarizer)
                 .iter()
                 .map(|value| (*value).to_owned())
@@ -320,6 +323,7 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
             "outliner-register",
             "outliner-find",
             "outliner-search",
+            "outliner-web-search",
             "outliner-insert-lines",
             "outliner-replace-lines",
             "outliner-rewrite-file",
@@ -328,6 +332,7 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
             "designer-register",
             "designer-find",
             "designer-search",
+            "designer-web-search",
             "designer-insert-lines",
             "designer-replace-lines",
             "designer-rewrite-file",
@@ -336,26 +341,29 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
             "planner-register",
             "planner-find",
             "planner-search",
+            "planner-web-search",
             "planner-insert-lines",
             "planner-replace-lines",
             "planner-rewrite-file",
         ],
-        WritingAgentKind::Detail => &["detail-find", "detail-search"],
+        WritingAgentKind::Detail => &["detail-find", "detail-search", "detail-web-search"],
         WritingAgentKind::Writer => &[
             "writer-find",
             "writer-search",
+            "writer-web-search",
             "writer-insert-lines",
             "writer-replace-lines",
         ],
-        WritingAgentKind::Critic => &["critic-find", "critic-search"],
-        WritingAgentKind::Prudent => &["prudent-find", "prudent-search"],
+        WritingAgentKind::Critic => &["critic-find", "critic-search", "critic-web-search"],
+        WritingAgentKind::Prudent => &["prudent-find", "prudent-search", "prudent-web-search"],
         WritingAgentKind::Polisher => &[
             "polisher-find",
             "polisher-search",
+            "polisher-web-search",
             "polisher-insert-lines",
             "polisher-replace-lines",
         ],
-        WritingAgentKind::Summarizer => &[],
+        WritingAgentKind::Summarizer => &["summarizer-search", "summarizer-web-search"],
     }
 }
 

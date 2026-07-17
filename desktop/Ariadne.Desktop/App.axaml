@@ -8,6 +8,7 @@
     RequestedThemeVariant="Default">
   <Application.Styles>
     <FluentTheme />
+    <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
     <StyleInclude Source="avares://Ariadne.Desktop/Resources/Styles/AriadneTheme.axaml" />
   </Application.Styles>
 

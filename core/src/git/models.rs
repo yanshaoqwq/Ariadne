@@ -25,6 +25,9 @@ pub struct GitHealthReport {
 pub struct GitCommitSummary {
     pub commit_id: String,
     pub summary: String,
+    pub timestamp_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_kind: Option<CheckpointKind>,
 }
@@ -72,4 +75,11 @@ pub struct BranchGraphNode {
     pub parents: Vec<String>,
     pub refs: Vec<String>,
     pub summary: String,
+    pub timestamp_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_kind: Option<CheckpointKind>,
+    #[serde(default)]
+    pub is_head: bool,
 }

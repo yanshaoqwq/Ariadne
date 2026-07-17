@@ -21,4 +21,4 @@ pub mod workflow;
 /// 产品版本由 workspace `Cargo.toml` 的 `workspace.package.version` 注入。
 pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// IPC schema 独立于产品版本，破坏性协议变更时递增。
-pub const IPC_SCHEMA_VERSION: u32 = 1;
+pub const IPC_SCHEMA_VERSION: u32 = 2;

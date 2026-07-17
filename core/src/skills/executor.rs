@@ -1,7 +1,11 @@
+use std::io::{Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::AutoModeConfig;
@@ -10,8 +14,12 @@ use crate::contracts::{
     ExternalDispatchOutcome, PermissionRequest, PortValue, RunControl,
 };
 use crate::costs::{evaluate_budget, BudgetLimits, BudgetUsage, CostLedger, CostQuery};
-use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
-use crate::providers::{ContentPart, LlmMessage, LlmProvider};
+use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig, ToolExecutorRouter};
+use crate::providers::{
+    ContentPart, LlmMessage, LlmProvider, ProviderCallContext, SearchProvider, ToolDefinition,
+    WebSearchToolExecutor,
+};
+use crate::retrieval::{ProjectRetrievalRuntime, ProjectSearchToolExecutor};
 use crate::skills::models::{
     HttpSkillConfig, SkillBackendOutput, SkillExecutorConfig, SkillManifest, SkillRunOutput,
     WasmSkillConfig,
@@ -19,6 +27,8 @@ use crate::skills::models::{
 use crate::skills::sanitizer::sanitize_skill_logs;
 
 const MAX_HTTP_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_WASM_WORKER_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const WASM_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// HTTP Skill 后端接口，真实网络实现后续可替换接入。
 pub trait HttpSkillBackend {
@@ -27,6 +37,7 @@ pub trait HttpSkillBackend {
         &self,
         config: &HttpSkillConfig,
         inputs: &crate::contracts::PortMap,
+        idempotency_key: Option<&str>,
         timeout_ms: u64,
         cancellation: &CancellationToken,
     ) -> CoreResult<SkillBackendOutput>;
@@ -52,7 +63,17 @@ pub trait WasmSkillBackend {
 /// 写在 memory[8..]，memory[4..8] 写入输出长度。输出 JSON 反序列化为
 /// `SkillBackendOutput`，或作为普通 `result` 端口返回。
 #[derive(Debug, Clone, Default)]
-pub struct NativeWasmSkillBackend;
+pub struct NativeWasmSkillBackend {
+    worker_executable: Option<PathBuf>,
+}
+
+impl NativeWasmSkillBackend {
+    /// 覆盖隔离执行器路径，供嵌入式宿主和合同测试显式绑定同版本二进制。
+    pub fn with_worker_executable(mut self, executable: impl Into<PathBuf>) -> Self {
+        self.worker_executable = Some(executable.into());
+        self
+    }
+}
 
 impl WasmSkillBackend for NativeWasmSkillBackend {
     /// 通过 wasmi 执行本地 WASM ExecutorAdapter。
@@ -64,7 +85,14 @@ impl WasmSkillBackend for NativeWasmSkillBackend {
         max_memory_bytes: Option<u64>,
         cancellation: &CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
-        execute_native_wasm(config, inputs, timeout_ms, max_memory_bytes, cancellation)
+        execute_native_wasm_isolated(
+            config,
+            inputs,
+            timeout_ms,
+            max_memory_bytes,
+            cancellation,
+            self.worker_executable.as_deref(),
+        )
     }
 }
 
@@ -80,10 +108,11 @@ impl HttpSkillBackend for NativeHttpSkillBackend {
         &self,
         config: &HttpSkillConfig,
         inputs: &crate::contracts::PortMap,
+        idempotency_key: Option<&str>,
         timeout_ms: u64,
         cancellation: &CancellationToken,
     ) -> CoreResult<SkillBackendOutput> {
-        execute_native_http(config, inputs, timeout_ms, cancellation)
+        execute_native_http(config, inputs, idempotency_key, timeout_ms, cancellation)
     }
 }
 
@@ -101,12 +130,58 @@ pub struct SkillExecutionContext<'a, L: CostLedger> {
 /// Skill 执行器，统一处理权限、预算、超时、输出大小和日志脱敏。
 pub struct SkillExecutor<'a, L: CostLedger> {
     context: SkillExecutionContext<'a, L>,
+    project_search: Option<SkillProjectSearch<'a>>,
+    web_search: Option<SkillWebSearch<'a>>,
+}
+
+struct SkillProjectSearch<'a> {
+    runtime: &'a ProjectRetrievalRuntime,
+    tool: ToolDefinition,
+    max_tool_rounds: u32,
+}
+
+struct SkillWebSearch<'a> {
+    provider: &'a dyn SearchProvider,
+    tool: ToolDefinition,
+    max_tool_rounds: u32,
 }
 
 impl<'a, L: CostLedger> SkillExecutor<'a, L> {
     /// 创建 Skill 执行器。
     pub fn new(context: SkillExecutionContext<'a, L>) -> Self {
-        Self { context }
+        Self {
+            context,
+            project_search: None,
+            web_search: None,
+        }
+    }
+
+    pub fn with_project_search(
+        mut self,
+        runtime: &'a ProjectRetrievalRuntime,
+        tool: ToolDefinition,
+        max_tool_rounds: u32,
+    ) -> Self {
+        self.project_search = Some(SkillProjectSearch {
+            runtime,
+            tool,
+            max_tool_rounds,
+        });
+        self
+    }
+
+    pub fn with_web_search(
+        mut self,
+        provider: &'a dyn SearchProvider,
+        tool: ToolDefinition,
+        max_tool_rounds: u32,
+    ) -> Self {
+        self.web_search = Some(SkillWebSearch {
+            provider,
+            tool,
+            max_tool_rounds,
+        });
+        self
     }
 
     /// 执行 Skill manifest。
@@ -163,34 +238,96 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
                     })?;
                     let service =
                         LlmService::new(self.context.ledger, self.context.auto_mode_config.clone());
-                    let report = service.complete_basic(
-                        provider,
-                        LlmRunRequest {
-                            config: LlmServiceConfig {
-                                provider_id: config.provider_id.clone(),
-                                model_id: config.model_id.clone(),
-                                max_tool_rounds: 0,
-                                timeout_ms: manifest.limits.timeout_ms,
-                                max_total_tokens: None,
-                                budget_limits: self.context.budget_limits.clone(),
-                                input_cost_per_million_tokens: None,
-                                output_cost_per_million_tokens: None,
-                                max_output_tokens: None,
-                                max_context_tokens: None,
-                            },
-                            messages: vec![LlmMessage::user(render_prompt(
-                                &config.prompt_template,
-                                &request.inputs,
-                            ))],
-                            tools: Vec::new(),
-                            workflow_id: None,
-                            run_id: None,
-                            node_id: None,
-                            metadata: request.metadata.clone(),
-                            dispatch_authorization: dispatch_authorization.clone(),
+                    let llm_request = LlmRunRequest {
+                        config: LlmServiceConfig {
+                            provider_id: config.provider_id.clone(),
+                            model_id: config.model_id.clone(),
+                            max_tool_rounds: self
+                                .project_search
+                                .as_ref()
+                                .map(|search| search.max_tool_rounds)
+                                .unwrap_or(0),
+                            timeout_ms: manifest.limits.timeout_ms,
+                            max_total_tokens: None,
+                            budget_limits: self.context.budget_limits.clone(),
+                            input_cost_per_million_tokens: None,
+                            output_cost_per_million_tokens: None,
+                            max_output_tokens: None,
+                            max_context_tokens: None,
                         },
-                        cancellation,
-                    )?;
+                        messages: vec![LlmMessage::user(render_prompt(
+                            &config.prompt_template,
+                            &request.inputs,
+                        ))],
+                        tools: self
+                            .project_search
+                            .iter()
+                            .map(|search| search.tool.clone())
+                            .chain(self.web_search.iter().map(|search| search.tool.clone()))
+                            .collect(),
+                        workflow_id: None,
+                        run_id: None,
+                        node_id: None,
+                        metadata: request.metadata.clone(),
+                        dispatch_authorization: dispatch_authorization.clone(),
+                    };
+                    let report = if self.project_search.is_some() || self.web_search.is_some() {
+                        let max_tool_rounds = self
+                            .project_search
+                            .iter()
+                            .map(|search| search.max_tool_rounds)
+                            .chain(self.web_search.iter().map(|search| search.max_tool_rounds))
+                            .max()
+                            .unwrap_or(0);
+                        let mut llm_request = llm_request;
+                        llm_request.config.max_tool_rounds = max_tool_rounds;
+                        let project_tool_executor = self.project_search.as_ref().map(|search| {
+                            let mut search_context = ProviderCallContext::new("project_retrieval");
+                            search_context.operation_id = request.operation_id.clone();
+                            search_context.timeout_ms = manifest.limits.timeout_ms;
+                            search_context.cancellation = cancellation.clone();
+                            search_context.dispatch_authorization = dispatch_authorization.clone();
+                            ProjectSearchToolExecutor::new(
+                                search.runtime,
+                                search_context,
+                                [search.tool.name.clone()],
+                            )
+                        });
+                        let web_tool_executor = self.web_search.as_ref().map(|search| {
+                            let mut search_context =
+                                ProviderCallContext::new(search.provider.definition().provider_id);
+                            search_context.operation_id = request.operation_id.clone();
+                            search_context.timeout_ms = manifest.limits.timeout_ms;
+                            search_context.cancellation = cancellation.clone();
+                            search_context.dispatch_authorization = dispatch_authorization.clone();
+                            WebSearchToolExecutor::new(
+                                search.provider,
+                                self.context.ledger,
+                                &self.context.execution_policy.permissions,
+                                search_context,
+                                [search.tool.name.clone()],
+                            )
+                        });
+                        let mut tool_router = ToolExecutorRouter::new();
+                        if let (Some(search), Some(executor)) =
+                            (self.project_search.as_ref(), project_tool_executor.as_ref())
+                        {
+                            tool_router.register(search.tool.name.clone(), executor)?;
+                        }
+                        if let (Some(search), Some(executor)) =
+                            (self.web_search.as_ref(), web_tool_executor.as_ref())
+                        {
+                            tool_router.register(search.tool.name.clone(), executor)?;
+                        }
+                        service.complete_with_tools(
+                            provider,
+                            llm_request,
+                            &tool_router,
+                            cancellation,
+                        )?
+                    } else {
+                        service.complete_basic(provider, llm_request, cancellation)?
+                    };
                     SkillBackendOutput {
                         outputs: output_text_port(report.response.message.content),
                         logs: vec!["llm skill completed".to_owned()],
@@ -211,6 +348,7 @@ impl<'a, L: CostLedger> SkillExecutor<'a, L> {
                     backend.execute(
                         config,
                         &request.inputs,
+                        request.operation_id.as_deref(),
                         manifest.limits.timeout_ms,
                         cancellation,
                     )?
@@ -340,6 +478,7 @@ fn output_text_port(content: Vec<ContentPart>) -> crate::contracts::PortMap {
 fn execute_native_http(
     config: &HttpSkillConfig,
     inputs: &crate::contracts::PortMap,
+    idempotency_key: Option<&str>,
     timeout_ms: u64,
     cancellation: &CancellationToken,
 ) -> CoreResult<SkillBackendOutput> {
@@ -371,6 +510,18 @@ fn execute_native_http(
         .header(reqwest::header::ACCEPT, "application/json");
     if method == reqwest::Method::POST {
         request = request.json(inputs);
+    }
+    if let Some(header) = config.idempotency_header.as_deref() {
+        let key = idempotency_key.ok_or_else(|| {
+            CoreError::validation(
+                "http skill idempotency_header requires a stable workflow operation_id",
+            )
+        })?;
+        let header = reqwest::header::HeaderName::from_bytes(header.trim().as_bytes())
+            .map_err(|_| CoreError::validation("invalid http skill idempotency_header"))?;
+        let value = reqwest::header::HeaderValue::from_str(key)
+            .map_err(|_| CoreError::validation("invalid http skill operation_id header value"))?;
+        request = request.header(header, value);
     }
     request = request.timeout(Duration::from_millis(timeout_ms));
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -635,7 +786,292 @@ fn http_skill_operation_error(
     }
 }
 
-fn execute_native_wasm(
+#[derive(Debug, Serialize, Deserialize)]
+struct WasmWorkerRequest {
+    config: WasmSkillConfig,
+    inputs: crate::contracts::PortMap,
+    timeout_ms: u64,
+    max_memory_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WasmWorkerResponse {
+    output: Option<SkillBackendOutput>,
+    error: Option<WasmWorkerError>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WasmWorkerError {
+    ResourceLimit { resource: String, reason: String },
+    Validation { message: String },
+    Cancelled,
+    External { message: String },
+}
+
+impl WasmWorkerResponse {
+    fn from_result(result: CoreResult<SkillBackendOutput>) -> Self {
+        match result {
+            Ok(output) => Self {
+                output: Some(output),
+                error: None,
+            },
+            Err(error) => Self {
+                output: None,
+                error: Some(match error {
+                    CoreError::ResourceLimitExceeded { resource, reason } => {
+                        WasmWorkerError::ResourceLimit { resource, reason }
+                    }
+                    CoreError::Validation { message } => WasmWorkerError::Validation { message },
+                    CoreError::Cancelled => WasmWorkerError::Cancelled,
+                    error => WasmWorkerError::External {
+                        message: error.to_string(),
+                    },
+                }),
+            },
+        }
+    }
+
+    fn into_result(self) -> CoreResult<SkillBackendOutput> {
+        match (self.output, self.error) {
+            (Some(output), None) => Ok(output),
+            (None, Some(WasmWorkerError::ResourceLimit { resource, reason })) => {
+                Err(CoreError::ResourceLimitExceeded { resource, reason })
+            }
+            (None, Some(WasmWorkerError::Validation { message })) => {
+                Err(CoreError::validation(message))
+            }
+            (None, Some(WasmWorkerError::Cancelled)) => Err(CoreError::Cancelled),
+            (None, Some(WasmWorkerError::External { message })) => Err(wasm_external(message)),
+            _ => Err(wasm_external("wasm worker returned an invalid response")),
+        }
+    }
+}
+
+/// `ariadne-ipc wasm-worker` 的受限 stdio 入口。外层进程负责墙钟超时和抢占，
+/// 子进程只执行 wasmi，并把类型化结果写回单个 JSON 消息。
+pub fn run_wasm_worker_stdio() -> Result<(), String> {
+    let request_bytes = read_limited(
+        std::io::stdin().lock(),
+        MAX_WASM_WORKER_MESSAGE_BYTES,
+        "wasm worker request",
+    )?;
+    let request: WasmWorkerRequest = serde_json::from_slice(&request_bytes)
+        .map_err(|error| format!("failed to parse wasm worker request: {error}"))?;
+    let response = WasmWorkerResponse::from_result(execute_native_wasm_in_process(
+        &request.config,
+        &request.inputs,
+        request.timeout_ms,
+        request.max_memory_bytes,
+        &CancellationToken::new(),
+    ));
+    let bytes = serde_json::to_vec(&response)
+        .map_err(|error| format!("failed to serialize wasm worker response: {error}"))?;
+    if bytes.len() > MAX_WASM_WORKER_MESSAGE_BYTES {
+        return Err("wasm worker response exceeds message limit".to_owned());
+    }
+    std::io::stdout()
+        .lock()
+        .write_all(&bytes)
+        .map_err(|error| format!("failed to write wasm worker response: {error}"))
+}
+
+fn execute_native_wasm_isolated(
+    config: &WasmSkillConfig,
+    inputs: &crate::contracts::PortMap,
+    timeout_ms: u64,
+    max_memory_bytes: Option<u64>,
+    cancellation: &CancellationToken,
+    configured_worker: Option<&Path>,
+) -> CoreResult<SkillBackendOutput> {
+    cancellation.check()?;
+    let executable = resolve_wasm_worker_executable(configured_worker)?;
+    let request = serde_json::to_vec(&WasmWorkerRequest {
+        config: config.clone(),
+        inputs: inputs.clone(),
+        timeout_ms,
+        max_memory_bytes,
+    })?;
+    if request.len() > MAX_WASM_WORKER_MESSAGE_BYTES {
+        return Err(CoreError::ResourceLimitExceeded {
+            resource: "wasm_input".to_owned(),
+            reason: format!(
+                "worker request {} bytes exceeds {} bytes",
+                request.len(),
+                MAX_WASM_WORKER_MESSAGE_BYTES
+            ),
+        });
+    }
+
+    let mut child = Command::new(&executable)
+        .arg("wasm-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            wasm_external(format!(
+                "failed to start isolated wasm worker {}: {error}",
+                executable.display()
+            ))
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| wasm_external("wasm worker stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| wasm_external("wasm worker stderr was not piped"))?;
+    let stdout_reader = thread::spawn(move || {
+        read_limited(
+            stdout,
+            MAX_WASM_WORKER_MESSAGE_BYTES,
+            "wasm worker response",
+        )
+    });
+    let stderr_reader = thread::spawn(move || {
+        read_limited(stderr, MAX_WASM_WORKER_MESSAGE_BYTES, "wasm worker stderr")
+    });
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| wasm_external("wasm worker stdin was not piped"))?
+        .write_all(&request);
+    if let Err(error) = write_result {
+        terminate_and_reap(&mut child);
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
+        return Err(wasm_external(format!(
+            "failed to send isolated wasm request: {error}"
+        )));
+    }
+
+    let started_at = Instant::now();
+    let status = loop {
+        if cancellation.is_cancelled() {
+            terminate_and_reap(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(CoreError::Cancelled);
+        }
+        if elapsed_millis(started_at) >= timeout_ms {
+            terminate_and_reap(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(CoreError::ResourceLimitExceeded {
+                resource: "wasm_time".to_owned(),
+                reason: format!("isolated wasm worker exceeded {timeout_ms}ms wall-clock timeout"),
+            });
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(WASM_WORKER_POLL_INTERVAL),
+            Err(error) => {
+                terminate_and_reap(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(wasm_external(format!(
+                    "failed to poll isolated wasm worker: {error}"
+                )));
+            }
+        }
+    };
+    let stdout = join_reader(stdout_reader, "stdout")?;
+    let stderr = join_reader(stderr_reader, "stderr")?;
+    if !status.success() {
+        return Err(wasm_external(format!(
+            "isolated wasm worker exited with {status}: {}",
+            String::from_utf8_lossy(&stderr)
+        )));
+    }
+    let response: WasmWorkerResponse = serde_json::from_slice(&stdout)
+        .map_err(|error| wasm_external(format!("invalid wasm worker response: {error}")))?;
+    response.into_result()
+}
+
+fn resolve_wasm_worker_executable(configured: Option<&Path>) -> CoreResult<PathBuf> {
+    if let Some(configured) = configured {
+        if configured.is_file() {
+            return Ok(configured.to_path_buf());
+        }
+        return Err(wasm_external(format!(
+            "configured wasm worker does not exist: {}",
+            configured.display()
+        )));
+    }
+    let current = std::env::current_exe()
+        .map_err(|error| wasm_external(format!("failed to locate current executable: {error}")))?;
+    let executable_name = if cfg!(windows) {
+        "ariadne-ipc.exe"
+    } else {
+        "ariadne-ipc"
+    };
+    if current
+        .file_name()
+        .is_some_and(|name| name == executable_name)
+    {
+        return Ok(current);
+    }
+    let parent = current
+        .parent()
+        .ok_or_else(|| wasm_external("current executable has no parent directory"))?;
+    for candidate in [
+        parent.join(executable_name),
+        parent
+            .parent()
+            .map(|directory| directory.join(executable_name))
+            .unwrap_or_default(),
+        parent.join("Backend").join(executable_name),
+        parent
+            .parent()
+            .map(|directory| directory.join("Backend").join(executable_name))
+            .unwrap_or_default(),
+    ] {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(wasm_external(format!(
+        "could not locate {executable_name} beside {}",
+        current.display()
+    )))
+}
+
+fn terminate_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn join_reader(
+    reader: thread::JoinHandle<Result<Vec<u8>, String>>,
+    stream: &str,
+) -> CoreResult<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| wasm_external(format!("wasm worker {stream} reader panicked")))?
+        .map_err(wasm_external)
+}
+
+fn read_limited(mut reader: impl Read, limit: usize, label: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("failed to read {label}: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(read) > limit {
+            return Err(format!("{label} exceeds {limit} bytes"));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    Ok(bytes)
+}
+
+fn execute_native_wasm_in_process(
     config: &WasmSkillConfig,
     inputs: &crate::contracts::PortMap,
     timeout_ms: u64,

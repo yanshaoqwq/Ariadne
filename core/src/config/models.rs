@@ -293,7 +293,15 @@ pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, b
     let mut controls = BTreeMap::new();
     controls.insert(
         "project_ai".to_owned(),
-        tool_controls(&[("project-ai-workflow-tools", false)]),
+        tool_controls(&[
+            ("project-ai-search", true),
+            ("project-ai-web-search", true),
+            ("project-ai-workflow-tools", false),
+        ]),
+    );
+    controls.insert(
+        "llm".to_owned(),
+        tool_controls(&[("llm-search", true), ("llm-web-search", true)]),
     );
     controls.insert(
         "outliner".to_owned(),
@@ -301,6 +309,7 @@ pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, b
             ("outliner-register", false),
             ("outliner-find", true),
             ("outliner-search", true),
+            ("outliner-web-search", true),
             ("outliner-insert-lines", false),
             ("outliner-replace-lines", false),
             ("outliner-rewrite-file", false),
@@ -312,6 +321,7 @@ pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, b
             ("designer-register", false),
             ("designer-find", true),
             ("designer-search", true),
+            ("designer-web-search", true),
             ("designer-insert-lines", false),
             ("designer-replace-lines", false),
             ("designer-rewrite-file", false),
@@ -323,6 +333,7 @@ pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, b
             ("planner-register", false),
             ("planner-find", true),
             ("planner-search", true),
+            ("planner-web-search", true),
             ("planner-insert-lines", false),
             ("planner-replace-lines", false),
             ("planner-rewrite-file", false),
@@ -330,35 +341,59 @@ pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, b
     );
     controls.insert(
         "detail".to_owned(),
-        tool_controls(&[("detail-find", true), ("detail-search", true)]),
+        tool_controls(&[
+            ("detail-find", true),
+            ("detail-search", true),
+            ("detail-web-search", true),
+        ]),
     );
     controls.insert(
         "writer".to_owned(),
         tool_controls(&[
             ("writer-find", true),
             ("writer-search", true),
+            ("writer-web-search", true),
             ("writer-insert-lines", false),
             ("writer-replace-lines", false),
         ]),
     );
     controls.insert(
         "critic".to_owned(),
-        tool_controls(&[("critic-find", true), ("critic-search", true)]),
+        tool_controls(&[
+            ("critic-find", true),
+            ("critic-search", true),
+            ("critic-web-search", true),
+        ]),
     );
     controls.insert(
         "prudent".to_owned(),
-        tool_controls(&[("prudent-find", true), ("prudent-search", true)]),
+        tool_controls(&[
+            ("prudent-find", true),
+            ("prudent-search", true),
+            ("prudent-web-search", true),
+        ]),
     );
     controls.insert(
         "polisher".to_owned(),
         tool_controls(&[
             ("polisher-find", true),
             ("polisher-search", true),
+            ("polisher-web-search", true),
             ("polisher-insert-lines", false),
             ("polisher-replace-lines", false),
         ]),
     );
-    controls.insert("summarizer".to_owned(), BTreeMap::new());
+    controls.insert(
+        "summarizer".to_owned(),
+        tool_controls(&[("summarizer-search", true), ("summarizer-web-search", true)]),
+    );
+    controls.insert(
+        "executor_adapter".to_owned(),
+        tool_controls(&[
+            ("executor-adapter-search", true),
+            ("executor-adapter-web-search", true),
+        ]),
+    );
     controls
 }
 
@@ -770,7 +805,7 @@ fn default_qdrant_vector_dimensions() -> u32 {
     1_536
 }
 
-/// 默认从 PATH 解析 Qdrant sidecar。
+/// 默认由 Ariadne 在首次启用向量检索时供应固定版本的 Qdrant sidecar。
 fn default_qdrant_binary_path() -> String {
     "qdrant".to_owned()
 }

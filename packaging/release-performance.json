@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "million_character_retrieval": {
+    "minimum_character_count": 1000000,
+    "maximum_import_ms": 60000,
+    "maximum_initial_index_ms": 600000,
+    "maximum_search_ms": 5000,
+    "maximum_incremental_update_ms": 120000,
+    "maximum_rebuild_ms": 600000,
+    "maximum_peak_rss_bytes": 2147483648,
+    "maximum_index_bytes": 1073741824
+  },
+  "desktop_ui_performance": {
+    "required_node_counts": [100, 500, 1000],
+    "minimum_frames_per_node_count": 120,
+    "maximum_initial_layout_ms": 180000,
+    "maximum_p95_frame_interval_ms": 66.67,
+    "maximum_p95_frame_work_ms": 8.0,
+    "maximum_p95_allocated_bytes": 262144
+  },
+  "wcag_contrast": {
+    "minimum_theme_variants": 12,
+    "minimum_normal_text_ratio": 4.5,
+    "minimum_large_text_ratio": 3.0,
+    "minimum_non_text_ratio": 3.0
+  },
+  "scheduler_throughput": {
+    "required_node_counts": [500, 1000],
+    "minimum_samples_per_node_count": 5,
+    "minimum_runnable_width_ratio": 0.99,
+    "minimum_median_nodes_per_second": 100,
+    "maximum_growth_ratio_500_to_1000": 2.5,
+    "minimum_soak_duration_seconds": 300,
+    "minimum_soak_completed_nodes": 100000,
+    "maximum_peak_rss_bytes": 1073741824
+  },
+  "qdrant_sidecar_e2e": {
+    "require_runtime_provisioning": true,
+    "require_cache_reuse": true,
+    "require_index_upsert_search": true,
+    "require_clean_shutdown": true
+  }
+}

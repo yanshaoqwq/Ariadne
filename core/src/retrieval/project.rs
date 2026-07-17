@@ -21,12 +21,12 @@ use crate::providers::{
 use crate::retrieval::reranker::apply_rerank_results;
 use crate::retrieval::{
     ensure_search_not_blocked_by_pending_index,
-    filter_fresh_retrieval_results_with_knowledge_revision, validate_product_search_limit,
-    validate_product_search_result_budget, FullTextStore, HybridSearch, HybridSearchRequest,
-    IndexingWorker, KnowledgeIndexSyncReport, KnowledgeIndexSynchronizer, QdrantSidecarConfig,
-    QdrantSidecarSupervisor, QdrantVectorStore, RetrievalResult, SidecarState, SqliteFullTextStore,
-    StoreHealth, TantivyFullTextStore, TextEmbedder, ThreeWayHybridSearchEngine, VectorStore,
-    MAX_HYBRID_SEARCH_LIMIT,
+    filter_fresh_retrieval_results_with_knowledge_revision, resolve_qdrant_binary_path,
+    validate_product_search_limit, validate_product_search_result_budget, FullTextStore,
+    HybridSearch, HybridSearchRequest, IndexingWorker, KnowledgeIndexSyncReport,
+    KnowledgeIndexSynchronizer, QdrantSidecarConfig, QdrantSidecarSupervisor, QdrantVectorStore,
+    RetrievalResult, SidecarState, SqliteFullTextStore, StoreHealth, TantivyFullTextStore,
+    TextEmbedder, ThreeWayHybridSearchEngine, VectorStore, MAX_HYBRID_SEARCH_LIMIT,
 };
 
 struct ProjectReranker {
@@ -151,8 +151,10 @@ impl ProjectRetrievalRuntime {
                         Path::new(&vector_config.sidecar.data_dir),
                     )?;
                     let log_dir = project_root.join(".runtime").join("logs").join("qdrant");
+                    let binary_path =
+                        resolve_qdrant_binary_path(Path::new(&vector_config.sidecar.binary_path))?;
                     let supervisor = Arc::new(QdrantSidecarSupervisor::new(QdrantSidecarConfig {
-                        binary_path: PathBuf::from(&vector_config.sidecar.binary_path),
+                        binary_path,
                         host: vector_config.sidecar.host.clone(),
                         requested_port: vector_config.sidecar.port,
                         data_dir,
@@ -322,10 +324,18 @@ impl ProjectRetrievalRuntime {
 
     /// 同步排空 outbox；任一失败保持事件可重试并向调用方 fail-loud。
     pub fn process_outbox(&self) -> CoreResult<usize> {
+        self.process_outbox_with_cancellation(&crate::contracts::ExecutionCancellation::new())
+    }
+
+    pub fn process_outbox_with_cancellation(
+        &self,
+        cancellation: &crate::contracts::ExecutionCancellation,
+    ) -> CoreResult<usize> {
         let worker = self.indexing_worker()?;
         let mut processed = 0usize;
         loop {
-            match worker.process_next()? {
+            cancellation.check()?;
+            match worker.process_next_with_cancellation(cancellation)? {
                 Some(_) => processed = processed.saturating_add(1),
                 None => return Ok(processed),
             }
@@ -416,11 +426,10 @@ impl ProjectRetrievalRuntime {
                 Arc::clone(&self.sqlite),
             ),
         };
-        let mut results = retrieval.search(HybridSearchRequest::new(
-            query.clone(),
-            query_embedding,
-            candidate_limit,
-        ))?;
+        let mut results = retrieval.search_with_cancellation(
+            HybridSearchRequest::new(query.clone(), query_embedding, candidate_limit),
+            &context.cancellation,
+        )?;
         results = filter_fresh_retrieval_results_with_knowledge_revision(
             results,
             Some(&knowledge.revision),

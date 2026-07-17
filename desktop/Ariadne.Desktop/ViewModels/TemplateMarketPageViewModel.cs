@@ -7,12 +7,31 @@ namespace Ariadne.Desktop.ViewModels;
 
 public sealed class TemplateMarketPageViewModel : ViewModelBase
 {
+    private const int PageSize = 20;
+
+    private enum SearchState
+    {
+        Idle,
+        Loading,
+        Results,
+        Empty,
+        Error,
+        EndOfList,
+    }
+
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
     private string _searchQuery = string.Empty;
     private string _statusText = string.Empty;
     private string _repositoryBaseUrl = string.Empty;
-    private int _page;
+    private int _page = -1;
+    private bool _isBusy;
+    private bool _hasMore;
+    private SearchState _state = SearchState.Idle;
+    private long _searchGeneration;
+    private long _requestGeneration;
+    private CancellationTokenSource? _requestCts;
+    private bool _initialCatalogLoadStarted;
 
     public TemplateMarketPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -28,9 +47,8 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             CreateTag("ui.template.tag.summary"),
         };
         SearchCommand = new RelayCommand(() => _ = SearchAsync());
-        InstallFirstCommand = new RelayCommand(() => _ = InstallFirstAsync());
-        LoadMoreCommand = new RelayCommand(() => _ = LoadMoreAsync());
-        _ = LoadRepositoryAsync();
+        InstallFirstCommand = new RelayCommand(() => _ = InstallFirstAsync(), () => Templates.Count > 0 && !IsBusy);
+        LoadMoreCommand = new RelayCommand(() => _ = LoadMoreAsync(), () => CanLoadMore);
     }
 
     public string Title => _displayNames.Text("ui.template.title");
@@ -53,10 +71,38 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
 
     public string LoadMoreText => _displayNames.Text("ui.common.load_more");
 
+    public string LoadingText => _displayNames.Text("ui.template.loading");
+
+    public string RetryText => _displayNames.Text("ui.template.retry");
+
+    public string EndOfListText => _displayNames.Text("ui.template.end");
+
+    public string RepositoryMissingText => _displayNames.Text("ui.template.repository_missing");
+
+    public bool IsBusy => _isBusy;
+
+    public bool IsIdle => _state == SearchState.Idle;
+
+    public bool IsLoading => _state == SearchState.Loading;
+
+    public bool IsEmpty => _state == SearchState.Empty;
+
+    public bool IsError => _state == SearchState.Error;
+
+    public bool IsEndOfList => _state == SearchState.EndOfList;
+
+    public bool HasResults => Templates.Count > 0;
+
+    public bool CanLoadMore => _hasMore && !IsBusy;
+
+    public bool IsLoadMoreVisible => _hasMore;
+
+    public bool CanInteract => !IsBusy;
+
     public string StatusText
     {
         get => _statusText;
-        set => SetProperty(ref _statusText, value);
+        private set => SetProperty(ref _statusText, value);
     }
 
     public string SearchQuery
@@ -82,60 +128,195 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         {
             SearchQuery = title;
             _ = SearchAsync();
-        });
+        }, () => !IsBusy);
     }
 
-    private async Task LoadRepositoryAsync()
+    private async Task<string> LoadRepositoryAsync(CancellationToken cancellationToken)
     {
-        try
+        if (!string.IsNullOrWhiteSpace(_repositoryBaseUrl))
         {
-            var settings = await _backend.GetTemplateRepositorySettingsAsync().ConfigureAwait(true);
-            _repositoryBaseUrl = settings.BaseUrl;
+            return _repositoryBaseUrl;
         }
-        catch (Exception ex)
+
+        var settings = await _backend.GetTemplateRepositorySettingsAsync(cancellationToken).ConfigureAwait(true);
+        _repositoryBaseUrl = settings.BaseUrl;
+        if (string.IsNullOrWhiteSpace(_repositoryBaseUrl))
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            throw new InvalidOperationException(RepositoryMissingText);
         }
+
+        return _repositoryBaseUrl;
     }
 
     private async Task SearchAsync()
     {
-        _page = 0;
-        await SearchPageAsync(clear: true).ConfigureAwait(true);
+        var searchGeneration = ++_searchGeneration;
+        var query = SearchQuery;
+        _page = -1;
+        _hasMore = false;
+        Templates.Clear();
+        NotifyTemplateCollectionChanged();
+        SetState(SearchState.Loading);
+        StatusText = string.Empty;
+        var (requestGeneration, cancellationToken) = BeginRequest();
+        try
+        {
+            var baseUrl = await LoadRepositoryAsync(cancellationToken).ConfigureAwait(true);
+            var results = await _backend
+                .SearchTemplatesAsync(baseUrl, query, 0, cancellationToken)
+                .ConfigureAwait(true);
+            if (!IsCurrent(searchGeneration, requestGeneration))
+            {
+                return;
+            }
+
+            AppendResults(results);
+            _page = 0;
+            _hasMore = results.Count >= PageSize;
+            SetState(results.Count == 0
+                ? SearchState.Empty
+                : _hasMore ? SearchState.Results : SearchState.EndOfList);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (IsCurrent(searchGeneration, requestGeneration))
+            {
+                SetState(SearchState.Idle);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (IsCurrent(searchGeneration, requestGeneration))
+            {
+                StatusText = UserFacingError.Format(ex, _displayNames);
+                SetState(SearchState.Error);
+            }
+        }
+        finally
+        {
+            FinishRequest(requestGeneration);
+        }
     }
 
     private async Task LoadMoreAsync()
     {
-        _page++;
-        await SearchPageAsync(clear: false).ConfigureAwait(true);
-    }
+        if (!CanLoadMore)
+        {
+            return;
+        }
 
-    private async Task SearchPageAsync(bool clear)
-    {
+        var searchGeneration = _searchGeneration;
+        var query = SearchQuery;
+        var targetPage = _page + 1;
+        var (requestGeneration, cancellationToken) = BeginRequest();
         try
         {
-            if (string.IsNullOrWhiteSpace(_repositoryBaseUrl))
+            var baseUrl = await LoadRepositoryAsync(cancellationToken).ConfigureAwait(true);
+            var results = await _backend
+                .SearchTemplatesAsync(baseUrl, query, targetPage, cancellationToken)
+                .ConfigureAwait(true);
+            if (!IsCurrent(searchGeneration, requestGeneration))
             {
-                await LoadRepositoryAsync().ConfigureAwait(true);
+                return;
             }
-            var results = await _backend.SearchTemplatesAsync(_repositoryBaseUrl, SearchQuery, _page).ConfigureAwait(true);
-            if (clear)
+
+            AppendResults(results);
+            _page = targetPage;
+            _hasMore = results.Count >= PageSize;
+            SetState(_hasMore ? SearchState.Results : SearchState.EndOfList);
+            StatusText = string.Empty;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (IsCurrent(searchGeneration, requestGeneration))
             {
-                Templates.Clear();
+                SetState(HasResults ? SearchState.Results : SearchState.Idle);
             }
-            foreach (var item in results)
-            {
-                Templates.Add(new TemplateCardViewModel(
-                    item,
-                    () => _ = ShowDetailsAsync(item),
-                    () => _ = InstallTemplateAsync(item)));
-            }
-            StatusText = Templates.Count == 0 ? EmptyText : $"{Templates.Count}";
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            if (IsCurrent(searchGeneration, requestGeneration))
+            {
+                StatusText = UserFacingError.Format(ex, _displayNames);
+                SetState(SearchState.Error);
+            }
         }
+        finally
+        {
+            FinishRequest(requestGeneration);
+        }
+    }
+
+    private void AppendResults(IReadOnlyList<TemplateSummary> results)
+    {
+        foreach (var item in results)
+        {
+            Templates.Add(new TemplateCardViewModel(
+                item,
+                ResolveDisplayText(item.Name),
+                string.Join(", ", item.Tags.Select(ResolveDisplayText)),
+                () => _ = ShowDetailsAsync(item),
+                () => _ = InstallTemplateAsync(item)));
+        }
+        NotifyTemplateCollectionChanged();
+    }
+
+    private (long RequestGeneration, CancellationToken CancellationToken) BeginRequest()
+    {
+        _requestCts?.Cancel();
+        _requestCts?.Dispose();
+        _requestCts = new CancellationTokenSource();
+        _isBusy = true;
+        OnPropertyChanged(nameof(IsBusy));
+        OnPropertyChanged(nameof(CanInteract));
+        LoadMoreCommand.NotifyCanExecuteChanged();
+        InstallFirstCommand.NotifyCanExecuteChanged();
+        return (++_requestGeneration, _requestCts.Token);
+    }
+
+    private bool IsCurrent(long searchGeneration, long requestGeneration)
+    {
+        return searchGeneration == _searchGeneration
+            && requestGeneration == _requestGeneration;
+    }
+
+    private void FinishRequest(long requestGeneration)
+    {
+        if (requestGeneration != _requestGeneration)
+        {
+            return;
+        }
+
+        _isBusy = false;
+        OnPropertyChanged(nameof(IsBusy));
+        OnPropertyChanged(nameof(CanInteract));
+        LoadMoreCommand.NotifyCanExecuteChanged();
+        InstallFirstCommand.NotifyCanExecuteChanged();
+        _requestCts?.Dispose();
+        _requestCts = null;
+    }
+
+    private void SetState(SearchState state)
+    {
+        if (_state == state)
+        {
+            return;
+        }
+
+        _state = state;
+        OnPropertyChanged(nameof(IsIdle));
+        OnPropertyChanged(nameof(IsLoading));
+        OnPropertyChanged(nameof(IsEmpty));
+        OnPropertyChanged(nameof(IsError));
+        OnPropertyChanged(nameof(IsEndOfList));
+        OnPropertyChanged(nameof(IsLoadMoreVisible));
+        LoadMoreCommand.NotifyCanExecuteChanged();
+    }
+
+    private void NotifyTemplateCollectionChanged()
+    {
+        OnPropertyChanged(nameof(HasResults));
+        InstallFirstCommand.NotifyCanExecuteChanged();
     }
 
     private async Task InstallFirstAsync()
@@ -158,7 +339,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             {
                 ["version"] = detail.Version,
             });
-            var message = detail.Name
+            var message = ResolveDisplayText(detail.Name)
                           + Environment.NewLine
                           + _displayNames.Format("ui.template.detail.version", new Dictionary<string, string>
                           {
@@ -200,7 +381,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             var report = await _backend.InstallTemplateAsync(_repositoryBaseUrl, template.Id).ConfigureAwait(true);
             StatusText = _displayNames.Format("ui.template.imported", new Dictionary<string, string>
             {
-                ["name"] = report.WorkflowId,
+                ["name"] = ResolveDisplayText(template.Name),
             });
         }
         catch (Exception ex)
@@ -284,17 +465,40 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         }
         return Array.Empty<string>();
     }
+
+    internal Task SearchForTestsAsync() => SearchAsync();
+
+    internal Task LoadMoreForTestsAsync() => LoadMoreAsync();
+
+    internal async Task EnsureInitialCatalogLoadedAsync()
+    {
+        if (_initialCatalogLoadStarted)
+        {
+            return;
+        }
+        _initialCatalogLoadStarted = true;
+        await SearchAsync().ConfigureAwait(true);
+    }
+
+    private string ResolveDisplayText(string value) => value.StartsWith("ui.", StringComparison.Ordinal)
+        ? _displayNames.Text(value)
+        : value;
 }
 
 public sealed class TemplateCardViewModel
 {
-    public TemplateCardViewModel(TemplateSummary summary, Action showDetails, Action install)
+    public TemplateCardViewModel(
+        TemplateSummary summary,
+        string displayName,
+        string tagsText,
+        Action showDetails,
+        Action install)
     {
         Summary = summary;
         Id = summary.Id;
-        Name = summary.Name;
+        Name = displayName;
         RequiresPermissions = summary.RequiresPermissions;
-        TagsText = string.Join(", ", summary.Tags);
+        TagsText = tagsText;
         ShowDetailsCommand = new RelayCommand(showDetails);
         InstallCommand = new RelayCommand(install);
     }
@@ -310,10 +514,10 @@ public sealed class TemplateCardViewModel
 
 public sealed class TemplateTagViewModel
 {
-    public TemplateTagViewModel(string title, Action select)
+    public TemplateTagViewModel(string title, Action select, Func<bool>? canSelect = null)
     {
         Title = title;
-        SelectCommand = new RelayCommand(select);
+        SelectCommand = new RelayCommand(select, canSelect);
     }
 
     public string Title { get; }

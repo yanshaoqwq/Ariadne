@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// 项目内部统一 Result 类型。
@@ -80,6 +82,13 @@ pub enum CoreError {
         outcome: ExternalDispatchOutcome,
     },
 
+    /// 远端可能已经执行，但该操作声明为 at-most-once，运行时已禁止重发并自动终止。
+    #[error("external operation outcome is unknown for at-most-once operation {operation_id}: {message}")]
+    ExternalOutcomeUnknown {
+        operation_id: String,
+        message: String,
+    },
+
     /// 本地操作被取消；不隐含外部请求是否 dispatch。外部适配器必须返回带
     /// `ExternalDispatchOutcome` 的错误，journal 才能判定安全重试或 in_doubt。
     #[error("operation cancelled")]
@@ -103,6 +112,10 @@ pub enum CoreError {
         expected: u64,
         actual: u64,
     },
+
+    /// create-only 文档写入发现目标已经存在；调用方必须显式声明覆盖意图。
+    #[error("document already exists: {}", path.display())]
+    DocumentAlreadyExists { path: PathBuf },
 
     /// 指定工作流运行不存在，save 不得隐式复活已删除记录。
     #[error("workflow run not found: {workflow_id}/{run_id}")]

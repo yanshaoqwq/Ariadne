@@ -13,33 +13,15 @@
         BorderBrush="{DynamicResource Ariadne.BorderMuted}"
         BorderThickness="0,0,0,1"
         Padding="28,20,28,12">
-      <Grid RowDefinitions="Auto,Auto" RowSpacing="14">
-        <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="16">
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16">
           <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="display" />
           <Border Grid.Column="1" Classes="chip" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <TextBlock Text="{Binding StatusText}" Classes="caption" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding StatusText}"
+                       Classes="caption"
+                       TextWrapping="Wrap"
+                       AutomationProperties.Name="{Binding StatusText}"
+                       AutomationProperties.LiveSetting="Assertive" />
           </Border>
-        </Grid>
-
-        <ItemsControl Grid.Row="1" ItemsSource="{Binding Tabs}">
-          <ItemsControl.ItemsPanel>
-            <ItemsPanelTemplate>
-              <StackPanel Orientation="Horizontal" Spacing="8" />
-            </ItemsPanelTemplate>
-          </ItemsControl.ItemsPanel>
-          <ItemsControl.ItemTemplate>
-            <DataTemplate DataType="{x:Type vm:SettingsTabViewModel}">
-              <Button
-                  Classes="tab"
-                  ctl:SelectedClass.IsSelected="{Binding IsSelected}"
-                  MinWidth="82"
-                  Padding="14,8"
-                  Command="{Binding SelectCommand}">
-                <TextBlock Text="{Binding Title}" TextAlignment="Center" />
-              </Button>
-            </DataTemplate>
-          </ItemsControl.ItemTemplate>
-        </ItemsControl>
       </Grid>
     </Border>
 
@@ -50,86 +32,132 @@
           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
           BorderThickness="0,0,1,0"
           Padding="18,24,14,24">
-        <DockPanel>
-          <TextBlock DockPanel.Dock="Top"
-                     Margin="0,0,0,12"
-                     Text="{Binding SectionIndexHintText}"
-                     Classes="caption"
-                     TextWrapping="Wrap"
-                     Opacity="0.9" />
           <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <ItemsControl ItemsSource="{Binding SectionIndexItems}">
-              <ItemsControl.ItemTemplate>
-                <DataTemplate DataType="{x:Type vm:SettingsSectionIndexItemViewModel}">
-                  <Button
-                      Classes="nav"
-                      ctl:SelectedClass.IsSelected="{Binding IsSelected}"
-                      HorizontalAlignment="Stretch"
-                      HorizontalContentAlignment="Left"
-                      Margin="{Binding IndentMargin}"
-                      Padding="10,6"
-                      MinHeight="32"
-                      Command="{Binding SelectCommand}">
-                    <TextBlock Text="{Binding Title}"
-                               TextWrapping="Wrap"
-                               FontSize="12"
-                               Opacity="0.95" />
-                  </Button>
+            <ListBox ItemsSource="{Binding Tabs}"
+                     SelectedItem="{Binding NavigationSelection, Mode=TwoWay}"
+                     SelectionMode="Single"
+                     Background="Transparent"
+                     BorderThickness="0"
+                     AutomationProperties.Name="{Binding Title}">
+              <ListBox.Styles>
+                <Style Selector="ListBoxItem">
+                  <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                  <Setter Property="Margin" Value="0,0,0,6" />
+                  <Setter Property="Padding" Value="12,10" />
+                  <Setter Property="MinHeight" Value="40" />
+                  <Setter Property="Background" Value="Transparent" />
+                  <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+                  <Setter Property="CornerRadius" Value="4" />
+                </Style>
+                <Style Selector="ListBoxItem:pointerover">
+                  <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+                  <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+                </Style>
+                <Style Selector="ListBoxItem:selected">
+                  <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+                  <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+                  <Setter Property="FontWeight" Value="SemiBold" />
+                </Style>
+              </ListBox.Styles>
+              <ListBox.ItemTemplate>
+                <DataTemplate DataType="{x:Type vm:SettingsTabViewModel}">
+                  <TextBlock Text="{Binding Title}"
+                             TextWrapping="Wrap"
+                             Opacity="0.95" />
                 </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
+              </ListBox.ItemTemplate>
+            </ListBox>
           </ScrollViewer>
-        </DockPanel>
       </Border>
 
       <ScrollViewer x:Name="SettingsContentScroll" Grid.Column="1" Padding="34,28">
         <Panel x:Name="SettingsContentHost" MaxWidth="1100" HorizontalAlignment="Stretch">
 
-          <StackPanel IsVisible="{Binding IsGeneralSelected}" Spacing="18">
+          <StackPanel IsVisible="{Binding IsGeneralSelected}" IsEnabled="{Binding IsGeneralEditable}" Spacing="18">
             <TextBlock Text="{Binding GeneralTitle}" Classes="title" />
-            <Border Classes="settings-section" Padding="22" Tag="project" IsVisible="{Binding IsSectionProjectSelected}">
-              <Grid ColumnDefinitions="180,*" ColumnSpacing="18">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProjectNameLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ProjectName, Mode=TwoWay}" />
-              </Grid>
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding ProjectSectionTitle}" Classes="subtitle" />
+                <Grid ColumnDefinitions="180,*" ColumnSpacing="18">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProjectNameLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBox Grid.Row="0" Grid.Column="1"
+                           Text="{Binding ProjectName, Mode=TwoWay}"
+                           AutomationProperties.Name="{Binding ProjectNameLabel}" />
+                </Grid>
+              </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22" Tag="directories" IsVisible="{Binding IsSectionDirectoriesSelected}">
-              <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*,Auto" RowSpacing="12" ColumnSpacing="12">
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding DirectoriesSectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*,Auto" RowSpacing="12" ColumnSpacing="12">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding DocumentsDir, Mode=TwoWay}" />
+                <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding DocumentsDir, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding DocumentsDirLabel}" />
                 <Button Grid.Row="0" Grid.Column="2" Classes="secondary" Content="{Binding BrowseFolderText}" Command="{Binding BrowseDocumentsDirCommand}" />
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding WorkflowsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding WorkflowsDir, Mode=TwoWay}" />
+                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding WorkflowsDir, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding WorkflowsDirLabel}" />
                 <Button Grid.Row="1" Grid.Column="2" Classes="secondary" Content="{Binding BrowseFolderText}" Command="{Binding BrowseWorkflowsDirCommand}" />
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding SkillsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding SkillsDir, Mode=TwoWay}" />
+                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding SkillsDir, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding SkillsDirLabel}" />
                 <Button Grid.Row="2" Grid.Column="2" Classes="secondary" Content="{Binding BrowseFolderText}" Command="{Binding BrowseSkillsDirCommand}" />
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding ExportsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ExportsDir, Mode=TwoWay}" />
+                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ExportsDir, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding ExportsDirLabel}" />
                 <Button Grid.Row="3" Grid.Column="2" Classes="secondary" Content="{Binding BrowseFolderText}" Command="{Binding BrowseExportsDirCommand}" />
-              </Grid>
+                </Grid>
+              </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22" Tag="project_memory" IsVisible="{Binding IsSectionProjectMemorySelected}">
-              <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="10" ColumnSpacing="18">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProjectMemoryLabel}" Classes="secondary" VerticalAlignment="Top" />
-                <TextBox Grid.Row="0" Grid.Column="1"
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding ProjectMemorySectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="10" ColumnSpacing="18">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProjectMemoryLabel}" Classes="secondary" VerticalAlignment="Top" />
+                  <TextBox Grid.Row="0" Grid.Column="1"
                          Text="{Binding ProjectMemory, Mode=TwoWay}"
                          PlaceholderText="{Binding ProjectMemoryPlaceholder}"
+                         AutomationProperties.Name="{Binding ProjectMemoryLabel}"
+                         AutomationProperties.HelpText="{Binding ProjectMemoryPlaceholder}"
                          AcceptsReturn="True"
                          TextWrapping="Wrap"
                          MinHeight="150" />
-              </Grid>
+                </Grid>
+              </StackPanel>
+            </Border>
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding LanguageSectionTitle}" Classes="subtitle" />
+                <Grid ColumnDefinitions="180,*" RowDefinitions="Auto,Auto" RowSpacing="10" ColumnSpacing="18">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding LanguageLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <ComboBox Grid.Row="0" Grid.Column="1"
+                            ItemsSource="{Binding LanguageOptions}"
+                            SelectedValue="{Binding SelectedLanguage, Mode=TwoWay}"
+                            SelectedValueBinding="{Binding Code}"
+                            AutomationProperties.Name="{Binding LanguageLabel}"
+                            AutomationProperties.HelpText="{Binding LanguageDescText}">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate DataType="{x:Type vm:LanguageOption}">
+                        <TextBlock Text="{Binding Label}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                  <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding LanguageDescText}" Classes="caption" TextWrapping="Wrap" />
+                </Grid>
+              </StackPanel>
             </Border>
             <Button Classes="primary" Content="{Binding SaveGeneralText}" HorizontalAlignment="Right" Command="{Binding SaveGeneralCommand}" />
           </StackPanel>
 
-          <StackPanel IsVisible="{Binding IsModelsSelected}" Spacing="18">
+          <StackPanel IsVisible="{Binding IsModelsSelected}" IsEnabled="{Binding IsModelsEditable}" Spacing="18">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="14">
               <TextBlock Grid.Column="0" Text="{Binding ModelsTitle}" Classes="title" />
               <Button Grid.Column="1" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshModelsCommand}" />
             </Grid>
-            <Border Classes="settings-section" Padding="22" Tag="provider" IsVisible="{Binding IsSectionProviderSelected}">
-              <Grid ColumnDefinitions="240,*" ColumnSpacing="20">
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding ProviderSectionTitle}" Classes="subtitle" />
+                <Grid ColumnDefinitions="240,*" ColumnSpacing="20">
                 <!-- 多供应商列表 -->
                 <DockPanel Grid.Column="0">
                   <StackPanel DockPanel.Dock="Top" Spacing="6" Margin="0,0,0,12">
@@ -171,41 +199,63 @@
 
                 <!-- 当前供应商编辑 -->
                 <StackPanel Grid.Column="1" Spacing="12">
-                  <TextBlock Text="{Binding ProviderEditorTitle}" Classes="subtitle" />
+                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                    <TextBlock Grid.Column="0" Text="{Binding ProviderEditorTitle}" Classes="subtitle" VerticalAlignment="Center" />
+                    <Button Grid.Column="1"
+                            Classes="danger"
+                            Content="{Binding RemoveProviderText}"
+                            Command="{Binding RemoveProviderCommand}" />
+                  </Grid>
                   <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="140,*" RowSpacing="12" ColumnSpacing="14">
                     <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProviderIdLabel}" Classes="secondary" VerticalAlignment="Center" />
                     <!-- 已落库供应商禁止改 ID（反人类误改）；草稿可编辑 -->
                     <TextBox Grid.Row="0" Grid.Column="1"
                              Text="{Binding ProviderId, Mode=TwoWay}"
                              Classes="mono"
+                             AutomationProperties.Name="{Binding ProviderIdLabel}"
                              IsReadOnly="{Binding !IsSelectedProviderDraft}" />
                     <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding ProviderTypeLabel}" Classes="secondary" VerticalAlignment="Center" />
-                    <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding ProviderTypeOptions}" SelectedItem="{Binding ProviderType, Mode=TwoWay}" />
+                    <ComboBox Grid.Row="1" Grid.Column="1"
+                              ItemsSource="{Binding ProviderTypeOptions}"
+                              SelectedItem="{Binding ProviderType, Mode=TwoWay}"
+                              AutomationProperties.Name="{Binding ProviderTypeLabel}" />
                     <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding ProviderDisplayNameLabel}" Classes="secondary" VerticalAlignment="Center" />
-                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding ProviderDisplayName, Mode=TwoWay}" />
+                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding ProviderDisplayName, Mode=TwoWay}"
+                             AutomationProperties.Name="{Binding ProviderDisplayNameLabel}" />
                     <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding BaseUrlLabel}" Classes="secondary" VerticalAlignment="Center" />
-                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ProviderBaseUrl, Mode=TwoWay}" PlaceholderText="{Binding BaseUrlPlaceholder}" />
+                    <TextBox Grid.Row="3" Grid.Column="1"
+                             Text="{Binding ProviderBaseUrl, Mode=TwoWay}"
+                             PlaceholderText="{Binding BaseUrlPlaceholder}"
+                             AutomationProperties.Name="{Binding BaseUrlLabel}"
+                             AutomationProperties.HelpText="{Binding BaseUrlPlaceholder}" />
                     <WrapPanel Grid.Row="4" Grid.Column="1">
                       <CheckBox Margin="0,0,18,8" IsChecked="{Binding ProviderEnabled, Mode=TwoWay}" Content="{Binding ProviderEnabledText}" />
                       <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultLlm, Mode=TwoWay}" Content="{Binding MakeDefaultLlmText}" />
                       <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultEmbedding, Mode=TwoWay}" Content="{Binding MakeDefaultEmbeddingText}" />
                       <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultReranker, Mode=TwoWay}" Content="{Binding MakeDefaultRerankerText}" />
+                      <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultSearch, Mode=TwoWay}" Content="{Binding MakeDefaultSearchText}" />
                     </WrapPanel>
                     <TextBlock Grid.Row="5" Grid.Column="0" Text="{Binding ApiKeyLabel}" Classes="secondary" VerticalAlignment="Center" />
                     <Grid Grid.Row="5" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                      <TextBox Grid.Column="0" Text="{Binding ApiKey, Mode=TwoWay}" PlaceholderText="{Binding ApiKeyPlaceholder}" PasswordChar="*" />
+                      <TextBox Grid.Column="0"
+                               Text="{Binding ApiKey, Mode=TwoWay}"
+                               PlaceholderText="{Binding ApiKeyPlaceholder}"
+                               PasswordChar="*"
+                               AutomationProperties.Name="{Binding ApiKeyLabel}"
+                               AutomationProperties.HelpText="{Binding ApiKeyPlaceholder}" />
                       <Button Grid.Column="1" Classes="secondary" Content="{Binding SaveKeyText}" Command="{Binding SaveProviderKeyCommand}" />
                     </Grid>
                     <TextBlock Grid.Row="6" Grid.Column="0" Text="{Binding ProviderStatusLabel}" Classes="secondary" VerticalAlignment="Top" />
                     <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding ProviderStatus}" Classes="caption" TextWrapping="Wrap" />
                   </Grid>
                 </StackPanel>
-              </Grid>
+                </Grid>
+              </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22" Tag="available" IsVisible="{Binding IsSectionAvailableModelsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="12">
-                <TextBlock Text="{Binding AvailableModelsText}" Classes="subtitle" />
+                <TextBlock Text="{Binding AvailableModelsSectionTitle}" Classes="subtitle" />
                 <ItemsControl ItemsSource="{Binding AvailableModels}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:ModelOptionViewModel}">
@@ -221,20 +271,42 @@
               </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22" Tag="embedding" IsVisible="{Binding IsSectionEmbeddingSelected}">
-              <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding EmbeddingModelLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding EmbeddingModelId, Mode=TwoWay}" PlaceholderText="{Binding EmbeddingModelPlaceholder}" />
-                <CheckBox Grid.Row="1" Grid.Column="1" IsChecked="{Binding MakeDefaultEmbedding, Mode=TwoWay}" Content="{Binding MakeDefaultEmbeddingText}" />
-              </Grid>
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding EmbeddingSectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding EmbeddingModelLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBox Grid.Row="0" Grid.Column="1"
+                           Text="{Binding EmbeddingModelId, Mode=TwoWay}"
+                           PlaceholderText="{Binding EmbeddingModelPlaceholder}"
+                           AutomationProperties.Name="{Binding EmbeddingModelLabel}"
+                           AutomationProperties.HelpText="{Binding EmbeddingModelPlaceholder}" />
+                  <CheckBox Grid.Row="1" Grid.Column="1" IsChecked="{Binding MakeDefaultEmbedding, Mode=TwoWay}" Content="{Binding MakeDefaultEmbeddingText}" />
+                </Grid>
+              </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22" Tag="manual" IsVisible="{Binding IsSectionManualModelsSelected}">
-              <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ModelsTextLabel}" Classes="secondary" VerticalAlignment="Top" />
-                <ToggleSwitch Grid.Row="0" Grid.Column="1" IsChecked="{Binding ManualModelsVisible, Mode=TwoWay}" OnContent="" OffContent="" Content="{Binding ManualModelsText}" />
-                <TextBox Grid.Row="1" Grid.Column="1" IsVisible="{Binding ManualModelsVisible}" Text="{Binding ModelsText, Mode=TwoWay}" PlaceholderText="{Binding ModelsPlaceholder}" AcceptsReturn="True" TextWrapping="NoWrap" MinHeight="116" />
-              </Grid>
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding ManualModelsSectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ModelsTextLabel}" Classes="secondary" VerticalAlignment="Top" />
+                  <ToggleSwitch Grid.Row="0" Grid.Column="1"
+                                IsChecked="{Binding ManualModelsVisible, Mode=TwoWay}"
+                                OnContent="" OffContent=""
+                                Content="{Binding ManualModelsText}"
+                                AutomationProperties.Name="{Binding ManualModelsText}" />
+                  <TextBox Grid.Row="1" Grid.Column="1"
+                           IsVisible="{Binding ManualModelsVisible}"
+                           Text="{Binding ModelsText, Mode=TwoWay}"
+                           PlaceholderText="{Binding ModelsPlaceholder}"
+                           AcceptsReturn="True"
+                           TextWrapping="NoWrap"
+                           MinHeight="116"
+                           AutomationProperties.Name="{Binding ModelsTextLabel}"
+                           AutomationProperties.HelpText="{Binding ModelsPlaceholder}" />
+                </Grid>
+              </StackPanel>
             </Border>
 
             <Button Classes="primary" Content="{Binding SaveModelText}" HorizontalAlignment="Right" Command="{Binding SaveModelCommand}" />
@@ -242,8 +314,9 @@
 
           <StackPanel IsVisible="{Binding IsPresetsSelected}" Spacing="18">
             <TextBlock Text="{Binding PresetsTitle}" Classes="title" />
-            <Border Classes="settings-section" Padding="22" Tag="node_presets" IsVisible="{Binding IsSectionNodePresetsSelected}">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPresetsEditable}">
               <StackPanel Spacing="12">
+                <TextBlock Text="{Binding NodePresetsSectionTitle}" Classes="subtitle" />
                 <Grid ColumnDefinitions="1.2*,2*,130,120" ColumnSpacing="12">
                   <TextBlock Grid.Column="0" Text="{Binding PresetNodeTypeLabel}" Classes="caption" />
                   <TextBlock Grid.Column="1" Text="{Binding PresetNodeModelLabel}" Classes="caption" />
@@ -259,9 +332,14 @@
                                   ItemsSource="{Binding $parent[UserControl].DataContext.AvailableModelIds}"
                                   IsEditable="True"
                                   Text="{Binding ModelId, Mode=TwoWay}"
+                                  AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeModelLabel}"
                                   HorizontalAlignment="Stretch" />
-                        <TextBox Grid.Column="2" Text="{Binding TimeoutMs, Mode=TwoWay}" />
-                        <TextBox Grid.Column="3" Text="{Binding BudgetUsd, Mode=TwoWay}" />
+                        <TextBox Grid.Column="2"
+                                 Text="{Binding TimeoutMs, Mode=TwoWay}"
+                                 AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeTimeoutLabel}" />
+                        <TextBox Grid.Column="3"
+                                 Text="{Binding BudgetUsd, Mode=TwoWay}"
+                                 AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeBudgetLabel}" />
                       </Grid>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
@@ -270,61 +348,82 @@
               </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22" Tag="defaults" IsVisible="{Binding IsSectionDefaultsSelected}">
-              <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPresetsEditable}">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding DefaultsSectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DefaultModelLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <ComboBox Grid.Row="0" Grid.Column="1"
                           ItemsSource="{Binding AvailableModelIds}"
                           IsEditable="True"
                           Text="{Binding DefaultModelId, Mode=TwoWay}"
+                          AutomationProperties.Name="{Binding DefaultModelLabel}"
                           HorizontalAlignment="Stretch" />
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding DefaultTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding DefaultTimeoutMs, Mode=TwoWay}" />
+                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding DefaultTimeoutMs, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding DefaultTimeoutLabel}" />
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding DefaultBudgetLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding DefaultBudgetUsd, Mode=TwoWay}" />
+                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding DefaultBudgetUsd, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding DefaultBudgetLabel}" />
                 <Button Grid.Row="3" Grid.Column="1" Classes="primary" Content="{Binding SavePresetsText}" HorizontalAlignment="Right" Command="{Binding SavePresetsCommand}" />
-              </Grid>
+                </Grid>
+              </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22" Tag="templates" IsVisible="{Binding IsSectionTemplatesSelected}">
-              <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsTemplateRepositoryEditable}">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding TemplatesSectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding TemplateRepositoryLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding TemplateRepositoryBaseUrl, Mode=TwoWay}" />
+                <TextBox Grid.Row="0" Grid.Column="1"
+                         Text="{Binding TemplateRepositoryBaseUrl, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding TemplateRepositoryLabel}" />
                 <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
                   <Button Classes="secondary" Content="{Binding OpenTemplateMarketText}" Command="{Binding OpenTemplateMarketCommand}" />
                   <Button Classes="primary" Content="{Binding SaveTemplateRepositoryText}" Command="{Binding SaveTemplateRepositoryCommand}" />
                 </StackPanel>
-              </Grid>
+                </Grid>
+              </StackPanel>
             </Border>
           </StackPanel>
 
-          <StackPanel IsVisible="{Binding IsAutomationSelected}" Spacing="18">
+          <StackPanel IsVisible="{Binding IsAutomationSelected}" IsEnabled="{Binding IsAutomationEditable}" Spacing="18">
             <TextBlock Text="{Binding AutomationTitle}" Classes="title" />
-            <Border Classes="settings-section" Padding="22" Tag="budget" IsVisible="{Binding IsSectionBudgetSelected}">
-              <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="10" ColumnSpacing="18">
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding BudgetSectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="10" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding BudgetLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding BudgetUsd, Mode=TwoWay}" />
+                <TextBox Grid.Row="0" Grid.Column="1"
+                         Text="{Binding BudgetUsd, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding BudgetLabel}"
+                         AutomationProperties.HelpText="{Binding BudgetHelpText}" />
                 <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding BudgetHelpText}" Classes="caption" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding PreauthorizedBudgetLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding PreauthorizedUsd, Mode=TwoWay}" />
+                <TextBox Grid.Row="2" Grid.Column="1"
+                         Text="{Binding PreauthorizedUsd, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding PreauthorizedBudgetLabel}"
+                         AutomationProperties.HelpText="{Binding PreauthorizedHelpText}" />
                 <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding PreauthorizedHelpText}" Classes="caption" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding SpentLabel}" Classes="caption" VerticalAlignment="Center" />
                 <CheckBox Grid.Row="5" Grid.Column="1" IsChecked="{Binding AutoModeEnabled, Mode=TwoWay}" Content="{Binding AutoModeLabel}" />
-              </Grid>
+                </Grid>
+              </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22" Tag="confirmations" IsVisible="{Binding IsSectionConfirmationsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
+                <TextBlock Text="{Binding ConfirmationsSectionTitle}" Classes="subtitle" />
                 <TextBlock Text="{Binding ConfirmationPolicyHelpText}" Classes="caption" TextWrapping="Wrap" />
                 <Grid ColumnDefinitions="*,180,180" ColumnSpacing="12">
                   <TextBlock Grid.Column="1" Text="{Binding NormalModeLabel}" Classes="caption" />
                   <TextBlock Grid.Column="2" Text="{Binding AutoModePolicyLabel}" Classes="caption" />
                 </Grid>
-                <!-- 按总结机制分组；每组 Tag 供左栏子索引跳转 -->
+                <!-- 按总结机制分组。 -->
                 <ItemsControl ItemsSource="{Binding ConfirmationPolicyGroups}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:ConfirmationPolicyGroupViewModel}">
-                      <Border Tag="{Binding GroupId}" Margin="0,0,0,10" Padding="0,4,0,0">
+                      <Border Margin="0,0,0,10" Padding="0,4,0,0">
                         <StackPanel Spacing="8">
                           <TextBlock Text="{Binding Title}" Classes="subtitle" FontWeight="SemiBold" />
                           <ItemsControl ItemsSource="{Binding Items}">
@@ -335,11 +434,15 @@
                                   <ToggleSwitch Grid.Column="1"
                                                 IsChecked="{Binding NormalAllowByDefault, Mode=TwoWay}"
                                                 OnContent="{Binding $parent[UserControl].DataContext.PolicyAllowText}"
-                                                OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}" />
+                                                OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}"
+                                                AutomationProperties.Name="{Binding Label}"
+                                                AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.NormalModeLabel}" />
                                   <ToggleSwitch Grid.Column="2"
                                                 IsChecked="{Binding AutoModeAutoApproval, Mode=TwoWay}"
                                                 OnContent="{Binding $parent[UserControl].DataContext.PolicyAllowText}"
-                                                OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}" />
+                                                OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}"
+                                                AutomationProperties.Name="{Binding Label}"
+                                                AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.AutoModePolicyLabel}" />
                                 </Grid>
                               </DataTemplate>
                             </ItemsControl.ItemTemplate>
@@ -352,26 +455,34 @@
               </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22" Tag="runtime" IsVisible="{Binding IsSectionRuntimeSelected}">
-              <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding RuntimeSectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding WorkflowDefaultTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding WorkflowDefaultTimeoutMs, Mode=TwoWay}" />
+                <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding WorkflowDefaultTimeoutMs, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding WorkflowDefaultTimeoutLabel}" />
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding MaxLoopIterationsLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding MaxLoopIterations, Mode=TwoWay}" />
+                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding MaxLoopIterations, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding MaxLoopIterationsLabel}" />
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding MaxToolRoundsLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MaxToolRounds, Mode=TwoWay}" />
+                <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MaxToolRounds, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding MaxToolRoundsLabel}" />
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding RuntimeAutosaveLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding RuntimeAutosaveMs, Mode=TwoWay}" />
+                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding RuntimeAutosaveMs, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding RuntimeAutosaveLabel}" />
                 <CheckBox Grid.Row="4" Grid.Column="1" IsChecked="{Binding CheckpointEnabled, Mode=TwoWay}" Content="{Binding CheckpointEnabledLabel}" />
-              </Grid>
+                </Grid>
+              </StackPanel>
             </Border>
             <Button Classes="primary" Content="{Binding SaveAutomationText}" HorizontalAlignment="Right" Command="{Binding SaveAutomationCommand}" />
           </StackPanel>
 
-          <StackPanel IsVisible="{Binding IsPermissionsSelected}" Spacing="18">
+          <StackPanel IsVisible="{Binding IsPermissionsSelected}" IsEnabled="{Binding IsPermissionsEditable}" Spacing="18">
             <TextBlock Text="{Binding PermissionsTitle}" Classes="title" />
-            <Border Classes="settings-section" Padding="22" Tag="capabilities" IsVisible="{Binding IsSectionCapabilitiesSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="12">
+                <TextBlock Text="{Binding CapabilitiesSectionTitle}" Classes="subtitle" />
                 <WrapPanel>
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowNetwork, Mode=TwoWay}" Content="{Binding AllowNetworkText}" />
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowWebSearch, Mode=TwoWay}" Content="{Binding AllowWebSearchText}" />
@@ -381,9 +492,9 @@
                 </WrapPanel>
               </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22" Tag="tool_controls" IsVisible="{Binding IsSectionToolControlsSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
-                <TextBlock Text="{Binding ToolControlsLabel}" Classes="subtitle" />
+                <TextBlock Text="{Binding ToolControlsSectionTitle}" Classes="subtitle" />
                 <ItemsControl ItemsSource="{Binding ToolControlGroups}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:ToolControlGroupViewModel}">
@@ -435,30 +546,43 @@
                 </ItemsControl>
               </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22" Tag="paths" IsVisible="{Binding IsSectionPathsSelected}">
-              <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding PathsSectionTitle}" Classes="subtitle" />
+                <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
                 <StackPanel Grid.Column="0" Spacing="8">
                   <TextBlock Text="{Binding ReadableRootsLabel}" Classes="secondary" />
-                  <TextBox Text="{Binding ReadableRootsText, Mode=TwoWay}" PlaceholderText="{Binding PathPlaceholder}" AcceptsReturn="True" MinHeight="130" />
+                  <TextBox Text="{Binding ReadableRootsText, Mode=TwoWay}"
+                           PlaceholderText="{Binding PathPlaceholder}"
+                           AcceptsReturn="True"
+                           MinHeight="130"
+                           AutomationProperties.Name="{Binding ReadableRootsLabel}"
+                           AutomationProperties.HelpText="{Binding PathPlaceholder}" />
                   <Button Classes="secondary" HorizontalAlignment="Left" Content="{Binding BrowseFolderText}" Command="{Binding BrowseReadableRootsCommand}" />
                 </StackPanel>
                 <StackPanel Grid.Column="1" Spacing="8">
                   <TextBlock Text="{Binding WritableRootsLabel}" Classes="secondary" />
-                  <TextBox Text="{Binding WritableRootsText, Mode=TwoWay}" PlaceholderText="{Binding PathPlaceholder}" AcceptsReturn="True" MinHeight="130" />
+                  <TextBox Text="{Binding WritableRootsText, Mode=TwoWay}"
+                           PlaceholderText="{Binding PathPlaceholder}"
+                           AcceptsReturn="True"
+                           MinHeight="130"
+                           AutomationProperties.Name="{Binding WritableRootsLabel}"
+                           AutomationProperties.HelpText="{Binding PathPlaceholder}" />
                   <Button Classes="secondary" HorizontalAlignment="Left" Content="{Binding BrowseFolderText}" Command="{Binding BrowseWritableRootsCommand}" />
                 </StackPanel>
-              </Grid>
+                </Grid>
+              </StackPanel>
             </Border>
             <Button Classes="primary" Content="{Binding SavePermissionsText}" HorizontalAlignment="Right" Command="{Binding SavePermissionsCommand}" />
           </StackPanel>
 
-          <StackPanel IsVisible="{Binding IsPersonalizationSelected}" Spacing="18">
+          <StackPanel IsVisible="{Binding IsPersonalizationSelected}" IsEnabled="{Binding IsPersonalizationEditable}" Spacing="18">
             <TextBlock Text="{Binding PersonalizationTitle}" Classes="title" />
             <!-- 调色板：对齐 settings-theme-spec §6，分组 swatch 卡片（无 WebUI） -->
-            <Border Classes="settings-section" Padding="22" Tag="theme" IsVisible="{Binding IsSectionThemeSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="18">
                 <StackPanel Spacing="6">
-                  <TextBlock Text="{Binding ThemeLabel}" Classes="subtitle" />
+                  <TextBlock Text="{Binding ThemeSectionTitle}" Classes="subtitle" />
                   <TextBlock Text="{Binding ThemePaletteHelpText}" Classes="caption" TextWrapping="Wrap" />
                 </StackPanel>
 
@@ -579,7 +703,8 @@
                       </Button>
                     </UniformGrid>
                     <!-- 折叠色块；点击弹出完整调色板（无全页变黑） -->
-                    <ctl:SpectrumColorPicker SelectedHex="{Binding ActiveThemeColorHex, Mode=TwoWay}" />
+                    <ctl:SpectrumColorPicker SelectedHex="{Binding ActiveThemeColorHex, Mode=TwoWay}"
+                                             AccessibleName="{Binding ActiveThemeColorLabel}" />
                   </StackPanel>
                 </Border>
 
@@ -589,33 +714,55 @@
                 <!-- Git 自动色 -->
                 <StackPanel Spacing="8" Margin="0,4,0,0">
                   <TextBlock Text="{Binding GitAutoColorLabel}" Classes="secondary" FontWeight="SemiBold" />
-                  <ctl:SpectrumColorPicker SelectedHex="{Binding GitAutoColor, Mode=TwoWay}" />
+                  <ctl:SpectrumColorPicker SelectedHex="{Binding GitAutoColor, Mode=TwoWay}"
+                                           AccessibleName="{Binding GitAutoColorLabel}" />
                 </StackPanel>
 
                 <!-- Git 手动色 -->
                 <StackPanel Spacing="8">
                   <TextBlock Text="{Binding GitManualColorLabel}" Classes="secondary" FontWeight="SemiBold" />
-                  <ctl:SpectrumColorPicker SelectedHex="{Binding GitManualColor, Mode=TwoWay}" />
+                  <ctl:SpectrumColorPicker SelectedHex="{Binding GitManualColor, Mode=TwoWay}"
+                                           AccessibleName="{Binding GitManualColorLabel}" />
                 </StackPanel>
               </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22" Tag="workspace" IsVisible="{Binding IsSectionWorkspaceSelected}">
-              <Grid RowDefinitions="Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
-                <CheckBox Grid.Row="0" Grid.Column="1" IsChecked="{Binding OnboardingSeen, Mode=TwoWay}" Content="{Binding OnboardingSeenText}" />
-              </Grid>
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding WorkspaceSectionTitle}" Classes="subtitle" />
+                <Grid RowDefinitions="Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+                  <CheckBox Grid.Row="0" Grid.Column="1"
+                            IsChecked="{Binding ProjectPanelVisible, Mode=TwoWay}"
+                            Content="{Binding ProjectPanelVisibleText}" />
+                </Grid>
+              </StackPanel>
             </Border>
             <Button Classes="primary" Content="{Binding SavePersonalizationText}" HorizontalAlignment="Right" Command="{Binding SavePersonalizationCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsMiscSelected}" Spacing="18">
             <TextBlock Text="{Binding MiscTitle}" Classes="title" />
-            <Border Classes="settings-section" Padding="22" Tag="retrieval" IsVisible="{Binding IsSectionRetrievalSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
-                <TextBlock Text="{Binding RagLabel}" Classes="subtitle" />
+                <TextBlock Text="{Binding TutorialText}" Classes="subtitle" />
+                <Button Classes="secondary"
+                        HorizontalAlignment="Left"
+                        Content="{Binding OpenTutorialText}"
+                        Command="{Binding ShowTutorialCommand}"
+                        AutomationProperties.Name="{Binding OpenTutorialText}" />
+              </StackPanel>
+            </Border>
+            <StackPanel IsEnabled="{Binding IsMiscEditable}" Spacing="18">
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding RetrievalSectionTitle}" Classes="subtitle" />
                 <CheckBox IsChecked="{Binding VectorEnabled, Mode=TwoWay}" Content="{Binding VectorEnabledText}" />
                 <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
                   <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding VectorBackendLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding VectorBackendOptions}" SelectedValue="{Binding VectorBackend, Mode=TwoWay}" SelectedValueBinding="{Binding Value}">
+                  <ComboBox Grid.Row="0" Grid.Column="1"
+                            ItemsSource="{Binding VectorBackendOptions}"
+                            SelectedValue="{Binding VectorBackend, Mode=TwoWay}"
+                            SelectedValueBinding="{Binding Value}"
+                            AutomationProperties.Name="{Binding VectorBackendLabel}">
                     <ComboBox.ItemTemplate>
                       <DataTemplate x:DataType="vm:SettingsValueOption">
                         <TextBlock Text="{Binding Label}" />
@@ -623,30 +770,42 @@
                     </ComboBox.ItemTemplate>
                   </ComboBox>
                   <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding VectorCollectionLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding VectorCollection, Mode=TwoWay}" />
+                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding VectorCollection, Mode=TwoWay}"
+                           AutomationProperties.Name="{Binding VectorCollectionLabel}" />
                   <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding VectorDimensionsLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding VectorDimensions, Mode=TwoWay}" />
+                  <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding VectorDimensions, Mode=TwoWay}"
+                           AutomationProperties.Name="{Binding VectorDimensionsLabel}" />
                   <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding QdrantHostLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding QdrantHost, Mode=TwoWay}" />
+                  <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding QdrantHost, Mode=TwoWay}"
+                           AutomationProperties.Name="{Binding QdrantHostLabel}" />
                   <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding QdrantPortLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding QdrantPort, Mode=TwoWay}" />
+                  <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding QdrantPort, Mode=TwoWay}"
+                           AutomationProperties.Name="{Binding QdrantPortLabel}" />
                   <TextBlock Grid.Row="5" Grid.Column="0" Text="{Binding QdrantDataDirLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsQdrantSidecarBackend}" />
-                  <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding QdrantDataDir, Mode=TwoWay}" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding QdrantDataDir, Mode=TwoWay}"
+                           IsVisible="{Binding IsQdrantSidecarBackend}"
+                           AutomationProperties.Name="{Binding QdrantDataDirLabel}" />
                   <TextBlock Grid.Row="6" Grid.Column="0" Text="{Binding QdrantBinaryPathLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsQdrantSidecarBackend}" />
-                  <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding QdrantBinaryPath, Mode=TwoWay}" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding QdrantBinaryPath, Mode=TwoWay}"
+                           IsVisible="{Binding IsQdrantSidecarBackend}"
+                           AutomationProperties.Name="{Binding QdrantBinaryPathLabel}" />
                   <TextBlock Grid.Row="7" Grid.Column="0" Text="{Binding QdrantStartupTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsQdrantSidecarBackend}" />
-                  <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding QdrantStartupTimeoutMs, Mode=TwoWay}" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                  <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding QdrantStartupTimeoutMs, Mode=TwoWay}"
+                           IsVisible="{Binding IsQdrantSidecarBackend}"
+                           AutomationProperties.Name="{Binding QdrantStartupTimeoutLabel}" />
                   <TextBlock Grid.Row="8" Grid.Column="0" Text="{Binding ChunkSizeLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding ChunkSizeChars, Mode=TwoWay}" />
+                  <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding ChunkSizeChars, Mode=TwoWay}"
+                           AutomationProperties.Name="{Binding ChunkSizeLabel}" />
                   <TextBlock Grid.Row="9" Grid.Column="0" Text="{Binding ChunkOverlapLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding ChunkOverlapChars, Mode=TwoWay}" />
+                  <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding ChunkOverlapChars, Mode=TwoWay}"
+                           AutomationProperties.Name="{Binding ChunkOverlapLabel}" />
                 </Grid>
                 <CheckBox IsChecked="{Binding RerankerEnabled, Mode=TwoWay}" Content="{Binding RerankerEnabledText}" />
               </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22" Tag="git" IsVisible="{Binding IsSectionGitSelected}">
+            <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
-                <TextBlock Text="{Binding GitLabel}" Classes="subtitle" />
+                <TextBlock Text="{Binding GitSectionTitle}" Classes="subtitle" />
                 <WrapPanel>
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding TrackDocuments, Mode=TwoWay}" Content="{Binding TrackDocumentsText}" />
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding TrackWorkflows, Mode=TwoWay}" Content="{Binding TrackWorkflowsText}" />
@@ -654,30 +813,25 @@
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding TrackNonSensitiveConfig, Mode=TwoWay}" Content="{Binding TrackConfigText}" />
                 </WrapPanel>
                 <TextBlock Text="{Binding IgnoredPathsLabel}" Classes="secondary" />
-                <TextBox Text="{Binding IgnoredPathsText, Mode=TwoWay}" PlaceholderText="{Binding IgnoredPathsPlaceholder}" AcceptsReturn="True" MinHeight="120" />
+                <TextBox Text="{Binding IgnoredPathsText, Mode=TwoWay}"
+                         PlaceholderText="{Binding IgnoredPathsPlaceholder}"
+                         AcceptsReturn="True"
+                         MinHeight="120"
+                         AutomationProperties.Name="{Binding IgnoredPathsLabel}"
+                         AutomationProperties.HelpText="{Binding IgnoredPathsPlaceholder}" />
               </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22" Tag="language" IsVisible="{Binding IsSectionLanguageSelected}">
-              <Grid ColumnDefinitions="180,*,Auto" RowDefinitions="Auto,Auto" RowSpacing="10" ColumnSpacing="18">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding LanguageLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding LanguageOptions}" SelectedValue="{Binding SelectedLanguage, Mode=TwoWay}" SelectedValueBinding="{Binding Code}">
-                  <ComboBox.ItemTemplate>
-                    <DataTemplate DataType="{x:Type vm:LanguageOption}">
-                      <TextBlock Text="{Binding Label}" />
-                    </DataTemplate>
-                  </ComboBox.ItemTemplate>
-                </ComboBox>
-                <Button Grid.Row="0" Grid.Column="2" Classes="secondary" Content="{Binding TutorialText}" Command="{Binding ResetOnboardingCommand}" />
-                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding LanguageDescText}" Classes="caption" TextWrapping="Wrap" />
-              </Grid>
-            </Border>
-            <Border Classes="settings-section" Padding="22" Tag="diagnostics" IsVisible="{Binding IsSectionDiagnosticsSelected}">
-              <Grid ColumnDefinitions="180,*" RowDefinitions="Auto" ColumnSpacing="18">
-                <TextBlock Grid.Column="0" Text="{Binding DiagnosticsLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBlock Grid.Column="1" Text="{Binding DiagnosticsStatusText}" Classes="caption" TextWrapping="Wrap" />
-              </Grid>
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <TextBlock Text="{Binding DiagnosticsSectionTitle}" Classes="subtitle" />
+                <Grid ColumnDefinitions="180,*" RowDefinitions="Auto" ColumnSpacing="18">
+                  <TextBlock Grid.Column="0" Text="{Binding DiagnosticsLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="1" Text="{Binding DiagnosticsStatusText}" Classes="caption" TextWrapping="Wrap" />
+                </Grid>
+              </StackPanel>
             </Border>
             <Button Classes="primary" Content="{Binding SaveMiscText}" HorizontalAlignment="Right" Command="{Binding SaveMiscCommand}" />
+            </StackPanel>
           </StackPanel>
         </Panel>
       </ScrollViewer>

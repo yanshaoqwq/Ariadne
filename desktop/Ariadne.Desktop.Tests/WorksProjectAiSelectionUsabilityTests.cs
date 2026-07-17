@@ -88,10 +88,11 @@ public sealed class WorksProjectAiSelectionUsabilityTests
         var viewAxaml = File.ReadAllText(ResolveSource("Views", "WorksPageView.axaml"));
         Assert.Contains("RequestEditorSelection = CurrentEditorSelection", viewCs, StringComparison.Ordinal);
         Assert.Contains("_stickySelection", viewCs, StringComparison.Ordinal);
-        Assert.Contains("LostFocus=\"OnDocumentBlockEditorLostFocus\"", viewAxaml, StringComparison.Ordinal);
-        Assert.Contains("PointerReleased=\"OnDocumentBlockEditorPointerReleased\"", viewAxaml, StringComparison.Ordinal);
-        Assert.Contains("KeyUp=\"OnDocumentBlockEditorKeyUp\"", viewAxaml, StringComparison.Ordinal);
-        Assert.Contains("CaptureStickySelectionFrom", viewCs, StringComparison.Ordinal);
+        Assert.Contains("LostFocus=\"OnDocumentEditorLostFocus\"", viewAxaml, StringComparison.Ordinal);
+        Assert.Contains("PointerReleased=\"OnDocumentEditorPointerReleased\"", viewAxaml, StringComparison.Ordinal);
+        Assert.Contains("KeyUp=\"OnDocumentEditorKeyUp\"", viewAxaml, StringComparison.Ordinal);
+        Assert.Contains("CaptureStickySelection", viewCs, StringComparison.Ordinal);
+        Assert.DoesNotContain("OnDocumentBlockEditor", viewAxaml, StringComparison.Ordinal);
         Assert.Contains("UpdateSummarySelectionFromEditor", viewCs, StringComparison.Ordinal);
         Assert.Contains("ClearStickyEditorSelection", viewCs, StringComparison.Ordinal);
         Assert.Contains("clearWhenEmpty: true", viewCs, StringComparison.Ordinal);

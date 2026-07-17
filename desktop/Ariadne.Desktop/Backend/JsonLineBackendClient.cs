@@ -9,13 +9,19 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     private readonly string? _backendCommand;
     private readonly string _appStateRoot;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly SemaphoreSlim _ipcLock = new(1, 1);
+    private readonly SemaphoreSlim _ipcWriteLock = new(1, 1);
+    private readonly object _processLock = new();
+    private readonly IpcResponseRouter _responseRouter = new();
     private readonly StringBuilder _stderrBuffer = new();
     private Process? _backendProcess;
     private StreamWriter? _backendInput;
     private StreamReader? _backendOutput;
     private Task? _stderrPump;
+    private Task? _stdoutPump;
     private string? _projectRoot;
+    private long _nextRequestId;
+    private int _processGeneration;
+    private bool _disposed;
 
     private JsonLineBackendClient(string? backendCommand)
     {
@@ -87,6 +93,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<AppSettings>("save_app_settings", new { settings }, cancellationToken);
     }
 
+    public Task<GeneralSectionSettings> SaveGeneralSectionSettingsAsync(GeneralSectionSettings settings, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<GeneralSectionSettings>("save_general_section_settings", new { settings }, cancellationToken);
+    }
+
     public Task<ProviderConfigStatus> GetProviderConfigAsync(CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<ProviderConfigStatus>("get_provider_config", null, cancellationToken);
@@ -97,14 +108,32 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<ProviderConfigStatus>("save_provider_settings", new { update }, cancellationToken);
     }
 
+    public Task<ProviderConfigStatus> SaveProviderSectionSettingsAsync(ProviderSectionSettings settings, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProviderConfigStatus>("save_provider_section_settings", new { settings }, cancellationToken);
+    }
+
+    public Task<ProviderRemovalPreview> PreviewProviderRemovalAsync(string provider, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProviderRemovalPreview>("preview_provider_removal", new { provider }, cancellationToken);
+    }
+
+    public Task<ProviderConfigStatus> RemoveProviderAsync(string provider, string expectedRevision, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProviderConfigStatus>(
+            "remove_provider",
+            new { provider, expected_revision = expectedRevision },
+            cancellationToken);
+    }
+
     public Task<ProviderModelsResult> FetchProviderModelsAsync(string? providerId = null, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<ProviderModelsResult>("fetch_provider_models", new { provider_id = providerId }, cancellationToken);
     }
 
-    public Task SaveProviderKeyAsync(string provider, string key, CancellationToken cancellationToken = default)
+    public Task<ProviderConfigStatus> SaveProviderKeyAsync(string provider, string key, CancellationToken cancellationToken = default)
     {
-        return InvokeCommandAsync("save_provider_key", new { provider, key }, cancellationToken);
+        return InvokeRequiredAsync<ProviderConfigStatus>("save_provider_key", new { provider, key }, cancellationToken);
     }
 
     public Task<NodePresetSettings> GetNodePresetSettingsAsync(CancellationToken cancellationToken = default)
@@ -125,6 +154,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     public Task<AutomationSettings> SaveAutomationSettingsAsync(AutomationSettings settings, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<AutomationSettings>("save_automation_settings", new { settings }, cancellationToken);
+    }
+
+    public Task<AutomationSectionSettings> SaveAutomationSectionSettingsAsync(AutomationSectionSettings settings, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<AutomationSectionSettings>("save_automation_section_settings", new { settings }, cancellationToken);
     }
 
     public Task<PermissionsSettings> GetPermissionsSettingsAsync(CancellationToken cancellationToken = default)
@@ -185,6 +219,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     public Task<RagSettings> SaveRagSettingsAsync(RagSettings settings, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<RagSettings>("save_rag_settings", new { settings }, cancellationToken);
+    }
+
+    public Task<MiscSectionSettings> SaveMiscSectionSettingsAsync(MiscSectionSettings settings, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<MiscSectionSettings>("save_misc_section_settings", new { settings }, cancellationToken);
     }
 
     public Task<IReadOnlyList<TemplateSummary>> SearchTemplatesAsync(string baseUrl, string query, int page = 0, CancellationToken cancellationToken = default)
@@ -272,15 +311,34 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
-    public Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default)
+    public Task<ProjectAiResponse> ProjectAiChatAsync(
+        string message,
+        string? workflowIdToRun = null,
+        string? referenceWorkflowId = null,
+        string? referenceRunId = null,
+        string? conversationId = null,
+        long? conversationRevision = null,
+        CancellationToken cancellationToken = default)
     {
-        return ProjectAiChatAsync(message, Array.Empty<ProjectAiChatMessage>(), workflowIdToRun, cancellationToken);
+        return ProjectAiChatAsync(
+            message,
+            Array.Empty<ProjectAiChatMessage>(),
+            workflowIdToRun,
+            referenceWorkflowId,
+            referenceRunId,
+            conversationId,
+            conversationRevision,
+            cancellationToken);
     }
 
     public Task<ProjectAiResponse> ProjectAiChatAsync(
         string message,
         IReadOnlyList<ProjectAiChatMessage> chatHistory,
         string? workflowIdToRun = null,
+        string? referenceWorkflowId = null,
+        string? referenceRunId = null,
+        string? conversationId = null,
+        long? conversationRevision = null,
         CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<ProjectAiResponse>("project_ai_chat", new
@@ -291,6 +349,10 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
                 chat_history = chatHistory,
                 references = Array.Empty<string>(),
                 workflow_id_to_run = workflowIdToRun,
+                reference_workflow_id = referenceWorkflowId,
+                reference_run_id = referenceRunId,
+                conversation_id = conversationId,
+                conversation_revision = conversationRevision,
                 append_memory = (string?)null,
             },
         }, cancellationToken);
@@ -507,21 +569,17 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
-    public Task<IReadOnlyList<UiRunLogEntry>> QueryRunLogsAsync(string? level = null, string? query = null, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<UiRunLogEntry>> QueryRunLogsAsync(RunLogQuery query, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredListAsync<UiRunLogEntry>("query_run_logs", new
         {
-            filter = new
-            {
-                level = string.IsNullOrWhiteSpace(level) ? null : level,
-                query = string.IsNullOrWhiteSpace(query) ? null : query,
-            },
+            filter = query,
         }, cancellationToken);
     }
 
-    public Task MarkRunLogsReadAsync(CancellationToken cancellationToken = default)
+    public Task<int> MarkRunLogsReadAsync(RunLogQuery filter, CancellationToken cancellationToken = default)
     {
-        return InvokeCommandAsync("mark_run_logs_read", null, cancellationToken);
+        return InvokeRequiredAsync<int>("mark_run_logs_read", new { filter }, cancellationToken);
     }
 
     public Task<BudgetStatus> GetBudgetStatusAsync(CancellationToken cancellationToken = default)
@@ -621,31 +679,29 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         object? parameters,
         CancellationToken cancellationToken)
     {
-        await _ipcLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureBackendProcess();
+        var requestId = Interlocked.Increment(ref _nextRequestId).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (!_responseRouter.TryRegister(requestId, out var response))
+        {
+            throw BackendException.Transport("ipc", "duplicate backend request id");
+        }
+
         try
         {
-            EnsureBackendProcess();
-            if (_backendInput is null || _backendOutput is null)
-            {
-                throw BackendException.Transport("ipc", "backend ipc process is not connected");
-            }
-
-            var request = JsonSerializer.Serialize(new { method, @params = parameters ?? new { } }, _jsonOptions);
-            await _backendInput.WriteLineAsync(request.AsMemory(), cancellationToken).ConfigureAwait(false);
-            await _backendInput.FlushAsync(cancellationToken).ConfigureAwait(false);
-
-            var output = await _backendOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(output))
-            {
-                ResetBackendProcess();
-                var stderr = CurrentBackendStderr();
-                throw BackendException.Transport(
-                    "ipc",
-                    string.IsNullOrWhiteSpace(stderr) ? "backend ipc returned no response" : stderr);
-            }
-
+            using var registration = cancellationToken.Register(
+                () => CancelPendingRequest(requestId, cancellationToken));
+            var request = JsonSerializer.Serialize(
+                new { request_id = requestId, method, @params = parameters ?? new { } },
+                _jsonOptions);
+            await WriteRequestLineAsync(request, cancellationToken).ConfigureAwait(false);
+            var output = await response.ConfigureAwait(false);
             var result = JsonSerializer.Deserialize<BackendResult<T>>(output, _jsonOptions)
                 ?? throw BackendException.Transport("ipc", "backend ipc returned invalid json");
+            if (!string.Equals(result.RequestId, requestId, StringComparison.Ordinal))
+            {
+                throw BackendException.Transport("ipc", "backend ipc response id mismatch");
+            }
             if (!result.Ok)
             {
                 throw BackendException.FromIpcPayload(
@@ -657,68 +713,173 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }
         catch
         {
+            _responseRouter.Remove(requestId);
             if (_backendProcess?.HasExited == true)
             {
                 ResetBackendProcess();
             }
             throw;
         }
+    }
+
+    private async Task WriteRequestLineAsync(string request, CancellationToken cancellationToken)
+    {
+        await _ipcWriteLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            StreamWriter input;
+            lock (_processLock)
+            {
+                input = _backendInput
+                    ?? throw BackendException.Transport("ipc", "backend ipc process is not connected");
+            }
+            await input.WriteLineAsync(request.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await input.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
         finally
         {
-            _ipcLock.Release();
+            _ipcWriteLock.Release();
+        }
+    }
+
+    private void CancelPendingRequest(string requestId, CancellationToken cancellationToken)
+    {
+        if (_responseRouter.TryCancel(requestId, cancellationToken))
+        {
+            _ = SendCancellationRequestAsync(requestId);
+        }
+    }
+
+    private async Task SendCancellationRequestAsync(string targetRequestId)
+    {
+        try
+        {
+            var cancelRequestId = $"cancel-{targetRequestId}";
+            var request = JsonSerializer.Serialize(
+                new
+                {
+                    request_id = cancelRequestId,
+                    method = "cancel_request",
+                    @params = new { target_request_id = targetRequestId },
+                },
+                _jsonOptions);
+            await WriteRequestLineAsync(request, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The caller is already cancelled; process failure is reported to remaining requests.
         }
     }
 
     private void EnsureBackendProcess()
     {
-        if (_backendProcess is { HasExited: false } && _backendInput is not null && _backendOutput is not null)
+        lock (_processLock)
         {
-            return;
-        }
-        ResetBackendProcess();
-        if (string.IsNullOrWhiteSpace(_backendCommand))
-        {
-            throw BackendException.Transport("ipc", "backend ipc command not found");
-        }
-
-        var startInfo = new ProcessStartInfo
-        {
-            // ARIADNE_BACKEND_IPC 与发布目录中的 sidecar 都是可执行文件路径。
-            // 路径可能包含空格，禁止再按命令行字符串拆分。
-            FileName = _backendCommand,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            StandardInputEncoding = Encoding.UTF8,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
-        ApplyProjectEnvironment(startInfo);
-
-        _backendProcess = Process.Start(startInfo)
-            ?? throw BackendException.Transport("ipc", "failed to start backend ipc process");
-        _backendInput = _backendProcess.StandardInput;
-        _backendOutput = _backendProcess.StandardOutput;
-        _stderrBuffer.Clear();
-        _stderrPump = Task.Run(async () =>
-        {
-            try
+            if (_disposed)
             {
-                while (_backendProcess is { HasExited: false }
-                       && await _backendProcess.StandardError.ReadLineAsync().ConfigureAwait(false) is { } line)
+                throw new ObjectDisposedException(nameof(JsonLineBackendClient));
+            }
+            if (_backendProcess is { HasExited: false }
+                && _backendInput is not null
+                && _backendOutput is not null)
+            {
+                return;
+            }
+            ResetBackendProcessLocked();
+            if (string.IsNullOrWhiteSpace(_backendCommand))
+            {
+                throw BackendException.Transport("ipc", "backend ipc command not found");
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                // ARIADNE_BACKEND_IPC 与发布目录中的 sidecar 都是可执行文件路径。
+                // 路径可能包含空格，禁止再按命令行字符串拆分。
+                FileName = _backendCommand,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                StandardInputEncoding = Encoding.UTF8,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            };
+            ApplyProjectEnvironment(startInfo);
+
+            var process = Process.Start(startInfo)
+                ?? throw BackendException.Transport("ipc", "failed to start backend ipc process");
+            var generation = ++_processGeneration;
+            _backendProcess = process;
+            _backendInput = process.StandardInput;
+            _backendOutput = process.StandardOutput;
+            _stderrBuffer.Clear();
+            _stdoutPump = PumpStdoutAsync(process.StandardOutput, generation);
+            _stderrPump = Task.Run(async () =>
+            {
+                try
                 {
-                    lock (_stderrBuffer)
+                    while (await process.StandardError.ReadLineAsync().ConfigureAwait(false) is { } line)
                     {
-                        _stderrBuffer.AppendLine(line);
+                        lock (_stderrBuffer)
+                        {
+                            _stderrBuffer.AppendLine(line);
+                        }
                     }
                 }
-            }
-            catch
+                catch
+                {
+                    // stderr is diagnostic only; request/response errors are handled by stdout.
+                }
+            });
+        }
+    }
+
+    private async Task PumpStdoutAsync(StreamReader output, int generation)
+    {
+        Exception? failure = null;
+        try
+        {
+            while (await output.ReadLineAsync().ConfigureAwait(false) is { } line)
             {
-                // stderr is diagnostic only; request/response errors are handled by stdout.
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+                var envelope = JsonSerializer.Deserialize<BackendResult<JsonElement>>(line, _jsonOptions)
+                    ?? throw BackendException.Transport("ipc", "backend ipc returned invalid json");
+                if (string.IsNullOrWhiteSpace(envelope.RequestId))
+                {
+                    throw BackendException.Transport("ipc", "backend ipc response is missing request id");
+                }
+                _responseRouter.TryComplete(envelope.RequestId, line);
             }
-        });
+            failure = BackendException.Transport(
+                "ipc",
+                string.IsNullOrWhiteSpace(CurrentBackendStderr())
+                    ? "backend ipc returned no response"
+                    : CurrentBackendStderr());
+        }
+        catch (Exception error)
+        {
+            failure = error;
+        }
+        finally
+        {
+            HandleBackendPumpEnded(generation, failure);
+        }
+    }
+
+    private void HandleBackendPumpEnded(int generation, Exception? failure)
+    {
+        lock (_processLock)
+        {
+            if (generation != _processGeneration)
+            {
+                return;
+            }
+            ResetBackendProcessLocked();
+        }
+        FailPendingRequests(failure ?? BackendException.Transport("ipc", "backend ipc disconnected"));
     }
 
     private string CurrentBackendStderr()
@@ -730,6 +891,15 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     }
 
     private void ResetBackendProcess()
+    {
+        lock (_processLock)
+        {
+            ResetBackendProcessLocked();
+        }
+        FailPendingRequests(BackendException.Transport("ipc", "backend ipc process reset"));
+    }
+
+    private void ResetBackendProcessLocked()
     {
         try
         {
@@ -751,13 +921,20 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             _backendOutput = null;
             _backendProcess = null;
             _stderrPump = null;
+            _stdoutPump = null;
         }
+    }
+
+    private void FailPendingRequests(Exception error)
+    {
+        _responseRouter.FailAll(error);
     }
 
     public void Dispose()
     {
+        _disposed = true;
         ResetBackendProcess();
-        _ipcLock.Dispose();
+        _ipcWriteLock.Dispose();
     }
 
     private async Task<T> InvokeAndRememberProjectAsync<T>(

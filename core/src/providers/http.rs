@@ -13,7 +13,8 @@ use crate::costs::{estimate_model_config_cost, TokenUsage};
 use crate::providers::{
     ContentPart, EmbeddingProvider, EmbeddingRequest, EmbeddingResponse, LlmMessage, LlmProvider,
     LlmRequest, LlmResponse, LlmRole, Provider, ProviderCallContext, ProviderHealth,
-    ProviderProtocol, RerankRequest, RerankResponse, RerankResult, RerankerProvider, ToolCall,
+    ProviderProtocol, RerankRequest, RerankResponse, RerankResult, RerankerProvider,
+    SearchProvider, SearchProviderRequest, SearchProviderResponse, SearchProviderResult, ToolCall,
 };
 
 const MAX_PROVIDER_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
@@ -42,6 +43,316 @@ impl OpenAiCompatibleLlmProvider {
             client,
         })
     }
+}
+
+/// 复用项目 Provider 配置的原生 Web 搜索 provider。
+///
+/// OpenAI/OpenAI-compatible 使用 Responses API `web_search`，Anthropic 使用服务端
+/// `web_search_20250305`，Gemini 使用 `google_search` grounding。搜索结果只返回给
+/// 调用节点，不自动写入项目知识库。
+#[derive(Debug, Clone)]
+pub struct HttpWebSearchProvider {
+    config: ProviderConfig,
+    base_url: String,
+    api_key: Option<String>,
+    model_id: String,
+    client: Client,
+}
+
+impl HttpWebSearchProvider {
+    pub fn new(config: ProviderConfig, api_key: Option<String>) -> CoreResult<Self> {
+        config.validate()?;
+        let base_url = crate::providers::resolve_base_url(&config)?
+            .trim_end_matches('/')
+            .to_owned();
+        let model_id = config
+            .models
+            .iter()
+            .find(|model| model.capability == ProviderCapability::Search)
+            .or_else(|| {
+                config
+                    .models
+                    .iter()
+                    .find(|model| model.capability == ProviderCapability::Llm)
+            })
+            .map(|model| model.model_id.trim().to_owned())
+            .filter(|model| !model.is_empty())
+            .ok_or_else(|| {
+                CoreError::validation(
+                    "web search provider requires a search or llm capability model",
+                )
+            })?;
+        let client = Client::builder().build().map_err(http_provider_error)?;
+        Ok(Self {
+            config,
+            base_url,
+            api_key,
+            model_id,
+            client,
+        })
+    }
+}
+
+impl Provider for HttpWebSearchProvider {
+    fn definition(&self) -> ProviderDefinition {
+        ProviderDefinition {
+            provider_id: self.config.provider_id.clone(),
+            provider_type: self.config.provider_type.clone(),
+            display_name: self.config.display_name.clone(),
+            capabilities: vec![ProviderCapability::Search],
+            config_schema: Value::Null,
+        }
+    }
+
+    fn health_check(&self) -> CoreResult<ProviderHealth> {
+        provider_config_health(&self.config)
+    }
+}
+
+impl SearchProvider for HttpWebSearchProvider {
+    fn search(
+        &self,
+        context: &ProviderCallContext,
+        request: SearchProviderRequest,
+    ) -> CoreResult<SearchProviderResponse> {
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Err(CoreError::validation("web search query cannot be empty"));
+        }
+        let limit = request.limit.unwrap_or(8);
+        if !(1..=20).contains(&limit) {
+            return Err(CoreError::validation(
+                "web search limit must be between 1 and 20",
+            ));
+        }
+        let protocol = ProviderProtocol::from_provider_type(&self.config.provider_type)?;
+        let (endpoint, payload) = match protocol {
+            ProviderProtocol::OpenAi => (
+                format!("{}/responses", self.base_url),
+                json!({
+                    "model": self.model_id,
+                    "input": query,
+                    "tools": [{ "type": "web_search" }],
+                    "tool_choice": "auto",
+                }),
+            ),
+            ProviderProtocol::Anthropic => (
+                format!("{}/messages", self.base_url),
+                json!({
+                    "model": self.model_id,
+                    "max_tokens": 2048,
+                    "messages": [{ "role": "user", "content": query }],
+                    "tools": [{
+                        "type": "web_search_20250305",
+                        "name": "web_search",
+                        "max_uses": 1
+                    }],
+                }),
+            ),
+            ProviderProtocol::Gemini => (
+                format!(
+                    "{}/{}:generateContent",
+                    self.base_url,
+                    gemini_model_path(&self.model_id)
+                ),
+                json!({
+                    "contents": [{ "role": "user", "parts": [{ "text": query }] }],
+                    "tools": [{ "google_search": {} }],
+                }),
+            ),
+        };
+        let mut http_request = self.client.post(endpoint).json(&payload);
+        if matches!(protocol, ProviderProtocol::Anthropic) {
+            http_request = http_request.header("anthropic-beta", "web-search-2025-03-05");
+        }
+        let http_request =
+            authorize_provider_request(protocol, self.api_key.as_deref(), http_request);
+        let raw =
+            execute_provider_json(http_request, context, &format!("{protocol:?} web search"))?;
+        let results = match protocol {
+            ProviderProtocol::OpenAi => parse_openai_web_search_results(&raw, limit),
+            ProviderProtocol::Anthropic => parse_anthropic_web_search_results(&raw, limit),
+            ProviderProtocol::Gemini => parse_gemini_web_search_results(&raw, limit),
+        }?;
+        Ok(SearchProviderResponse {
+            results,
+            cost_usd: None,
+            raw,
+        })
+    }
+}
+
+fn parse_openai_web_search_results(
+    raw: &Value,
+    limit: usize,
+) -> CoreResult<Vec<SearchProviderResult>> {
+    let mut results = Vec::new();
+    let mut seen = BTreeSet::new();
+    let output = raw
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CoreError::validation("OpenAI web search response missing output"))?;
+    for item in output {
+        let Some(content) = item.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for part in content {
+            let snippet = part.get("text").and_then(Value::as_str).unwrap_or_default();
+            let Some(annotations) = part.get("annotations").and_then(Value::as_array) else {
+                continue;
+            };
+            for annotation in annotations {
+                let citation = annotation.get("url_citation").unwrap_or(annotation);
+                let Some(url) = citation.get("url").and_then(Value::as_str) else {
+                    continue;
+                };
+                let title = citation.get("title").and_then(Value::as_str).unwrap_or(url);
+                push_web_search_result(
+                    &mut results,
+                    &mut seen,
+                    title,
+                    url,
+                    snippet,
+                    json!({ "provider": "openai" }),
+                    limit,
+                );
+                if results.len() >= limit {
+                    return Ok(results);
+                }
+            }
+        }
+    }
+    Ok(results)
+}
+
+fn parse_anthropic_web_search_results(
+    raw: &Value,
+    limit: usize,
+) -> CoreResult<Vec<SearchProviderResult>> {
+    let content = raw
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CoreError::validation("Anthropic web search response missing content"))?;
+    let summary = content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut results = Vec::new();
+    let mut seen = BTreeSet::new();
+    for block in content {
+        if block.get("type").and_then(Value::as_str) != Some("web_search_tool_result") {
+            continue;
+        }
+        let Some(items) = block.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let Some(url) = item.get("url").and_then(Value::as_str) else {
+                continue;
+            };
+            let title = item.get("title").and_then(Value::as_str).unwrap_or(url);
+            push_web_search_result(
+                &mut results,
+                &mut seen,
+                title,
+                url,
+                &summary,
+                json!({
+                    "provider": "anthropic",
+                    "page_age": item.get("page_age").cloned().unwrap_or(Value::Null),
+                }),
+                limit,
+            );
+            if results.len() >= limit {
+                return Ok(results);
+            }
+        }
+    }
+    Ok(results)
+}
+
+fn parse_gemini_web_search_results(
+    raw: &Value,
+    limit: usize,
+) -> CoreResult<Vec<SearchProviderResult>> {
+    let candidates = raw
+        .get("candidates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CoreError::validation("Gemini web search response missing candidates"))?;
+    let mut results = Vec::new();
+    let mut seen = BTreeSet::new();
+    for candidate in candidates {
+        let snippet = candidate
+            .get("content")
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunks = candidate
+            .get("groundingMetadata")
+            .or_else(|| candidate.get("grounding_metadata"))
+            .and_then(|metadata| {
+                metadata
+                    .get("groundingChunks")
+                    .or_else(|| metadata.get("grounding_chunks"))
+            })
+            .and_then(Value::as_array);
+        let Some(chunks) = chunks else {
+            continue;
+        };
+        for chunk in chunks {
+            let Some(web) = chunk.get("web") else {
+                continue;
+            };
+            let Some(url) = web
+                .get("uri")
+                .or_else(|| web.get("url"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let title = web.get("title").and_then(Value::as_str).unwrap_or(url);
+            push_web_search_result(
+                &mut results,
+                &mut seen,
+                title,
+                url,
+                &snippet,
+                json!({ "provider": "gemini" }),
+                limit,
+            );
+            if results.len() >= limit {
+                return Ok(results);
+            }
+        }
+    }
+    Ok(results)
+}
+
+fn push_web_search_result(
+    results: &mut Vec<SearchProviderResult>,
+    seen: &mut BTreeSet<String>,
+    title: &str,
+    url: &str,
+    snippet: &str,
+    metadata: Value,
+    limit: usize,
+) {
+    if results.len() >= limit || url.trim().is_empty() || !seen.insert(url.to_owned()) {
+        return;
+    }
+    results.push(SearchProviderResult {
+        title: title.to_owned(),
+        url: url.to_owned(),
+        snippet: snippet.to_owned(),
+        score: 1.0 / (results.len() as f32 + 1.0),
+        metadata,
+    });
 }
 
 impl Provider for OpenAiCompatibleLlmProvider {

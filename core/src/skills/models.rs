@@ -115,6 +115,10 @@ pub struct HttpSkillConfig {
     pub host: String,
     pub method: String,
     pub path: String,
+    /// 远端声明支持的幂等请求头。工作流执行时其值固定为 operation ID；未声明的
+    /// POST 使用 at-most-once 策略，未知结果不会自动重发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_header: Option<String>,
 }
 
 /// WASM Skill 配置。
@@ -218,6 +222,21 @@ impl SkillManifest {
                 if config.host.trim().is_empty() {
                     return Err(CoreError::validation("http skill host cannot be empty"));
                 }
+                if let Some(header) = config.idempotency_header.as_deref() {
+                    let header = header.trim();
+                    if header.is_empty()
+                        || reqwest::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+                    {
+                        return Err(CoreError::validation(
+                            "http skill idempotency_header must be a valid HTTP header name",
+                        ));
+                    }
+                    if !config.method.eq_ignore_ascii_case("POST") {
+                        return Err(CoreError::validation(
+                            "http skill idempotency_header is only valid for POST",
+                        ));
+                    }
+                }
             }
             SkillExecutorConfig::Wasm(config) => {
                 if config.module_path.trim().is_empty() {
@@ -235,6 +254,8 @@ impl SkillManifest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillRunRequest {
     pub skill_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     #[serde(default)]
     pub inputs: PortMap,
     #[serde(default)]

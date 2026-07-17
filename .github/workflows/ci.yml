@@ -5,6 +5,16 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      full_release_matrix:
+        description: Run five-RID packaging, Qdrant E2E, and release performance evidence
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -12,8 +22,12 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -22,6 +36,8 @@ jobs:
           toolchain: 1.96.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Release engineering contract
+        run: python3 scripts/verify-release-engineering.py
       - name: Rust format
         run: cargo fmt --all -- --check
       - name: Rust clippy
@@ -43,6 +59,8 @@ jobs:
 
   native-package:
     needs: quality
+    if: github.event_name == 'workflow_dispatch' && inputs.full_release_matrix
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +78,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Release engineering contract
+        run: python3 scripts/verify-release-engineering.py
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -76,6 +99,19 @@ jobs:
       - name: Build and verify native release layout
         shell: bash
         run: bash scripts/build-release.sh '${{ matrix.rid }}'
+      - name: Provision and smoke managed Qdrant
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARIADNE_QDRANT_CACHE_DIR: ${{ runner.temp }}/ariadne-qdrant-cache
+          ARIADNE_RELEASE_EVIDENCE_DIR: ${{ github.workspace }}/artifacts/release-evidence
+        run: |
+          cargo test --release --locked --package ariadne --test release_acceptance qdrant_runtime_provisioning_installs_then_uses_cache -- --ignored --exact
+          python3 scripts/qdrant-sidecar-smoke.py \
+            --runtime-cache "$ARIADNE_QDRANT_CACHE_DIR" \
+            --rid '${{ matrix.rid }}' \
+            --provisioning-evidence "$ARIADNE_RELEASE_EVIDENCE_DIR/qdrant-runtime-provisioning.json" \
+            --output "$ARIADNE_RELEASE_EVIDENCE_DIR/qdrant-sidecar-${{ matrix.rid }}.json"
       - name: Build and smoke Linux installer
         if: runner.os == 'Linux'
         shell: bash
@@ -87,16 +123,84 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $installer = packaging/windows/build-installer.ps1 -PackageDirectory "artifacts/staging/ariadne-${{ matrix.rid }}" -OutputDirectory artifacts
-          packaging/windows/smoke-installer.ps1 -Installer $installer
+          & ./packaging/windows/build-installer.ps1 -PackageDirectory "artifacts/staging/ariadne-${{ matrix.rid }}" -OutputDirectory artifacts
+          $manifest = Get-Content "artifacts/staging/ariadne-${{ matrix.rid }}/release-manifest.json" -Raw | ConvertFrom-Json
+          $installer = Join-Path (Resolve-Path artifacts) "Ariadne-$($manifest.version)-win-x64-setup.exe"
+          if (-not (Test-Path $installer)) { throw "expected installer is missing: $installer" }
+          & ./packaging/windows/smoke-installer.ps1 -Installer $installer
       - name: Build and smoke macOS installer
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          pkg="$(bash packaging/macos/build-installer.sh "artifacts/staging/ariadne-${{ matrix.rid }}" artifacts)"
+          bash packaging/macos/build-installer.sh "artifacts/staging/ariadne-${{ matrix.rid }}" artifacts
+          version="$(jq -er '.version' "artifacts/staging/ariadne-${{ matrix.rid }}/release-manifest.json")"
+          pkg="artifacts/Ariadne-$version-${{ matrix.rid }}.pkg"
+          test -f "$pkg"
           bash packaging/macos/smoke-installer.sh "$pkg"
       - uses: actions/upload-artifact@v4
         with:
           name: ariadne-${{ matrix.rid }}
           path: artifacts/
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qdrant-evidence-${{ matrix.rid }}
+          path: artifacts/release-evidence/qdrant-sidecar-${{ matrix.rid }}.json
+          if-no-files-found: error
+
+  performance-evidence:
+    needs: quality
+    if: github.event_name == 'workflow_dispatch' && inputs.full_release_matrix
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-evidence-arm64
+      - name: Install headless display
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Rust release acceptance evidence
+        env:
+          ARIADNE_RELEASE_EVIDENCE_DIR: ${{ github.workspace }}/artifacts/release-evidence
+          ARIADNE_SCHEDULER_SOAK_SECONDS: '300'
+        run: |
+          cargo test --release --locked --package ariadne --test release_acceptance million_character_retrieval_release_matrix -- --ignored --exact
+          cargo test --release --locked --package ariadne --test release_acceptance scheduler_high_runnable_throughput_and_soak -- --ignored --exact
+      - name: Desktop release acceptance evidence
+        run: |
+          dotnet restore desktop/Ariadne.slnx
+          dotnet build desktop/Ariadne.Desktop/Ariadne.Desktop.csproj --configuration Release --no-restore
+          dotnet desktop/Ariadne.Desktop/bin/Release/net10.0/Ariadne.Desktop.dll --release-wcag-probe artifacts/release-evidence/wcag-contrast.json
+          xvfb-run -a -s "-screen 0 1600x900x24" dotnet desktop/Ariadne.Desktop/bin/Release/net10.0/Ariadne.Desktop.dll --release-ui-probe artifacts/release-evidence/desktop-ui-performance.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-performance-evidence
+          path: artifacts/release-evidence/
+          if-no-files-found: error
+
+  evidence-gate:
+    needs: [native-package, performance-evidence]
+    if: github.event_name == 'workflow_dispatch' && inputs.full_release_matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-evidence*'
+          path: artifacts/release-evidence
+          merge-multiple: true
+      - run: python3 scripts/verify-release-evidence.py --evidence-dir artifacts/release-evidence

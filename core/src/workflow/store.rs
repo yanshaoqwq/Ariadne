@@ -83,6 +83,46 @@ impl WorkflowOperationPolicy {
         }
     }
 
+    /// 远端调用没有可证明的幂等或对账协议。未知结果时保留审计记录、自动终止
+    /// 运行且永不重发；不要求作者猜测远端结果。
+    pub const fn at_most_once() -> Self {
+        Self::Journaled {
+            recovery: WorkflowOperationRecoveryPolicy::ManualResolution,
+            response: WorkflowOperationResponsePolicy::RequireExecutorReceipt,
+        }
+    }
+
+    /// 只读或携带稳定幂等键的远端调用，可用同一 operation ID 自动重放。
+    pub const fn replayable_remote() -> Self {
+        Self::Journaled {
+            recovery: WorkflowOperationRecoveryPolicy::ReplayExecutor,
+            response: WorkflowOperationResponsePolicy::AllowExternalResponse,
+        }
+    }
+
+    pub const fn is_at_most_once(self) -> bool {
+        matches!(
+            self,
+            Self::Journaled {
+                recovery: WorkflowOperationRecoveryPolicy::ManualResolution,
+                response: WorkflowOperationResponsePolicy::RequireExecutorReceipt,
+            }
+        )
+    }
+
+    /// 只有远端已声明稳定幂等键或天然只读时，未知结果才允许由 scheduler
+    /// 按原 operation identity 自动退避重放。依赖本地 receipt 的执行器即使可
+    /// 重入，在 receipt 仍未知时也必须暂停，避免无意义空转到失败。
+    pub const fn is_automatically_replayable(self) -> bool {
+        matches!(
+            self,
+            Self::Journaled {
+                recovery: WorkflowOperationRecoveryPolicy::ReplayExecutor,
+                response: WorkflowOperationResponsePolicy::AllowExternalResponse,
+            }
+        )
+    }
+
     pub const fn reconcilable_receipt() -> Self {
         Self::Journaled {
             recovery: WorkflowOperationRecoveryPolicy::ReconcileReceipt,
@@ -1281,30 +1321,6 @@ impl SqliteWorkflowRuntimeStore {
         }
         transaction.commit().map_err(sqlite_error)?;
         Ok(ConfirmationResolutionCommitResult::Saved { state })
-    }
-
-    /// F14-a：runtime 在 knowledge 已提交后消失且已补偿 knowledge 时，删除未完成 saga，
-    /// 阻止 open_project recover 再次重放 knowledge 副作用。
-    pub fn abort_confirmation_resolution(
-        &self,
-        operation_id: &str,
-        _now_ms: u64,
-    ) -> CoreResult<()> {
-        let connection = self.connection.lock().map_err(lock_error)?;
-        let changed = connection
-            .execute(
-                "DELETE FROM confirmation_resolution_operations
-                 WHERE operation_id=?1
-                   AND status IN ('prepared', 'knowledge_committed')",
-                params![operation_id],
-            )
-            .map_err(sqlite_error)?;
-        if changed != 1 {
-            return Err(CoreError::validation(format!(
-                "confirmation resolution could not be aborted: {operation_id}"
-            )));
-        }
-        Ok(())
     }
 
     /// F14-b：投影是可重建派生数据；成功后仅标记 outbox 已消费。

@@ -10,9 +10,10 @@ namespace Ariadne.Desktop.Tests;
 /// </summary>
 public sealed class NodePinAndImportTests
 {
-    private static WorkflowNodeViewModel NewNode(string type = "document_read")
+    private static WorkflowNodeViewModel NewNode(
+        string type = "document_read",
+        Action<WorkflowNodeViewModel>? runRequested = null)
     {
-        var backend = DispatchProxy.Create<IAriadneBackendClient, UnimplementedBackendProxy>();
         return new WorkflowNodeViewModel(
             id: "n1",
             nodeType: type,
@@ -20,10 +21,20 @@ public sealed class NodePinAndImportTests
             defaultWorkDir: string.Empty,
             x: 0,
             y: 0,
-            backend: backend,
-            currentWorkflowId: () => "default",
+            runRequested: runRequested ?? (_ => { }),
             clearSelection: () => { },
             markDirty: () => { });
+    }
+
+    [Fact]
+    public void RunCommand_DelegatesToHostRunCoordinator()
+    {
+        WorkflowNodeViewModel? requestedNode = null;
+        var node = NewNode("start", requested => requestedNode = requested);
+
+        node.RunCommand.Execute(null);
+
+        Assert.Same(node, requestedNode);
     }
 
     [Fact]
@@ -126,7 +137,7 @@ public sealed class NodePinAndImportTests
         // 与 XAML：内容 pad-top=8、pin=14、Spacing=8、VerticalAlignment=Top 一致
         var first = NodePortSpec.LocalCenterForHandle("input");
         var second = NodePortSpec.LocalCenterForHandle("data-in-1");
-        Assert.Equal(first.Y, NodePortSpec.DataPortY, 6);
+        Assert.Equal(NodePortSpec.DataPortY, first.Y, 6);
         Assert.Equal(second.Y, first.Y + NodePortSpec.DataPortSpacing, 6);
         Assert.Equal(NodePortSpec.DataPortSpacing, NodePortSpec.DataPinBox + NodePortSpec.DataPortGap, 6);
         // 首 pin 中心 = CardTop + Title + pad + half pin
@@ -173,6 +184,10 @@ public sealed class NodePinAndImportTests
         var l = loop.ToData();
         Assert.Equal(3, Convert.ToInt32(l["max_iterations"]));
         Assert.True(l.ContainsKey("stop_condition"));
+        var stop = Assert.IsType<Dictionary<string, object?>>(l["stop_condition"]);
+        Assert.Equal("done", stop["input_alias"]?.ToString());
+        Assert.Equal(true, stop["equals"]);
+        Assert.Equal(300000L, Convert.ToInt64(l["timeout_ms"]));
 
         var ap = NewNode("approval");
         ap.ApprovalId = "ap-1";

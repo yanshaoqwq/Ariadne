@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "version": "1.18.2",
+  "release_api": "https://api.github.com/repos/qdrant/qdrant/releases/tags/v1.18.2",
+  "targets": [
+    {
+      "rid": "linux-x64",
+      "asset": "qdrant-x86_64-unknown-linux-musl.tar.gz",
+      "binary": "qdrant",
+      "archive_sha256": "16c8e6114add0b6001840bb3175e182833a96591c9d503d83169aec13637ae71"
+    },
+    {
+      "rid": "linux-arm64",
+      "asset": "qdrant-aarch64-unknown-linux-musl.tar.gz",
+      "binary": "qdrant",
+      "archive_sha256": "2ead5bb8206289b67c930f0eb29123228ddb43c2344551a0947cbc9046f92c6c"
+    },
+    {
+      "rid": "win-x64",
+      "asset": "qdrant-x86_64-pc-windows-msvc.zip",
+      "binary": "qdrant.exe",
+      "archive_sha256": "b2b262cba6f78cf4fa794ae78d73a8f70a221c93c76c75ac8fd6fe95d809b142"
+    },
+    {
+      "rid": "osx-x64",
+      "asset": "qdrant-x86_64-apple-darwin.tar.gz",
+      "binary": "qdrant",
+      "archive_sha256": "d395eb3d96c2196bbb8c611b800842928fb8b4997924b585bf42ce0ceb90fa1f"
+    },
+    {
+      "rid": "osx-arm64",
+      "asset": "qdrant-aarch64-apple-darwin.tar.gz",
+      "binary": "qdrant",
+      "archive_sha256": "859f487e316ae1bda3b5d7c1e129a0a7344424d992503c188979ca6ac1b47253"
+    }
+  ]
+}

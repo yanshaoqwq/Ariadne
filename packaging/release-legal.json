@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "license_expression": "PolyForm-Noncommercial-1.0.0",
+  "license_name": "PolyForm Noncommercial License 1.0.0",
+  "license_sha256": "4fd68d7a252dcf3f9d80b06aff196d57a3b83d69741086e7d9991f2c16468819",
+  "required_notice": "Required Notice: Copyright 2026 yanshaoqwq and Ariadne contributors.",
+  "required_release_files": [
+    "LICENSE",
+    "NOTICE",
+    "COMMERCIAL_LICENSE.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "contributor_license_agreement": "CLA.md",
+  "cla_acceptance": "I have read and agree to the Ariadne Contributor License Agreement, and I have the right to submit this contribution.",
+  "legal_review": {
+    "status": "pending",
+    "approval_reference": null,
+    "release_blocker": "LEGAL_REVIEW"
+  }
+}

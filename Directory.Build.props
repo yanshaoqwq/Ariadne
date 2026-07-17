@@ -2,7 +2,7 @@
   <PropertyGroup>
     <AriadneRepositoryRoot>$(MSBuildThisFileDirectory)</AriadneRepositoryRoot>
     <AriadneCargoManifest>$([System.IO.File]::ReadAllText('$(AriadneRepositoryRoot)Cargo.toml'))</AriadneCargoManifest>
-    <AriadneProductVersion>$([System.Text.RegularExpressions.Regex]::Match($(AriadneCargoManifest), '(?m)^version\s*=\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</AriadneProductVersion>
+    <AriadneProductVersion>$([System.Text.RegularExpressions.Regex]::Match($(AriadneCargoManifest), '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</AriadneProductVersion>
     <Version>$(AriadneProductVersion)</Version>
     <AssemblyVersion>$(AriadneProductVersion).0</AssemblyVersion>
     <FileVersion>$(AriadneProductVersion).0</FileVersion>

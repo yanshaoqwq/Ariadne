@@ -5,13 +5,24 @@ namespace Ariadne.Desktop.ViewModels;
 
 public sealed class WelcomeViewModel : ViewModelBase
 {
+    private enum RecentProjectsState
+    {
+        Loading,
+        Content,
+        Empty,
+        Error,
+    }
+
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
     private readonly Func<CurrentProjectStatus, Task>? _projectOpened;
     private Func<string?, Task<string?>> _pickProjectFolder;
     private IReadOnlyList<RecentProjectItemViewModel> _recentProjects = Array.Empty<RecentProjectItemViewModel>();
-    private string _statusText;
+    private string _statusText = string.Empty;
+    private string _recentErrorText = string.Empty;
     private bool _isLoading;
+    private RecentProjectsState _recentState = RecentProjectsState.Loading;
+    private Task? _loadTask;
 
     public WelcomeViewModel(
         DisplayNameService displayNames,
@@ -23,9 +34,9 @@ public sealed class WelcomeViewModel : ViewModelBase
         _backend = backend;
         _projectOpened = projectOpened;
         _pickProjectFolder = pickProjectFolder ?? (_ => Task.FromResult<string?>(null));
-        _statusText = displayNames.Text("ui.common.loading");
-        CreateProjectCommand = new RelayCommand(() => _ = CreateProjectAsync());
-        OpenProjectCommand = new RelayCommand(() => _ = OpenProjectAsync());
+        CreateProjectCommand = new RelayCommand(() => _ = CreateProjectAsync(), () => CanStartProjectAction);
+        OpenProjectCommand = new RelayCommand(() => _ = OpenProjectAsync(), () => CanStartProjectAction);
+        RetryRecentProjectsCommand = new RelayCommand(() => _ = LoadAsync(), () => !IsLoading);
         TutorialCommand = new RelayCommand(() => _ = ShowTutorialAsync());
         FeedbackCommand = new RelayCommand(() => _ = ShowFeedbackAsync());
         _displayNames.LanguageChanged += (_, _) => RefreshLocalizedText();
@@ -57,9 +68,23 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     public string EmptyRecentHint => _displayNames.Text("ui.welcome.recent_empty_hint");
 
-    public bool HasRecentProjects => RecentProjects.Count > 0;
+    public string RecentLoadingText => _displayNames.Text("ui.welcome.recent_loading");
 
-    public bool IsRecentEmpty => RecentProjects.Count == 0;
+    public string RetryRecentProjectsText => _displayNames.Text("ui.welcome.retry_recent");
+
+    public bool CanStartProjectAction => !IsLoading;
+
+    public bool HasStatusText => !string.IsNullOrWhiteSpace(StatusText);
+
+    public bool HasRecentProjects => _recentState == RecentProjectsState.Content && RecentProjects.Count > 0;
+
+    public bool IsRecentLoading => _recentState == RecentProjectsState.Loading;
+
+    public bool IsRecentEmpty => _recentState == RecentProjectsState.Empty;
+
+    public bool IsRecentError => _recentState == RecentProjectsState.Error;
+
+    public string RecentErrorText => _recentErrorText;
 
     public string RecentCountText => _displayNames.Format(
         "ui.welcome.recent_project_count",
@@ -72,6 +97,8 @@ public sealed class WelcomeViewModel : ViewModelBase
     public RelayCommand TutorialCommand { get; }
 
     public RelayCommand FeedbackCommand { get; }
+
+    public RelayCommand RetryRecentProjectsCommand { get; }
 
     /// <summary>title 为选择器标题（新建=父目录 / 打开=项目根）。</summary>
     public void SetProjectFolderPicker(Func<string?, Task<string?>> picker)
@@ -94,19 +121,39 @@ public sealed class WelcomeViewModel : ViewModelBase
         OnPropertyChanged(nameof(FeedbackText));
         OnPropertyChanged(nameof(EmptyRecentTitle));
         OnPropertyChanged(nameof(EmptyRecentHint));
+        OnPropertyChanged(nameof(RecentLoadingText));
+        OnPropertyChanged(nameof(RetryRecentProjectsText));
         OnPropertyChanged(nameof(RecentCountText));
+        OnPropertyChanged(nameof(RecentErrorText));
     }
 
     public string StatusText
     {
         get => _statusText;
-        set => SetProperty(ref _statusText, value);
+        set
+        {
+            if (SetProperty(ref _statusText, value))
+            {
+                OnPropertyChanged(nameof(HasStatusText));
+            }
+        }
     }
 
     public bool IsLoading
     {
         get => _isLoading;
-        set => SetProperty(ref _isLoading, value);
+        private set
+        {
+            if (!SetProperty(ref _isLoading, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(CanStartProjectAction));
+            CreateProjectCommand.NotifyCanExecuteChanged();
+            OpenProjectCommand.NotifyCanExecuteChanged();
+            RetryRecentProjectsCommand.NotifyCanExecuteChanged();
+        }
     }
 
     public IReadOnlyList<RecentProjectItemViewModel> RecentProjects
@@ -115,28 +162,59 @@ public sealed class WelcomeViewModel : ViewModelBase
         private set => SetProperty(ref _recentProjects, value);
     }
 
-    public async Task LoadAsync()
+    public Task LoadAsync()
+    {
+        if (_loadTask is not null || IsLoading)
+        {
+            return _loadTask ?? Task.CompletedTask;
+        }
+
+        _loadTask = LoadRecentProjectsAsync();
+        return _loadTask;
+    }
+
+    private async Task LoadRecentProjectsAsync()
     {
         IsLoading = true;
+        SetRecentState(RecentProjectsState.Loading);
         try
         {
-            RecentProjects = WrapRecentProjects(await _backend.ListRecentProjectsAsync().ConfigureAwait(true));
-            NotifyRecentProjectsChanged();
-            StatusText = RecentProjects.Count == 0
-                ? _displayNames.Text("ui.welcome.recent_empty_title")
-                : _displayNames.Format("ui.welcome.recent_project_count", new Dictionary<string, string>
-                {
-                    ["count"] = RecentProjects.Count.ToString(),
-                });
+            await RefreshRecentProjectsAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            _recentErrorText = UserFacingError.Format(ex, _displayNames);
+            SetRecentState(RecentProjectsState.Error);
+            OnPropertyChanged(nameof(RecentErrorText));
         }
         finally
         {
             IsLoading = false;
+            _loadTask = null;
         }
+    }
+
+    private async Task RefreshRecentProjectsAsync()
+    {
+        RecentProjects = WrapRecentProjects(await _backend.ListRecentProjectsAsync().ConfigureAwait(true));
+        NotifyRecentProjectsChanged();
+        SetRecentState(RecentProjects.Count == 0
+            ? RecentProjectsState.Empty
+            : RecentProjectsState.Content);
+    }
+
+    private void SetRecentState(RecentProjectsState state)
+    {
+        if (_recentState == state)
+        {
+            return;
+        }
+
+        _recentState = state;
+        OnPropertyChanged(nameof(HasRecentProjects));
+        OnPropertyChanged(nameof(IsRecentLoading));
+        OnPropertyChanged(nameof(IsRecentEmpty));
+        OnPropertyChanged(nameof(IsRecentError));
     }
 
     private void NotifyRecentProjectsChanged()
@@ -148,6 +226,11 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     private async Task CreateProjectAsync()
     {
+        if (IsLoading)
+        {
+            return;
+        }
+
         IsLoading = true;
         try
         {
@@ -187,8 +270,7 @@ public sealed class WelcomeViewModel : ViewModelBase
                     ["name"] = projectName,
                     ["path"] = report.ProjectRoot,
                 });
-            RecentProjects = WrapRecentProjects(await _backend.ListRecentProjectsAsync().ConfigureAwait(true));
-            NotifyRecentProjectsChanged();
+            await RefreshRecentProjectsAsync().ConfigureAwait(true);
             var status = await _backend.GetCurrentProjectAsync().ConfigureAwait(true);
             if (status is not null && _projectOpened is not null)
             {
@@ -207,6 +289,11 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     private async Task OpenProjectAsync()
     {
+        if (IsLoading)
+        {
+            return;
+        }
+
         IsLoading = true;
         try
         {
@@ -237,7 +324,7 @@ public sealed class WelcomeViewModel : ViewModelBase
                 return;
             }
 
-            await OpenProjectRootAsync(root).ConfigureAwait(true);
+            await OpenProjectRootCoreAsync(root).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
@@ -263,14 +350,61 @@ public sealed class WelcomeViewModel : ViewModelBase
     private async Task ShowFeedbackAsync()
     {
         StatusText = FeedbackText;
-        await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateFeedbackDialog(_displayNames)).ConfigureAwait(true);
+        var result = await DialogService.Current
+            .ConfirmAsync(HelpDialogFactory.CreateFeedbackDialog(_displayNames))
+            .ConfigureAwait(true);
+        if (result == 1 && !ExternalLinkOpener.TryOpen(HelpDialogFactory.FeedbackIssueUrl))
+        {
+            StatusText = _displayNames.Text("ui.feedback.open_failed");
+        }
     }
 
-    private async Task OpenProjectRootAsync(string root) =>
-        await OpenProjectRootForHostAsync(root).ConfigureAwait(true);
+    private async Task OpenProjectRootAsync(string root)
+    {
+        if (IsLoading)
+        {
+            return;
+        }
+
+        IsLoading = true;
+        try
+        {
+            await OpenProjectRootCoreAsync(root).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
 
     /// <summary>供主窗口标题栏「切换项目」调用。</summary>
     public async Task OpenProjectRootForHostAsync(string root)
+    {
+        if (IsLoading)
+        {
+            return;
+        }
+
+        IsLoading = true;
+        try
+        {
+            await OpenProjectRootCoreAsync(root).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task OpenProjectRootCoreAsync(string root)
     {
         // 最近列表也可能指向已删/未初始化目录，与「打开」共用本地预检
         if (!ProjectPathHelper.LooksLikeInitializedProject(root))
@@ -292,8 +426,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
 
         var status = await _backend.OpenProjectAsync(root).ConfigureAwait(true);
-        RecentProjects = WrapRecentProjects(await _backend.ListRecentProjectsAsync().ConfigureAwait(true));
-        NotifyRecentProjectsChanged();
+        await RefreshRecentProjectsAsync().ConfigureAwait(true);
         StatusText = status.ProjectRoot;
         if (_projectOpened is not null)
         {

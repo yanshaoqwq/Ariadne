@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::contracts::{CoreError, CoreResult};
+use crate::contracts::{CoreError, CoreResult, ExecutionCancellation};
 use crate::retrieval::memory::sort_and_limit;
 use crate::retrieval::models::{
     FullTextSearchRequest, HybridSearchRequest, RerankInput, RetrievalResult, RetrievalSource,
@@ -67,6 +67,88 @@ impl ThreeWayHybridSearchEngine {
     pub fn with_reranker(mut self, reranker: Arc<dyn ResultReranker>) -> Self {
         self.reranker = Some(reranker);
         self
+    }
+
+    fn execute_search(
+        &self,
+        request: HybridSearchRequest,
+        cancellation: Option<&ExecutionCancellation>,
+    ) -> CoreResult<Vec<RetrievalResult>> {
+        if request.limit == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
+
+        validate_limit(request.limit)?;
+        validate_weights(request.vector_weight, request.full_text_weight)?;
+
+        let candidate_limit = request
+            .limit
+            .checked_mul(3)
+            .unwrap_or(MAX_HYBRID_CANDIDATE_LIMIT)
+            .min(MAX_HYBRID_CANDIDATE_LIMIT)
+            .max(request.limit);
+        let mut combined: BTreeMap<String, RetrievalResult> = BTreeMap::new();
+
+        if let Some(query_embedding) = request.query_embedding.clone() {
+            let vector_store = self.vector_store.as_ref().ok_or_else(|| {
+                CoreError::validation(
+                    "query_embedding was provided but vector retrieval is not configured",
+                )
+            })?;
+            let vector_request = VectorSearchRequest {
+                query_embedding,
+                limit: candidate_limit,
+                filters: request.filters.clone(),
+            };
+            let vector_results = match cancellation {
+                Some(cancellation) => {
+                    vector_store.search_with_cancellation(vector_request, cancellation)?
+                }
+                None => vector_store.search(vector_request)?,
+            };
+            merge_ranked_results(&mut combined, vector_results, request.vector_weight)?;
+        }
+
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
+        let text_weight = request.full_text_weight / 2.0;
+        let tantivy_results = self.tantivy_store.search(FullTextSearchRequest {
+            query: request.query.clone(),
+            limit: candidate_limit,
+            filters: request.filters.clone(),
+        })?;
+        merge_ranked_results(&mut combined, tantivy_results, text_weight)?;
+
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
+        let sqlite_results = self.sqlite_store.search(FullTextSearchRequest {
+            query: request.query.clone(),
+            limit: candidate_limit,
+            filters: request.filters,
+        })?;
+        merge_ranked_results(&mut combined, sqlite_results, text_weight)?;
+
+        let mut results = combined.into_values().collect::<Vec<_>>();
+        sort_and_limit(&mut results, candidate_limit);
+
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
+        if let Some(reranker) = &self.reranker {
+            return reranker.rerank(RerankInput {
+                query: request.query,
+                results,
+                limit: request.limit,
+            });
+        }
+
+        sort_and_limit(&mut results, request.limit);
+        Ok(results)
     }
 }
 
@@ -153,63 +235,15 @@ impl HybridSearch for HybridSearchEngine {
 impl HybridSearch for ThreeWayHybridSearchEngine {
     /// 执行 Qdrant + Tantivy + SQLite 三路混合召回。
     fn search(&self, request: HybridSearchRequest) -> CoreResult<Vec<RetrievalResult>> {
-        if request.limit == 0 {
-            return Ok(Vec::new());
-        }
+        self.execute_search(request, None)
+    }
 
-        validate_limit(request.limit)?;
-        validate_weights(request.vector_weight, request.full_text_weight)?;
-
-        let candidate_limit = request
-            .limit
-            .checked_mul(3)
-            .unwrap_or(MAX_HYBRID_CANDIDATE_LIMIT)
-            .min(MAX_HYBRID_CANDIDATE_LIMIT)
-            .max(request.limit);
-        let mut combined: BTreeMap<String, RetrievalResult> = BTreeMap::new();
-
-        if let Some(query_embedding) = request.query_embedding.clone() {
-            let vector_store = self.vector_store.as_ref().ok_or_else(|| {
-                CoreError::validation(
-                    "query_embedding was provided but vector retrieval is not configured",
-                )
-            })?;
-            let vector_results = vector_store.search(VectorSearchRequest {
-                query_embedding,
-                limit: candidate_limit,
-                filters: request.filters.clone(),
-            })?;
-            merge_ranked_results(&mut combined, vector_results, request.vector_weight)?;
-        }
-
-        let text_weight = request.full_text_weight / 2.0;
-        let tantivy_results = self.tantivy_store.search(FullTextSearchRequest {
-            query: request.query.clone(),
-            limit: candidate_limit,
-            filters: request.filters.clone(),
-        })?;
-        merge_ranked_results(&mut combined, tantivy_results, text_weight)?;
-
-        let sqlite_results = self.sqlite_store.search(FullTextSearchRequest {
-            query: request.query.clone(),
-            limit: candidate_limit,
-            filters: request.filters,
-        })?;
-        merge_ranked_results(&mut combined, sqlite_results, text_weight)?;
-
-        let mut results = combined.into_values().collect::<Vec<_>>();
-        sort_and_limit(&mut results, candidate_limit);
-
-        if let Some(reranker) = &self.reranker {
-            return reranker.rerank(RerankInput {
-                query: request.query,
-                results,
-                limit: request.limit,
-            });
-        }
-
-        sort_and_limit(&mut results, request.limit);
-        Ok(results)
+    fn search_with_cancellation(
+        &self,
+        request: HybridSearchRequest,
+        cancellation: &ExecutionCancellation,
+    ) -> CoreResult<Vec<RetrievalResult>> {
+        self.execute_search(request, Some(cancellation))
     }
 
     /// 返回三路底层组件健康状态。

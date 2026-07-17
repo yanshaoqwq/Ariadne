@@ -4,7 +4,7 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
-use crate::contracts::{CoreError, CoreResult};
+use crate::contracts::{CoreError, CoreResult, ExecutionCancellation, ExternalDispatchOutcome};
 use crate::retrieval::models::{
     ChunkDocument, RebuildReport, RebuildStatus, RetrievalResult, RetrievalSource, StoreHealth,
     VectorRecord, VectorSearchRequest,
@@ -218,6 +218,38 @@ impl VectorStore for QdrantVectorStore {
             .and_then(Value::as_array)
             .ok_or_else(|| qdrant_error("search response missing result array"))?;
         hits.iter().map(qdrant_hit_to_result).collect()
+    }
+
+    fn search_with_cancellation(
+        &self,
+        request: VectorSearchRequest,
+        cancellation: &ExecutionCancellation,
+    ) -> CoreResult<Vec<RetrievalResult>> {
+        cancellation.check()?;
+        let store = self.clone();
+        let blocking_permit = crate::contracts::acquire_detached_blocking_task_permit()?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("ariadne-qdrant-search".to_owned())
+            .spawn(move || {
+                let _blocking_permit = blocking_permit;
+                let _ = sender.send(store.search(request));
+            })?;
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(CoreError::external_cancelled(
+                    "qdrant",
+                    ExternalDispatchOutcome::DispatchedUnknown,
+                ));
+            }
+            match receiver.recv_timeout(Duration::from_millis(25)) {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(qdrant_error("search worker disconnected"));
+                }
+            }
+        }
     }
 
     /// 返回 Qdrant collection 健康状态。

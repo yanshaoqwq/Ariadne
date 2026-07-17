@@ -1,4 +1,4 @@
-use crate::contracts::CoreResult;
+use crate::contracts::{CoreResult, ExecutionCancellation};
 use crate::providers::ProviderCallContext;
 use crate::retrieval::models::{
     FullTextRecord, FullTextSearchRequest, HybridSearchRequest, RebuildReport, RerankInput,
@@ -15,6 +15,18 @@ pub trait VectorStore: Send + Sync {
 
     /// 按 query embedding 检索相似 chunk。
     fn search(&self, request: VectorSearchRequest) -> CoreResult<Vec<RetrievalResult>>;
+
+    /// 携带执行链取消信号检索；本地后端复用同步实现，网络后端应覆盖并轮询取消。
+    fn search_with_cancellation(
+        &self,
+        request: VectorSearchRequest,
+        cancellation: &ExecutionCancellation,
+    ) -> CoreResult<Vec<RetrievalResult>> {
+        cancellation.check()?;
+        let results = self.search(request)?;
+        cancellation.check()?;
+        Ok(results)
+    }
 
     /// 返回当前后端健康状态。
     fn health_check(&self) -> CoreResult<StoreHealth>;
@@ -76,6 +88,18 @@ pub trait ResultReranker: Send + Sync {
 pub trait HybridSearch {
     /// 执行混合检索。
     fn search(&self, request: HybridSearchRequest) -> CoreResult<Vec<RetrievalResult>>;
+
+    /// 携带执行链取消信号执行混合检索。
+    fn search_with_cancellation(
+        &self,
+        request: HybridSearchRequest,
+        cancellation: &ExecutionCancellation,
+    ) -> CoreResult<Vec<RetrievalResult>> {
+        cancellation.check()?;
+        let results = self.search(request)?;
+        cancellation.check()?;
+        Ok(results)
+    }
 
     /// 返回底层组件健康状态。
     fn health_check(&self) -> CoreResult<Vec<StoreHealth>>;

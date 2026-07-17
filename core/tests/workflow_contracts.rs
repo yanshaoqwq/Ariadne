@@ -5,7 +5,7 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ariadne::config::{ModelConfig, ProviderConfig};
+use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, ProviderConfig};
 use ariadne::contracts::{
     CommunicationEdgeConfig, DocumentPatch, Edge, EdgeId, ExternalDispatchAuthorization, NodeId,
     NodeInstance, PatchHunk, PermissionPolicy, PortEndpoint, PortMap, PortValue,
@@ -14,20 +14,25 @@ use ariadne::contracts::{
     EXECUTION_OUTPUT_PORT,
 };
 use ariadne::costs::{CostLedger, CostQuery, SqliteCostLedger, TokenUsage};
-use ariadne::documents::{DocumentReadRequest, DocumentRepository, FileDocumentService};
+use ariadne::documents::{
+    DocumentReadRequest, DocumentRepository, DocumentWriteRequest, FileDocumentService,
+};
 use ariadne::git::GitService;
 use ariadne::providers::{
     LlmMessage, LlmProvider, LlmRequest, LlmResponse, OpenAiCompatibleLlmProvider, Provider,
-    ProviderCallContext, ProviderHealth,
+    ProviderCallContext, ProviderHealth, SearchProvider, SearchProviderRequest,
+    SearchProviderResponse, SearchProviderResult, ToolCall,
 };
 use ariadne::rag::{
     MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, SummarizerStageOperationStatus,
 };
 use ariadne::retrieval::{
     FullTextRecord, FullTextStore, HybridSearchEngine, MemoryFullTextStore, MemoryVectorStore,
+    ProjectRetrievalRuntime,
 };
 use ariadne::workflow::{
     apply_confirmed_patch, execute_llm_node, execute_llm_node_with_defaults,
+    execute_llm_node_with_project_search, execute_llm_node_with_search_tools,
     execute_project_search_node_for_test_fixture, execute_summarizer_node,
     validate_workflow_execution_contracts, BuiltinWorkflowNodeExecutor, CommunicationControl,
     DocumentWorkflowExportSink, FilesystemRuntimeReferenceResolver, NewWorkflowOperation,
@@ -35,11 +40,11 @@ use ariadne::workflow::{
     RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
     RuntimeReferenceKind, RuntimeReferenceResolver, SqliteWorkflowRuntimeStore,
     WorkflowExportRequest, WorkflowExportSink, WorkflowExternalNodeExecutor,
-    WorkflowMutationClaimResult, WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest,
-    WorkflowNodeExecutor, WorkflowOperationPolicy, WorkflowOperationRecoveryPolicy,
-    WorkflowOperationResponsePolicy, WorkflowOperationStatus, WorkflowResumeClaimResult,
-    WorkflowRunState, WorkflowRuntime, WorkflowRuntimeEventType, WorkflowRuntimeStore,
-    WorkflowStopRequestResult,
+    WorkflowLlmSearchOptions, WorkflowMutationClaimResult, WorkflowNodeExecutionOutput,
+    WorkflowNodeExecutionRequest, WorkflowNodeExecutor, WorkflowOperationPolicy,
+    WorkflowOperationRecoveryPolicy, WorkflowOperationResponsePolicy, WorkflowOperationStatus,
+    WorkflowResumeClaimResult, WorkflowRunState, WorkflowRuntime, WorkflowRuntimeEventType,
+    WorkflowRuntimeStore, WorkflowStopRequestResult,
 };
 use serde_json::{json, Value};
 use std::sync::{mpsc, Arc, Mutex};
@@ -50,6 +55,154 @@ struct RecordingLlmProvider {
     contexts: Mutex<Vec<ProviderCallContext>>,
     /// 测试可注入返回的 cost_usd（F13 单次预算合同）。
     cost_usd: Mutex<Option<f64>>,
+}
+
+#[derive(Default)]
+struct ProjectSearchLlmProvider {
+    calls: AtomicUsize,
+    requests: Mutex<Vec<LlmRequest>>,
+}
+
+#[derive(Default)]
+struct WebSearchLlmProvider {
+    calls: AtomicUsize,
+    requests: Mutex<Vec<LlmRequest>>,
+}
+
+impl Provider for WebSearchLlmProvider {
+    fn definition(&self) -> ProviderDefinition {
+        ProviderDefinition {
+            provider_id: "web-search-llm".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "web-search-llm".to_owned(),
+            capabilities: vec![ProviderCapability::Llm],
+            config_schema: Value::Null,
+        }
+    }
+}
+
+impl LlmProvider for WebSearchLlmProvider {
+    fn complete(
+        &self,
+        _context: &ProviderCallContext,
+        request: LlmRequest,
+    ) -> ariadne::contracts::CoreResult<LlmResponse> {
+        self.requests.lock().unwrap().push(request);
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let tool_call = ToolCall {
+                tool_call_id: "web-search-1".to_owned(),
+                name: "writer-web-search".to_owned(),
+                arguments: json!({ "query": "2026 月球任务", "limit": 3 }),
+            };
+            return Ok(LlmResponse {
+                message: LlmMessage::assistant_with_tool_calls(
+                    "",
+                    std::slice::from_ref(&tool_call),
+                ),
+                tool_calls: vec![tool_call],
+                usage: None,
+                finish_reason: Some("tool_calls".to_owned()),
+                cost_usd: None,
+                raw: Value::Null,
+            });
+        }
+        Ok(LlmResponse {
+            message: LlmMessage::assistant("已根据 Web 搜索完成"),
+            tool_calls: Vec::new(),
+            usage: None,
+            finish_reason: Some("stop".to_owned()),
+            cost_usd: None,
+            raw: Value::Null,
+        })
+    }
+}
+
+struct MockWebSearchProvider;
+
+impl Provider for MockWebSearchProvider {
+    fn definition(&self) -> ProviderDefinition {
+        ProviderDefinition {
+            provider_id: "mock-web-search".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "mock-web-search".to_owned(),
+            capabilities: vec![ProviderCapability::Search],
+            config_schema: Value::Null,
+        }
+    }
+}
+
+impl SearchProvider for MockWebSearchProvider {
+    fn search(
+        &self,
+        _context: &ProviderCallContext,
+        request: SearchProviderRequest,
+    ) -> ariadne::contracts::CoreResult<SearchProviderResponse> {
+        assert_eq!(request.query, "2026 月球任务");
+        Ok(SearchProviderResponse {
+            results: vec![SearchProviderResult {
+                title: "月球任务进展".to_owned(),
+                url: "https://example.test/moon-2026".to_owned(),
+                snippet: "公开资料摘要".to_owned(),
+                score: 1.0,
+                metadata: Value::Null,
+            }],
+            cost_usd: None,
+            raw: Value::Null,
+        })
+    }
+}
+
+impl Provider for ProjectSearchLlmProvider {
+    fn definition(&self) -> ProviderDefinition {
+        ProviderDefinition {
+            provider_id: "project-search-provider".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "project-search-provider".to_owned(),
+            capabilities: vec![ProviderCapability::Llm],
+            config_schema: Value::Null,
+        }
+    }
+
+    fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+        Ok(ProviderHealth::Healthy)
+    }
+}
+
+impl LlmProvider for ProjectSearchLlmProvider {
+    fn complete(
+        &self,
+        _context: &ProviderCallContext,
+        request: LlmRequest,
+    ) -> ariadne::contracts::CoreResult<LlmResponse> {
+        self.requests.lock().unwrap().push(request);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            let tool_call = ToolCall {
+                tool_call_id: "search-1".to_owned(),
+                name: "writer-search".to_owned(),
+                arguments: json!({ "query": "银色钥匙", "limit": 5 }),
+            };
+            return Ok(LlmResponse {
+                message: LlmMessage::assistant_with_tool_calls(
+                    "",
+                    std::slice::from_ref(&tool_call),
+                ),
+                tool_calls: vec![tool_call],
+                usage: None,
+                finish_reason: Some("tool_calls".to_owned()),
+                cost_usd: None,
+                raw: Value::Null,
+            });
+        }
+        Ok(LlmResponse {
+            message: LlmMessage::assistant("已根据项目检索完成"),
+            tool_calls: Vec::new(),
+            usage: None,
+            finish_reason: Some("stop".to_owned()),
+            cost_usd: None,
+            raw: Value::Null,
+        })
+    }
 }
 
 #[test]
@@ -115,6 +268,73 @@ fn f8_summarizer_contract_requires_complete_config_and_matching_chapter_text_edg
     assert!(missing_document
         .to_string()
         .contains("chapter_document_id cannot be empty"));
+}
+
+#[test]
+fn utility_node_contracts_require_matching_aliases_and_valid_branch_selectors() {
+    let mut workflow = WorkflowDefinition {
+        id: WorkflowId::from("utility-contracts"),
+        name: "Utility contracts".to_owned(),
+        nodes: vec![
+            node("source", "writer"),
+            NodeInstance {
+                id: NodeId::from("utility"),
+                type_name: "search".to_owned(),
+                label: None,
+                config: json!({ "query_alias": "query", "limit": 5 }),
+                position: None,
+            },
+            node("target", "writer"),
+        ],
+        edges: vec![Edge {
+            id: EdgeId::from("utility-data"),
+            kind: WorkflowEdgeKind::Data,
+            from: PortEndpoint {
+                node_id: NodeId::from("source"),
+                port_name: "output".to_owned(),
+            },
+            to: PortEndpoint {
+                node_id: NodeId::from("utility"),
+                port_name: "input".to_owned(),
+            },
+            alias: Some("input".to_owned()),
+            communication: None,
+        }],
+        metadata: Value::Null,
+    };
+
+    let mismatch = validate_workflow_execution_contracts(&workflow).unwrap_err();
+    assert!(mismatch
+        .to_string()
+        .contains("incoming data edge with alias query"));
+    workflow.edges[0].alias = Some("query".to_owned());
+    validate_workflow_execution_contracts(&workflow).unwrap();
+
+    workflow.nodes[1].type_name = "condition".to_owned();
+    workflow.nodes[1].config = json!({
+        "input_alias": "query",
+        "operator": "truthy"
+    });
+    workflow.edges.push(Edge {
+        id: EdgeId::from("invalid-branch"),
+        kind: WorkflowEdgeKind::Control,
+        from: PortEndpoint {
+            node_id: NodeId::from("utility"),
+            port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+        },
+        to: PortEndpoint {
+            node_id: NodeId::from("target"),
+            port_name: EXECUTION_INPUT_PORT.to_owned(),
+        },
+        alias: Some("yes".to_owned()),
+        communication: None,
+    });
+    let invalid_selector = validate_workflow_execution_contracts(&workflow).unwrap_err();
+    assert!(invalid_selector
+        .to_string()
+        .contains("branch selector true or false"));
+    workflow.edges[1].alias = Some("true".to_owned());
+    validate_workflow_execution_contracts(&workflow).unwrap();
 }
 
 #[test]
@@ -1291,6 +1511,77 @@ fn replayable_in_doubt_operation_reenters_same_attempt_without_becoming_terminal
 }
 
 #[test]
+fn replayable_remote_unknown_result_retries_after_deadline_with_same_operation() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("replayable-remote"),
+        name: "Replayable remote".to_owned(),
+        nodes: vec![node("search", "search")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let mut executor = ScriptedExecutor::default()
+        .with_operation_policy(WorkflowOperationPolicy::replayable_remote());
+    executor.push_error(
+        "search",
+        ariadne::contracts::CoreError::ExternalOperation {
+            service: "idempotent-search".to_owned(),
+            outcome: ariadne::contracts::ExternalDispatchOutcome::DispatchedUnknown,
+            message: "response unknown after dispatch".to_owned(),
+        },
+    );
+    executor.push("search", inline_output("results", "recovered"));
+
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Queued
+    );
+    assert_eq!(executor.call_count("search"), 1);
+    assert!(runtime.state.next_retry_at_ms.is_some());
+    let first_operation = store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(first_operation.status, WorkflowOperationStatus::InDoubt);
+
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Queued
+    );
+    assert_eq!(executor.call_count("search"), 1);
+
+    runtime.state.next_retry_at_ms = Some(0);
+    assert_eq!(
+        runtime
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(executor.call_count("search"), 2);
+    assert_eq!(
+        executor.calls[0].operation_id,
+        executor.calls[1].operation_id
+    );
+    assert_eq!(
+        executor.calls[0].request_hash,
+        executor.calls[1].request_hash
+    );
+    assert_eq!(executor.calls[1].operation_attempt, 1);
+    let operation = store
+        .load_operation(&first_operation.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::Committed);
+}
+
+#[test]
 fn workflow_operation_journal_only_deletes_prepared_records() {
     let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
     let workflow_id = WorkflowId::from("delete-operation-workflow");
@@ -1492,6 +1783,63 @@ fn persisted_external_error_becomes_in_doubt_without_automatic_retry() {
 }
 
 #[test]
+fn at_most_once_unknown_result_fails_without_manual_resolution_or_redispatch() {
+    let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("at-most-once-unknown"),
+        name: "At most once unknown".to_owned(),
+        nodes: vec![node("writer", "llm")],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let run_id = RunId::from("run-1");
+    let mut runtime = WorkflowRuntime::new(&workflow, run_id.clone()).unwrap();
+    let mut executor =
+        ScriptedExecutor::default().with_operation_policy(WorkflowOperationPolicy::at_most_once());
+    executor.push_error(
+        "writer",
+        ariadne::contracts::CoreError::ProviderRequest {
+            service: "mock-provider".to_owned(),
+            outcome: ariadne::contracts::ExternalDispatchOutcome::DispatchedUnknown,
+            message: "connection closed after dispatch".to_owned(),
+        },
+    );
+
+    let status = runtime
+        .run_persisted(&workflow, &mut executor, &store)
+        .unwrap();
+
+    assert_eq!(status, RunStatus::Failed);
+    assert_eq!(executor.call_count("writer"), 1);
+    let operation = store
+        .list_operations(&workflow.id, &run_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(operation.status, WorkflowOperationStatus::InDoubt);
+    assert_eq!(
+        operation.response_policy,
+        WorkflowOperationResponsePolicy::RequireExecutorReceipt
+    );
+    let persisted = store.load_state(&workflow.id, &run_id).unwrap().unwrap();
+    assert_eq!(persisted.status, RunStatus::Failed);
+    assert!(persisted.nodes[&NodeId::from("writer")]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("at-most-once"));
+
+    let mut restarted = WorkflowRuntime::from_state(persisted);
+    assert_eq!(
+        restarted
+            .run_persisted(&workflow, &mut executor, &store)
+            .unwrap(),
+        RunStatus::Failed
+    );
+    assert_eq!(executor.call_count("writer"), 1);
+}
+
+#[test]
 fn confirmed_not_dispatched_error_aborts_operation_and_uses_normal_retry_policy() {
     let store = SqliteWorkflowRuntimeStore::open_in_memory().unwrap();
     let workflow = WorkflowDefinition {
@@ -1535,6 +1883,7 @@ fn confirmed_not_dispatched_error_aborts_operation_and_uses_normal_retry_policy(
         .as_mut()
         .unwrap()
         .next_retry_at_ms = Some(0);
+    runtime.state.next_retry_at_ms = Some(0);
     let status = runtime
         .run_persisted(&workflow, &mut executor, &store)
         .unwrap();
@@ -2756,6 +3105,129 @@ fn ui_llm_node_uses_prompt_template_and_project_provider_defaults() {
     let prompt = format!("{:?}", requests[0].messages);
     assert!(prompt.contains("你是 Writer 节点"));
     assert!(prompt.contains("根据本章大纲续写"));
+}
+
+#[test]
+fn writing_node_can_call_project_search_before_final_answer() {
+    let temp = tempfile::tempdir().unwrap();
+    ConfigStore::new(temp.path()).load_or_create().unwrap();
+    let permissions = PermissionPolicy {
+        readable_file_roots: vec![temp.path().to_path_buf()],
+        writable_file_roots: vec![temp.path().to_path_buf()],
+        ..PermissionPolicy::default()
+    };
+    let documents = FileDocumentService::new(permissions, temp.path().join(".runtime/artifacts"));
+    documents
+        .create_document(DocumentWriteRequest {
+            path: temp.path().join("documents/chapter-1.md"),
+            content: "林岚把银色钥匙藏进旧钟表，约定黎明前回来。".to_owned(),
+            format: None,
+            base_version: None,
+        })
+        .unwrap();
+    let retrieval =
+        ProjectRetrievalRuntime::open(temp.path(), &MemorySecretStore::default()).unwrap();
+    assert_eq!(retrieval.process_outbox().unwrap(), 1);
+
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let provider = ProjectSearchLlmProvider::default();
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf-search"),
+        run_id: RunId::from("run-search"),
+        node_id: NodeId::from("writer"),
+        operation_id: "op-writer-search".to_owned(),
+        operation_attempt: 1,
+        request_hash: "request-writer-search".to_owned(),
+        type_name: "writer".to_owned(),
+        config: json!({ "prompt_template": "续写并先核对项目事实" }),
+        inputs: PortMap::new(),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
+    };
+
+    let output = execute_llm_node_with_project_search(
+        request,
+        &provider,
+        &ledger,
+        WorkflowLlmSearchOptions {
+            default_provider_id: Some("project-search-provider"),
+            default_model_id: Some("model"),
+            project_search: Some((
+                &retrieval,
+                ariadne::retrieval::project_search_tool_definition("writer-search", "检索项目事实"),
+            )),
+            web_search: None,
+            max_tool_rounds: 4,
+        },
+    )
+    .unwrap();
+
+    assert!(format!("{:?}", output.outputs).contains("已根据项目检索完成"));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tools[0].name, "writer-search");
+    let second_round = serde_json::to_string(&requests[1].messages).unwrap();
+    assert!(second_round.contains("银色钥匙"));
+    assert!(second_round.contains("chapter-1.md"));
+}
+
+#[test]
+fn writing_node_can_call_web_search_before_final_answer() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let provider = WebSearchLlmProvider::default();
+    let search_provider = MockWebSearchProvider;
+    let permission_policy = PermissionPolicy {
+        allow_network: true,
+        allow_web_search: true,
+        ..PermissionPolicy::default()
+    };
+    let request = WorkflowNodeExecutionRequest {
+        workflow_id: WorkflowId::from("wf-web-search"),
+        run_id: RunId::from("run-web-search"),
+        node_id: NodeId::from("writer"),
+        operation_id: "op-writer-web-search".to_owned(),
+        operation_attempt: 1,
+        request_hash: "request-writer-web-search".to_owned(),
+        type_name: "writer".to_owned(),
+        config: json!({ "prompt_template": "写作前核对公开资料" }),
+        inputs: PortMap::new(),
+        communication_messages: Vec::new(),
+        metadata: Value::Null,
+        cancellation: ariadne::contracts::ExecutionCancellation::new(),
+        dispatch_authorization: Default::default(),
+    };
+
+    let output = execute_llm_node_with_search_tools(
+        request,
+        &provider,
+        &ledger,
+        WorkflowLlmSearchOptions {
+            default_provider_id: Some("web-search-llm"),
+            default_model_id: Some("model"),
+            project_search: None,
+            web_search: Some((
+                &search_provider,
+                &permission_policy,
+                ariadne::providers::web_search_tool_definition(
+                    "writer-web-search",
+                    "搜索公开互联网",
+                ),
+            )),
+            max_tool_rounds: 4,
+        },
+    )
+    .unwrap();
+
+    assert!(format!("{:?}", output.outputs).contains("已根据 Web 搜索完成"));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tools[0].name, "writer-web-search");
+    let second_round = serde_json::to_string(&requests[1].messages).unwrap();
+    assert!(second_round.contains("https://example.test/moon-2026"));
+    assert!(second_round.contains("公开资料摘要"));
 }
 
 /// F13：节点 config.timeout_ms / budget_usd 必须进入真实 LLM 调用上下文，不可硬编码 120s 忽略。
@@ -4592,6 +5064,7 @@ fn runtime_retries_retryable_external_errors_with_backoff_events() {
         .as_mut()
         .unwrap()
         .next_retry_at_ms = Some(0);
+    runtime.state.next_retry_at_ms = Some(0);
     let status = runtime.run(&workflow, &mut executor).unwrap();
     assert_eq!(status, RunStatus::Queued);
     assert_eq!(executor.call_count("llm"), 2);
@@ -4612,6 +5085,7 @@ fn runtime_retries_retryable_external_errors_with_backoff_events() {
         .as_mut()
         .unwrap()
         .next_retry_at_ms = Some(0);
+    runtime.state.next_retry_at_ms = Some(0);
     let status = runtime.run(&workflow, &mut executor).unwrap();
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!(executor.call_count("llm"), 3);
@@ -4656,6 +5130,7 @@ fn runtime_pauses_after_tool_argument_errors_exhaust_retries() {
             .as_mut()
             .unwrap()
             .next_retry_at_ms = Some(0);
+        runtime.state.next_retry_at_ms = Some(0);
         runtime.run(&workflow, &mut executor).unwrap();
     }
 
@@ -4793,6 +5268,155 @@ fn builtin_condition_node_outputs_branch_values() {
         .contains_key("passed"));
 }
 
+/// 验证 condition 的 true/false 控制边只执行被选分支，未选分支显式记为跳过。
+#[test]
+fn builtin_condition_node_routes_control_branches() {
+    for selected in [true, false] {
+        let workflow = WorkflowDefinition {
+            id: WorkflowId::from("wf"),
+            name: "Condition branches".to_owned(),
+            nodes: vec![
+                node("source", "source"),
+                NodeInstance {
+                    id: NodeId::from("condition"),
+                    type_name: "condition".to_owned(),
+                    label: None,
+                    config: json!({
+                        "input_alias": "flag",
+                        "operator": "equals",
+                        "expected": true,
+                    }),
+                    position: None,
+                },
+                node("true-node", "writer"),
+                node("false-node", "writer"),
+            ],
+            edges: vec![
+                Edge {
+                    id: EdgeId::from("source-data"),
+                    kind: WorkflowEdgeKind::Data,
+                    from: PortEndpoint {
+                        node_id: NodeId::from("source"),
+                        port_name: "flag".to_owned(),
+                    },
+                    to: PortEndpoint {
+                        node_id: NodeId::from("condition"),
+                        port_name: "input".to_owned(),
+                    },
+                    alias: Some("flag".to_owned()),
+                    communication: None,
+                },
+                Edge {
+                    id: EdgeId::from("source-control"),
+                    kind: WorkflowEdgeKind::Control,
+                    from: PortEndpoint {
+                        node_id: NodeId::from("source"),
+                        port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                    },
+                    to: PortEndpoint {
+                        node_id: NodeId::from("condition"),
+                        port_name: EXECUTION_INPUT_PORT.to_owned(),
+                    },
+                    alias: None,
+                    communication: None,
+                },
+                Edge {
+                    id: EdgeId::from("true-branch"),
+                    kind: WorkflowEdgeKind::Control,
+                    from: PortEndpoint {
+                        node_id: NodeId::from("condition"),
+                        port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                    },
+                    to: PortEndpoint {
+                        node_id: NodeId::from("true-node"),
+                        port_name: EXECUTION_INPUT_PORT.to_owned(),
+                    },
+                    alias: Some("true".to_owned()),
+                    communication: None,
+                },
+                Edge {
+                    id: EdgeId::from("false-branch"),
+                    kind: WorkflowEdgeKind::Control,
+                    from: PortEndpoint {
+                        node_id: NodeId::from("condition"),
+                        port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                    },
+                    to: PortEndpoint {
+                        node_id: NodeId::from("false-node"),
+                        port_name: EXECUTION_INPUT_PORT.to_owned(),
+                    },
+                    alias: Some("false".to_owned()),
+                    communication: None,
+                },
+                Edge {
+                    id: EdgeId::from("true-branch-data"),
+                    kind: WorkflowEdgeKind::Data,
+                    from: PortEndpoint {
+                        node_id: NodeId::from("condition"),
+                        port_name: "branch".to_owned(),
+                    },
+                    to: PortEndpoint {
+                        node_id: NodeId::from("true-node"),
+                        port_name: "input".to_owned(),
+                    },
+                    alias: Some("condition_branch".to_owned()),
+                    communication: None,
+                },
+                Edge {
+                    id: EdgeId::from("false-branch-data"),
+                    kind: WorkflowEdgeKind::Data,
+                    from: PortEndpoint {
+                        node_id: NodeId::from("condition"),
+                        port_name: "branch".to_owned(),
+                    },
+                    to: PortEndpoint {
+                        node_id: NodeId::from("false-node"),
+                        port_name: "input".to_owned(),
+                    },
+                    alias: Some("condition_branch".to_owned()),
+                    communication: None,
+                },
+            ],
+            metadata: Value::Null,
+        };
+        let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-1")).unwrap();
+        let mut external = ScriptedExternalExecutor {
+            scripted: ScriptedExecutor::default(),
+        };
+        let mut source_output = PortMap::new();
+        source_output.insert("flag".to_owned(), PortValue::inline(selected));
+        external.scripted.outputs.insert(
+            "source".to_owned(),
+            vec![WorkflowNodeExecutionOutput {
+                outputs: source_output,
+                ..WorkflowNodeExecutionOutput::default()
+            }],
+        );
+        external
+            .scripted
+            .push("true-node", WorkflowNodeExecutionOutput::default());
+        external
+            .scripted
+            .push("false-node", WorkflowNodeExecutionOutput::default());
+        {
+            let mut executor = BuiltinWorkflowNodeExecutor::new(&mut external);
+            assert_eq!(
+                runtime.run(&workflow, &mut executor).unwrap(),
+                RunStatus::Succeeded
+            );
+        }
+
+        let executed = if selected { "true-node" } else { "false-node" };
+        let skipped = if selected { "false-node" } else { "true-node" };
+        assert_eq!(external.scripted.call_count(executed), 1);
+        assert_eq!(external.scripted.call_count(skipped), 0);
+        assert_eq!(
+            runtime.state.nodes[&NodeId::from(skipped)].metadata["branch_skipped"],
+            json!(true)
+        );
+    }
+}
+
 /// 验证 approval 节点暂停运行，并在确认后回写审批输出。
 #[test]
 fn builtin_approval_node_pauses_and_resume_publishes_result() {
@@ -4828,6 +5452,15 @@ fn builtin_approval_node_pauses_and_resume_publishes_result() {
         approval_node.outputs.get("approved"),
         Some(PortValue::Inline { value }) if value == &json!(true)
     ));
+    assert_eq!(
+        runtime.run(&workflow, &mut executor).unwrap(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(runtime.state.confirmations.len(), 1);
+    assert_eq!(
+        runtime.state.nodes[&NodeId::from("approval")].execution_attempts,
+        1
+    );
 }
 
 /// 验证 loop 节点按显式目标重跑，直到停止条件满足。
@@ -5097,6 +5730,48 @@ fn document_export_sink_writes_export_artifact() {
         .join("exports")
         .join("book.md")
         .exists());
+    let markdown = fs::read(
+        temp_dir
+            .path()
+            .join(".runtime")
+            .join("artifacts")
+            .join("exports")
+            .join("book.md"),
+    )
+    .unwrap();
+    assert!(markdown.starts_with(b"# Book"));
+
+    for (index, format) in ["epub", "pdf", "json"].into_iter().enumerate() {
+        let mut format_request = request.clone();
+        format_request.operation_id = format!("op-export-{format}");
+        let artifact_id = format!("exports/book-{index}.{format}");
+        let mut inputs = ariadne::contracts::PortMap::new();
+        inputs.insert("chapter".to_owned(), PortValue::inline("Chapter body"));
+        sink.export_artifact(
+            &format_request,
+            WorkflowExportRequest {
+                artifact_id: artifact_id.clone(),
+                format: format.to_owned(),
+                title: Some("Book".to_owned()),
+                inputs,
+            },
+        )
+        .unwrap();
+        let bytes = fs::read(
+            temp_dir
+                .path()
+                .join(".runtime")
+                .join("artifacts")
+                .join(&artifact_id),
+        )
+        .unwrap();
+        match format {
+            "epub" => assert!(bytes.starts_with(b"PK")),
+            "pdf" => assert!(bytes.starts_with(b"%PDF-1.4")),
+            "json" => assert!(bytes.starts_with(b"{")),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]

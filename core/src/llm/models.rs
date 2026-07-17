@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -147,6 +149,60 @@ pub trait ToolExecutor: Send + Sync {
         context: &ToolExecutionContext,
         call: &ToolCall,
     ) -> crate::contracts::CoreResult<ToolExecutionOutput>;
+}
+
+/// 按工具名把同一轮 LLM tool call 路由到不同执行器。
+///
+/// 项目检索、Web 搜索和后续通用工具可在同一节点同时出现，调用方无需把多个
+/// 完全不同的副作用边界塞进单一特殊执行器。
+#[derive(Default)]
+pub struct ToolExecutorRouter<'a> {
+    routes: BTreeMap<String, &'a dyn ToolExecutor>,
+}
+
+impl<'a> ToolExecutorRouter<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(
+        &mut self,
+        tool_name: impl Into<String>,
+        executor: &'a dyn ToolExecutor,
+    ) -> crate::contracts::CoreResult<()> {
+        let tool_name = tool_name.into();
+        if tool_name.trim().is_empty() {
+            return Err(crate::contracts::CoreError::validation(
+                "tool route name cannot be empty",
+            ));
+        }
+        if self.routes.insert(tool_name.clone(), executor).is_some() {
+            return Err(crate::contracts::CoreError::validation(format!(
+                "duplicate tool executor route: {tool_name}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+}
+
+impl ToolExecutor for ToolExecutorRouter<'_> {
+    fn execute(
+        &self,
+        context: &ToolExecutionContext,
+        call: &ToolCall,
+    ) -> crate::contracts::CoreResult<ToolExecutionOutput> {
+        let executor = self.routes.get(&call.name).ok_or_else(|| {
+            crate::contracts::CoreError::validation(format!(
+                "tool is not routed in this scope: {}",
+                call.name
+            ))
+        })?;
+        executor.execute(context, call)
+    }
 }
 
 /// LLM 服务审计事件类型。

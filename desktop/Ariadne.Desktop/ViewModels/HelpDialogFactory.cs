@@ -28,11 +28,22 @@ internal static class HelpDialogFactory
 
     public static ConfirmDialogViewModel CreateFeedbackDialog(DisplayNameService displayNames)
     {
-        return CreateInfoDialog(
+        return new ConfirmDialogViewModel(
             displayNames.Text("ui.feedback.title"),
             displayNames.Text("ui.feedback.message"),
-            displayNames);
+            new[]
+            {
+                new DialogButton(displayNames.Text("ui.feedback.open_issue"), DialogButtonVariant.Primary, 1),
+                new DialogButton(displayNames.Text("ui.common.close"), DialogButtonVariant.Subtle, 0),
+            })
+        {
+            Severity = DialogSeverity.Info,
+            CancelResultIndex = 0,
+            ConfirmResultIndex = 1,
+        }.SealKeyboardRoles();
     }
+
+    internal const string FeedbackIssueUrl = "https://github.com/yanshaoqwq/Ariadne/issues/new";
 
     private static ConfirmDialogViewModel CreateInfoDialog(string title, string message, DisplayNameService displayNames)
     {

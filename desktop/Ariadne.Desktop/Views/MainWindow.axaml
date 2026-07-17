@@ -32,7 +32,7 @@
       CornerRadius="10"
       ClipToBounds="True">
     <Panel>
-    <Grid RowDefinitions="40,Auto,*">
+    <Grid RowDefinitions="40,Auto,Auto,*">
 
       <!-- ================= 顶栏（自定义标题栏 + 项目 + 预算） ================= -->
       <Grid
@@ -162,8 +162,38 @@
                    Foreground="{DynamicResource Ariadne.StatusWarning}" />
       </Border>
 
+      <!-- U1：默认只显示本地化摘要，作者主动展开后才显示脱敏诊断。 -->
+      <Border Grid.Row="2"
+              IsVisible="{Binding HasDiagnostic}"
+              Background="{DynamicResource Ariadne.LogWarningBg}"
+              BorderBrush="{DynamicResource Ariadne.StatusWarning}"
+              BorderThickness="0,0,0,1"
+              Padding="12,6">
+        <StackPanel Spacing="6">
+          <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+            <TextBlock Grid.Column="0" Text="{Binding DiagnosticTitleText}"
+                       Classes="caption" FontWeight="SemiBold" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="{Binding DiagnosticSummaryText}"
+                       Classes="caption" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <Button Grid.Column="2" Classes="subtle" Command="{Binding ToggleDiagnosticCommand}"
+                    Content="{Binding DiagnosticToggleText}"
+                    AutomationProperties.Name="{Binding DiagnosticToggleText}" />
+            <Button Grid.Column="3" Classes="subtle" Command="{Binding ClearDiagnosticCommand}"
+                    Content="{Binding DiagnosticClearText}"
+                    AutomationProperties.Name="{Binding DiagnosticClearText}" />
+          </Grid>
+          <Border IsVisible="{Binding IsDiagnosticExpanded}"
+                  Background="{DynamicResource Ariadne.BackgroundSubtle}"
+                  BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                  BorderThickness="1" CornerRadius="4" Padding="8">
+            <TextBlock Text="{Binding DiagnosticDetailText}" Classes="caption"
+                       TextWrapping="Wrap" MaxHeight="96" />
+          </Border>
+        </StackPanel>
+      </Border>
+
       <!-- ================= 主体：侧栏 + 内容 ================= -->
-      <Grid Grid.Row="2" ColumnDefinitions="Auto,*">
+      <Grid Grid.Row="3" ColumnDefinitions="Auto,*">
 
         <!-- 左侧栏：折叠时仅图标（U66） -->
         <Border
@@ -256,6 +286,7 @@
       <!-- ================= 全局弹窗遮罩 ================= -->
       <Border x:Name="DialogScrim"
               Grid.Row="1"
+              Grid.RowSpan="3"
               Background="{DynamicResource Ariadne.Scrim}"
               IsVisible="{Binding Dialog.IsOpen}"
               PointerPressed="OnDialogScrimPressed">

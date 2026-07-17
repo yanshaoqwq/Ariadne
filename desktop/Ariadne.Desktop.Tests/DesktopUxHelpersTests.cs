@@ -23,6 +23,24 @@ public sealed class DesktopUxHelpersTests
     }
 
     [Fact]
+    public void FeedbackDialog_OffersRepositoryIssueAction()
+    {
+        var names = Names();
+        var dialog = HelpDialogFactory.CreateFeedbackDialog(names);
+
+        Assert.Equal(names.Text("ui.feedback.title"), dialog.Title);
+        Assert.Equal(2, dialog.Buttons.Count);
+        Assert.Equal(names.Text("ui.feedback.open_issue"), dialog.Buttons[0].Text);
+        Assert.Equal(1, dialog.ConfirmResultIndex);
+        Assert.Equal(0, dialog.CancelResultIndex);
+        Assert.True(dialog.Buttons[0].IsDefault);
+        Assert.True(dialog.Buttons[1].IsCancel);
+        Assert.Equal("https://github.com/yanshaoqwq/Ariadne/issues/new", HelpDialogFactory.FeedbackIssueUrl);
+        Assert.True(Uri.TryCreate(HelpDialogFactory.FeedbackIssueUrl, UriKind.Absolute, out var issueUri));
+        Assert.Equal(Uri.UriSchemeHttps, issueUri!.Scheme);
+    }
+
+    [Fact]
     public void BackendDiscovery_PrefersPackagedRelativeSidecarAndPreservesSpaces()
     {
         using var temp = new TemporaryDirectory("Ariadne release with spaces");
@@ -61,6 +79,10 @@ public sealed class DesktopUxHelpersTests
     [InlineData("external", "ui.error.external")]
     [InlineData("io", "ui.error.io")]
     [InlineData("ipc", "ui.error.ipc")]
+    [InlineData("resource_limit", "ui.error.resource_limit")]
+    [InlineData("external_outcome_unknown", "ui.error.external_outcome_unknown")]
+    [InlineData("serialization", "ui.error.serialization")]
+    [InlineData("internal", "ui.error.internal")]
     [InlineData("unknown", "ui.error.unknown")]
     public void UserFacingError_PrimaryForCode_IsLocalizedKeyOnly(string code, string key)
     {
@@ -141,6 +163,31 @@ public sealed class DesktopUxHelpersTests
     }
 
     [Fact]
+    public void MainWindow_DiagnosticPanel_ReceivesRedactedSecondaryFailureAndCanClear()
+    {
+        var names = Names();
+        var backend = System.Reflection.DispatchProxy.Create<IAriadneBackendClient, UnimplementedBackendProxy>();
+        var window = new MainWindowViewModel(names, backend);
+
+        var primary = UserFacingError.Format(
+            BackendException.FromIpcPayload(
+                "validation",
+                "invalid project at /home/writer/private/project.yaml"),
+            names);
+
+        Assert.True(window.HasDiagnostic);
+        Assert.False(window.IsDiagnosticExpanded);
+        Assert.Equal(primary, window.DiagnosticSummaryText);
+        Assert.DoesNotContain("/home/writer", window.DiagnosticDetailText, StringComparison.Ordinal);
+
+        window.ToggleDiagnosticCommand.Execute(null);
+        Assert.True(window.IsDiagnosticExpanded);
+        window.ClearDiagnosticCommand.Execute(null);
+        Assert.False(window.HasDiagnostic);
+        Assert.Empty(window.DiagnosticDetailText);
+    }
+
+    [Fact]
     public void UserFacingError_Short_TruncatesForTitleBar()
     {
         var names = Names();
@@ -212,6 +259,38 @@ public sealed class DesktopUxHelpersTests
     }
 
     [Fact]
+    public async Task C9_IpcResponseRouter_CompletesRequestsByIdOutOfOrder()
+    {
+        var router = new IpcResponseRouter();
+        Assert.True(router.TryRegister("slow", out var slow));
+        Assert.True(router.TryRegister("fast", out var fast));
+
+        Assert.True(router.TryComplete("fast", "fast-response"));
+        Assert.Equal("fast-response", await fast);
+        Assert.False(slow.IsCompleted);
+
+        Assert.True(router.TryComplete("slow", "slow-response"));
+        Assert.Equal("slow-response", await slow);
+    }
+
+    [Fact]
+    public async Task C9_IpcResponseRouter_CancelsOnlyTargetRequest()
+    {
+        var router = new IpcResponseRouter();
+        using var cancellation = new CancellationTokenSource();
+        Assert.True(router.TryRegister("target", out var target));
+        Assert.True(router.TryRegister("other", out var other));
+
+        cancellation.Cancel();
+        Assert.True(router.TryCancel("target", cancellation.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await target);
+        Assert.False(other.IsCompleted);
+
+        Assert.True(router.TryComplete("other", "ok"));
+        Assert.Equal("ok", await other);
+    }
+
+    [Fact]
     public void EnJaLocaleStubs_AreNotProductLanguages()
     {
         var names = Names();
@@ -264,7 +343,7 @@ public sealed class DesktopUxHelpersTests
         dialog.RequestConfirm();
         Assert.False(dialog.Completion.IsCompleted);
         dialog.Cancel();
-        Assert.Equal(1, await dialog.Completion.ConfigureAwait(false));
+        Assert.Equal(1, await dialog.Completion);
     }
 
     [Fact]
@@ -314,7 +393,7 @@ public sealed class DesktopUxHelpersTests
         Assert.True(dialog.AllowEnterConfirm);
         Assert.Contains("作品", dialog.Message, StringComparison.Ordinal);
         dialog.RequestConfirm();
-        Assert.Equal((int)UnsavedLeaveChoice.Save, await dialog.Completion.ConfigureAwait(false));
+        Assert.Equal((int)UnsavedLeaveChoice.Save, await dialog.Completion);
     }
 
     [Fact]
@@ -660,8 +739,145 @@ public sealed class DesktopUxHelpersTests
         Assert.DoesNotContain("foreach (var guard in dirty)\n                {\n                    if (!await guard.SaveUnsavedChangesAsync()", main);
     }
 
+    [Fact]
+    public void ProviderModelRefresh_IsReadOnlyAndRejectsDraftProviders()
+    {
+        var settings = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("ViewModels"),
+            "SettingsPageViewModel.cs"));
+        var start = settings.IndexOf("private async Task FetchModelsAsync()", StringComparison.Ordinal);
+        var end = settings.IndexOf("private Task<bool> SaveGeneralAsync()", start, StringComparison.Ordinal);
 
-        private static string FindRepoResource(string fileName)
+        Assert.True(start >= 0 && end > start);
+        var refresh = settings[start..end];
+        Assert.Contains("FetchProviderModelsAsync", refresh, StringComparison.Ordinal);
+        Assert.Contains("CanUsePersistedProvider", refresh, StringComparison.Ordinal);
+        Assert.DoesNotContain("SaveModelAsync", refresh, StringComparison.Ordinal);
+        Assert.Contains("RefreshModelsCommand = new RelayCommand(() => _ = FetchModelsAsync(), CanUsePersistedProvider)", settings, StringComparison.Ordinal);
+        Assert.Contains("SaveProviderKeyCommand = new RelayCommand(() => _ = SaveProviderKeyAsync(), CanUsePersistedProvider)", settings, StringComparison.Ordinal);
+        Assert.Contains("!selected.IsDraft", settings, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProviderRemoval_UsesImpactPreviewDangerConfirmationAndRevision()
+    {
+        var settings = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("ViewModels"),
+            "SettingsPageViewModel.cs"));
+        var view = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("Views"),
+            "SettingsPageView.axaml"));
+
+        Assert.Contains("PreviewProviderRemovalAsync(providerId)", settings, StringComparison.Ordinal);
+        Assert.Contains("preview.BlockingReferences.Count > 0", settings, StringComparison.Ordinal);
+        Assert.Contains("Severity = DialogSeverity.Danger", settings, StringComparison.Ordinal);
+        Assert.Contains("RemoveProviderAsync(providerId, preview.Revision)", settings, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding RemoveProviderCommand}\"", view, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SettingsNavigation_UsesOneVerticalCategoryModelWithVisibleSectionTitles()
+    {
+        var settings = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("ViewModels"),
+            "SettingsPageViewModel.cs"));
+        var view = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("Views"),
+            "SettingsPageView.axaml"));
+        var codeBehind = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("Views"),
+            "SettingsPageView.axaml.cs"));
+
+        Assert.Single(Regex.Matches(view, "ItemsSource=\\\"\\{Binding Tabs\\}\\\""));
+        Assert.Contains("<ListBox ItemsSource=\"{Binding Tabs}\"", view, StringComparison.Ordinal);
+        Assert.Contains("SelectedItem=\"{Binding NavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
+        Assert.Equal(22, Regex.Matches(
+            view,
+            "Text=\\\"\\{Binding [A-Za-z]+SectionTitle\\}\\\" Classes=\\\"subtitle\\\"").Count);
+        Assert.DoesNotContain("SectionIndexItems", settings, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsSectionSelected", settings, StringComparison.Ordinal);
+        Assert.DoesNotContain("RequestScrollToSection", settings, StringComparison.Ordinal);
+        Assert.DoesNotContain("ScrollToSection", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("SettingsScrollPad", codeBehind, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProjectAiConversationUi_AppendsRevisionDeltaWithoutRebuildingBubbles()
+    {
+        var history = new List<ProjectAiChatMessage>();
+        var bubbles = new System.Collections.ObjectModel.ObservableCollection<ChatBubbleViewModel>();
+        var firstTurn = new ProjectAiResponse(
+            "第一轮回答",
+            Array.Empty<ProjectAiChatMessage>(),
+            null,
+            string.Empty,
+            ConversationId: "works",
+            ConversationRevision: 1,
+            NewMessages: new[]
+            {
+                new ProjectAiChatMessage("user", "第一轮问题"),
+                new ProjectAiChatMessage("assistant", "第一轮回答"),
+            },
+            ConversationSnapshot: new[]
+            {
+                new ProjectAiChatMessage("user", "第一轮问题"),
+                new ProjectAiChatMessage("assistant", "第一轮回答"),
+            },
+            HistoryTruncated: true);
+
+        var revision = ProjectAiConversationUi.Apply(firstTurn, history, bubbles, currentRevision: null);
+
+        Assert.Equal(1, revision);
+        Assert.Equal(firstTurn.ConversationSnapshot, history);
+        Assert.Equal(2, bubbles.Count);
+        Assert.True(ProjectAiConversationUi.ContextWasCompacted(firstTurn));
+
+        revision = ProjectAiConversationUi.Apply(firstTurn, history, bubbles, revision);
+        Assert.Equal(1, revision);
+        Assert.Equal(2, bubbles.Count);
+
+        var secondTurn = new ProjectAiResponse(
+            "第二轮回答",
+            Array.Empty<ProjectAiChatMessage>(),
+            null,
+            string.Empty,
+            ConversationId: "works",
+            ConversationRevision: 2,
+            NewMessages: new[]
+            {
+                new ProjectAiChatMessage("user", "第二轮问题"),
+                new ProjectAiChatMessage("assistant", "第二轮回答"),
+            });
+
+        revision = ProjectAiConversationUi.Apply(secondTurn, history, bubbles, revision);
+
+        Assert.Equal(2, revision);
+        Assert.Equal(4, history.Count);
+        Assert.Equal("第二轮回答", history[^1].Content);
+        Assert.Equal(4, bubbles.Count);
+        Assert.Equal("第一轮问题", bubbles[0].Content);
+        Assert.Equal("第二轮回答", bubbles[3].Content);
+    }
+
+    [Fact]
+    public void ProjectAiPages_UseSharedRevisionDeltaProtocol()
+    {
+        var works = File.ReadAllText(Path.Combine(ResolveDesktopSource("ViewModels"), "WorksPageViewModel.cs"));
+        var workspace = File.ReadAllText(Path.Combine(ResolveDesktopSource("ViewModels"), "WorkspacePageViewModel.cs"));
+
+        Assert.Contains("ProjectAiConversationUi.Apply(", works, StringComparison.Ordinal);
+        Assert.Contains("ProjectAiConversationUi.Apply(", workspace, StringComparison.Ordinal);
+        Assert.Contains("conversationRevision: _projectAiConversationRevision", works, StringComparison.Ordinal);
+        Assert.Contains("conversationRevision: _projectAiConversationRevision", workspace, StringComparison.Ordinal);
+        Assert.Contains("ProjectAiChatAsync(\n                instruction,\n                workflowIdToRun", works, StringComparison.Ordinal);
+        Assert.Contains("var message = ProjectAiMessage;", workspace, StringComparison.Ordinal);
+        Assert.Contains("ProjectAiChatAsync(\n                message,\n                workflowIdToRun", workspace, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProjectAiBubbles.Clear()", works, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProjectAiBubbles.Clear()", workspace, StringComparison.Ordinal);
+    }
+
+
+    private static string FindRepoResource(string fileName)
     {
         var walk = new DirectoryInfo(AppContext.BaseDirectory);
         for (var i = 0; i < 10 && walk is not null; i++)

@@ -3,9 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::contracts::{
-    ArtifactKind, CoreError, CoreResult, NodeId, PortMap, PortValue, RunControl,
-};
+use crate::contracts::{ArtifactKind, CoreError, CoreResult, NodeId, PortMap, PortValue};
 use crate::skills::{stable_json_hash, stable_text_hash};
 use crate::workflow::{
     RuntimeConfirmation, RuntimeConfirmationState, RuntimeLoopControl, WorkflowNodeExecutionOutput,
@@ -333,16 +331,13 @@ fn execute_approval(
         }),
     };
 
-    // 普通模式通过 run_control 暂停；Auto approval 仍生成 confirmation，
-    // 这样审计记录和下游输出形态保持一致。
+    // 待确认项由 runtime 的统一 pending-confirmation 门禁暂停运行。
+    // 节点本身先记录为成功，审批解决后才能复用已有输出推进下游，
+    // 避免 Resume 重新执行审批节点并再次生成同一个待审项。
     Ok(WorkflowNodeExecutionOutput {
         outputs,
         confirmations: vec![confirmation],
-        run_control: if config.auto_approve {
-            None
-        } else {
-            Some(RunControl::Pause)
-        },
+        run_control: None,
         metadata: json!({ "approval_id": config.approval_id }),
         ..WorkflowNodeExecutionOutput::default()
     })

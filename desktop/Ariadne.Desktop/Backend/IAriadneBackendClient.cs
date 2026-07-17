@@ -33,13 +33,21 @@ public interface IAriadneBackendClient
 
     Task<AppSettings> SaveAppSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default);
 
+    Task<GeneralSectionSettings> SaveGeneralSectionSettingsAsync(GeneralSectionSettings settings, CancellationToken cancellationToken = default);
+
     Task<ProviderConfigStatus> GetProviderConfigAsync(CancellationToken cancellationToken = default);
 
     Task<ProviderConfigStatus> SaveProviderSettingsAsync(ProviderSettingsUpdate update, CancellationToken cancellationToken = default);
 
+    Task<ProviderConfigStatus> SaveProviderSectionSettingsAsync(ProviderSectionSettings settings, CancellationToken cancellationToken = default);
+
+    Task<ProviderRemovalPreview> PreviewProviderRemovalAsync(string provider, CancellationToken cancellationToken = default);
+
+    Task<ProviderConfigStatus> RemoveProviderAsync(string provider, string expectedRevision, CancellationToken cancellationToken = default);
+
     Task<ProviderModelsResult> FetchProviderModelsAsync(string? providerId = null, CancellationToken cancellationToken = default);
 
-    Task SaveProviderKeyAsync(string provider, string key, CancellationToken cancellationToken = default);
+    Task<ProviderConfigStatus> SaveProviderKeyAsync(string provider, string key, CancellationToken cancellationToken = default);
 
     Task<NodePresetSettings> GetNodePresetSettingsAsync(CancellationToken cancellationToken = default);
 
@@ -48,6 +56,8 @@ public interface IAriadneBackendClient
     Task<AutomationSettings> GetAutomationSettingsAsync(CancellationToken cancellationToken = default);
 
     Task<AutomationSettings> SaveAutomationSettingsAsync(AutomationSettings settings, CancellationToken cancellationToken = default);
+
+    Task<AutomationSectionSettings> SaveAutomationSectionSettingsAsync(AutomationSectionSettings settings, CancellationToken cancellationToken = default);
 
     Task<PermissionsSettings> GetPermissionsSettingsAsync(CancellationToken cancellationToken = default);
 
@@ -73,6 +83,8 @@ public interface IAriadneBackendClient
 
     Task<RagSettings> SaveRagSettingsAsync(RagSettings settings, CancellationToken cancellationToken = default);
 
+    Task<MiscSectionSettings> SaveMiscSectionSettingsAsync(MiscSectionSettings settings, CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<TemplateSummary>> SearchTemplatesAsync(string baseUrl, string query, int page = 0, CancellationToken cancellationToken = default);
 
     Task<TemplateDetail> GetTemplateDetailAsync(string baseUrl, string id, CancellationToken cancellationToken = default);
@@ -95,12 +107,23 @@ public interface IAriadneBackendClient
 
     Task<ResolveInDoubtOperationResult> ResolveInDoubtOperationAsync(string operationId, string decision, object? response = null, string? reason = null, CancellationToken cancellationToken = default);
 
-    Task<ProjectAiResponse> ProjectAiChatAsync(string message, string? workflowIdToRun = null, CancellationToken cancellationToken = default);
+    Task<ProjectAiResponse> ProjectAiChatAsync(
+        string message,
+        string? workflowIdToRun = null,
+        string? referenceWorkflowId = null,
+        string? referenceRunId = null,
+        string? conversationId = null,
+        long? conversationRevision = null,
+        CancellationToken cancellationToken = default);
 
     Task<ProjectAiResponse> ProjectAiChatAsync(
         string message,
         IReadOnlyList<ProjectAiChatMessage> chatHistory,
         string? workflowIdToRun = null,
+        string? referenceWorkflowId = null,
+        string? referenceRunId = null,
+        string? conversationId = null,
+        long? conversationRevision = null,
         CancellationToken cancellationToken = default);
 
     Task<string> ReadProjectMemoryAsync(CancellationToken cancellationToken = default);
@@ -171,9 +194,9 @@ public interface IAriadneBackendClient
 
     Task<ResolveConfirmationResult> ResolveConfirmationAsync(string workflowId, string runId, string confirmationId, string decision, string? reviewReason = null, CancellationToken cancellationToken = default);
 
-    Task<IReadOnlyList<UiRunLogEntry>> QueryRunLogsAsync(string? level = null, string? query = null, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<UiRunLogEntry>> QueryRunLogsAsync(RunLogQuery query, CancellationToken cancellationToken = default);
 
-    Task MarkRunLogsReadAsync(CancellationToken cancellationToken = default);
+    Task<int> MarkRunLogsReadAsync(RunLogQuery filter, CancellationToken cancellationToken = default);
 
     Task<BudgetStatus> GetBudgetStatusAsync(CancellationToken cancellationToken = default);
 

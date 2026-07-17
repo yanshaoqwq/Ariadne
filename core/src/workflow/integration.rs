@@ -4,26 +4,31 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::contracts::{
-    ArtifactKind, CoreError, CoreResult, DocumentPatch, NodeId, PortMap, PortValue,
-    WorkflowDefinition, WorkflowEdgeKind,
+    ArtifactKind, CoreError, CoreResult, DocumentPatch, LoopPolicy, NodeId, PermissionPolicy,
+    PortMap, PortValue, WorkflowDefinition, WorkflowEdgeKind,
 };
 use crate::costs::CostLedger;
 use crate::documents::{
     ArtifactWriteRequest, DocumentReadRequest, DocumentRepository, FileDocumentService,
     PatchApplyReport, PatchCheckpointRequest,
 };
+use crate::frontend::service::{
+    render_chapters_epub, render_chapters_markdown, render_chapters_pdf,
+};
 use crate::git::GitService;
+use crate::llm::{tool_result_message, ToolExecutionContext, ToolExecutor, ToolExecutorRouter};
 use crate::providers::{
     LlmProvider, LlmRequest, LlmResponse, ProviderCallContext, ProviderExecutor, SearchProvider,
-    SearchProviderRequest,
+    SearchProviderRequest, ToolDefinition, WebSearchToolExecutor,
 };
 use crate::retrieval::{
     validate_product_search_limit, validate_product_search_result_budget, HybridSearch,
-    HybridSearchRequest,
+    HybridSearchRequest, ProjectRetrievalRuntime, ProjectSearchToolExecutor,
 };
 use crate::skills::{SkillExecutor, SkillManifest, SkillRunRequest};
 use crate::workflow::{
-    PatchWriteBackState, RuntimeReferenceResolver, WorkflowExportRequest, WorkflowExportSink,
+    ApprovalNodeConfig, ConditionNodeConfig, ExportNodeConfig, LoopNodeConfig, PatchWriteBackState,
+    RuntimeReferenceResolver, WorkflowExportRequest, WorkflowExportSink,
     WorkflowExternalNodeExecutor, WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest,
     WorkflowRuntime,
 };
@@ -35,6 +40,15 @@ pub type ExternalNodeHandler =
 pub type ExternalOperationReconciler = Box<
     dyn FnMut(&WorkflowNodeExecutionRequest) -> CoreResult<Option<WorkflowNodeExecutionOutput>>,
 >;
+
+#[derive(Default)]
+pub struct WorkflowLlmSearchOptions<'a> {
+    pub default_provider_id: Option<&'a str>,
+    pub default_model_id: Option<&'a str>,
+    pub project_search: Option<(&'a ProjectRetrievalRuntime, ToolDefinition)>,
+    pub web_search: Option<(&'a dyn SearchProvider, &'a PermissionPolicy, ToolDefinition)>,
+    pub max_tool_rounds: u32,
+}
 
 struct RoutedExternalNodeHandler {
     policy: crate::workflow::WorkflowOperationPolicy,
@@ -288,22 +302,42 @@ impl WorkflowExportSink for DocumentWorkflowExportSink<'_> {
         request: &WorkflowNodeExecutionRequest,
         export: WorkflowExportRequest,
     ) -> CoreResult<String> {
-        let payload = json!({
-            "operation_id": request.operation_id,
-            "workflow_id": request.workflow_id,
-            "run_id": request.run_id,
-            "node_id": request.node_id,
-            "format": export.format,
-            "title": export.title,
-            "inputs": export.inputs,
-        });
-        let bytes = serde_json::to_vec_pretty(&payload)?;
+        let format = export.format.trim().to_ascii_lowercase();
+        let title = export
+            .title
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "Export".to_owned());
+        let bytes = if format == "json" {
+            let payload = json!({
+                "operation_id": request.operation_id,
+                "workflow_id": request.workflow_id,
+                "run_id": request.run_id,
+                "node_id": request.node_id,
+                "format": format,
+                "title": export.title,
+                "inputs": export.inputs,
+            });
+            serde_json::to_vec_pretty(&payload)?
+        } else {
+            let chapters = export_chapters_from_inputs(&export.inputs, &title)?;
+            match format.as_str() {
+                "markdown" | "md" => render_chapters_markdown(&chapters).into_bytes(),
+                "epub" => render_chapters_epub(&chapters)?,
+                "pdf" => render_chapters_pdf(&chapters),
+                other => {
+                    return Err(CoreError::validation(format!(
+                        "unsupported workflow export format: {other}"
+                    )))
+                }
+            }
+        };
         request.dispatch_authorization.authorize_dispatch()?;
         let report = self.documents.write_artifact_with_cancellation(
             ArtifactWriteRequest {
                 artifact_id: export.artifact_id.clone(),
                 kind: ArtifactKind::Export,
-                media_type: export_media_type(&export.format).to_owned(),
+                media_type: export_media_type(&format).to_owned(),
                 bytes,
                 operation_id: Some(request.operation_id.clone()),
                 metadata: json!({
@@ -317,6 +351,28 @@ impl WorkflowExportSink for DocumentWorkflowExportSink<'_> {
         )?;
         Ok(report.descriptor.artifact_id)
     }
+}
+
+fn export_chapters_from_inputs(
+    inputs: &PortMap,
+    default_title: &str,
+) -> CoreResult<Vec<(String, String)>> {
+    if inputs.is_empty() {
+        return Ok(vec![(default_title.to_owned(), String::new())]);
+    }
+    inputs
+        .iter()
+        .map(|(alias, value)| {
+            let content = match value {
+                PortValue::Inline { value } => value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string()),
+                _ => serde_json::to_string_pretty(value)?,
+            };
+            Ok((alias.clone(), content))
+        })
+        .collect()
 }
 
 /// patch 写回执行结果。
@@ -528,18 +584,56 @@ pub fn execute_llm_node_with_defaults<L: CostLedger>(
     default_provider_id: Option<&str>,
     default_model_id: Option<&str>,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_llm_node_with_optional_search_tools(
+        request,
+        provider,
+        ledger,
+        WorkflowLlmSearchOptions {
+            default_provider_id,
+            default_model_id,
+            ..WorkflowLlmSearchOptions::default()
+        },
+    )
+}
+
+/// 使用项目级 Search tool 执行 LLM/写作节点；模型可按需多轮检索后再给出最终输出。
+pub fn execute_llm_node_with_project_search<L: CostLedger>(
+    request: WorkflowNodeExecutionRequest,
+    provider: &dyn LlmProvider,
+    ledger: &L,
+    options: WorkflowLlmSearchOptions<'_>,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_llm_node_with_optional_search_tools(request, provider, ledger, options)
+}
+
+/// 同时为 LLM/写作节点提供项目 Search 与外部 Web Search。
+pub fn execute_llm_node_with_search_tools<L: CostLedger>(
+    request: WorkflowNodeExecutionRequest,
+    provider: &dyn LlmProvider,
+    ledger: &L,
+    options: WorkflowLlmSearchOptions<'_>,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_llm_node_with_optional_search_tools(request, provider, ledger, options)
+}
+
+fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
+    request: WorkflowNodeExecutionRequest,
+    provider: &dyn LlmProvider,
+    ledger: &L,
+    options: WorkflowLlmSearchOptions<'_>,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
     let config = serde_json::from_value::<WorkflowLlmNodeConfig>(request.config.clone())?;
     let provider_id = config
         .provider_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .or(default_provider_id)
+        .or(options.default_provider_id)
         .ok_or_else(|| CoreError::validation("LLM node provider_id is not configured"))?;
     let model_id = config
         .model_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .or(default_model_id)
+        .or(options.default_model_id)
         .ok_or_else(|| CoreError::validation("LLM node model_id is not configured"))?;
     let input_prompt = resolve_llm_input_prompt(&request.inputs, config.prompt_alias.as_deref())?;
     let prompt_template = config
@@ -585,34 +679,130 @@ pub fn execute_llm_node_with_defaults<L: CostLedger>(
     }
 
     let executor = ProviderExecutor::new(ledger);
-    let response = executor.complete_llm(
-        provider,
-        &ProviderCallContext {
-            provider_id: provider_id.to_owned(),
-            operation_id: Some(request.operation_id.clone()),
-            workflow_id: Some(request.workflow_id.clone()),
-            run_id: Some(request.run_id.clone()),
-            node_id: Some(request.node_id.clone()),
-            tool_call_id: None,
-            timeout_ms,
-            max_retries: 0,
-            metadata: call_metadata.clone(),
-            cancellation: request.cancellation.clone(),
-            // F12-b：把 runtime 注入的派发栅栏传到 provider 真实副作用边界。
-            dispatch_authorization: request.dispatch_authorization.clone(),
-        },
-        LlmRequest {
-            model_id: model_id.to_owned(),
-            messages,
-            tools: Vec::new(),
-            temperature: None,
-            max_output_tokens: None,
-            stream: false,
-            metadata: call_metadata,
-        },
-    )?;
-    enforce_single_call_budget(single_call_budget_usd, response.cost_usd)?;
-    llm_response_to_output(response)
+    let base_context = ProviderCallContext {
+        provider_id: provider_id.to_owned(),
+        operation_id: Some(request.operation_id.clone()),
+        workflow_id: Some(request.workflow_id.clone()),
+        run_id: Some(request.run_id.clone()),
+        node_id: Some(request.node_id.clone()),
+        tool_call_id: None,
+        timeout_ms,
+        max_retries: 0,
+        metadata: call_metadata.clone(),
+        cancellation: request.cancellation.clone(),
+        // F12-b：把 runtime 注入的派发栅栏传到 provider 与检索真实副作用边界。
+        dispatch_authorization: request.dispatch_authorization.clone(),
+    };
+
+    if options.project_search.is_none() && options.web_search.is_none() {
+        let response = executor.complete_llm(
+            provider,
+            &base_context,
+            LlmRequest {
+                model_id: model_id.to_owned(),
+                messages,
+                tools: Vec::new(),
+                temperature: None,
+                max_output_tokens: None,
+                stream: false,
+                metadata: call_metadata,
+            },
+        )?;
+        enforce_single_call_budget(single_call_budget_usd, response.cost_usd)?;
+        return llm_response_to_output(response);
+    }
+
+    if options.max_tool_rounds == 0 || options.max_tool_rounds > 32 {
+        return Err(CoreError::validation(
+            "search tool max_tool_rounds must be between 1 and 32",
+        ));
+    }
+    let project_tool_executor = options.project_search.as_ref().map(|(retrieval, tool)| {
+        ProjectSearchToolExecutor::new(retrieval, base_context.clone(), [tool.name.clone()])
+    });
+    let web_tool_executor = options
+        .web_search
+        .as_ref()
+        .map(|(search_provider, policy, tool)| {
+            WebSearchToolExecutor::new(
+                *search_provider,
+                ledger,
+                policy,
+                base_context.clone(),
+                [tool.name.clone()],
+            )
+        });
+    let mut tool_router = ToolExecutorRouter::new();
+    if let (Some((_, tool)), Some(tool_executor)) = (
+        options.project_search.as_ref(),
+        project_tool_executor.as_ref(),
+    ) {
+        tool_router.register(tool.name.clone(), tool_executor)?;
+    }
+    if let (Some((_, _, tool)), Some(tool_executor)) =
+        (options.web_search.as_ref(), web_tool_executor.as_ref())
+    {
+        tool_router.register(tool.name.clone(), tool_executor)?;
+    }
+    let tools = options
+        .project_search
+        .iter()
+        .map(|(_, tool)| tool.clone())
+        .chain(options.web_search.iter().map(|(_, _, tool)| tool.clone()))
+        .collect::<Vec<_>>();
+    let tool_names = tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
+    for round in 0..=options.max_tool_rounds {
+        request.cancellation.check()?;
+        let mut round_context = base_context.clone();
+        round_context.operation_id = Some(format!("{}:llm-round-{round}", request.operation_id));
+        round_context.metadata = json!({
+            "node_metadata": call_metadata,
+            "tool_round": round,
+            "search_tools": tool_names,
+        });
+        let response = executor.complete_llm(
+            provider,
+            &round_context,
+            LlmRequest {
+                model_id: model_id.to_owned(),
+                messages: messages.clone(),
+                tools: tools.clone(),
+                temperature: None,
+                max_output_tokens: None,
+                stream: false,
+                metadata: round_context.metadata.clone(),
+            },
+        )?;
+        enforce_single_call_budget(single_call_budget_usd, response.cost_usd)?;
+        if response.tool_calls.is_empty() {
+            return llm_response_to_output(response);
+        }
+        if round >= options.max_tool_rounds {
+            return Err(CoreError::validation(
+                "LLM node search tool max rounds exceeded before final answer",
+            ));
+        }
+        messages.push(response.message.clone());
+        for call in &response.tool_calls {
+            let output = tool_router.execute(
+                &ToolExecutionContext {
+                    provider_id: provider_id.to_owned(),
+                    workflow_id: Some(request.workflow_id.clone()),
+                    run_id: Some(request.run_id.clone()),
+                    node_id: Some(request.node_id.clone()),
+                    round,
+                },
+                call,
+            )?;
+            messages.push(tool_result_message(call, output));
+        }
+    }
+    Err(CoreError::validation(
+        "LLM node search tool loop ended unexpectedly",
+    ))
 }
 
 /// F13：节点超时；未配置或 0 时保持历史默认 120s。
@@ -747,30 +937,192 @@ fn default_chapter_text_alias() -> String {
 /// 产品级工作流校验：拓扑与节点业务配置只走这一入口，保存、显式校验和运行预检共用。
 pub fn validate_workflow_execution_contracts(workflow: &WorkflowDefinition) -> CoreResult<()> {
     workflow.validate_topology()?;
+    let node_ids = workflow
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut approval_ids = BTreeSet::new();
     for node in &workflow.nodes {
-        if node.type_name != "summarizer" {
-            continue;
+        match node.type_name.as_str() {
+            "summarizer" => {
+                let config = WorkflowSummarizerNodeConfig::from_value(node.config.clone())
+                    .map_err(|error| {
+                        CoreError::validation(format!(
+                            "summarizer node {} failed configuration validation: {error}",
+                            node.id.as_str()
+                        ))
+                    })?;
+                require_incoming_data_alias(workflow, node, &config.chapter_text_alias)?;
+            }
+            "condition" | "eval" => {
+                let config = serde_json::from_value::<ConditionNodeConfig>(node.config.clone())
+                    .map_err(|error| node_configuration_error(node, error))?;
+                require_non_empty_node_field(node, "input_alias", &config.input_alias)?;
+                require_non_empty_node_field(node, "operator", &config.operator)?;
+                if !matches!(config.operator.as_str(), "truthy" | "equals" | "not_equals") {
+                    return Err(CoreError::validation(format!(
+                        "{} node {} has unsupported operator {}",
+                        node.type_name,
+                        node.id.as_str(),
+                        config.operator
+                    )));
+                }
+                require_incoming_data_alias(workflow, node, &config.input_alias)?;
+                for edge in workflow.edges.iter().filter(|edge| {
+                    edge.kind == WorkflowEdgeKind::Control
+                        && edge.from.node_id == node.id
+                        && edge.alias.is_some()
+                }) {
+                    let selector = edge.alias.as_deref().map(str::trim).unwrap_or_default();
+                    if !matches!(selector, "true" | "false") {
+                        return Err(CoreError::validation(format!(
+                            "condition control edge {} requires branch selector true or false",
+                            edge.id.as_str()
+                        )));
+                    }
+                }
+            }
+            "search" | "project_search" => {
+                let config =
+                    serde_json::from_value::<WorkflowProjectSearchNodeConfig>(node.config.clone())
+                        .map_err(|error| node_configuration_error(node, error))?;
+                require_non_empty_node_field(node, "query_alias", &config.query_alias)?;
+                require_incoming_data_alias(workflow, node, &config.query_alias)?;
+            }
+            "document" | "document_read" => {
+                let config =
+                    serde_json::from_value::<WorkflowDocumentReadConfig>(node.config.clone())
+                        .map_err(|error| node_configuration_error(node, error))?;
+                if config.path.as_os_str().is_empty() {
+                    return Err(CoreError::validation(format!(
+                        "{} node {} path cannot be empty",
+                        node.type_name,
+                        node.id.as_str()
+                    )));
+                }
+            }
+            "loop" => {
+                let config = serde_json::from_value::<LoopNodeConfig>(node.config.clone())
+                    .map_err(|error| node_configuration_error(node, error))?;
+                LoopPolicy {
+                    max_iterations: config.max_iterations,
+                    timeout_ms: config.timeout_ms,
+                    budget_limit_usd: config.budget_limit_usd,
+                    stop_condition: config.stop_condition.clone(),
+                }
+                .validate()?;
+                let stop = config.stop_condition.as_object().ok_or_else(|| {
+                    CoreError::validation(format!(
+                        "loop node {} stop_condition must be an object",
+                        node.id.as_str()
+                    ))
+                })?;
+                let input_alias = stop
+                    .get("input_alias")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                require_non_empty_node_field(node, "stop_condition.input_alias", input_alias)?;
+                if !stop.contains_key("equals") {
+                    return Err(CoreError::validation(format!(
+                        "loop node {} stop_condition requires equals",
+                        node.id.as_str()
+                    )));
+                }
+                require_incoming_data_alias(workflow, node, input_alias)?;
+                for rerun_node_id in &config.rerun_node_ids {
+                    if !node_ids.contains(rerun_node_id) {
+                        return Err(CoreError::validation(format!(
+                            "loop node {} references missing rerun node {}",
+                            node.id.as_str(),
+                            rerun_node_id.as_str()
+                        )));
+                    }
+                }
+                if config.rerun_node_ids.is_empty()
+                    && !workflow.edges.iter().any(|edge| {
+                        edge.kind == WorkflowEdgeKind::Control && edge.from.node_id == node.id
+                    })
+                {
+                    return Err(CoreError::validation(format!(
+                        "loop node {} requires rerun_node_ids or an outgoing control edge",
+                        node.id.as_str()
+                    )));
+                }
+            }
+            "approval" => {
+                let config = serde_json::from_value::<ApprovalNodeConfig>(node.config.clone())
+                    .map_err(|error| node_configuration_error(node, error))?;
+                require_non_empty_node_field(node, "approval_id", &config.approval_id)?;
+                if !approval_ids.insert(config.approval_id.trim().to_owned()) {
+                    return Err(CoreError::validation(format!(
+                        "duplicate workflow approval_id: {}",
+                        config.approval_id.trim()
+                    )));
+                }
+            }
+            "export" => {
+                let config = serde_json::from_value::<ExportNodeConfig>(node.config.clone())
+                    .map_err(|error| node_configuration_error(node, error))?;
+                require_non_empty_node_field(node, "artifact_id", &config.artifact_id)?;
+                let format = config.format.trim().to_ascii_lowercase();
+                if !matches!(format.as_str(), "json" | "markdown" | "md" | "epub" | "pdf") {
+                    return Err(CoreError::validation(format!(
+                        "export node {} has unsupported format {}",
+                        node.id.as_str(),
+                        config.format
+                    )));
+                }
+            }
+            _ => {}
         }
+    }
+    Ok(())
+}
 
-        let config =
-            WorkflowSummarizerNodeConfig::from_value(node.config.clone()).map_err(|error| {
-                CoreError::validation(format!(
-                    "summarizer node {} failed configuration validation: {error}",
-                    node.id.as_str()
-                ))
-            })?;
-        let chapter_text_alias = config.chapter_text_alias.trim();
-        let has_chapter_text_edge = workflow.edges.iter().any(|edge| {
-            edge.kind == WorkflowEdgeKind::Data
-                && edge.to.node_id == node.id
-                && edge.alias.as_deref().map(str::trim) == Some(chapter_text_alias)
-        });
-        if !has_chapter_text_edge {
-            return Err(CoreError::validation(format!(
-                "summarizer node {} requires an incoming data edge with alias {chapter_text_alias}",
-                node.id.as_str()
-            )));
-        }
+fn node_configuration_error(
+    node: &crate::contracts::NodeInstance,
+    error: serde_json::Error,
+) -> CoreError {
+    CoreError::validation(format!(
+        "{} node {} failed configuration validation: {error}",
+        node.type_name,
+        node.id.as_str()
+    ))
+}
+
+fn require_non_empty_node_field(
+    node: &crate::contracts::NodeInstance,
+    field: &str,
+    value: &str,
+) -> CoreResult<()> {
+    if value.trim().is_empty() {
+        return Err(CoreError::validation(format!(
+            "{} node {} {field} cannot be empty",
+            node.type_name,
+            node.id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+fn require_incoming_data_alias(
+    workflow: &WorkflowDefinition,
+    node: &crate::contracts::NodeInstance,
+    alias: &str,
+) -> CoreResult<()> {
+    let alias = alias.trim();
+    let has_edge = workflow.edges.iter().any(|edge| {
+        edge.kind == WorkflowEdgeKind::Data
+            && edge.to.node_id == node.id
+            && edge.alias.as_deref().map(str::trim) == Some(alias)
+    });
+    if !has_edge {
+        return Err(CoreError::validation(format!(
+            "{} node {} requires an incoming data edge with alias {alias}",
+            node.type_name,
+            node.id.as_str()
+        )));
     }
     Ok(())
 }
@@ -823,6 +1175,66 @@ pub fn execute_summarizer_node<L: CostLedger>(
     provider: &dyn LlmProvider,
     ledger: &L,
     project_root: &Path,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_summarizer_node_with_optional_search_tools(
+        request,
+        provider,
+        ledger,
+        project_root,
+        None,
+        None,
+        0,
+    )
+}
+
+pub fn execute_summarizer_node_with_project_search<L: CostLedger>(
+    request: WorkflowNodeExecutionRequest,
+    provider: &dyn LlmProvider,
+    ledger: &L,
+    project_root: &Path,
+    retrieval: &ProjectRetrievalRuntime,
+    search_tool: ToolDefinition,
+    max_tool_rounds: u32,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_summarizer_node_with_optional_search_tools(
+        request,
+        provider,
+        ledger,
+        project_root,
+        Some((retrieval, search_tool)),
+        None,
+        max_tool_rounds,
+    )
+}
+
+pub fn execute_summarizer_node_with_search_tools<L: CostLedger>(
+    request: WorkflowNodeExecutionRequest,
+    provider: &dyn LlmProvider,
+    ledger: &L,
+    project_root: &Path,
+    project_search: Option<(&ProjectRetrievalRuntime, ToolDefinition)>,
+    web_search: Option<(&dyn SearchProvider, &PermissionPolicy, ToolDefinition)>,
+    max_tool_rounds: u32,
+) -> CoreResult<WorkflowNodeExecutionOutput> {
+    execute_summarizer_node_with_optional_search_tools(
+        request,
+        provider,
+        ledger,
+        project_root,
+        project_search,
+        web_search,
+        max_tool_rounds,
+    )
+}
+
+fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
+    request: WorkflowNodeExecutionRequest,
+    provider: &dyn LlmProvider,
+    ledger: &L,
+    project_root: &Path,
+    project_search: Option<(&ProjectRetrievalRuntime, ToolDefinition)>,
+    web_search: Option<(&dyn SearchProvider, &PermissionPolicy, ToolDefinition)>,
+    max_tool_rounds: u32,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
     use crate::contracts::{AutoModeState, RunControl};
     use crate::rag::models::ConfirmationState;
@@ -889,6 +1301,21 @@ pub fn execute_summarizer_node<L: CostLedger>(
             }),
         },
     );
+    let summarizer = match project_search {
+        Some((retrieval, search_tool)) => {
+            summarizer.with_project_search(retrieval, search_tool, max_tool_rounds)
+        }
+        None => summarizer,
+    };
+    let summarizer = match web_search {
+        Some((search_provider, permission_policy, search_tool)) => summarizer.with_web_search(
+            search_provider,
+            permission_policy,
+            search_tool,
+            max_tool_rounds,
+        ),
+        None => summarizer,
+    };
     let draft = summarizer.summarize_chapter(&config.chapter_id, &chapter_text)?;
 
     // 外部计算不占写锁；提交前在统一写护栏内重放检查并重新读取最新快照，
@@ -1192,6 +1619,7 @@ pub fn execute_executor_adapter_node<L: CostLedger>(
         manifest,
         SkillRunRequest {
             skill_id: config.skill_id,
+            operation_id: Some(request.operation_id),
             inputs: request.inputs,
             metadata: request.metadata,
         },
@@ -1269,6 +1697,7 @@ fn export_media_type(format: &str) -> &'static str {
         "epub" => "application/epub+zip",
         "pdf" => "application/pdf",
         "markdown" | "md" => "text/markdown; charset=utf-8",
+        "json" => "application/json",
         _ => "application/octet-stream",
     }
 }

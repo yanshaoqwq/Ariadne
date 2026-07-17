@@ -6,6 +6,26 @@ using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop;
 
+internal sealed record ThemeColorTokens(
+    Color Window,
+    Color Main,
+    Color Surface,
+    Color Elevated,
+    Color Subtle,
+    Color Canvas,
+    Color Editor,
+    Color AccentPrimary,
+    Color AccentHover,
+    Color AccentPressed,
+    Color TextOnAccent,
+    Color TextPrimary,
+    Color TextHeading,
+    Color TextSecondary,
+    Color TextSubtle,
+    Color StatusError,
+    Color StatusWarning,
+    Color StatusInfo);
+
 /// <summary>
 /// 运行时应用个性化主题。
 /// 预设主题 + 可选自定义三色（主底 / 表面 / 强调）；跟随系统时可分别指定昼/夜三色。
@@ -172,62 +192,78 @@ public static class ThemeApplication
             return;
         }
 
-        // 表面阶梯：主底 / 壳 / 内容面 / 浮层拉开明度差（U71 自定义主题）
-        var window = isDark ? Darken(main, 0.14) : Darken(main, 0.06);
-        var subtle = isDark ? Lighten(main, 0.08) : Darken(main, 0.08);
-        var elevated = isDark ? Lighten(surface, 0.10) : Lighten(surface, 0.0);
-        var canvas = isDark ? Blend(main, surface, 0.25) : Blend(main, surface, 0.45);
-        var editor = surface;
-        var hover = isDark ? Lighten(brand, 0.12) : Darken(brand, 0.10);
-        var pressed = isDark ? Darken(brand, 0.10) : Darken(brand, 0.18);
-        var onAccent = Luminance(brand) > 0.55
-            ? Color.FromRgb(0x08, 0x10, 0x12)
-            : Colors.White;
-
-        // 文字 token 按编辑器/表面明度派生，避免自定义表面与 Light/Dark 字典脱节（U5）
-        var surfaceDark = Luminance(surface) < 0.45;
-        var textPrimary = surfaceDark ? Color.FromRgb(0xF2, 0xF4, 0xF6) : Color.FromRgb(0x1B, 0x1F, 0x22);
-        var textHeading = surfaceDark ? Color.FromRgb(0xFA, 0xFB, 0xFC) : Color.FromRgb(0x12, 0x15, 0x18);
-        var textSecondary = surfaceDark ? Color.FromRgb(0xB0, 0xB8, 0xC0) : Color.FromRgb(0x5B, 0x64, 0x69);
-        var textSubtle = surfaceDark ? Color.FromRgb(0x86, 0x8E, 0x96) : Color.FromRgb(0x7A, 0x84, 0x8C);
+        var tokens = BuildThreeColorTokens(isDark, main, surface, brand);
 
         var resources = Application.Current.Resources;
-        SetBrush(resources, "Ariadne.WindowBase", window);
-        SetBrush(resources, "Ariadne.BackgroundMain", main);
-        SetBrush(resources, "Ariadne.BackgroundSurface", surface);
-        SetBrush(resources, "Ariadne.BackgroundElevated", elevated);
-        SetBrush(resources, "Ariadne.BackgroundSubtle", subtle);
-        SetBrush(resources, "Ariadne.CanvasBackground", canvas);
-        SetBrush(resources, "Ariadne.EditorBackground", editor);
-        SetBrush(resources, "Ariadne.AccentPrimary", brand);
-        SetBrush(resources, "Ariadne.AccentHover", hover);
-        SetBrush(resources, "Ariadne.AccentPressed", pressed);
-        SetBrush(resources, "Ariadne.AccentLight", WithAlpha(brand, 0x1F));
-        SetBrush(resources, "Ariadne.AccentBorder", WithAlpha(brand, 0x66));
-        SetBrush(resources, "Ariadne.FocusRing", brand);
-        SetBrush(resources, "Ariadne.NodeSelected", brand);
-        SetBrush(resources, "Ariadne.EdgeData", brand);
-        SetBrush(resources, "Ariadne.RuntimeRunning", brand);
-        SetBrush(resources, "Ariadne.GitCurrent", brand);
-        SetBrush(resources, "Ariadne.TextOnAccent", onAccent);
-        SetBrush(resources, "Ariadne.TextPrimary", textPrimary);
-        SetBrush(resources, "Ariadne.TextHeading", textHeading);
-        SetBrush(resources, "Ariadne.TextSecondary", textSecondary);
-        SetBrush(resources, "Ariadne.TextSubtle", textSubtle);
-        SetBrush(resources, "Ariadne.EditorSelection", WithAlpha(brand, 0x2E));
+        SetBrush(resources, "Ariadne.WindowBase", tokens.Window);
+        SetBrush(resources, "Ariadne.BackgroundMain", tokens.Main);
+        SetBrush(resources, "Ariadne.BackgroundSurface", tokens.Surface);
+        SetBrush(resources, "Ariadne.BackgroundElevated", tokens.Elevated);
+        SetBrush(resources, "Ariadne.BackgroundSubtle", tokens.Subtle);
+        SetBrush(resources, "Ariadne.CanvasBackground", tokens.Canvas);
+        SetBrush(resources, "Ariadne.EditorBackground", tokens.Editor);
+        SetBrush(resources, "Ariadne.AccentPrimary", tokens.AccentPrimary);
+        SetBrush(resources, "Ariadne.AccentHover", tokens.AccentHover);
+        SetBrush(resources, "Ariadne.AccentPressed", tokens.AccentPressed);
+        SetBrush(resources, "Ariadne.AccentLight", WithAlpha(tokens.AccentPrimary, 0x1F));
+        SetBrush(resources, "Ariadne.AccentBorder", WithAlpha(tokens.AccentPrimary, 0x66));
+        SetBrush(resources, "Ariadne.FocusRing", tokens.AccentPrimary);
+        SetBrush(resources, "Ariadne.NodeSelected", tokens.AccentPrimary);
+        SetBrush(resources, "Ariadne.EdgeData", tokens.AccentPrimary);
+        SetBrush(resources, "Ariadne.RuntimeRunning", tokens.AccentPrimary);
+        SetBrush(resources, "Ariadne.GitCurrent", tokens.AccentPrimary);
+        SetBrush(resources, "Ariadne.TextOnAccent", tokens.TextOnAccent);
+        SetBrush(resources, "Ariadne.TextPrimary", tokens.TextPrimary);
+        SetBrush(resources, "Ariadne.TextHeading", tokens.TextHeading);
+        SetBrush(resources, "Ariadne.TextSecondary", tokens.TextSecondary);
+        SetBrush(resources, "Ariadne.TextSubtle", tokens.TextSubtle);
+        SetBrush(resources, "Ariadne.EditorSelection", WithAlpha(tokens.AccentPrimary, 0x2E));
 
         // U70：日志 chip 与状态色并入同一 resolver，按表面明暗派生，避免自定义主题下固定字典色失对比度。
-        var logError = isDark ? Color.FromRgb(0xF0, 0x71, 0x78) : Color.FromRgb(0xC9, 0x3C, 0x37);
-        var logWarning = isDark ? Color.FromRgb(0xE3, 0xB3, 0x41) : Color.FromRgb(0x9A, 0x67, 0x00);
-        var logInfo = isDark ? Color.FromRgb(0x79, 0xC0, 0xFF) : Color.FromRgb(0x09, 0x6B, 0xC0);
-        SetBrush(resources, "Ariadne.StatusError", logError);
-        SetBrush(resources, "Ariadne.StatusWarning", logWarning);
-        SetBrush(resources, "Ariadne.StatusInfo", logInfo);
-        SetBrush(resources, "Ariadne.LogErrorBg", WithAlpha(logError, 0x28));
-        SetBrush(resources, "Ariadne.LogWarningBg", WithAlpha(logWarning, 0x28));
-        SetBrush(resources, "Ariadne.LogInfoBg", WithAlpha(logInfo, 0x28));
+        SetBrush(resources, "Ariadne.StatusError", tokens.StatusError);
+        SetBrush(resources, "Ariadne.StatusWarning", tokens.StatusWarning);
+        SetBrush(resources, "Ariadne.StatusInfo", tokens.StatusInfo);
+        SetBrush(resources, "Ariadne.LogErrorBg", WithAlpha(tokens.StatusError, 0x28));
+        SetBrush(resources, "Ariadne.LogWarningBg", WithAlpha(tokens.StatusWarning, 0x28));
+        SetBrush(resources, "Ariadne.LogInfoBg", WithAlpha(tokens.StatusInfo, 0x28));
 
         resources[OverlayKey] = overlayId;
+    }
+
+    internal static ThemeColorTokens BuildThreeColorTokens(bool isDark, Color main, Color surface, Color brand)
+    {
+        var window = isDark ? Darken(main, 0.14) : Darken(main, 0.06);
+        var subtle = isDark ? Lighten(main, 0.08) : Darken(main, 0.08);
+        var elevated = isDark ? Lighten(surface, 0.10) : surface;
+        var canvas = isDark ? Blend(main, surface, 0.25) : Blend(main, surface, 0.45);
+        var onAccent = ThemeAccessibilityAudit.BestTextOn(brand);
+        var usesDarkAccentText = onAccent == Colors.Black;
+        var hover = usesDarkAccentText ? Lighten(brand, 0.10) : Darken(brand, 0.10);
+        var pressed = usesDarkAccentText ? Lighten(brand, 0.04) : Darken(brand, 0.18);
+
+        var darkText = Color.FromRgb(0x1B, 0x1F, 0x22);
+        var lightText = Color.FromRgb(0xF2, 0xF4, 0xF6);
+        var useLightText = ThemeAccessibilityAudit.ContrastRatio(lightText, surface)
+            > ThemeAccessibilityAudit.ContrastRatio(darkText, surface);
+        var textPrimary = useLightText ? lightText : darkText;
+        var textHeading = useLightText
+            ? Color.FromRgb(0xFA, 0xFB, 0xFC)
+            : Color.FromRgb(0x12, 0x15, 0x18);
+        var textSecondary = useLightText
+            ? Color.FromRgb(0xB0, 0xB8, 0xC0)
+            : Color.FromRgb(0x5B, 0x64, 0x69);
+        var textSubtle = useLightText
+            ? Color.FromRgb(0x86, 0x8E, 0x96)
+            : Color.FromRgb(0x7A, 0x84, 0x8C);
+        var statusError = isDark ? Color.FromRgb(0xF0, 0x71, 0x78) : Color.FromRgb(0xC9, 0x3C, 0x37);
+        var statusWarning = isDark ? Color.FromRgb(0xE3, 0xB3, 0x41) : Color.FromRgb(0x9A, 0x67, 0x00);
+        var statusInfo = isDark ? Color.FromRgb(0x79, 0xC0, 0xFF) : Color.FromRgb(0x09, 0x6B, 0xC0);
+
+        return new ThemeColorTokens(
+            window, main, surface, elevated, subtle, canvas, surface,
+            brand, hover, pressed, onAccent,
+            textPrimary, textHeading, textSecondary, textSubtle,
+            statusError, statusWarning, statusInfo);
     }
 
     /// <summary>解析当前是否应按暗色方案应用（含跟随系统）。</summary>
@@ -302,9 +338,6 @@ public static class ThemeApplication
 
     private static Color WithAlpha(Color color, byte alpha) =>
         Color.FromArgb(alpha, color.R, color.G, color.B);
-
-    private static double Luminance(Color c) =>
-        (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255.0;
 
     private static Color Darken(Color c, double amount)
     {

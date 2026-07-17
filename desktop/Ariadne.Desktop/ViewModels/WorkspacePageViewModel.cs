@@ -10,22 +10,27 @@ namespace Ariadne.Desktop.ViewModels;
 
 public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable
 {
+    private const string ProjectAiConversationId = "workspace";
     private const string DefaultWorkflowId = "default";
-    private const double MinRightPanelWidth = 260;
-    private const double MaxRightPanelWidth = 560;
     // 收起后列宽为 0：展开只靠画布右缘 pill，避免窄条 + float 双箭头
     private const double CollapsedRightPanelWidth = 0;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
-    private bool _isRightPanelOpen = true;
+    private readonly WorkspaceRunSessionCoordinator _runSession;
+    // U4：首屏只展开底部节点库；右侧详情按需打开，避免三栏同时挤压画布。
+    private bool _isRightPanelOpen;
     // 默认右栏略窄，多留给画布
     private GridLength _rightPanelColumnWidth = new(280);
+    private double _availableWorkspaceWidth = double.PositiveInfinity;
     private bool _isLibraryOpen = true;
+    private bool _isCanvasFocusMode;
+    private bool _focusRestoreLibraryOpen;
+    private bool _focusRestoreRightPanelOpen;
     private bool _isExecutionPanel;
     private bool _isProjectAiTab = true;
-    private double _canvasZoom = 1.0;
+    private readonly CanvasViewportSession _canvasViewport = new();
     private string _statusText = string.Empty;
     private bool _hasUnsavedChanges;
     private string _savedSnapshot = string.Empty;
@@ -35,14 +40,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
     private bool _isConfirmationPanelExpanded = true;
-    private string _currentRunId = string.Empty;
-    /// <summary>W8：最近一次已知 run 生命周期状态（running/paused/…）。</summary>
-    private string _currentRunStatus = string.Empty;
     private string _selectedWorkflowId = DefaultWorkflowId;
     private string _currentWorkflowName = "Default";
     private bool _suppressWorkflowSelectionChange;
-    private long _workflowEventCursor;
-    private CancellationTokenSource? _workflowEventPollingCts;
     private string _confirmationReason = string.Empty;
     private WorkflowOperation? _selectedInDoubtOperation;
     private string _inDoubtResponseJson = string.Empty;
@@ -52,11 +52,13 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private readonly List<string> _undoSnapshots = new();
     private readonly List<string> _redoSnapshots = new();
     private readonly List<ProjectAiChatMessage> _projectAiHistory = new();
+    private long? _projectAiConversationRevision;
     private CanvasNode? _clipboardNode;
     private WorkflowNodeViewModel? _selectedNode;
     private ConfirmationItemViewModel? _selectedConfirmation;
     private WorkflowEdgeViewModel? _selectedEdge;
     private WorkflowLoadState _workflowLoadState = WorkflowLoadState.NoProject;
+    private bool _isApplyingGraph;
     private string? _workflowContentRevision;
     private string _defaultLlmProviderId = string.Empty;
 
@@ -64,16 +66,37 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         _displayNames = displayNames;
         _backend = backend;
+        _runSession = new WorkspaceRunSessionCoordinator(backend);
+        _runSession.StateChanged += OnRunSessionStateChanged;
+        _runSession.EventsReceived += ApplyWorkflowEvents;
+        _runSession.PollingFailed += OnRunSessionPollingFailed;
         ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
         ToggleLibraryCommand = new RelayCommand(() => IsLibraryOpen = !IsLibraryOpen);
+        ToggleCanvasFocusModeCommand = new RelayCommand(ToggleCanvasFocusMode);
         ZoomInCommand = new RelayCommand(() => AdjustCanvasZoom(0.1));
         ZoomOutCommand = new RelayCommand(() => AdjustCanvasZoom(-0.1));
-        ResetZoomCommand = new RelayCommand(() => CanvasZoom = 1.0);
-        ShowNodeLibraryCommand = new RelayCommand(() => IsExecutionPanel = false);
-        ShowExecutionCommand = new RelayCommand(() => IsExecutionPanel = true);
-        ShowProjectAiCommand = new RelayCommand(() => IsProjectAiTab = true);
-        ShowNodeDetailsCommand = new RelayCommand(() => IsProjectAiTab = false);
-        ImportCommand = new RelayCommand(() => _ = LoadWorkflowWithUnsavedCheckAsync());
+        ResetZoomCommand = new RelayCommand(ResetCanvasZoom);
+        ShowNodeLibraryCommand = new RelayCommand(() =>
+        {
+            IsExecutionPanel = false;
+            IsLibraryOpen = true;
+        });
+        ShowExecutionCommand = new RelayCommand(() =>
+        {
+            IsExecutionPanel = true;
+            IsLibraryOpen = true;
+        });
+        ShowProjectAiCommand = new RelayCommand(() =>
+        {
+            IsProjectAiTab = true;
+            IsRightPanelOpen = true;
+        });
+        ShowNodeDetailsCommand = new RelayCommand(() =>
+        {
+            IsProjectAiTab = false;
+            IsRightPanelOpen = true;
+        });
+        ReloadDefaultWorkflowCommand = new RelayCommand(() => _ = ReloadDefaultWorkflowWithUnsavedCheckAsync());
         ExportCommand = new RelayCommand(() => _ = ExportWorkflowAsync(requireSelection: false));
         SaveCommand = new RelayCommand(() => _ = SaveWorkflowAsync(), CanPersistWorkflow);
         UndoCommand = new RelayCommand(UndoCanvasChange, () => _undoSnapshots.Count > 0);
@@ -103,6 +126,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             IsConfirmationPanelExpanded = !IsConfirmationPanelExpanded);
         ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"), CanResolveConfirmation);
         RejectConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("reject"), CanResolveConfirmation);
+        OpenSelectedConfirmationWorkflowCommand = new RelayCommand(
+            () => _ = OpenSelectedConfirmationWorkflowAsync(),
+            () => CanOpenSelectedConfirmationWorkflow);
         RetryInDoubtOperationCommand = new RelayCommand(() => _ = ResolveSelectedInDoubtOperationAsync("retry"), HasSelectedInDoubtOperation);
         UseInDoubtResponseCommand = new RelayCommand(() => _ = ResolveSelectedInDoubtOperationAsync("use_response"), HasSelectedInDoubtOperation);
         StopInDoubtOperationCommand = new RelayCommand(() => _ = ResolveSelectedInDoubtOperationAsync("stop"), HasSelectedInDoubtOperation);
@@ -152,20 +178,20 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         AvailableProviderIds = new ObservableCollection<string>();
         AvailableModelIds = new ObservableCollection<string>();
+        SummarizerChapterOptions = new ObservableCollection<SummarizerChapterOption>();
         CaptureSnapshot();
-        _ = InitializeWorkflowAsync();
-        _ = LoadConfirmationsAsync();
-        _ = LoadAvailableModelsAsync();
     }
 
     public ObservableCollection<string> AvailableProviderIds { get; }
     public bool HasAvailableProviderChoices => AvailableProviderIds.Count > 0;
     public ObservableCollection<string> AvailableModelIds { get; }
     public bool HasAvailableModelChoices => AvailableModelIds.Count > 0;
+    public ObservableCollection<SummarizerChapterOption> SummarizerChapterOptions { get; }
+    public bool HasSummarizerChapterChoices => SummarizerChapterOptions.Count > 0;
 
     public string Title => _displayNames.Text("ui.nav.workspace");
     public string SaveText => _displayNames.Text("ui.workspace.save");
-    public string ImportText => _displayNames.Text("ui.workspace.import");
+    public string ReloadDefaultWorkflowText => _displayNames.Text("ui.workspace.reload_default");
     public string ExportText => _displayNames.Text("ui.workspace.export");
     public string UndoText => _displayNames.Text("ui.action.undo");
     public string RedoText => _displayNames.Text("ui.action.redo");
@@ -242,6 +268,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ConfirmationReasonPlaceholder => _displayNames.Text("ui.workspace.confirmation.reason.placeholder");
     public string ApproveConfirmationText => _displayNames.Text("ui.workspace.confirmation.approve");
     public string RejectConfirmationText => _displayNames.Text("ui.workspace.confirmation.reject");
+    public string OpenConfirmationWorkflowText => _displayNames.Text("ui.workspace.confirmation.open_workflow");
     public string PromptTemplateText => _displayNames.Text("ui.workspace.prompt_template");
     public string ModelIdText => _displayNames.Text("ui.workspace.model_id");
     public string NodeBudgetText => _displayNames.Text("ui.workspace.node_budget");
@@ -311,6 +338,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SummarizerNodeHint => _displayNames.Text("ui.workspace.summarizer.hint");
     public string SummarizerProviderIdLabel => _displayNames.Text("ui.workspace.summarizer.provider_id");
     public string SummarizerProviderIdPlaceholder => _displayNames.Text("ui.workspace.summarizer.provider_id_placeholder");
+    public string SummarizerChapterSelectorLabel => _displayNames.Text("ui.workspace.summarizer.chapter_selector");
+    public string SummarizerChapterSelectorPlaceholder => _displayNames.Text("ui.workspace.summarizer.chapter_selector_placeholder");
     public string SummarizerChapterIdLabel => _displayNames.Text("ui.workspace.summarizer.chapter_id");
     public string SummarizerChapterIdPlaceholder => _displayNames.Text("ui.workspace.summarizer.chapter_id_placeholder");
     public string SummarizerChapterDocumentIdLabel => _displayNames.Text("ui.workspace.summarizer.chapter_document_id");
@@ -327,6 +356,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ZoomInGlyphText => _displayNames.Text("ui.workspace.zoom_in_glyph");
     public string ZoomOutGlyphText => _displayNames.Text("ui.workspace.zoom_out_glyph");
     public string MinimapText => _displayNames.Text("ui.workspace.minimap");
+    public string CanvasNavigationHintText => _displayNames.Text("ui.workspace.canvas_navigation_hint");
+    public string CanvasOverviewFocusText => _displayNames.Text("ui.workspace.canvas_overview_focus");
+    public string CanvasFocusText => _displayNames.Text(
+        IsCanvasFocusMode
+            ? "ui.workspace.canvas_focus_exit"
+            : "ui.workspace.canvas_focus");
     public string CanvasZoomText => _displayNames.Format("ui.workspace.zoom_percent", new Dictionary<string, string>
     {
         ["percent"] = Math.Round(CanvasZoom * 100).ToString("0"),
@@ -339,19 +374,30 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             if (SetProperty(ref _isRightPanelOpen, value))
             {
+                ExitCanvasFocusModeForPanelOpen(value);
                 OnPropertyChanged(nameof(RightPanelSplitterWidth));
                 OnPropertyChanged(nameof(RightPanelColumnWidth));
+                OnPropertyChanged(nameof(IsRightPanelDocked));
             }
         }
     }
     public RelayCommand ToggleRightPanelCommand { get; }
-    public GridLength RightPanelSplitterWidth => IsRightPanelOpen ? new GridLength(4) : new GridLength(0);
+    public RelayCommand ToggleCanvasFocusModeCommand { get; }
+    public bool UseOverlayRightPanel => ResponsiveRightPanelLayout.UseOverlayRightPanel;
+    public bool IsRightPanelDocked => IsRightPanelOpen && !UseOverlayRightPanel;
+    public double RightPanelMaximumWidth => ResponsiveRightPanelLayout.MaximumDockedRightPanelWidth;
+    public double RightPanelOverlayWidth => ResponsiveRightPanelLayout.OverlayRightPanelWidth;
+    public GridLength RightPanelSplitterWidth => IsRightPanelDocked
+        ? new GridLength(WorkspaceResponsiveLayoutHelpers.RightPanelSplitterWidth)
+        : new GridLength(0);
     public GridLength RightPanelColumnWidth
     {
-        get => IsRightPanelOpen ? _rightPanelColumnWidth : new GridLength(CollapsedRightPanelWidth);
+        get => IsRightPanelDocked
+            ? new GridLength(ResponsiveRightPanelLayout.DockedRightPanelWidth)
+            : new GridLength(CollapsedRightPanelWidth);
         set
         {
-            if (!IsRightPanelOpen)
+            if (!IsRightPanelDocked)
             {
                 return;
             }
@@ -363,6 +409,32 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
         }
     }
+
+    public void SetAvailableWorkspaceWidth(double width)
+    {
+        if (!double.IsFinite(width)
+            || width <= 0
+            || Math.Abs(_availableWorkspaceWidth - width) < 0.5)
+        {
+            return;
+        }
+
+        _availableWorkspaceWidth = width;
+        OnPropertyChanged(nameof(UseOverlayRightPanel));
+        OnPropertyChanged(nameof(IsRightPanelDocked));
+        OnPropertyChanged(nameof(RightPanelSplitterWidth));
+        OnPropertyChanged(nameof(RightPanelColumnWidth));
+        OnPropertyChanged(nameof(RightPanelMaximumWidth));
+        OnPropertyChanged(nameof(RightPanelOverlayWidth));
+    }
+
+    private WorkspaceResponsiveLayout ResponsiveRightPanelLayout =>
+        WorkspaceResponsiveLayoutHelpers.Compute(
+            _availableWorkspaceWidth,
+            _rightPanelColumnWidth.IsAbsolute
+                ? _rightPanelColumnWidth.Value
+                : 360,
+            IsRightPanelOpen);
     public bool IsLibraryOpen
     {
         get => _isLibraryOpen;
@@ -370,29 +442,106 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             if (SetProperty(ref _isLibraryOpen, value))
             {
+                ExitCanvasFocusModeForPanelOpen(value);
                 OnPropertyChanged(nameof(BottomPanelShowsCollapseGlyph));
             }
         }
     }
     public RelayCommand ToggleLibraryCommand { get; }
+    public bool IsCanvasFocusMode
+    {
+        get => _isCanvasFocusMode;
+        private set
+        {
+            if (SetProperty(ref _isCanvasFocusMode, value))
+            {
+                OnPropertyChanged(nameof(CanvasFocusText));
+            }
+        }
+    }
+
+    private void ToggleCanvasFocusMode()
+    {
+        if (!IsCanvasFocusMode)
+        {
+            _focusRestoreLibraryOpen = IsLibraryOpen;
+            _focusRestoreRightPanelOpen = IsRightPanelOpen;
+            IsLibraryOpen = false;
+            IsRightPanelOpen = false;
+            IsCanvasFocusMode = true;
+            StatusText = _displayNames.Text("ui.workspace.canvas_focus_entered");
+            return;
+        }
+
+        IsCanvasFocusMode = false;
+        IsLibraryOpen = _focusRestoreLibraryOpen;
+        IsRightPanelOpen = _focusRestoreRightPanelOpen;
+        StatusText = _displayNames.Text("ui.workspace.canvas_focus_exited");
+    }
+
+    private void ExitCanvasFocusModeForPanelOpen(bool opening)
+    {
+        if (opening && IsCanvasFocusMode)
+        {
+            IsCanvasFocusMode = false;
+        }
+    }
+
     public double CanvasZoom
     {
-        get => _canvasZoom;
+        get => _canvasViewport.Zoom;
         private set => SetCanvasZoom(value);
     }
+
+    /// <summary>A5：视口会话是 zoom、offset 与 pan 生命周期的唯一状态源。</summary>
+    internal CanvasViewportSession CanvasViewport => _canvasViewport;
 
     /// <summary>W2：产品路径设置缩放（FitView / 滚轮 / 工具栏共用）。</summary>
     public void SetCanvasZoom(double value)
     {
-        var clamped = Math.Clamp(
-            Math.Round(value, 2),
-            CanvasViewportHelpers.MinZoom,
-            CanvasViewportHelpers.MaxZoom);
-        if (SetProperty(ref _canvasZoom, clamped, nameof(CanvasZoom)))
+        var previousZoom = _canvasViewport.Zoom;
+        var state = _canvasViewport.SetZoom(value);
+        NotifyCanvasZoomChanged(previousZoom, state.Zoom);
+    }
+
+    internal CanvasViewportState SetCanvasZoomAt(double value, double anchorX, double anchorY)
+    {
+        var previousZoom = _canvasViewport.Zoom;
+        var state = _canvasViewport.ZoomAt(value, anchorX, anchorY);
+        NotifyCanvasZoomChanged(previousZoom, state.Zoom);
+        return state;
+    }
+
+    internal CanvasViewportState FitCanvasViewport(
+        double minX,
+        double minY,
+        double maxX,
+        double maxY,
+        CanvasViewportRect safeViewport)
+    {
+        var previousZoom = _canvasViewport.Zoom;
+        var state = _canvasViewport.Fit(minX, minY, maxX, maxY, safeViewport);
+        NotifyCanvasZoomChanged(previousZoom, state.Zoom);
+        return state;
+    }
+
+    private void NotifyCanvasZoomChanged(double previousZoom, double nextZoom)
+    {
+        if (Math.Abs(previousZoom - nextZoom) >= 1e-9)
         {
+            OnPropertyChanged(nameof(CanvasZoom));
             OnPropertyChanged(nameof(CanvasZoomText));
+            OnPropertyChanged(nameof(ShowCanvasDetails));
+            OnPropertyChanged(nameof(ShowCanvasPrecisionControls));
         }
     }
+
+    /// <summary>W9：总览倍率隐藏正文和边标签，仅保留节点身份、运行态和拓扑骨架。</summary>
+    public bool ShowCanvasDetails => CanvasSemanticZoomHelpers.ShowDetails(CanvasZoom);
+
+    /// <summary>W9：端口、运行按钮和拖动只在可编辑倍率出现。</summary>
+    public bool ShowCanvasPrecisionControls =>
+        CanvasSemanticZoomHelpers.AllowPrecisionControls(CanvasZoom);
 
     public RelayCommand ZoomInCommand { get; }
     public RelayCommand ZoomOutCommand { get; }
@@ -430,7 +579,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool IsNodeDetailsTab => !_isProjectAiTab;
     public RelayCommand ShowProjectAiCommand { get; }
     public RelayCommand ShowNodeDetailsCommand { get; }
-    public RelayCommand ImportCommand { get; }
+    public RelayCommand ReloadDefaultWorkflowCommand { get; }
     public RelayCommand ExportCommand { get; }
     public RelayCommand SaveCommand { get; }
     public RelayCommand UndoCommand { get; }
@@ -459,6 +608,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand ToggleConfirmationPanelCommand { get; }
     public RelayCommand ApproveConfirmationCommand { get; }
     public RelayCommand RejectConfirmationCommand { get; }
+    public RelayCommand OpenSelectedConfirmationWorkflowCommand { get; }
     public RelayCommand RetryInDoubtOperationCommand { get; }
     public RelayCommand UseInDoubtResponseCommand { get; }
     public RelayCommand StopInDoubtOperationCommand { get; }
@@ -470,6 +620,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand PasteNodeCommand { get; }
     public RelayCommand FitViewCommand { get; }
     public Action? RequestFitView { get; set; }
+    public Action<double>? RequestCanvasZoomStep { get; set; }
+    public Action? RequestResetCanvasZoom { get; set; }
+    public Action<WorkflowNodeViewModel>? RequestEnsureNodeVisible { get; set; }
 
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
     public string ProjectAiMessage
@@ -486,19 +639,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ProjectAiAnswer { get => _projectAiAnswer; set => SetProperty(ref _projectAiAnswer, value); }
 
     internal int ProjectAiHistoryCount => _projectAiHistory.Count;
-    public string CurrentRunId
-    {
-        get => _currentRunId;
-        set
-        {
-            if (SetProperty(ref _currentRunId, value))
-            {
-                OnPropertyChanged(nameof(CurrentRunValueText));
-                NotifyRunCommandStates();
-                _ = LoadInDoubtOperationsAsync();
-            }
-        }
-    }
+    public string CurrentRunId => _runSession.RunId;
     public string SelectedWorkflowId
     {
         get => _selectedWorkflowId;
@@ -546,7 +687,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SaveToolTipText =>
         HasUnsavedChanges
             ? _displayNames.Text("ui.workspace.save_unsaved_tip")
-            : SaveText;
+            : _displayNames.Text("ui.workspace.save_tip");
 
     /// <summary>W16：底部面板开合标签随当前模式（节点库 / 执行）变化。</summary>
     public string BottomPanelToggleText =>
@@ -581,12 +722,39 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 OnPropertyChanged(nameof(HasSelectedNode));
                 OnPropertyChanged(nameof(IsSelectedStartNode));
                 OnPropertyChanged(nameof(SelectedNodeTitle));
+                OnPropertyChanged(nameof(SelectedSummarizerChapterOption));
                 NotifyNodeCommandStates();
             }
         }
     }
 
     public bool HasSelectedNode => SelectedNode is not null;
+
+    public SummarizerChapterOption? SelectedSummarizerChapterOption
+    {
+        get
+        {
+            if (SelectedNode is not { IsSummarizerNode: true } node)
+            {
+                return null;
+            }
+
+            return SummarizerChapterOptions.FirstOrDefault(option =>
+                string.Equals(option.ChapterId, node.SummarizerChapterId, StringComparison.Ordinal)
+                && string.Equals(option.DocumentId, node.SummarizerChapterDocumentId, StringComparison.Ordinal));
+        }
+        set
+        {
+            if (value is null || SelectedNode is not { IsSummarizerNode: true } node)
+            {
+                return;
+            }
+
+            node.SummarizerChapterId = value.ChapterId;
+            node.SummarizerChapterDocumentId = value.DocumentId;
+            OnPropertyChanged();
+        }
+    }
     public bool IsSelectedStartNode => SelectedNode?.IsStartNode == true;
     public bool HasStartNodes => StartNodes.Count > 0;
     public bool HasNodes => Nodes.Count > 0;
@@ -606,6 +774,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 
     public bool HasSelectedConfirmation => SelectedConfirmation is not null;
+    public bool CanOpenSelectedConfirmationWorkflow =>
+        SelectedConfirmation is { WorkflowId.Length: > 0 } confirmation
+        && !string.Equals(confirmation.WorkflowId, CurrentWorkflowId, StringComparison.Ordinal);
     public bool HasPendingConfirmations => Confirmations.Count > 0;
     public bool HasInDoubtOperations => InDoubtOperations.Count > 0;
     public WorkflowOperation? SelectedInDoubtOperation
@@ -674,30 +845,33 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     /// <summary>W8 产品路径：可测的 can-execute 矩阵。</summary>
     public bool CanPauseWorkflow() =>
-        HasCurrentRun() && CanvasRunControlHelpers.CanPause(_currentRunStatus);
+        HasCurrentRun() && CanvasRunControlHelpers.CanPause(CurrentRunStatus);
 
     public bool CanResumeWorkflow() =>
-        HasCurrentRun() && CanvasRunControlHelpers.CanResume(_currentRunStatus);
+        HasCurrentRun() && CanvasRunControlHelpers.CanResume(CurrentRunStatus);
 
     public bool CanStopWorkflow() =>
-        HasCurrentRun() && CanvasRunControlHelpers.CanStop(_currentRunStatus);
+        HasCurrentRun() && CanvasRunControlHelpers.CanStop(CurrentRunStatus);
 
-    public string CurrentRunStatus
-    {
-        get => _currentRunStatus;
-        private set
-        {
-            if (SetProperty(ref _currentRunStatus, value))
-            {
-                NotifyRunCommandStates();
-            }
-        }
-    }
+    /// <summary>W8：最近一次已知 run 生命周期状态（running/paused/…）。</summary>
+    public string CurrentRunStatus => _runSession.Status;
     private bool HasProjectAiMessage() => !string.IsNullOrWhiteSpace(ProjectAiMessage);
-    private bool CanResolveConfirmation() =>
-        SelectedConfirmation is not null
-        && (!string.IsNullOrWhiteSpace(SelectedConfirmation.RunId)
-            || !string.IsNullOrWhiteSpace(CurrentRunId));
+    private bool CanResolveConfirmation()
+    {
+        if (SelectedConfirmation is null)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(SelectedConfirmation.RunId))
+        {
+            return true;
+        }
+
+        return (string.IsNullOrWhiteSpace(SelectedConfirmation.WorkflowId)
+                || string.Equals(SelectedConfirmation.WorkflowId, CurrentWorkflowId, StringComparison.Ordinal))
+            && !string.IsNullOrWhiteSpace(CurrentRunId);
+    }
     private bool HasSelectedInDoubtOperation() => SelectedInDoubtOperation is not null;
 
     /// <summary>
@@ -965,6 +1139,16 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         StatusText = _displayNames.Text("ui.workspace.edge.connect_rejected_miss");
     }
 
+    public void NotifyKeyboardConnectStarted()
+    {
+        StatusText = _displayNames.Text("ui.workspace.keyboard_connect_started");
+    }
+
+    public void NotifyKeyboardConnectCancelled()
+    {
+        StatusText = _displayNames.Text("ui.workspace.keyboard_connect_cancelled");
+    }
+
     private string NextDataAlias(string targetNodeId, string targetHandle)
     {
         var used = Edges
@@ -977,8 +1161,15 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         var summarizerAlias = targetNode?.IsSummarizerNode == true
             ? targetNode.SummarizerChapterTextAlias.Trim()
             : string.Empty;
+        var utilityAlias = targetNode?.IsSearchNode == true
+            ? targetNode.QueryAlias.Trim()
+            : targetNode?.IsLoopNode == true
+                ? targetNode.StopInputAlias.Trim()
+                : string.Empty;
         var aliasBase = !string.IsNullOrWhiteSpace(summarizerAlias)
             ? summarizerAlias
+            : !string.IsNullOrWhiteSpace(utilityAlias)
+                ? utilityAlias
             : string.IsNullOrWhiteSpace(targetHandle) ? "input" : targetHandle.Trim();
         if (!used.Contains(aliasBase))
         {
@@ -1086,10 +1277,42 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         NotifyConfirmationCommandStates();
     }
 
+    private void OnRunSessionStateChanged(
+        WorkspaceRunSessionState previous,
+        WorkspaceRunSessionState current)
+    {
+        var identityChanged = !string.Equals(
+                previous.WorkflowId,
+                current.WorkflowId,
+                StringComparison.Ordinal)
+            || !string.Equals(previous.RunId, current.RunId, StringComparison.Ordinal);
+        if (!string.Equals(previous.RunId, current.RunId, StringComparison.Ordinal))
+        {
+            OnPropertyChanged(nameof(CurrentRunId));
+            OnPropertyChanged(nameof(CurrentRunValueText));
+        }
+        if (identityChanged)
+        {
+            _ = LoadInDoubtOperationsAsync();
+        }
+        if (!string.Equals(previous.Status, current.Status, StringComparison.Ordinal))
+        {
+            OnPropertyChanged(nameof(CurrentRunStatus));
+        }
+        NotifyRunCommandStates();
+    }
+
+    private void OnRunSessionPollingFailed(Exception error)
+    {
+        StatusText = UserFacingError.Format(error, _displayNames);
+    }
+
     private void NotifyConfirmationCommandStates()
     {
         ApproveConfirmationCommand.NotifyCanExecuteChanged();
         RejectConfirmationCommand.NotifyCanExecuteChanged();
+        OpenSelectedConfirmationWorkflowCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(CanOpenSelectedConfirmationWorkflow));
     }
 
     public void CaptureCanvasHistory()
@@ -1188,8 +1411,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             defaultWorkDir: nodeType == "start" ? _displayNames.Text("ui.workspace.start_node.default_work_dir") : string.Empty,
             x: Math.Max(0, x),
             y: Math.Max(0, y),
-            _backend,
-            () => CurrentWorkflowId,
+            runRequested: runNode => _ = RunNodeAsync(runNode),
             () => SelectNode(node: null),
             RefreshDirtyState);
         // agent 才填提示词；通用节点用角色配置默认值
@@ -1201,6 +1423,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         SeedUtilityDefaults(node);
         AttachNodeCommands(node);
         Nodes.Add(node);
+        RequestEnsureNodeVisible?.Invoke(node);
         RefreshStartNodes();
         SelectNode(node);
         if (capture)
@@ -1263,8 +1486,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             ReadString(data, "work_dir"),
             graphNode.Position?.X ?? 120 + ((Nodes.Count % 4) * 230),
             graphNode.Position?.Y ?? 80 + ((Nodes.Count / 4) * 170),
-            _backend,
-            () => CurrentWorkflowId,
+            runRequested: runNode => _ = RunNodeAsync(runNode),
             () => SelectNode(node: null),
             RefreshDirtyState)
         {
@@ -1274,7 +1496,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             PromptTemplate = ReadString(data, "prompt_template"),
             ModelId = ReadString(data, "model_id"),
             BudgetUsd = ReadString(data, "budget_usd"),
-            TimeoutMs = ReadString(data, "timeout_ms"),
+            TimeoutMs = ReadString(data, "timeout_ms", graphNode.Type == "loop" ? "300000" : string.Empty),
             BreakpointEnabled = ReadBool(data, "breakpoint", false),
             ImportPath = CoalescePath(data),
             IncludeContent = ReadBool(data, "include_content", true),
@@ -1333,7 +1555,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 node.StopInputAlias = a.ToString() ?? "done";
             }
 
-            if (dict.TryGetValue("expected", out var e) && e is not null)
+            if ((dict.TryGetValue("equals", out var e) || dict.TryGetValue("expected", out e)) && e is not null)
             {
                 node.StopExpected = e is bool b ? (b ? "true" : "false") : (e.ToString() ?? "true");
             }
@@ -1348,7 +1570,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 node.StopInputAlias = a.GetString() ?? "done";
             }
 
-            if (el.TryGetProperty("expected", out var e))
+            if (el.TryGetProperty("equals", out var e) || el.TryGetProperty("expected", out e))
             {
                 node.StopExpected = e.ValueKind switch
                 {
@@ -1409,10 +1631,47 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private void AttachNodeCommands(WorkflowNodeViewModel node)
     {
         node.SelectCommand = new RelayCommand(() => SelectNode(node));
-        node.RunCommand = new RelayCommand(() => _ = RunNodeAsync(node));
         node.DataInPinRemoved = handle => OnDataInPinRemoved(node, handle);
         node.SummarizerChapterTextAliasChanged = (previous, current) =>
             OnSummarizerChapterTextAliasChanged(node, previous, current);
+        node.QueryAliasChanged = (previous, current) =>
+            OnUtilityInputAliasChanged(node, previous, current);
+        node.StopInputAliasChanged = (previous, current) =>
+            OnUtilityInputAliasChanged(node, previous, current);
+    }
+
+    private void OnUtilityInputAliasChanged(
+        WorkflowNodeViewModel node,
+        string previousAlias,
+        string currentAlias)
+    {
+        if ((!node.IsSearchNode && !node.IsLoopNode) || string.IsNullOrWhiteSpace(currentAlias))
+        {
+            return;
+        }
+
+        var primaryHandle = node.DataInPins.FirstOrDefault()?.Handle;
+        var edge = Edges.FirstOrDefault(candidate =>
+            candidate.IsData
+            && candidate.Target == node.Id
+            && (string.IsNullOrWhiteSpace(primaryHandle)
+                || string.Equals(candidate.TargetHandle, primaryHandle, StringComparison.OrdinalIgnoreCase)));
+        if (edge is null)
+        {
+            return;
+        }
+
+        var prior = previousAlias.Trim();
+        if (!string.IsNullOrWhiteSpace(edge.Label)
+            && !string.IsNullOrWhiteSpace(prior)
+            && !string.Equals(edge.Label.Trim(), prior, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        edge.Label = currentAlias.Trim();
+        _edges = Edges.Select(item => item.ToCanvasEdge()).ToArray();
+        RefreshDirtyState();
     }
 
     public void SelectNode(WorkflowNodeViewModel? node)
@@ -1425,6 +1684,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         if (node is not null)
         {
             IsProjectAiTab = false;
+            IsRightPanelOpen = true;
         }
 
         // 换节点时清掉无关边选中；相关边配置仅随当前节点展示
@@ -1529,7 +1789,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         var (rx, ry, rw, rh) = CanvasSelectionHelpers.NormalizeRect(x0, y0, x1, y1);
         return Nodes
             .Where(n => CanvasSelectionHelpers.NodeIntersectsRect(
-                n.X, n.Y, NodePortSpec.NodeWidth, NodePortSpec.NodeBodyHeight,
+                n.X, n.Y, NodePortSpec.NodeWidth, n.CanvasHeight,
                 rx, ry, rw, rh))
             .ToArray();
     }
@@ -1725,6 +1985,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         var node = CreateNodeFromCanvas(pasted);
         CaptureUndoSnapshot();
         Nodes.Add(node);
+        RequestEnsureNodeVisible?.Invoke(node);
         RefreshStartNodes();
         SelectNode(node);
         RefreshDirtyState();
@@ -1748,7 +2009,27 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private void AdjustCanvasZoom(double delta)
     {
-        CanvasZoom += delta;
+        if (RequestCanvasZoomStep is not null)
+        {
+            RequestCanvasZoomStep(delta);
+        }
+        else
+        {
+            CanvasZoom += delta;
+        }
+        StatusText = CanvasZoomText;
+    }
+
+    private void ResetCanvasZoom()
+    {
+        if (RequestResetCanvasZoom is not null)
+        {
+            RequestResetCanvasZoom();
+        }
+        else
+        {
+            CanvasZoom = 1.0;
+        }
         StatusText = CanvasZoomText;
     }
 
@@ -1759,10 +2040,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             return new GridLength(360);
         }
         var width = value.IsAuto ? 360 : value.Value;
-        return new GridLength(Math.Clamp(width, MinRightPanelWidth, MaxRightPanelWidth));
+        return new GridLength(WorkspaceResponsiveLayoutHelpers.NormalizeRequestedRightPanelWidth(width));
     }
 
-    private async Task InitializeWorkflowAsync()
+    private async Task InitializeWorkflowAsync(CancellationToken cancellationToken = default)
     {
         // 无打开项目：保持空画布，不打项目 IPC（避免 cwd 误当项目 / 英文技术报错）
         if (!_backend.HasProjectRoot)
@@ -1785,8 +2066,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         try
         {
-            await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
-            await LoadWorkflowAsync(SelectedWorkflowId).ConfigureAwait(true);
+            await RefreshWorkflowSummariesAsync(cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            await LoadWorkflowAsync(SelectedWorkflowId, cancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch
         {
@@ -1799,11 +2084,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
-    private async Task LoadAvailableModelsAsync()
+    private async Task LoadAvailableModelsAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            var config = await _backend.GetProviderConfigAsync().ConfigureAwait(true);
+            var config = await _backend.GetProviderConfigAsync(cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             _defaultLlmProviderId = config.DefaultLlmProviderId?.Trim() ?? string.Empty;
             AvailableProviderIds.Clear();
             foreach (var providerId in config.Providers
@@ -1828,13 +2114,75 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             OnPropertyChanged(nameof(HasAvailableProviderChoices));
             OnPropertyChanged(nameof(HasAvailableModelChoices));
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
         catch
         {
             // 无模型列表时保持可手填。
         }
     }
 
-    private async Task RefreshWorkflowSummariesAsync()
+    private async Task LoadSummarizerChapterOptionsAsync(CancellationToken cancellationToken = default)
+    {
+        SummarizerChapterOptions.Clear();
+        if (!_backend.HasProjectRoot)
+        {
+            OnPropertyChanged(nameof(HasSummarizerChapterChoices));
+            OnPropertyChanged(nameof(SelectedSummarizerChapterOption));
+            return;
+        }
+
+        try
+        {
+            var tree = await _backend.GetWorksTreeAsync(cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var option in FlattenSummarizerChapterOptions(tree)
+                         .GroupBy(item => (item.ChapterId, item.DocumentId))
+                         .Select(group => group.First())
+                         .OrderBy(item => item.DisplayTitle, StringComparer.CurrentCulture))
+            {
+                SummarizerChapterOptions.Add(option);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            UserFacingError.Format(error, _displayNames);
+        }
+        finally
+        {
+            OnPropertyChanged(nameof(HasSummarizerChapterChoices));
+            OnPropertyChanged(nameof(SelectedSummarizerChapterOption));
+        }
+    }
+
+    private static IEnumerable<SummarizerChapterOption> FlattenSummarizerChapterOptions(
+        WorksTreeNode node)
+    {
+        if (string.Equals(node.Kind, "chapter", StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(node.ChapterId)
+            && !string.IsNullOrWhiteSpace(node.DocumentId))
+        {
+            yield return new SummarizerChapterOption(
+                node.ChapterId,
+                node.DocumentId,
+                node.Title,
+                node.Path);
+        }
+
+        foreach (var child in node.Children)
+        {
+            foreach (var option in FlattenSummarizerChapterOptions(child))
+            {
+                yield return option;
+            }
+        }
+    }
+
+    private async Task RefreshWorkflowSummariesAsync(CancellationToken cancellationToken = default)
     {
         if (!_backend.HasProjectRoot)
         {
@@ -1845,7 +2193,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         try
         {
             var selected = SelectedWorkflowId;
-            var summaries = await _backend.ListWorkflowGraphsAsync().ConfigureAwait(true);
+            var summaries = await _backend.ListWorkflowGraphsAsync(cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             WorkflowSummaries.Clear();
             foreach (var summary in summaries)
             {
@@ -1865,6 +2214,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 _suppressWorkflowSelectionChange = false;
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
         catch
         {
             WorkflowSummaries.Clear();
@@ -1879,9 +2231,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             return;
         }
         SetSelectedWorkflowId(workflowId);
-        CurrentRunId = string.Empty;
-        CurrentRunStatus = string.Empty;
-        _workflowEventPollingCts?.Cancel();
+        _runSession.Reset();
         await LoadWorkflowAsync(workflowId).ConfigureAwait(true);
     }
 
@@ -1891,10 +2241,13 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             var summary = WorkflowSummaries.FirstOrDefault(item => item.WorkflowId == _selectedWorkflowId);
             CurrentWorkflowName = summary?.Name ?? _selectedWorkflowId;
+            NotifyConfirmationCommandStates();
         }
     }
 
-    private async Task LoadWorkflowAsync(string? workflowId = null)
+    private async Task LoadWorkflowAsync(
+        string? workflowId = null,
+        CancellationToken cancellationToken = default)
     {
         if (!_backend.HasProjectRoot)
         {
@@ -1915,12 +2268,18 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         StatusText = _displayNames.Text("ui.common.loading");
         try
         {
-            var graph = await _backend.LoadWorkflowGraphAsync(string.IsNullOrWhiteSpace(workflowId) ? SelectedWorkflowId : workflowId).ConfigureAwait(true);
+            var graph = await _backend.LoadWorkflowGraphAsync(
+                string.IsNullOrWhiteSpace(workflowId) ? SelectedWorkflowId : workflowId,
+                cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             CurrentWorkflowName = graph.Name;
             ApplyGraph(graph);
             CaptureSnapshot();
             SetWorkflowLoadState(WorkflowLoadState.Loaded);
             StatusText = _displayNames.Text("ui.common.open");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch
         {
@@ -1932,24 +2291,18 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 
     /// <summary>
-    /// 导入：重新从项目加载默认画布图到当前画布（一项目一画布，无工作流切换）。
+    /// 显式重新加载项目的默认工作流，避免把该动作误标为“导入”。
     /// </summary>
-    private async Task LoadWorkflowWithUnsavedCheckAsync()
+    private async Task ReloadDefaultWorkflowWithUnsavedCheckAsync()
     {
         if (!await ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
         {
             return;
         }
 
-        // 始终加载默认工作流图到当前画布，不切换「多工作流」
         SetSelectedWorkflowId(DefaultWorkflowId);
         await LoadWorkflowAsync(DefaultWorkflowId).ConfigureAwait(true);
-        ScheduleCanvasHintAfterImport();
-    }
-
-    private void ScheduleCanvasHintAfterImport()
-    {
-        StatusText = _displayNames.Text("ui.workspace.import_to_canvas");
+        StatusText = _displayNames.Text("ui.workspace.reload_default_done");
     }
 
     private async Task SaveWorkflowAsync()
@@ -2127,6 +2480,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             return;
         }
+        var workflowId = CurrentWorkflowId;
+        var sessionFence = _runSession.CaptureFence();
         try
         {
             var startNodeId = node.NodeType == "start" ? node.Id : null;
@@ -2135,13 +2490,16 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             RememberWorkflowRevision(await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true));
             CaptureSnapshot();
             await RefreshWorkflowSummariesAsync().ConfigureAwait(true);
-            var run = await _backend.RunWorkflowAsync(CurrentWorkflowId, startNodeId).ConfigureAwait(true);
-            CurrentRunId = run.RunId;
-            CurrentRunStatus = run.Status ?? "running";
-            _workflowEventCursor = 0;
+            _runSession.ThrowIfStale(sessionFence);
+            var run = await _runSession
+                .StartAsync(workflowId, startNodeId)
+                .ConfigureAwait(true);
             node.StatusText = UserFacingError.RuntimeStatus(run.Status, _displayNames);
             StatusText = UserFacingError.RuntimeStatus(run.Status, _displayNames);
-            StartWorkflowEventPolling(run.RunId);
+        }
+        catch (OperationCanceledException)
+        {
+            // 工作流已切换；迟到的启动结果不得覆盖新会话的页面状态。
         }
         catch (Exception ex)
         {
@@ -2152,7 +2510,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     private async Task PauseWorkflowAsync()
     {
-        await RunControlAsync((workflowId, runId) => _backend.PauseWorkflowAsync(workflowId, runId, StatusText));
+        await RunControlAsync(() => _runSession.PauseAsync(StatusText));
     }
 
     private async Task StopWorkflowAsync()
@@ -2162,6 +2520,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             StatusText = _displayNames.Text("ui.common.none");
             return;
         }
+        var sessionFence = _runSession.CaptureFence();
         if (!await ConfirmDangerAsync(
                 "ui.dialog.workspace.stop_run.title",
                 "ui.dialog.workspace.stop_run.message",
@@ -2169,15 +2528,19 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             return;
         }
-        await RunControlAsync((workflowId, runId) => _backend.StopWorkflowAsync(workflowId, runId, StatusText));
+        await RunControlAsync(() =>
+        {
+            _runSession.ThrowIfStale(sessionFence);
+            return _runSession.StopAsync(StatusText);
+        });
     }
 
     private async Task ResumeWorkflowAsync()
     {
-        await RunControlAsync((workflowId, runId) => _backend.ResumeWorkflowAsync(workflowId, runId));
+        await RunControlAsync(() => _runSession.ResumeAsync());
     }
 
-    private async Task RunControlAsync(Func<string, string, Task<WorkflowActionResult>> action)
+    private async Task RunControlAsync(Func<Task<WorkflowActionResult>> action)
     {
         if (string.IsNullOrWhiteSpace(CurrentRunId))
         {
@@ -2186,11 +2549,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
-            var result = await action(CurrentWorkflowId, CurrentRunId).ConfigureAwait(true);
-            CurrentRunId = result.RunId;
-            CurrentRunStatus = result.Status ?? CurrentRunStatus;
+            var result = await action().ConfigureAwait(true);
             StatusText = UserFacingError.RuntimeStatus(result.Status, _displayNames);
-            StartWorkflowEventPolling(result.RunId);
+        }
+        catch (OperationCanceledException)
+        {
+            // 控制请求返回前已切换会话；协调器已拒绝旧结果。
         }
         catch (Exception ex)
         {
@@ -2198,56 +2562,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
-    private void StartWorkflowEventPolling(string runId)
-    {
-        _workflowEventPollingCts?.Cancel();
-        _workflowEventPollingCts?.Dispose();
-        _workflowEventPollingCts = new CancellationTokenSource();
-        var token = _workflowEventPollingCts.Token;
-        _ = PollWorkflowEventsAsync(runId, token);
-    }
-
-    private async Task PollWorkflowEventsAsync(string runId, CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            try
-            {
-                var result = await _backend
-                    .GetWorkflowEventsAsync(CurrentWorkflowId, runId, _workflowEventCursor, 100, cancellationToken)
-                    .ConfigureAwait(true);
-                _workflowEventCursor = result.NextSequence;
-                ApplyWorkflowEvents(result);
-                if (WorkflowRunIsTerminal(result.Status))
-                {
-                    CurrentRunStatus = result.Status ?? CurrentRunStatus;
-                    return;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                StatusText = UserFacingError.Format(ex, _displayNames);
-                return;
-            }
-
-            try
-            {
-                await Task.Delay(750, cancellationToken).ConfigureAwait(true);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-        }
-    }
-
     private void ApplyWorkflowEvents(WorkflowEventsResult result)
     {
-        CurrentRunStatus = result.Status ?? CurrentRunStatus;
         StatusText = UserFacingError.RuntimeStatus(result.Status, _displayNames);
         foreach (var runtimeEvent in result.Events)
         {
@@ -2290,11 +2606,6 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         };
     }
 
-    private static bool WorkflowRunIsTerminal(string status)
-    {
-        return status is "stopped" or "succeeded" or "failed";
-    }
-
     private async Task LoadInDoubtOperationsAsync()
     {
         InDoubtOperations.Clear();
@@ -2329,6 +2640,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             return;
         }
+        var sessionFence = _runSession.CaptureFence();
         object? response = null;
         if (decision == "use_response")
         {
@@ -2353,20 +2665,26 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
+            _runSession.ThrowIfStale(sessionFence);
             var result = await _backend.ResolveInDoubtOperationAsync(
                 operation.OperationId,
                 decision,
                 response,
                 string.IsNullOrWhiteSpace(InDoubtStopReason) ? null : InDoubtStopReason).ConfigureAwait(true);
-            CurrentRunId = result.Workflow.RunId;
+            _runSession.ThrowIfStale(sessionFence);
+            _runSession.Attach(
+                result.Workflow.WorkflowId,
+                result.Workflow.RunId,
+                result.Workflow.Status,
+                startPolling: !WorkspaceRunSessionCoordinator.IsTerminal(result.Workflow.Status));
             StatusText = _displayNames.Text("ui.workspace.in_doubt.resolved");
             InDoubtResponseJson = string.Empty;
             InDoubtStopReason = string.Empty;
             await LoadInDoubtOperationsAsync().ConfigureAwait(true);
-            if (!WorkflowRunIsTerminal(result.Workflow.Status))
-            {
-                StartWorkflowEventPolling(result.Workflow.RunId);
-            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 解析请求属于旧会话；不将其结果挂接到当前工作流。
         }
         catch (Exception ex)
         {
@@ -2387,6 +2705,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             {
                 return;
             }
+            var workflowId = CurrentWorkflowId;
+            var referenceRunId = string.IsNullOrWhiteSpace(CurrentRunId) ? null : CurrentRunId;
+            var message = ProjectAiMessage;
+            var sessionFence = _runSession.CaptureFence();
             if (HasUnsavedChanges)
             {
                 var graph = BuildGraph();
@@ -2394,34 +2716,42 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 RememberWorkflowRevision(await _backend.SaveWorkflowGraphAsync(graph).ConfigureAwait(true));
                 CaptureSnapshot();
             }
+            _runSession.ThrowIfStale(sessionFence);
             // 起点由后端 list_start_nodes 工具 + AI 自行抉择；前端不提供优先起点。
             var result = await _backend.ProjectAiChatAsync(
-                ProjectAiMessage,
-                _projectAiHistory,
-                workflowIdToRun: null).ConfigureAwait(true);
+                message,
+                workflowIdToRun: null,
+                referenceWorkflowId: workflowId,
+                referenceRunId: referenceRunId,
+                conversationId: ProjectAiConversationId,
+                conversationRevision: _projectAiConversationRevision)
+                .ConfigureAwait(true);
+            _runSession.ThrowIfStale(sessionFence);
             ProjectAiAnswer = result.Answer;
-            _projectAiHistory.Clear();
-            ProjectAiBubbles.Clear();
-            foreach (var historyMessage in result.ChatHistory)
-            {
-                _projectAiHistory.Add(historyMessage);
-                ProjectAiBubbles.Add(new ChatBubbleViewModel(historyMessage.Role, historyMessage.Content));
-            }
-            if (ProjectAiBubbles.Count == 0 && !string.IsNullOrWhiteSpace(result.Answer))
-            {
-                ProjectAiBubbles.Add(new ChatBubbleViewModel("assistant", result.Answer));
-            }
+            _projectAiConversationRevision = ProjectAiConversationUi.Apply(
+                result,
+                _projectAiHistory,
+                ProjectAiBubbles,
+                _projectAiConversationRevision);
             OnPropertyChanged(nameof(HasProjectAiBubbles));
             ProjectAiMessage = string.Empty;
             StatusText = result.WorkflowRun is not null
                 ? UserFacingError.RuntimeStatus(result.WorkflowRun.Status, _displayNames)
-                : _displayNames.Text("ui.common.configured");
+                : ProjectAiConversationUi.ContextWasCompacted(result)
+                    ? _displayNames.Text("ui.project_ai.context_compacted")
+                    : _displayNames.Text("ui.common.configured");
             if (result.WorkflowRun is not null)
             {
-                CurrentRunId = result.WorkflowRun.RunId;
-                _workflowEventCursor = 0;
-                StartWorkflowEventPolling(result.WorkflowRun.RunId);
+                _runSession.Attach(
+                    workflowId,
+                    result.WorkflowRun.RunId,
+                    result.WorkflowRun.Status,
+                    resetCursor: true);
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // Project AI 响应属于已切走的工作流；丢弃其页面投影。
         }
         catch (Exception ex)
         {
@@ -2611,7 +2941,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         });
     }
 
-    private async Task LoadConfirmationsAsync()
+    private async Task LoadConfirmationsAsync(CancellationToken cancellationToken = default)
     {
         if (!_backend.HasProjectRoot)
         {
@@ -2630,13 +2960,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         try
         {
-            var entries = await _backend.ListConfirmationsAsync().ConfigureAwait(true);
+            var entries = await _backend.ListConfirmationsAsync(cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             Confirmations.Clear();
             SelectedConfirmation = null;
             // 后端已只返回 pending；前端再保险过滤，避免历史态挡住画布。
             foreach (var entry in entries.Where(IsPendingConfirmation))
             {
-                Confirmations.Add(new ConfirmationItemViewModel(entry, SelectConfirmation));
+                Confirmations.Add(new ConfirmationItemViewModel(entry, _displayNames, SelectConfirmation));
             }
             if (Confirmations.Count > 0 && SelectedConfirmation is null)
             {
@@ -2657,6 +2988,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
             NotifyConfirmationCommandStates();
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
         catch (Exception ex)
         {
             StatusText = UserFacingError.Format(ex, _displayNames);
@@ -2675,16 +3009,18 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             confirmation.IsSelected = confirmation == item;
         }
         SelectedConfirmation = item;
-        // 选中待审项时同步会话 run，便于暂停/恢复与事件轮询。
-        if (!string.IsNullOrWhiteSpace(item.RunId))
-        {
-            CurrentRunId = item.RunId;
-        }
-        if (!string.IsNullOrWhiteSpace(item.WorkflowId))
-        {
-            SelectedWorkflowId = item.WorkflowId;
-        }
         NotifyConfirmationCommandStates();
+    }
+
+    private async Task OpenSelectedConfirmationWorkflowAsync()
+    {
+        var confirmation = SelectedConfirmation;
+        if (confirmation is null || string.IsNullOrWhiteSpace(confirmation.WorkflowId))
+        {
+            return;
+        }
+
+        await SwitchWorkflowAsync(confirmation.WorkflowId).ConfigureAwait(true);
     }
 
     private async Task ResolveSelectedConfirmationAsync(string decision)
@@ -2694,17 +3030,21 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             StatusText = ConfirmationsEmptyText;
             return;
         }
-        var workflowId = !string.IsNullOrWhiteSpace(SelectedConfirmation.WorkflowId)
-            ? SelectedConfirmation.WorkflowId
+        var confirmation = SelectedConfirmation;
+        var targetsCurrentWorkflow = string.IsNullOrWhiteSpace(confirmation.WorkflowId)
+            || string.Equals(confirmation.WorkflowId, CurrentWorkflowId, StringComparison.Ordinal);
+        var workflowId = !string.IsNullOrWhiteSpace(confirmation.WorkflowId)
+            ? confirmation.WorkflowId
             : CurrentWorkflowId;
-        var runId = !string.IsNullOrWhiteSpace(SelectedConfirmation.RunId)
-            ? SelectedConfirmation.RunId
-            : CurrentRunId;
+        var runId = !string.IsNullOrWhiteSpace(confirmation.RunId)
+            ? confirmation.RunId
+            : targetsCurrentWorkflow ? CurrentRunId : string.Empty;
         if (string.IsNullOrWhiteSpace(runId) || string.IsNullOrWhiteSpace(workflowId))
         {
             StatusText = _displayNames.Text("ui.workspace.confirmation.missing_run");
             return;
         }
+        var sessionFence = _runSession.CaptureFence();
         if (string.Equals(decision, "reject", StringComparison.Ordinal)
             && !await ConfirmDangerAsync(
                     "ui.dialog.workspace.reject_confirmation.title",
@@ -2715,16 +3055,27 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         try
         {
+            _runSession.ThrowIfStale(sessionFence);
             var result = await _backend.ResolveConfirmationAsync(
                 workflowId,
                 runId,
-                SelectedConfirmation.ConfirmationId,
+                confirmation.ConfirmationId,
                 decision,
                 string.IsNullOrWhiteSpace(ConfirmationReason) ? null : ConfirmationReason).ConfigureAwait(true);
-            CurrentRunId = result.Workflow.RunId;
+            _runSession.ThrowIfStale(sessionFence);
             StatusText = UserFacingError.RuntimeStatus(result.Workflow.Status, _displayNames);
-            StartWorkflowEventPolling(result.Workflow.RunId);
+            if (string.Equals(workflowId, CurrentWorkflowId, StringComparison.Ordinal))
+            {
+                _runSession.Attach(
+                    result.Workflow.WorkflowId,
+                    result.Workflow.RunId,
+                    result.Workflow.Status);
+            }
             await LoadConfirmationsAsync().ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            // 确认请求属于旧会话；后端结果仍持久化，但不得覆盖当前页面会话。
         }
         catch (Exception ex)
         {
@@ -2880,13 +3231,21 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
-    public async Task ReloadProjectDataAsync()
+    public async Task ReloadProjectDataAsync(CancellationToken cancellationToken = default)
     {
-        CurrentRunId = string.Empty;
-        CurrentRunStatus = string.Empty;
-        _workflowEventPollingCts?.Cancel();
-        await InitializeWorkflowAsync().ConfigureAwait(true);
-        await LoadConfirmationsAsync().ConfigureAwait(true);
+        _runSession.Reset();
+        await InitializeWorkflowAsync(cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
+        await LoadConfirmationsAsync(cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
+        await LoadAvailableModelsAsync(cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
+        await LoadSummarizerChapterOptionsAsync(cancellationToken).ConfigureAwait(true);
+    }
+
+    public void DeactivateProjectData()
+    {
+        _runSession.CancelPolling();
     }
 
     private bool CanPersistWorkflow()
@@ -2942,6 +3301,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private void ApplyGraph(WorkflowGraphData graph)
     {
         RememberWorkflowRevision(graph);
+        _isApplyingGraph = true;
         _suppressSnapshotChecks = true;
         try
         {
@@ -2967,8 +3327,23 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         finally
         {
+            _isApplyingGraph = false;
             _suppressSnapshotChecks = false;
+            GraphRevision++;
+            OnPropertyChanged(nameof(GraphRevision));
         }
+    }
+
+    internal bool IsApplyingGraph => _isApplyingGraph;
+    internal int GraphRevision { get; private set; }
+
+    /// <summary>供发布性能探针注入合成图；仍复用正式画布图 DTO 和节点构造路径。</summary>
+    internal void LoadReleaseProbeGraph(WorkflowGraphData graph)
+    {
+        CurrentWorkflowName = graph.Name;
+        ApplyGraph(graph);
+        CaptureSnapshot();
+        SetWorkflowLoadState(WorkflowLoadState.Loaded);
     }
 
     private void CaptureSnapshot()
@@ -3120,6 +3495,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         SelectedEdge = edge;
         IsProjectAiTab = false;
+        IsRightPanelOpen = true;
 
         // 点边时同步选中一个端点节点，右栏才显示「相关边」配置（符合直觉）
         var prefer = SelectedNode is not null
@@ -3292,6 +3668,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 }
 
+public sealed record SummarizerChapterOption(
+    string ChapterId,
+    string DocumentId,
+    string Title,
+    string Path)
+{
+    public string DisplayTitle => string.IsNullOrWhiteSpace(Path)
+        ? Title
+        : $"{Title} · {Path.Replace('\\', '/')}";
+}
+
 public sealed class NodeLibraryItemViewModel
 {
     public NodeLibraryItemViewModel(string nodeType, string title, Action add)
@@ -3363,8 +3750,8 @@ public static class NodePortSpec
 {
     /// <summary>节点外框宽（单卡片，引脚在内侧）。与 WorkspacePageView 节点模板一致。</summary>
     public const double NodeWidth = 200;
-    /// <summary>框选命中用节点高度（通信行 + 标题 + 内容栏近似）。</summary>
-    public const double NodeBodyHeight = 96;
+    /// <summary>节点最小高度；多数据入按同一几何模型向下扩展。</summary>
+    public const double MinimumNodeHeight = 96;
     /// <summary>内侧引脚中心到左右边的内缩（padding 6 + 半宽 7 ≈ 13）。</summary>
     public const double PinInsetX = 13;
     /// <summary>通信口中心 Y：顶行 10px 内、半出卡片上沿。</summary>
@@ -3380,6 +3767,8 @@ public static class NodePortSpec
     /// <summary>多数据入垂直间距 = pin 高 14 + StackPanel Spacing 8。</summary>
     public const double DataPortGap = 8;
     public const double DataPortSpacing = DataPinBox + DataPortGap; // 22
+    /// <summary>最后一个数据入中心到节点底边的安全间距。</summary>
+    public const double DataPortBottomInset = 15;
     /// <summary>执行口中心 Y（标题行垂直中线）。</summary>
     public const double ExecPortY = CardTopOffset + 7 + 8; // pad-top + half pin
     /// <summary>
@@ -3388,10 +3777,8 @@ public static class NodePortSpec
     /// </summary>
     public const double DataPortY = CardTopOffset + TitleBarHeight + ContentBarPaddingY + (DataPinBox / 2.0);
     public const double HitRadius = 16;
-    /// <summary>小地图相对逻辑画布的缩放（与 MiniMapX/Y 一致）。</summary>
-    public const double MiniMapScale = 0.1;
-    public const double MiniMapContentWidth = 140;
-    public const double MiniMapContentHeight = 84;
+    public const double MiniMapContentWidth = CanvasMiniMapHelpers.ContentWidth;
+    public const double MiniMapContentHeight = CanvasMiniMapHelpers.ContentHeight;
 
     public static string HandleName(NodePortKind kind, NodePortDirection direction) => kind switch
     {
@@ -3464,6 +3851,17 @@ public static class NodePortSpec
     public static string DataInHandleName(int index) =>
         index <= 0 ? "input" : $"data-in-{index}";
 
+    /// <summary>
+    /// W7：XAML 高度、框选、Fit、小地图和节点命中共用的节点高度。
+    /// 状态正文不再参与卡片测量；多数据入仍按端口间距确定真实高度。
+    /// </summary>
+    public static double NodeHeightForDataInputCount(int dataInputCount)
+    {
+        var count = Math.Max(1, dataInputCount);
+        var lastPortCenter = DataPortY + ((count - 1) * DataPortSpacing);
+        return Math.Max(MinimumNodeHeight, lastPortCenter + DataPortBottomInset);
+    }
+
     /// <summary>数据入旁标签：贴在目标引脚右侧。</summary>
     public static (double X, double Y) LabelBesideDataIn(double endX, double endY) =>
         (endX + 10, endY - 7);
@@ -3534,6 +3932,43 @@ public static class NodePortSpec
         var x = (u * u * u * p0.X) + (3 * u * u * t * p1.X) + (3 * u * t * t * p2.X) + (t * t * t * p3.X);
         var y = (u * u * u * p0.Y) + (3 * u * u * t * p1.Y) + (3 * u * t * t * p2.Y) + (t * t * t * p3.Y);
         return new Avalonia.Point(x, y);
+    }
+
+    /// <summary>
+    /// 从曲线端点切线生成箭头三角形。tipInset 把箭头移到节点外侧，避免终点在卡片内时被节点遮住。
+    /// previousPoint 是沿当前阅读方向到达 target 前的控制点；反向箭头传入 Control1 → Start。
+    /// </summary>
+    public static EdgeArrowSpec BuildArrowHead(
+        Avalonia.Point target,
+        Avalonia.Point previousPoint,
+        double tipInset = 14.0,
+        double length = 11.0,
+        double halfWidth = 5.5)
+    {
+        var dx = target.X - previousPoint.X;
+        var dy = target.Y - previousPoint.Y;
+        var magnitude = Math.Sqrt((dx * dx) + (dy * dy));
+        if (magnitude < 0.001)
+        {
+            dx = 1.0;
+            dy = 0.0;
+            magnitude = 1.0;
+        }
+
+        var ux = dx / magnitude;
+        var uy = dy / magnitude;
+        var tip = new Avalonia.Point(target.X - (ux * tipInset), target.Y - (uy * tipInset));
+        var baseCenter = new Avalonia.Point(tip.X - (ux * length), tip.Y - (uy * length));
+        var perpendicularX = -uy;
+        var perpendicularY = ux;
+        return new EdgeArrowSpec(
+            Tip: tip,
+            Left: new Avalonia.Point(
+                baseCenter.X + (perpendicularX * halfWidth),
+                baseCenter.Y + (perpendicularY * halfWidth)),
+            Right: new Avalonia.Point(
+                baseCenter.X - (perpendicularX * halfWidth),
+                baseCenter.Y - (perpendicularY * halfWidth)));
     }
 
     /// <summary>
@@ -3649,27 +4084,6 @@ public static class NodePortSpec
         return false;
     }
 
-    /// <summary>小地图坐标 → 逻辑画布坐标。</summary>
-    public static (double X, double Y) MiniMapToLogical(double miniX, double miniY) =>
-        (miniX / MiniMapScale, miniY / MiniMapScale);
-
-    /// <summary>逻辑画布视口 → 小地图视口框（内容区内）。</summary>
-    public static (double X, double Y, double Width, double Height) LogicalViewportToMiniMap(
-        double logicalLeft, double logicalTop, double logicalWidth, double logicalHeight)
-    {
-        var x = Math.Clamp(logicalLeft * MiniMapScale, 0, MiniMapContentWidth);
-        var y = Math.Clamp(logicalTop * MiniMapScale, 0, MiniMapContentHeight);
-        var rawW = Math.Max(0.0, logicalWidth * MiniMapScale);
-        var rawH = Math.Max(0.0, logicalHeight * MiniMapScale);
-        // maxW/maxH 可能为 0（视口贴右下角）；min 不得超过 max，否则 Math.Clamp 抛 ArgumentException。
-        var maxW = Math.Max(0.0, MiniMapContentWidth - x);
-        var maxH = Math.Max(0.0, MiniMapContentHeight - y);
-        var minW = Math.Min(8.0, maxW);
-        var minH = Math.Min(6.0, maxH);
-        var w = Math.Clamp(rawW, minW, maxW);
-        var h = Math.Clamp(rawH, minH, maxH);
-        return (x, y, w, h);
-    }
 }
 
 /// <summary>边路径控制点规格（可单测）。</summary>
@@ -3682,7 +4096,21 @@ public readonly record struct EdgePathSpec(
 {
     public Avalonia.Point Midpoint =>
         NodePortSpec.CubicBezierPoint(Start, Control1, Control2, End, 0.5);
+
+    public Avalonia.Vector MidpointTangent => new(
+        (0.75 * (Control1.X - Start.X))
+        + (1.5 * (Control2.X - Control1.X))
+        + (0.75 * (End.X - Control2.X)),
+        (0.75 * (Control1.Y - Start.Y))
+        + (1.5 * (Control2.Y - Control1.Y))
+        + (0.75 * (End.Y - Control2.Y)));
 }
+
+/// <summary>有向边箭头三角形规格（可单测，位置按贝塞尔切线计算）。</summary>
+public readonly record struct EdgeArrowSpec(
+    Avalonia.Point Tip,
+    Avalonia.Point Left,
+    Avalonia.Point Right);
 
 public sealed class WorkflowNodeViewModel : ViewModelBase
 {
@@ -3700,8 +4128,6 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     private static readonly IBrush TypeControlBrush = new SolidColorBrush(Color.Parse("#D97706"));
     private static readonly IBrush TypeDefaultBrush = new SolidColorBrush(Color.Parse("#8B939D"));
 
-    private readonly IAriadneBackendClient _backend;
-    private readonly Func<string> _currentWorkflowId;
     private readonly Action _markDirty;
     /// <summary>加载时保留的非 UI 配置键，保存时经 <see cref="NodeConfigData.MergeUiFields"/> 合并回去。</summary>
     private Dictionary<string, object?> _extraData = new(StringComparer.Ordinal);
@@ -3762,8 +4188,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         string defaultWorkDir,
         double x,
         double y,
-        IAriadneBackendClient backend,
-        Func<string> currentWorkflowId,
+        Action<WorkflowNodeViewModel> runRequested,
         Action clearSelection,
         Action markDirty)
     {
@@ -3775,11 +4200,13 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         _exposedAsTool = nodeType == "start";
         _x = x;
         _y = y;
-        _backend = backend;
-        _currentWorkflowId = currentWorkflowId;
         _markDirty = markDirty;
+        if (nodeType == "loop")
+        {
+            _timeoutMs = "300000";
+        }
         SelectCommand = new RelayCommand(() => clearSelection());
-        RunCommand = new RelayCommand(() => _ = RunAsync());
+        RunCommand = new RelayCommand(() => runRequested(this));
         DataInPins = new ObservableCollection<NodeDataInPinViewModel>();
         AddDataInPinCommand = new RelayCommand(AddDataInPin);
         RemoveDataInPinCommand = new RelayCommand(RemoveLastDataInPin, () => DataInPins.Count > 1);
@@ -3790,7 +4217,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public string NodeType { get; }
     public string Label { get; }
     public RelayCommand SelectCommand { get; set; }
-    public RelayCommand RunCommand { get; set; }
+    public RelayCommand RunCommand { get; }
     public RelayCommand AddDataInPinCommand { get; }
     public RelayCommand RemoveDataInPinCommand { get; }
     public bool IsStartNode => NodeType == "start";
@@ -3811,6 +4238,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public bool ShowPromptEditor => IsAgentNode;
     public bool ShowDataInPinEditor => !IsStartNode;
     public ObservableCollection<NodeDataInPinViewModel> DataInPins { get; }
+    public double CanvasHeight => NodePortSpec.NodeHeightForDataInputCount(DataInPins.Count);
 
     public string ImportPath
     {
@@ -3827,13 +4255,37 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     }
 
     public bool IncludeContent { get => _includeContent; set { if (SetProperty(ref _includeContent, value)) _markDirty(); } }
-    public string QueryAlias { get => _queryAlias; set { if (SetProperty(ref _queryAlias, value ?? "query")) _markDirty(); } }
+    public string QueryAlias
+    {
+        get => _queryAlias;
+        set
+        {
+            var previous = _queryAlias;
+            if (SetProperty(ref _queryAlias, value ?? "query"))
+            {
+                _markDirty();
+                QueryAliasChanged?.Invoke(previous, _queryAlias);
+            }
+        }
+    }
     public string SearchLimit { get => _searchLimit; set { if (SetProperty(ref _searchLimit, value ?? "10")) _markDirty(); } }
     public string ConditionInputAlias { get => _conditionInputAlias; set { if (SetProperty(ref _conditionInputAlias, value ?? "input")) _markDirty(); } }
     public string ConditionOperator { get => _conditionOperator; set { if (SetProperty(ref _conditionOperator, value ?? "truthy")) _markDirty(); } }
     public string ConditionExpected { get => _conditionExpected; set { if (SetProperty(ref _conditionExpected, value ?? string.Empty)) _markDirty(); } }
     public string MaxIterations { get => _maxIterations; set { if (SetProperty(ref _maxIterations, value ?? "5")) _markDirty(); } }
-    public string StopInputAlias { get => _stopInputAlias; set { if (SetProperty(ref _stopInputAlias, value ?? "done")) _markDirty(); } }
+    public string StopInputAlias
+    {
+        get => _stopInputAlias;
+        set
+        {
+            var previous = _stopInputAlias;
+            if (SetProperty(ref _stopInputAlias, value ?? "done"))
+            {
+                _markDirty();
+                StopInputAliasChanged?.Invoke(previous, _stopInputAlias);
+            }
+        }
+    }
     public string StopExpected { get => _stopExpected; set { if (SetProperty(ref _stopExpected, value ?? "true")) _markDirty(); } }
     public string ApprovalId { get => _approvalId; set { if (SetProperty(ref _approvalId, value ?? string.Empty)) _markDirty(); } }
     public bool AutoApprove { get => _autoApprove; set { if (SetProperty(ref _autoApprove, value)) _markDirty(); } }
@@ -3875,6 +4327,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         DataInPins.Add(new NodeDataInPinViewModel(handle, shortLabel: $"in{_nextDataInIndex - 1}", () => RemoveDataInPin(handle)));
         RemoveDataInPinCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(DataInPins));
+        OnPropertyChanged(nameof(CanvasHeight));
         _markDirty();
     }
 
@@ -3905,6 +4358,7 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         DataInPins.Remove(pin);
         RemoveDataInPinCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(DataInPins));
+        OnPropertyChanged(nameof(CanvasHeight));
         _markDirty();
         DataInPinRemoved?.Invoke(handle);
     }
@@ -3914,6 +4368,10 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
 
     /// <summary>Summarizer 正文 alias 改动后由宿主同步首个数据入边。</summary>
     public Action<string, string>? SummarizerChapterTextAliasChanged { get; set; }
+
+    /// <summary>Search/Loop 输入 alias 改动后同步首个数据入边。</summary>
+    public Action<string, string>? QueryAliasChanged { get; set; }
+    public Action<string, string>? StopInputAliasChanged { get; set; }
 
     /// <summary>从已存配置恢复多数据入列表。</summary>
     public void RestoreDataInPins(IEnumerable<string>? handles)
@@ -3943,6 +4401,8 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         }
 
         RemoveDataInPinCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(DataInPins));
+        OnPropertyChanged(nameof(CanvasHeight));
     }
 
     public string Name { get => _name; set => SetProperty(ref _name, value); }
@@ -3986,28 +4446,13 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public double X
     {
         get => _x;
-        set
-        {
-            if (SetProperty(ref _x, value))
-            {
-                OnPropertyChanged(nameof(MiniMapX));
-            }
-        }
+        set => SetProperty(ref _x, value);
     }
     public double Y
     {
         get => _y;
-        set
-        {
-            if (SetProperty(ref _y, value))
-            {
-                OnPropertyChanged(nameof(MiniMapY));
-            }
-        }
+        set => SetProperty(ref _y, value);
     }
-    // 点宽 10 / 高 6，夹在 140×84 内容区内
-    public double MiniMapX => Math.Clamp(X * NodePortSpec.MiniMapScale, 0, NodePortSpec.MiniMapContentWidth - 10);
-    public double MiniMapY => Math.Clamp(Y * NodePortSpec.MiniMapScale, 0, NodePortSpec.MiniMapContentHeight - 6);
     public bool IsSelected
     {
         get => _isSelected;
@@ -4191,11 +4636,16 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
                 fields["max_iterations"] = mi;
             }
 
-            // stop_condition: { input_alias, expected }
+            if (long.TryParse(TimeoutMs, out var timeoutMs) && timeoutMs > 0)
+            {
+                fields["timeout_ms"] = timeoutMs;
+            }
+
+            // stop_condition: { input_alias, equals }
             fields["stop_condition"] = new Dictionary<string, object?>
             {
                 ["input_alias"] = string.IsNullOrWhiteSpace(StopInputAlias) ? "done" : StopInputAlias.Trim(),
-                ["expected"] = ParseLooseJsonOrString(string.IsNullOrWhiteSpace(StopExpected) ? "true" : StopExpected),
+                ["equals"] = ParseLooseJsonOrString(string.IsNullOrWhiteSpace(StopExpected) ? "true" : StopExpected),
             };
         }
         else if (IsApprovalNode)
@@ -4269,19 +4719,6 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
             new CanvasPosition(X, Y));
     }
 
-    private async Task RunAsync()
-    {
-        try
-        {
-            var run = await _backend.RunWorkflowAsync(_currentWorkflowId(), IsStartNode ? Id : null).ConfigureAwait(true);
-            StatusText = UserFacingError.RuntimeStatus(run.Status, Localization.DisplayNameService.Current);
-        }
-        catch (Exception ex)
-        {
-            StatusText = UserFacingError.Format(ex, Localization.DisplayNameService.Current);
-        }
-    }
-
     protected override void OnPropertyChanged(string? propertyName = null)
     {
         base.OnPropertyChanged(propertyName);
@@ -4336,7 +4773,10 @@ public sealed class ConfirmationItemViewModel : ViewModelBase
 {
     private bool _isSelected;
 
-    public ConfirmationItemViewModel(ConfirmationLogEntry entry, Action<ConfirmationItemViewModel> select)
+    public ConfirmationItemViewModel(
+        ConfirmationLogEntry entry,
+        DisplayNameService displayNames,
+        Action<ConfirmationItemViewModel> select)
     {
         ConfirmationId = entry.ConfirmationId;
         Summary = entry.Summary;
@@ -4344,12 +4784,27 @@ public sealed class ConfirmationItemViewModel : ViewModelBase
         Diff = entry.Diff;
         WorkflowId = entry.WorkflowId ?? string.Empty;
         RunId = entry.RunId ?? string.Empty;
+        StateText = displayNames.Format("ui.workspace.confirmation.state", new Dictionary<string, string>
+        {
+            ["state"] = State,
+        });
+        SourceText = displayNames.Format("ui.workspace.confirmation.source", new Dictionary<string, string>
+        {
+            ["workflow"] = string.IsNullOrWhiteSpace(WorkflowId)
+                ? displayNames.Text("ui.common.none")
+                : WorkflowId,
+            ["run"] = string.IsNullOrWhiteSpace(RunId)
+                ? displayNames.Text("ui.common.none")
+                : RunId,
+        });
         SelectCommand = new RelayCommand(() => select(this));
     }
 
     public string ConfirmationId { get; }
     public string Summary { get; }
     public string State { get; }
+    public string StateText { get; }
+    public string SourceText { get; }
     public string Diff { get; }
     public string WorkflowId { get; }
     public string RunId { get; }
@@ -4375,6 +4830,10 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     private string _forwardTemplate;
     private string _reverseTemplate;
     private string _maxCommunicationCount;
+    private bool _hasLabelLayout;
+    private bool _labelLayoutVisible = true;
+    private double _labelOffsetX;
+    private double _labelOffsetY;
 
     public WorkflowEdgeViewModel(
         CanvasEdge edge,
@@ -4481,8 +4940,14 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     /// <summary>W14：选中边不透明，未选中略淡。</summary>
     public double StrokeOpacity => IsSelected ? 1.0 : 0.88;
     public Geometry EdgePath { get; private set; } = new PathGeometry();
+    public Geometry EndArrowPath { get; private set; } = new PathGeometry();
+    public Geometry StartArrowPath { get; private set; } = new PathGeometry();
     public double LabelX { get; private set; }
     public double LabelY { get; private set; }
+    public double LabelAnchorX { get; private set; }
+    public double LabelAnchorY { get; private set; }
+    public double LabelTangentX { get; private set; } = 1;
+    public double LabelTangentY { get; private set; }
     /// <summary>入脚旁名称：优先 label / alias；不默认甩类型名（避免线上噪点）。</summary>
     public string MidpointLabel
     {
@@ -4506,6 +4971,29 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
         }
     }
     public bool HasMidpointLabel => !string.IsNullOrWhiteSpace(MidpointLabel);
+    public bool IsCanvasLabelVisible => HasMidpointLabel && _labelLayoutVisible;
+
+    public void SetLabelLayout(double x, double y, bool isVisible)
+    {
+        _hasLabelLayout = true;
+        _labelOffsetX = x - LabelAnchorX;
+        _labelOffsetY = y - LabelAnchorY;
+        if (Math.Abs(LabelX - x) > 0.01)
+        {
+            LabelX = x;
+            OnPropertyChanged(nameof(LabelX));
+        }
+        if (Math.Abs(LabelY - y) > 0.01)
+        {
+            LabelY = y;
+            OnPropertyChanged(nameof(LabelY));
+        }
+        if (_labelLayoutVisible != isVisible)
+        {
+            _labelLayoutVisible = isVisible;
+            OnPropertyChanged(nameof(IsCanvasLabelVisible));
+        }
+    }
 
     public void UpdateEdgePath(double sourceX, double sourceY, double targetX, double targetY)
     {
@@ -4552,25 +5040,55 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
         geometry.Figures ??= new PathFigures();
         geometry.Figures.Add(figure);
         EdgePath = geometry;
-        // 名称贴在目标入脚旁，不画在线中
-        if (isComm)
+        EndArrowPath = BuildArrowGeometry(NodePortSpec.BuildArrowHead(spec.End, spec.Control2));
+        StartArrowPath = isComm
+            ? BuildArrowGeometry(NodePortSpec.BuildArrowHead(spec.Start, spec.Control1))
+            : new PathGeometry();
+        var midpoint = spec.Midpoint;
+        var tangent = spec.MidpointTangent;
+        LabelAnchorX = midpoint.X;
+        LabelAnchorY = midpoint.Y;
+        LabelTangentX = tangent.X;
+        LabelTangentY = tangent.Y;
+        if (!_hasLabelLayout)
         {
-            var mid = spec.Midpoint;
-            LabelX = mid.X - 28;
-            LabelY = mid.Y - 14;
+            var (width, height) = CanvasEdgeLabelLayoutHelpers.FallbackSize(MidpointLabel);
+            var magnitude = Math.Sqrt((tangent.X * tangent.X) + (tangent.Y * tangent.Y));
+            var normalX = magnitude < 0.001 ? 0 : -tangent.Y / magnitude;
+            var normalY = magnitude < 0.001 ? 1 : tangent.X / magnitude;
+            var normalOffset = (height * 0.5) + 9;
+            _labelOffsetX = (normalX * normalOffset) - (width * 0.5);
+            _labelOffsetY = (normalY * normalOffset) - (height * 0.5);
         }
-        else
-        {
-            var (lx, ly) = NodePortSpec.LabelBesideDataIn(endX, endY);
-            LabelX = lx;
-            LabelY = ly;
-        }
+        LabelX = LabelAnchorX + _labelOffsetX;
+        LabelY = LabelAnchorY + _labelOffsetY;
 
         OnPropertyChanged(nameof(EdgePath));
+        OnPropertyChanged(nameof(EndArrowPath));
+        OnPropertyChanged(nameof(StartArrowPath));
         OnPropertyChanged(nameof(LabelX));
         OnPropertyChanged(nameof(LabelY));
         OnPropertyChanged(nameof(MidpointLabel));
         OnPropertyChanged(nameof(HasMidpointLabel));
+    }
+
+    private static Geometry BuildArrowGeometry(EdgeArrowSpec arrow)
+    {
+        var figure = new PathFigure
+        {
+            StartPoint = arrow.Tip,
+            IsClosed = true,
+            IsFilled = true,
+            Segments = new PathSegments
+            {
+                new LineSegment { Point = arrow.Left },
+                new LineSegment { Point = arrow.Right },
+            },
+        };
+        return new PathGeometry
+        {
+            Figures = new PathFigures { figure },
+        };
     }
 
     protected override void OnPropertyChanged(string? propertyName = null)
@@ -4592,6 +5110,7 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
             {
                 OnPropertyChanged(nameof(MidpointLabel));
                 OnPropertyChanged(nameof(HasMidpointLabel));
+                OnPropertyChanged(nameof(IsCanvasLabelVisible));
             }
             _markDirty();
         }

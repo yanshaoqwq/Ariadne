@@ -6,6 +6,7 @@ using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using AvaloniaEdit;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -13,8 +14,6 @@ namespace Ariadne.Desktop.Views;
 public partial class WorksPageView : UserControl
 {
     private WorksPageViewModel? _attachedViewModel;
-    private TextBox? _activeBlockEditor;
-    private DocumentBlockViewModel? _activeBlock;
     /// <summary>
     /// 焦点移到项目 AI 输入框/发送按钮时，TextBox 选区可能被清空。
     /// 在 LostFocus 时固化最后一次非空选区，保证「选中 → 告诉 AI」仍可用。
@@ -24,47 +23,72 @@ public partial class WorksPageView : UserControl
     public WorksPageView()
     {
         InitializeComponent();
+        DocumentEditor.TextArea.SelectionChanged += OnDocumentEditorSelectionChanged;
+        DocumentEditor.TextArea.Caret.PositionChanged += OnDocumentEditorCaretPositionChanged;
         DataContextChanged += (_, _) => AttachEditorActions();
         AttachEditorActions();
     }
 
-    private void OnDocumentBlockEditorKeyDown(object? sender, KeyEventArgs e)
+    private void OnDocumentEditorKeyDown(object? sender, KeyEventArgs e)
+    {
+        HandleKeyboardShortcut(sender, e);
+    }
+
+    private void OnWorksPageKeyDown(object? sender, KeyEventArgs e)
+    {
+        HandleKeyboardShortcut(sender, e);
+    }
+
+    private void HandleKeyboardShortcut(object? sender, KeyEventArgs e)
     {
         var hasCommandModifier = e.KeyModifiers.HasFlag(KeyModifiers.Control)
                                  || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
-        if (!hasCommandModifier || e.Key != Key.K || DataContext is not WorksPageViewModel viewModel)
+        if (!hasCommandModifier || DataContext is not WorksPageViewModel viewModel)
         {
             return;
         }
 
-        CaptureStickySelectionFrom(sender as TextBox, clearWhenEmpty: false);
-        viewModel.QuickAiCommand.Execute(null);
-        e.Handled = true;
+        if (e.Key == Key.K)
+        {
+            CaptureStickySelection(clearWhenEmpty: false);
+            e.Handled = viewModel.OpenQuickEditCommand.TryExecute();
+            return;
+        }
+
+        if (e.Key == Key.S)
+        {
+            e.Handled = viewModel.SaveCommand.TryExecute();
+        }
     }
 
-    private void OnDocumentBlockEditorKeyUp(object? sender, KeyEventArgs e)
+    private void OnDocumentEditorKeyUp(object? sender, KeyEventArgs e)
     {
-        // 键盘移动光标或改变选区后，同步反向定位右栏中的正式总结故事段。
-        CaptureStickySelectionFrom(sender as TextBox, clearWhenEmpty: false);
+        CaptureStickySelection(clearWhenEmpty: false);
     }
 
-    private void OnDocumentBlockEditorGotFocus(object? sender, RoutedEventArgs e)
+    private void OnDocumentEditorGotFocus(object? sender, RoutedEventArgs e)
     {
-        _activeBlockEditor = sender as TextBox;
-        _activeBlock = _activeBlockEditor?.DataContext as DocumentBlockViewModel;
-        CaptureStickySelectionFrom(_activeBlockEditor, clearWhenEmpty: false);
+        CaptureStickySelection(clearWhenEmpty: false);
     }
 
-    private void OnDocumentBlockEditorLostFocus(object? sender, RoutedEventArgs e)
+    private void OnDocumentEditorLostFocus(object? sender, RoutedEventArgs e)
     {
-        // 先固化选区，再让焦点去 AI 面板；空采样不得清 sticky。
-        CaptureStickySelectionFrom(sender as TextBox, clearWhenEmpty: false);
+        CaptureStickySelection(clearWhenEmpty: false);
     }
 
-    private void OnDocumentBlockEditorPointerReleased(object? sender, PointerReleasedEventArgs e)
+    private void OnDocumentEditorPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
-        // 编辑器仍聚焦时若变成空选区，视为主动取消选中。
-        CaptureStickySelectionFrom(sender as TextBox, clearWhenEmpty: true);
+        CaptureStickySelection(clearWhenEmpty: true);
+    }
+
+    private void OnDocumentEditorSelectionChanged(object? sender, EventArgs e)
+    {
+        CaptureStickySelection(clearWhenEmpty: DocumentEditor.IsKeyboardFocusWithin);
+    }
+
+    private void OnDocumentEditorCaretPositionChanged(object? sender, EventArgs e)
+    {
+        CaptureStickySelection(clearWhenEmpty: false);
     }
 
     private void AttachEditorActions()
@@ -76,6 +100,7 @@ public partial class WorksPageView : UserControl
             _attachedViewModel.RequestEditorSelection = null;
             _attachedViewModel.RequestRevealEditorRange = null;
             _attachedViewModel.ClearStickyEditorSelection = null;
+            _attachedViewModel.RequestFocusQuickEditInstruction = null;
             _attachedViewModel.PickImportSourceFile = null;
             _attachedViewModel.OpenFolderInShell = null;
             _attachedViewModel = null;
@@ -89,16 +114,17 @@ public partial class WorksPageView : UserControl
         viewModel.RequestEditorCopy = () => _ = CopySelectionAsync();
         viewModel.RequestEditorSelectAll = () =>
         {
-            if (_activeBlockEditor is not null)
+            if (viewModel.IsEditMode && DocumentEditor.Document is not null)
             {
-                _activeBlockEditor.SelectionStart = 0;
-                _activeBlockEditor.SelectionEnd = _activeBlockEditor.Text?.Length ?? 0;
-                _activeBlockEditor.Focus();
+                DocumentEditor.SelectAll();
+                DocumentEditor.Focus();
+                CaptureStickySelection(clearWhenEmpty: false);
             }
         };
         viewModel.RequestEditorSelection = CurrentEditorSelection;
         viewModel.RequestRevealEditorRange = RevealEditorRange;
         viewModel.ClearStickyEditorSelection = ClearStickySelectionState;
+        viewModel.RequestFocusQuickEditInstruction = FocusQuickEditInstruction;
         viewModel.PickImportSourceFile = PickImportSourceFileAsync;
         viewModel.OpenFolderInShell = OpenFolderInShellAsync;
         _attachedViewModel = viewModel;
@@ -160,6 +186,7 @@ public partial class WorksPageView : UserControl
             _attachedViewModel.RequestEditorSelection = null;
             _attachedViewModel.RequestRevealEditorRange = null;
             _attachedViewModel.ClearStickyEditorSelection = null;
+            _attachedViewModel.RequestFocusQuickEditInstruction = null;
             _attachedViewModel.PickImportSourceFile = null;
             _attachedViewModel.OpenFolderInShell = null;
             _attachedViewModel = null;
@@ -168,16 +195,23 @@ public partial class WorksPageView : UserControl
         base.OnDetachedFromVisualTree(e);
     }
 
+    private void FocusQuickEditInstruction()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            QuickEditInstructionBox.Focus();
+            QuickEditInstructionBox.SelectionStart = QuickEditInstructionBox.Text?.Length ?? 0;
+            QuickEditInstructionBox.SelectionEnd = QuickEditInstructionBox.SelectionStart;
+        }, DispatcherPriority.Input);
+    }
+
     private void RevealEditorRange(int globalStart, int globalEnd)
     {
         if (DataContext is not WorksPageViewModel viewModel
-            || !viewModel.TryResolveBlockSelection(
-                globalStart,
-                globalEnd,
-                out var block,
-                out var localStart,
-                out var localEnd)
-            || block is null)
+            || DocumentEditor.Document is null
+            || globalStart < 0
+            || globalEnd <= globalStart
+            || globalEnd > DocumentEditor.Document.TextLength)
         {
             return;
         }
@@ -185,42 +219,29 @@ public partial class WorksPageView : UserControl
         viewModel.IsEditMode = true;
         Dispatcher.UIThread.Post(() =>
         {
-            DocumentEditor.SelectedItem = block;
-            DocumentEditor.ScrollIntoView(block);
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (DocumentEditor.ContainerFromItem(block) is not Control container)
-                {
-                    return;
-                }
-
-                var editor = container.GetVisualDescendants().OfType<TextBox>().FirstOrDefault();
-                if (editor is null)
-                {
-                    return;
-                }
-
-                _activeBlock = block;
-                _activeBlockEditor = editor;
-                editor.SelectionStart = Math.Clamp(localStart, 0, editor.Text?.Length ?? 0);
-                editor.SelectionEnd = Math.Clamp(localEnd, editor.SelectionStart, editor.Text?.Length ?? 0);
-                editor.Focus();
-                CaptureStickySelectionFrom(editor, clearWhenEmpty: false);
-            }, DispatcherPriority.Loaded);
+            DocumentEditor.Select(globalStart, globalEnd - globalStart);
+            var line = DocumentEditor.Document.GetLineByOffset(globalStart).LineNumber;
+            DocumentEditor.ScrollToLine(line);
+            DocumentEditor.Focus();
+            CaptureStickySelection(clearWhenEmpty: false);
         }, DispatcherPriority.Loaded);
     }
 
     private void ClearStickySelectionState()
     {
         _stickySelection = null;
-        // Keep last editor ref for next focus; indices are invalid across documents.
+        if (DocumentEditor.Document is not null)
+        {
+            DocumentEditor.Select(0, 0);
+            DocumentEditor.CaretOffset = 0;
+            Dispatcher.UIThread.Post(() => DocumentEditor.ScrollToLine(1), DispatcherPriority.Loaded);
+        }
     }
 
     private EditorTextSelection CurrentEditorSelection()
     {
-        // Prefer live selection on the focused (or last focused) block editor.
-        // Do not clear sticky here: empty live sample during AI focus is expected.
-        CaptureStickySelectionFrom(_activeBlockEditor, clearWhenEmpty: false);
+        // 焦点移到 AI composer 后保留最后一次非空全局选区。
+        CaptureStickySelection(clearWhenEmpty: false);
         if (_stickySelection is { } sticky
             && sticky.End > sticky.Start
             && !string.IsNullOrWhiteSpace(sticky.Text))
@@ -231,30 +252,22 @@ public partial class WorksPageView : UserControl
         return new EditorTextSelection(0, 0, string.Empty);
     }
 
-    private void CaptureStickySelectionFrom(TextBox? editor, bool clearWhenEmpty)
+    private void CaptureStickySelection(bool clearWhenEmpty)
     {
         if (DataContext is not WorksPageViewModel viewModel
-            || editor is null
-            || editor.DataContext is not DocumentBlockViewModel block)
+            || DocumentEditor.Document is null)
         {
             return;
         }
 
-        var start = Math.Min(editor.SelectionStart, editor.SelectionEnd);
-        var end = Math.Max(editor.SelectionStart, editor.SelectionEnd);
-        var selected = editor.SelectedText ?? string.Empty;
-        if (string.IsNullOrEmpty(selected) && end > start && end <= (editor.Text?.Length ?? 0))
-        {
-            selected = editor.Text![start..end];
-        }
-
-        var mapped = viewModel.SelectionForBlock(block, start, end, selected);
+        var start = DocumentEditor.SelectionStart;
+        var end = start + DocumentEditor.SelectionLength;
+        var selected = DocumentEditor.SelectedText ?? string.Empty;
+        var mapped = new EditorTextSelection(start, end, selected);
         viewModel.UpdateSummarySelectionFromEditor(mapped);
 
         if (end > start && !string.IsNullOrWhiteSpace(selected))
         {
-            _activeBlockEditor = editor;
-            _activeBlock = block;
             _stickySelection = EditorStickySelectionPolicy.Update(
                 _stickySelection,
                 mapped.Start,
@@ -275,12 +288,19 @@ public partial class WorksPageView : UserControl
 
     private async Task CopySelectionAsync()
     {
-        var selectedText = _activeBlockEditor?.SelectedText;
+        if (DataContext is WorksPageViewModel { IsEditMode: true }
+            && DocumentEditor.SelectionLength > 0)
+        {
+            DocumentEditor.Copy();
+            return;
+        }
+
+        var selectedText = DataContext is WorksPageViewModel viewModel
+            ? viewModel.DocumentContent
+            : string.Empty;
         if (string.IsNullOrEmpty(selectedText))
         {
-            selectedText = DataContext is WorksPageViewModel viewModel
-                ? viewModel.DocumentContent
-                : string.Empty;
+            return;
         }
         var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
         if (clipboard is not null)

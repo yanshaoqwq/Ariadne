@@ -18,13 +18,16 @@ use ariadne::rag::{
     SummaryPipelineExecutor, SummaryPipelineStep, WriterDocumentContext, WriterInsertLines,
     WriterReplaceLines, WritingAgentKind, WritingConfirmationPolicy, WritingContextAssembler,
     WritingContextRequest, WritingDocumentScope, WritingNodeDefinition, WritingToolExecutor,
-    TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH, TOOL_DESIGNER_FIND, TOOL_DESIGNER_INSERT_LINES,
-    TOOL_DESIGNER_REGISTER, TOOL_DESIGNER_REPLACE_LINES, TOOL_DESIGNER_SEARCH, TOOL_DETAIL_FIND,
-    TOOL_DETAIL_SEARCH, TOOL_OUTLINER_FIND, TOOL_OUTLINER_INSERT_LINES, TOOL_OUTLINER_REGISTER,
-    TOOL_OUTLINER_REPLACE_LINES, TOOL_OUTLINER_SEARCH, TOOL_PLANNER_FIND,
+    TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH, TOOL_CRITIC_WEB_SEARCH, TOOL_DESIGNER_FIND,
+    TOOL_DESIGNER_INSERT_LINES, TOOL_DESIGNER_REGISTER, TOOL_DESIGNER_REPLACE_LINES,
+    TOOL_DESIGNER_SEARCH, TOOL_DESIGNER_WEB_SEARCH, TOOL_DETAIL_FIND, TOOL_DETAIL_SEARCH,
+    TOOL_DETAIL_WEB_SEARCH, TOOL_OUTLINER_FIND, TOOL_OUTLINER_INSERT_LINES, TOOL_OUTLINER_REGISTER,
+    TOOL_OUTLINER_REPLACE_LINES, TOOL_OUTLINER_SEARCH, TOOL_OUTLINER_WEB_SEARCH, TOOL_PLANNER_FIND,
     TOOL_PLANNER_INSERT_LINES, TOOL_PLANNER_REGISTER, TOOL_PLANNER_REPLACE_LINES,
-    TOOL_PLANNER_SEARCH, TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH, TOOL_WRITER_FIND,
+    TOOL_PLANNER_SEARCH, TOOL_PLANNER_WEB_SEARCH, TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH,
+    TOOL_PRUDENT_WEB_SEARCH, TOOL_SUMMARIZER_SEARCH, TOOL_SUMMARIZER_WEB_SEARCH, TOOL_WRITER_FIND,
     TOOL_WRITER_INSERT_LINES, TOOL_WRITER_REPLACE_LINES, TOOL_WRITER_SEARCH,
+    TOOL_WRITER_WEB_SEARCH,
 };
 use serde_json::{json, Value};
 
@@ -93,9 +96,7 @@ fn rag_resources_validate_required_prompt_and_display_keys() {
     assert!(prompts.contains_key("agent_prompt.outliner"));
     assert!(prompts.contains_key("node_template.writer.default"));
     assert!(prompts.contains_key("tool.planner_register"));
-    assert!(prompts["tool.writer_search"]
-        .prompt
-        .contains("现实中的情况"));
+    assert!(prompts["tool.writer_search"].prompt.contains("当前项目"));
     assert_eq!(display_names["agent.designer"], "阶段设计");
     assert_eq!(display_names["tool.writer-replace-lines"], "按行替换正文");
 }
@@ -111,6 +112,7 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
     let writer = tool_definitions_for_agent(WritingAgentKind::Writer, &prompts).unwrap();
     let critic = tool_definitions_for_agent(WritingAgentKind::Critic, &prompts).unwrap();
     let prudent = tool_definitions_for_agent(WritingAgentKind::Prudent, &prompts).unwrap();
+    let summarizer = tool_definitions_for_agent(WritingAgentKind::Summarizer, &prompts).unwrap();
 
     assert_eq!(
         outliner
@@ -121,6 +123,7 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             TOOL_OUTLINER_REGISTER,
             TOOL_OUTLINER_FIND,
             TOOL_OUTLINER_SEARCH,
+            TOOL_OUTLINER_WEB_SEARCH,
             TOOL_OUTLINER_INSERT_LINES,
             TOOL_OUTLINER_REPLACE_LINES
         ]
@@ -134,6 +137,7 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             TOOL_DESIGNER_REGISTER,
             TOOL_DESIGNER_FIND,
             TOOL_DESIGNER_SEARCH,
+            TOOL_DESIGNER_WEB_SEARCH,
             TOOL_DESIGNER_INSERT_LINES,
             TOOL_DESIGNER_REPLACE_LINES
         ]
@@ -147,6 +151,7 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             TOOL_PLANNER_REGISTER,
             TOOL_PLANNER_FIND,
             TOOL_PLANNER_SEARCH,
+            TOOL_PLANNER_WEB_SEARCH,
             TOOL_PLANNER_INSERT_LINES,
             TOOL_PLANNER_REPLACE_LINES
         ]
@@ -156,7 +161,7 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec![TOOL_DETAIL_FIND, TOOL_DETAIL_SEARCH]
+        vec![TOOL_DETAIL_FIND, TOOL_DETAIL_SEARCH, TOOL_DETAIL_WEB_SEARCH]
     );
     assert_eq!(
         writer
@@ -166,6 +171,7 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
         vec![
             TOOL_WRITER_FIND,
             TOOL_WRITER_SEARCH,
+            TOOL_WRITER_WEB_SEARCH,
             TOOL_WRITER_INSERT_LINES,
             TOOL_WRITER_REPLACE_LINES
         ]
@@ -176,23 +182,177 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec![TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH]
+        vec![TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH, TOOL_CRITIC_WEB_SEARCH]
     );
     assert_eq!(
         prudent
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec![TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH]
+        vec![
+            TOOL_PRUDENT_FIND,
+            TOOL_PRUDENT_SEARCH,
+            TOOL_PRUDENT_WEB_SEARCH
+        ]
     );
     assert!(!critic.iter().any(|tool| tool.name == TOOL_PLANNER_REGISTER));
     assert!(!prudent
         .iter()
         .any(|tool| tool.name == TOOL_PLANNER_REGISTER));
+    assert_eq!(summarizer[0].name, TOOL_SUMMARIZER_SEARCH);
+    assert_eq!(summarizer[1].name, TOOL_SUMMARIZER_WEB_SEARCH);
     assert_eq!(
         planner[0].description,
         prompts["tool.planner_register"].describe
     );
+}
+
+#[test]
+fn summarizer_can_call_project_search_during_a_generation_stage() {
+    use ariadne::config::{ConfigStore, MemorySecretStore};
+    use ariadne::contracts::content_version_for_bytes;
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::documents::IndexInvalidationOutbox;
+    use ariadne::providers::{
+        LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderCallContext, ProviderHealth,
+    };
+    use ariadne::rag::summarizer::{SummarizerConfig, SummarizerExecutor};
+    use ariadne::retrieval::{project_search_tool_definition, ProjectRetrievalRuntime};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    struct SearchAwareSummarizerProvider {
+        calls: AtomicUsize,
+        requests: Mutex<Vec<LlmRequest>>,
+    }
+
+    impl Provider for SearchAwareSummarizerProvider {
+        fn definition(&self) -> ProviderDefinition {
+            ProviderDefinition {
+                provider_id: "summarizer-project-search".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "summarizer-project-search".to_owned(),
+                capabilities: vec![ProviderCapability::Llm],
+                config_schema: Value::Null,
+            }
+        }
+
+        fn health_check(&self) -> ariadne::contracts::CoreResult<ProviderHealth> {
+            Ok(ProviderHealth::Healthy)
+        }
+    }
+
+    impl LlmProvider for SearchAwareSummarizerProvider {
+        fn complete(
+            &self,
+            _context: &ProviderCallContext,
+            request: LlmRequest,
+        ) -> ariadne::contracts::CoreResult<LlmResponse> {
+            self.requests.lock().unwrap().push(request.clone());
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let (message, tool_calls) = match call {
+                0 => {
+                    let tool_call = ToolCall {
+                        tool_call_id: "summarizer-search-1".to_owned(),
+                        name: TOOL_SUMMARIZER_SEARCH.to_owned(),
+                        arguments: json!({ "query": "黑曜石戒指", "limit": 5 }),
+                    };
+                    (
+                        LlmMessage::assistant_with_tool_calls("", std::slice::from_ref(&tool_call)),
+                        vec![tool_call],
+                    )
+                }
+                1 => (
+                    LlmMessage::assistant(
+                        r#"{"segments":[{"number":"1","summary":"发现戒指","start_line":1,"end_line":1}]}"#,
+                    ),
+                    Vec::new(),
+                ),
+                2 => (
+                    LlmMessage::assistant(
+                        r#"{"events":[{"event_id":"event-1","summary":"发现戒指","status":"ongoing","segment_ids":["chapter-1::seg-1"]}]}"#,
+                    ),
+                    Vec::new(),
+                ),
+                3 => (
+                    LlmMessage::assistant(r#"{"summary":"章节总结"}"#),
+                    Vec::new(),
+                ),
+                4 => (
+                    LlmMessage::assistant(
+                        r#"{"stage_id":"stage-1","stage_summary":"阶段总结","is_new_stage":true}"#,
+                    ),
+                    Vec::new(),
+                ),
+                _ => panic!("unexpected summarizer provider call {call}"),
+            };
+            Ok(LlmResponse {
+                message,
+                tool_calls,
+                usage: None,
+                finish_reason: Some("stop".to_owned()),
+                cost_usd: None,
+                raw: Value::Null,
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    ConfigStore::new(temp.path()).load_or_create().unwrap();
+    let source = temp.path().join("documents/previous.md");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let source_text = "前章中，季遥在石桥下找到了黑曜石戒指。";
+    std::fs::write(&source, source_text).unwrap();
+    let source = source.canonicalize().unwrap();
+    let outbox = IndexInvalidationOutbox::new(temp.path().join(".runtime/index_invalidation.db"));
+    let version = content_version_for_bytes(source_text.as_bytes());
+    let event = outbox
+        .prepare(source.to_str().unwrap(), "document_saved", &version, false)
+        .unwrap();
+    outbox.activate(&event).unwrap();
+    let retrieval =
+        ProjectRetrievalRuntime::open(temp.path(), &MemorySecretStore::default()).unwrap();
+    assert_eq!(retrieval.process_outbox().unwrap(), 1);
+
+    let prompts = load_prompt_resources().unwrap();
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let provider = SearchAwareSummarizerProvider {
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(Vec::new()),
+    };
+    let executor = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        SummarizerConfig {
+            provider_id: "summarizer-project-search".to_owned(),
+            model_id: "model".to_owned(),
+            chapter_document_id: "documents/chapter-1.md".to_owned(),
+            run_id: None,
+            timeout_ms: 5_000,
+            cancellation: ariadne::contracts::ExecutionCancellation::new(),
+            dispatch_authorization: Default::default(),
+            prompt_template: None,
+            generation_context: Default::default(),
+            workflow_operation: None,
+        },
+    )
+    .with_project_search(
+        &retrieval,
+        project_search_tool_definition(TOOL_SUMMARIZER_SEARCH, "检索项目上下文"),
+        4,
+    );
+
+    let draft = executor
+        .summarize_chapter("chapter-1", "本章第一行")
+        .unwrap();
+    assert_eq!(draft.segments.len(), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 5);
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests[0].tools[0].name, TOOL_SUMMARIZER_SEARCH);
+    let second_round = serde_json::to_string(&requests[1].messages).unwrap();
+    assert!(second_round.contains("黑曜石戒指"));
+    assert!(second_round.contains("previous.md"));
 }
 
 /// 验证一个写作节点就是一个 agent，且内置节点边界固定。
@@ -232,16 +392,19 @@ fn writing_nodes_are_one_to_one_with_agents() {
         vec![
             TOOL_WRITER_FIND,
             TOOL_WRITER_SEARCH,
+            TOOL_WRITER_WEB_SEARCH,
             TOOL_WRITER_INSERT_LINES,
             TOOL_WRITER_REPLACE_LINES
         ]
     );
-    assert!(nodes
-        .iter()
-        .find(|node| node.agent == WritingAgentKind::Summarizer)
-        .unwrap()
-        .tool_names
-        .is_empty());
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|node| node.agent == WritingAgentKind::Summarizer)
+            .unwrap()
+            .tool_names,
+        vec![TOOL_SUMMARIZER_SEARCH, TOOL_SUMMARIZER_WEB_SEARCH]
+    );
 }
 
 /// 验证节点提示词模板可内联节点提示词、上下文区块和上游数据边 alias。
@@ -582,7 +745,7 @@ fn search_results_are_not_persisted_to_writing_knowledge() {
             &tool_context(),
             &ToolCall {
                 tool_call_id: "search-1".to_owned(),
-                name: TOOL_WRITER_SEARCH.to_owned(),
+                name: TOOL_WRITER_WEB_SEARCH.to_owned(),
                 arguments: json!({
                     "query": "宋代城市",
                     "limit": 1

@@ -53,6 +53,7 @@ public sealed record AppStatus(
     [property: JsonPropertyName("preferences")] UiPreferences Preferences);
 
 public sealed record BackendResult<T>(
+    [property: JsonPropertyName("request_id")] string? RequestId,
     [property: JsonPropertyName("ok")] bool Ok,
     [property: JsonPropertyName("data")] T? Data,
     [property: JsonPropertyName("error")] string? Error,
@@ -66,6 +67,10 @@ public sealed record ProjectInitReport(
 
 public sealed record AppSettings(
     [property: JsonPropertyName("app")] AppConfig App);
+
+public sealed record GeneralSectionSettings(
+    [property: JsonPropertyName("app")] AppSettings App,
+    [property: JsonPropertyName("project_memory")] string ProjectMemory);
 
 public sealed record AppConfig(
     [property: JsonPropertyName("schema_version")] int SchemaVersion,
@@ -83,12 +88,14 @@ public sealed record ProviderConfigStatus(
     [property: JsonPropertyName("default_llm_provider_id")] string? DefaultLlmProviderId,
     [property: JsonPropertyName("default_embedding_provider_id")] string? DefaultEmbeddingProviderId,
     [property: JsonPropertyName("default_reranker_provider_id")] string? DefaultRerankerProviderId,
+    [property: JsonPropertyName("default_search_provider_id")] string? DefaultSearchProviderId,
     [property: JsonPropertyName("providers")] IReadOnlyList<ProviderKeyStatus> Providers);
 
 public sealed record ProviderKeyStatus(
     [property: JsonPropertyName("provider")] string Provider,
     [property: JsonPropertyName("display_name")] string DisplayName,
     [property: JsonPropertyName("provider_type")] string ProviderType,
+    [property: JsonPropertyName("configured")] bool Configured,
     [property: JsonPropertyName("enabled")] bool Enabled,
     [property: JsonPropertyName("base_url")] string? BaseUrl,
     [property: JsonPropertyName("models")] IReadOnlyList<ModelConfig> Models,
@@ -103,7 +110,26 @@ public sealed record ProviderSettingsUpdate(
     [property: JsonPropertyName("models")] IReadOnlyList<ModelConfig> Models,
     [property: JsonPropertyName("make_default_llm")] bool MakeDefaultLlm,
     [property: JsonPropertyName("make_default_embedding")] bool MakeDefaultEmbedding,
-    [property: JsonPropertyName("make_default_reranker")] bool MakeDefaultReranker);
+    [property: JsonPropertyName("make_default_reranker")] bool MakeDefaultReranker,
+    [property: JsonPropertyName("make_default_search")] bool MakeDefaultSearch);
+
+public sealed record ProviderSectionSettings(
+    [property: JsonPropertyName("provider")] ProviderSettingsUpdate Provider,
+    [property: JsonPropertyName("api_key")] string? ApiKey);
+
+public sealed record ProviderRemovalReference(
+    [property: JsonPropertyName("reference_type")] string ReferenceType,
+    [property: JsonPropertyName("owner_id")] string OwnerId,
+    [property: JsonPropertyName("node_id")] string? NodeId,
+    [property: JsonPropertyName("model_id")] string? ModelId);
+
+public sealed record ProviderRemovalPreview(
+    [property: JsonPropertyName("provider_id")] string ProviderId,
+    [property: JsonPropertyName("display_name")] string DisplayName,
+    [property: JsonPropertyName("revision")] string Revision,
+    [property: JsonPropertyName("has_key")] bool HasKey,
+    [property: JsonPropertyName("default_roles")] IReadOnlyList<string> DefaultRoles,
+    [property: JsonPropertyName("blocking_references")] IReadOnlyList<ProviderRemovalReference> BlockingReferences);
 
 public sealed record ModelConfig(
     [property: JsonPropertyName("model_id")] string ModelId,
@@ -125,6 +151,10 @@ public sealed record BudgetStatus(
 public sealed record AutomationSettings(
     [property: JsonPropertyName("budget")] BudgetStatus Budget,
     [property: JsonPropertyName("confirmation_policies")] IReadOnlyList<ConfirmationPolicySetting> ConfirmationPolicies);
+
+public sealed record AutomationSectionSettings(
+    [property: JsonPropertyName("automation")] AutomationSettings Automation,
+    [property: JsonPropertyName("workflow")] WorkflowSettings Workflow);
 
 public sealed record ConfirmationPolicySetting(
     [property: JsonPropertyName("confirmation_kind")] string ConfirmationKind,
@@ -184,6 +214,10 @@ public sealed record GitConfig(
 
 public sealed record RagSettings(
     [property: JsonPropertyName("rag")] RagConfig Rag);
+
+public sealed record MiscSectionSettings(
+    [property: JsonPropertyName("rag")] RagSettings Rag,
+    [property: JsonPropertyName("git")] GitSettings Git);
 
 public sealed record RagConfig(
     [property: JsonPropertyName("schema_version")] int SchemaVersion,
@@ -289,7 +323,20 @@ public sealed record ProjectAiResponse(
     [property: JsonPropertyName("answer")] string Answer,
     [property: JsonPropertyName("chat_history")] IReadOnlyList<ProjectAiChatMessage> ChatHistory,
     [property: JsonPropertyName("workflow_run")] WorkflowRunStarted? WorkflowRun,
-    [property: JsonPropertyName("project_memory")] string ProjectMemory);
+    [property: JsonPropertyName("project_memory")] string ProjectMemory,
+    [property: JsonPropertyName("conversation_id")] string ConversationId = "",
+    [property: JsonPropertyName("conversation_revision")] long ConversationRevision = 0,
+    [property: JsonPropertyName("summary_revision")] long SummaryRevision = 0,
+    [property: JsonPropertyName("new_messages")] IReadOnlyList<ProjectAiChatMessage>? NewMessages = null,
+    [property: JsonPropertyName("conversation_snapshot")] IReadOnlyList<ProjectAiChatMessage>? ConversationSnapshot = null,
+    [property: JsonPropertyName("conversation_summary")] string ConversationSummary = "",
+    [property: JsonPropertyName("project_memory_revision")] string ProjectMemoryRevision = "",
+    [property: JsonPropertyName("history_truncated")] bool HistoryTruncated = false,
+    [property: JsonPropertyName("memory_truncated")] bool MemoryTruncated = false,
+    [property: JsonPropertyName("references_truncated")] bool ReferencesTruncated = false,
+    [property: JsonPropertyName("summary_truncated")] bool SummaryTruncated = false,
+    [property: JsonPropertyName("estimated_input_tokens")] long EstimatedInputTokens = 0,
+    [property: JsonPropertyName("context_limit_tokens")] int ContextLimitTokens = 0);
 
 public sealed record ProjectAiChatMessage(
     [property: JsonPropertyName("role")] string Role,
@@ -302,6 +349,7 @@ public sealed record WorksTreeNode(
     [property: JsonPropertyName("path")] string Path,
     [property: JsonPropertyName("children")] IReadOnlyList<WorksTreeNode> Children,
     [property: JsonPropertyName("chapter_id")] string? ChapterId = null,
+    [property: JsonPropertyName("document_id")] string? DocumentId = null,
     [property: JsonPropertyName("stage_id")] string? StageId = null);
 
 public sealed record ChapterSummaryView(
@@ -387,7 +435,8 @@ public sealed record ChapterImportRequest(
     [property: JsonPropertyName("title")] string Title,
     [property: JsonPropertyName("order")] long Order,
     [property: JsonPropertyName("source_path")] string SourcePath,
-    [property: JsonPropertyName("target_path")] string TargetPath);
+    [property: JsonPropertyName("target_path")] string TargetPath,
+    [property: JsonPropertyName("overwrite")] bool Overwrite);
 
 public sealed record ChapterImportReport(
     [property: JsonPropertyName("entry")] object? Entry,
@@ -502,7 +551,9 @@ public sealed record ArchivePoint(
 public sealed record GitCommitSummary(
     [property: JsonPropertyName("commit_id")] string CommitId,
     [property: JsonPropertyName("summary")] string Summary,
-    [property: JsonPropertyName("checkpoint_kind")] string? CheckpointKind);
+    [property: JsonPropertyName("checkpoint_kind")] string? CheckpointKind,
+    [property: JsonPropertyName("timestamp_ms")] long TimestampMs = 0,
+    [property: JsonPropertyName("author")] string? Author = null);
 
 public sealed record GitRepositoryStatus(
     [property: JsonPropertyName("status")] string Status,
@@ -517,7 +568,11 @@ public sealed record BranchGraphNode(
     [property: JsonPropertyName("commit_id")] string CommitId,
     [property: JsonPropertyName("parents")] IReadOnlyList<string> Parents,
     [property: JsonPropertyName("refs")] IReadOnlyList<string> Refs,
-    [property: JsonPropertyName("summary")] string Summary);
+    [property: JsonPropertyName("summary")] string Summary,
+    [property: JsonPropertyName("timestamp_ms")] long TimestampMs = 0,
+    [property: JsonPropertyName("author")] string? Author = null,
+    [property: JsonPropertyName("checkpoint_kind")] string? CheckpointKind = null,
+    [property: JsonPropertyName("is_head")] bool IsHead = false);
 
 public sealed record RestoreReport(
     [property: JsonPropertyName("new_branch")] string NewBranch,
@@ -530,7 +585,24 @@ public sealed record UiRunLogEntry(
     [property: JsonPropertyName("timestamp_ms")] long TimestampMs,
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("level")] string Level,
-    [property: JsonPropertyName("message")] string Message);
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("workflow_id")] string? WorkflowId = null,
+    [property: JsonPropertyName("run_id")] string? RunId = null,
+    [property: JsonPropertyName("node_id")] string? NodeId = null,
+    [property: JsonPropertyName("unread")] bool Unread = false,
+    [property: JsonPropertyName("metadata")] JsonElement Metadata = default);
+
+public sealed record RunLogQuery(
+    [property: JsonPropertyName("kind")] string? Kind = null,
+    [property: JsonPropertyName("level")] string? Level = null,
+    [property: JsonPropertyName("workflow_id")] string? WorkflowId = null,
+    [property: JsonPropertyName("run_id")] string? RunId = null,
+    [property: JsonPropertyName("node_id")] string? NodeId = null,
+    [property: JsonPropertyName("query")] string? Query = null,
+    [property: JsonPropertyName("after_timestamp_ms")] long? AfterTimestampMs = null,
+    [property: JsonPropertyName("after_log_id")] string? AfterLogId = null,
+    [property: JsonPropertyName("limit")] int? Limit = null,
+    [property: JsonPropertyName("descending")] bool Descending = false);
 
 public sealed record ConfirmationLogEntry(
     [property: JsonPropertyName("confirmation_id")] string ConfirmationId,

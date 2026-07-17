@@ -40,6 +40,12 @@ public partial class WorkspacePageView : UserControl
     private bool _dragFrameScheduled;
     private readonly Dictionary<string, WorkflowNodeViewModel> _nodesById = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<WorkflowEdgeViewModel>> _edgesByNodeId = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Control> _nodeContainersById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Control> _miniMapContainersById = new(StringComparer.Ordinal);
+    private CanvasMiniMapTransform _miniMapTransform = CanvasMiniMapHelpers.ComputeTransform(0, 0, 1400, 840);
+    private bool _edgeSyncScheduled;
+    private bool _edgeLabelLayoutScheduled;
+    private bool? _executionLayoutCompact;
 
     // ---- 左键框选（空白处按下拖动）----
     private bool _marqueePointerDown;
@@ -48,11 +54,8 @@ public partial class WorkspacePageView : UserControl
     private Point _marqueeCurrentLogical;
     private bool _marqueeAdditive;
 
-    // ---- W2：中键 / 空格+左键平移 ----
-    private bool _panDragging;
-    private Point _panStartScreen;
-    private double _panOriginX;
-    private double _panOriginY;
+    // ---- W2：中键 / Alt+左键 / 空格+左键平移 ----
+    private bool _spacePanMode;
 
     // ---- 端口拖线（任意口起拖，落点类型校验 + 橡皮筋） ----
     private bool _edgeDragging;
@@ -61,6 +64,12 @@ public partial class WorkspacePageView : UserControl
     private NodePortDirection _edgeSourceDirection;
     private string? _edgeSourceHandle;
     private Point _rubberBandStartLogical;
+
+    // ---- W4：键盘端口连线（Tab 选目标，Enter/空格确认，Esc 取消） ----
+    private WorkflowNodeViewModel? _keyboardEdgeSourceNode;
+    private NodePortKind _keyboardEdgeSourceKind;
+    private NodePortDirection _keyboardEdgeSourceDirection;
+    private string? _keyboardEdgeSourceHandle;
 
     // ---- 节点库：页级指针手势（单击添加 / 拖到画布）----
     private bool _libraryPointerDown;
@@ -77,13 +86,33 @@ public partial class WorkspacePageView : UserControl
         InitializeComponent();
         Focusable = true;
         AddHandler(KeyDownEvent, OnWorkspaceKeyDown, Avalonia.Interactivity.RoutingStrategies.Tunnel);
+        AddHandler(KeyUpEvent, OnWorkspaceKeyUp, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         DataContextChanged += (_, _) => AttachViewActions();
+        SizeChanged += OnWorkspaceViewSizeChanged;
         LayoutUpdated += OnFirstLayout;
         if (CanvasOverlay is not null)
         {
             CanvasOverlay.SizeChanged += OnCanvasOverlaySizeChanged;
         }
+        if (WorkspaceGrid is not null)
+        {
+            WorkspaceGrid.SizeChanged += OnWorkspacePrimarySizeChanged;
+        }
         AttachViewActions();
+    }
+
+    private void OnWorkspaceViewSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        if (DataContext is WorkspacePageViewModel viewModel)
+        {
+            viewModel.SetAvailableWorkspaceWidth(e.NewSize.Width);
+        }
+        ApplyRightPanelResponsiveLayout();
+    }
+
+    private void OnWorkspacePrimarySizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        ApplyExecutionResponsiveLayout(e.NewSize.Width);
     }
 
     private void OnCanvasOverlaySizeChanged(object? sender, SizeChangedEventArgs e)
@@ -125,6 +154,12 @@ public partial class WorkspacePageView : UserControl
         }
         PositionBottomPill();
         PositionRightPill();
+        if (DataContext is WorkspacePageViewModel viewModel && Bounds.Width > 0)
+        {
+            viewModel.SetAvailableWorkspaceWidth(Bounds.Width);
+        }
+        ApplyRightPanelResponsiveLayout();
+        ApplyExecutionResponsiveLayout(WorkspaceGrid.Bounds.Width);
         SyncNodeContainerPositions();
         SyncEdgePositions();
         SyncMiniMapPositions();
@@ -134,7 +169,14 @@ public partial class WorkspacePageView : UserControl
     {
         if (_attachedViewModel is not null && !ReferenceEquals(_attachedViewModel, DataContext))
         {
+            _attachedViewModel.CanvasViewport.EndPan();
+            _attachedViewModel.EndPortDragHighlight();
+            _keyboardEdgeSourceNode = null;
+            _keyboardEdgeSourceHandle = null;
             _attachedViewModel.RequestFitView = null;
+            _attachedViewModel.RequestCanvasZoomStep = null;
+            _attachedViewModel.RequestResetCanvasZoom = null;
+            _attachedViewModel.RequestEnsureNodeVisible = null;
             _attachedViewModel.PickFolder = null;
             _attachedViewModel.PickFile = null;
             _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
@@ -144,12 +186,19 @@ public partial class WorkspacePageView : UserControl
             {
                 node.PropertyChanged -= OnNodePropertyChanged;
             }
+            foreach (var edge in _attachedViewModel.Edges)
+            {
+                edge.PropertyChanged -= OnEdgePropertyChanged;
+            }
             _attachedViewModel = null;
         }
 
         if (DataContext is WorkspacePageViewModel viewModel)
         {
             viewModel.RequestFitView = FitViewToNodes;
+            viewModel.RequestCanvasZoomStep = ZoomCanvasAtCenterBy;
+            viewModel.RequestResetCanvasZoom = ResetCanvasZoomAtCenter;
+            viewModel.RequestEnsureNodeVisible = EnsureNodeInSafeViewport;
             viewModel.PickFolder = PickFolderAsync;
             viewModel.PickFile = PickFileAsync;
             viewModel.Nodes.CollectionChanged += OnNodesCollectionChanged;
@@ -159,10 +208,21 @@ public partial class WorkspacePageView : UserControl
             {
                 node.PropertyChanged += OnNodePropertyChanged;
             }
+            foreach (var edge in viewModel.Edges)
+            {
+                edge.PropertyChanged += OnEdgePropertyChanged;
+            }
             _attachedViewModel = viewModel;
+            if (Bounds.Width > 0)
+            {
+                viewModel.SetAvailableWorkspaceWidth(Bounds.Width);
+            }
             RebuildCanvasIndexes(viewModel);
+            ApplyCanvasViewportState(viewModel.CanvasViewport.Current);
             // 初始布局与 VM 开合状态对齐
             ApplyLibraryOpenState(viewModel.IsLibraryOpen);
+            ApplyRightPanelResponsiveLayout();
+            ApplyExecutionResponsiveLayout(WorkspaceGrid?.Bounds.Width ?? 0);
             ScheduleNodeContainerSync();
             ScheduleEdgeSync();
             ScheduleMiniMapSync();
@@ -203,9 +263,15 @@ public partial class WorkspacePageView : UserControl
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        _spacePanMode = false;
+        _keyboardEdgeSourceNode = null;
+        _keyboardEdgeSourceHandle = null;
         if (_attachedViewModel is not null)
         {
+            _attachedViewModel.CanvasViewport.EndPan();
             _attachedViewModel.RequestFitView = null;
+            _attachedViewModel.RequestCanvasZoomStep = null;
+            _attachedViewModel.RequestResetCanvasZoom = null;
             _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
             _attachedViewModel.Edges.CollectionChanged -= OnEdgesCollectionChanged;
             _attachedViewModel.PropertyChanged -= OnViewModelPropertyChanged;
@@ -213,6 +279,10 @@ public partial class WorkspacePageView : UserControl
             foreach (var node in _attachedViewModel.Nodes)
             {
                 node.PropertyChanged -= OnNodePropertyChanged;
+            }
+            foreach (var edge in _attachedViewModel.Edges)
+            {
+                edge.PropertyChanged -= OnEdgePropertyChanged;
             }
             _attachedViewModel = null;
         }
@@ -225,6 +295,13 @@ public partial class WorkspacePageView : UserControl
         if (e.PropertyName is nameof(WorkspacePageViewModel.CanvasZoom))
         {
             ScheduleMiniMapSync();
+            ScheduleEdgeLabelLayout();
+        }
+        if (e.PropertyName is nameof(WorkspacePageViewModel.UseOverlayRightPanel)
+            or nameof(WorkspacePageViewModel.RightPanelOverlayWidth)
+            or nameof(WorkspacePageViewModel.IsRightPanelOpen))
+        {
+            ApplyRightPanelResponsiveLayout();
         }
         // W16：pill / ToggleLibraryCommand 均经 IsLibraryOpen 驱动布局与 glyph
         if (e.PropertyName is nameof(WorkspacePageViewModel.IsLibraryOpen)
@@ -232,10 +309,24 @@ public partial class WorkspacePageView : UserControl
         {
             ApplyLibraryOpenState(vm.IsLibraryOpen);
         }
+        if (e.PropertyName is nameof(WorkspacePageViewModel.GraphRevision)
+            && sender is WorkspacePageViewModel graphViewModel)
+        {
+            RebuildCanvasIndexes(graphViewModel);
+            ScheduleNodeContainerSync();
+            ScheduleEdgeSync();
+            ScheduleMiniMapSync();
+        }
     }
 
     private void OnNodesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        if (_keyboardEdgeSourceNode is not null
+            && e.OldItems?.OfType<WorkflowNodeViewModel>()
+                .Any(node => ReferenceEquals(node, _keyboardEdgeSourceNode)) == true)
+        {
+            CancelKeyboardConnection(announce: false);
+        }
         if (e.OldItems is not null)
         {
             foreach (var item in e.OldItems.OfType<WorkflowNodeViewModel>())
@@ -243,7 +334,7 @@ public partial class WorkspacePageView : UserControl
                 item.PropertyChanged -= OnNodePropertyChanged;
             }
         }
-        if (_attachedViewModel is not null)
+        if (_attachedViewModel is not null && !_attachedViewModel.IsApplyingGraph)
         {
             RebuildCanvasIndexes(_attachedViewModel);
         }
@@ -254,23 +345,57 @@ public partial class WorkspacePageView : UserControl
                 item.PropertyChanged += OnNodePropertyChanged;
             }
         }
-        ScheduleNodeContainerSync();
-        ScheduleEdgeSync();
-        ScheduleMiniMapSync();
+        if (_attachedViewModel is null || !_attachedViewModel.IsApplyingGraph)
+        {
+            ScheduleNodeContainerSync();
+            ScheduleEdgeSync();
+            ScheduleMiniMapSync();
+        }
     }
 
     private void OnEdgesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (_attachedViewModel is not null)
+        if (e.OldItems is not null)
+        {
+            foreach (var item in e.OldItems.OfType<WorkflowEdgeViewModel>())
+            {
+                item.PropertyChanged -= OnEdgePropertyChanged;
+            }
+        }
+        if (_attachedViewModel is not null && !_attachedViewModel.IsApplyingGraph)
         {
             RebuildCanvasIndexes(_attachedViewModel);
         }
-        ScheduleEdgeSync();
+        if (e.NewItems is not null)
+        {
+            foreach (var item in e.NewItems.OfType<WorkflowEdgeViewModel>())
+            {
+                item.PropertyChanged += OnEdgePropertyChanged;
+            }
+        }
+        if (_attachedViewModel is null || !_attachedViewModel.IsApplyingGraph)
+        {
+            ScheduleEdgeSync();
+        }
+    }
+
+    private void OnEdgePropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(WorkflowEdgeViewModel.Label)
+            or nameof(WorkflowEdgeViewModel.ForwardAlias)
+            or nameof(WorkflowEdgeViewModel.IsSelected)
+            or nameof(WorkflowEdgeViewModel.SourceHandle)
+            or nameof(WorkflowEdgeViewModel.TargetHandle))
+        {
+            ScheduleEdgeSync();
+        }
     }
 
     private void OnNodePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(WorkflowNodeViewModel.X) or nameof(WorkflowNodeViewModel.Y))
+        if (e.PropertyName is nameof(WorkflowNodeViewModel.X)
+            or nameof(WorkflowNodeViewModel.Y)
+            or nameof(WorkflowNodeViewModel.CanvasHeight))
         {
             if (_nodeDragging)
             {
@@ -289,12 +414,108 @@ public partial class WorkspacePageView : UserControl
 
     private void ScheduleEdgeSync()
     {
-        Dispatcher.UIThread.Post(SyncEdgePositions, DispatcherPriority.Background);
+        if (_edgeSyncScheduled)
+        {
+            return;
+        }
+        _edgeSyncScheduled = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _edgeSyncScheduled = false;
+            SyncEdgePositions();
+        }, DispatcherPriority.Background);
+    }
+
+    private void ScheduleEdgeLabelLayout()
+    {
+        if (_edgeLabelLayoutScheduled)
+        {
+            return;
+        }
+        _edgeLabelLayoutScheduled = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _edgeLabelLayoutScheduled = false;
+            LayoutEdgeLabels();
+        }, DispatcherPriority.Render);
     }
 
     private void ScheduleMiniMapSync()
     {
         Dispatcher.UIThread.Post(SyncMiniMapPositions, DispatcherPriority.Background);
+    }
+
+    private void ApplyRightPanelResponsiveLayout()
+    {
+        if (RightPanelHost is null || DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return;
+        }
+
+        if (viewModel.UseOverlayRightPanel)
+        {
+            Grid.SetColumn(RightPanelHost, 0);
+            RightPanelHost.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right;
+            RightPanelHost.Width = viewModel.RightPanelOverlayWidth;
+            RightPanelHost.ZIndex = 100;
+        }
+        else
+        {
+            Grid.SetColumn(RightPanelHost, 2);
+            RightPanelHost.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch;
+            RightPanelHost.Width = double.NaN;
+            RightPanelHost.ZIndex = 0;
+        }
+    }
+
+    private void ApplyExecutionResponsiveLayout(double primaryPaneWidth)
+    {
+        if (ExecutionLayoutGrid is null
+            || ExecutionLayoutGrid.ColumnDefinitions.Count < 3
+            || ExecutionLayoutGrid.RowDefinitions.Count < 3
+            || ExecutionStartPane is null
+            || ExecutionRunPane is null)
+        {
+            return;
+        }
+
+        var compact = WorkspaceResponsiveLayoutHelpers.UseStackedExecutionLayout(primaryPaneWidth);
+        if (_executionLayoutCompact == compact)
+        {
+            return;
+        }
+        _executionLayoutCompact = compact;
+        var primaryColumn = ExecutionLayoutGrid.ColumnDefinitions[0];
+        var gapColumn = ExecutionLayoutGrid.ColumnDefinitions[1];
+        var runColumn = ExecutionLayoutGrid.ColumnDefinitions[2];
+        var primaryRow = ExecutionLayoutGrid.RowDefinitions[0];
+        var gapRow = ExecutionLayoutGrid.RowDefinitions[1];
+        var runRow = ExecutionLayoutGrid.RowDefinitions[2];
+        primaryColumn.Width = new GridLength(1, GridUnitType.Star);
+        primaryRow.Height = GridLength.Auto;
+        if (compact)
+        {
+            gapColumn.Width = new GridLength(0);
+            runColumn.Width = new GridLength(0);
+            gapRow.Height = new GridLength(12);
+            runRow.Height = GridLength.Auto;
+            Grid.SetColumn(ExecutionStartPane, 0);
+            Grid.SetRow(ExecutionStartPane, 0);
+            Grid.SetColumn(ExecutionRunPane, 0);
+            Grid.SetRow(ExecutionRunPane, 2);
+        }
+        else
+        {
+            gapColumn.Width = new GridLength(18);
+            runColumn.Width = new GridLength(280);
+            gapRow.Height = new GridLength(0);
+            runRow.Height = new GridLength(0);
+            Grid.SetColumn(ExecutionStartPane, 0);
+            Grid.SetRow(ExecutionStartPane, 0);
+            Grid.SetColumn(ExecutionRunPane, 2);
+            Grid.SetRow(ExecutionRunPane, 0);
+        }
+        ExecutionLayoutGrid.InvalidateMeasure();
     }
 
     // ===================== 收起/展开下栏（库底部 Pill 点击） =====================
@@ -434,6 +655,17 @@ public partial class WorkspacePageView : UserControl
         e.Pointer.Capture(null);
     }
 
+    public void OnBottomPillKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!IsDirectActivation(sender, e))
+        {
+            return;
+        }
+
+        ToggleLibrary();
+        e.Handled = true;
+    }
+
     // ===================== 右侧 Pill 拖拽（上下） =====================
 
     public void OnRightPillPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -486,6 +718,20 @@ public partial class WorkspacePageView : UserControl
         e.Pointer.Capture(null);
     }
 
+    public void OnRightPillKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!IsDirectActivation(sender, e) || DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return;
+        }
+
+        viewModel.IsRightPanelOpen = !viewModel.IsRightPanelOpen;
+        e.Handled = true;
+    }
+
+    private static bool IsDirectActivation(object? sender, KeyEventArgs e) =>
+        ReferenceEquals(sender, e.Source) && e.Key is Key.Enter or Key.Space;
+
     // ===================== 节点拖动 =====================
 
     public void OnNodePointerPressed(object? sender, PointerPressedEventArgs e)
@@ -498,6 +744,11 @@ public partial class WorkspacePageView : UserControl
 
         // 框选进行中时不抢节点拖
         if (_marqueeActive)
+        {
+            return;
+        }
+
+        if (FocusOverviewNodeIfNeeded(node, e))
         {
             return;
         }
@@ -751,9 +1002,55 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        // 输入框内不劫持退格/删除
+        var hasCommandModifier = e.KeyModifiers.HasFlag(KeyModifiers.Control)
+            || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+
+        // 保存是页面级命令，即使当前正在编辑属性也应可用。
+        if (hasCommandModifier && e.Key == Key.S)
+        {
+            e.Handled = viewModel.SaveCommand.TryExecute();
+            return;
+        }
+
+        if (e.Key == Key.F11 && e.KeyModifiers == KeyModifiers.None)
+        {
+            e.Handled = viewModel.ToggleCanvasFocusModeCommand.TryExecute();
+            return;
+        }
+
+        if (e.Key == Key.Escape && _keyboardEdgeSourceNode is not null)
+        {
+            CancelKeyboardConnection(announce: true);
+            e.Handled = true;
+            return;
+        }
+        if (e.Key == Key.Escape && viewModel.IsCanvasFocusMode)
+        {
+            e.Handled = viewModel.ToggleCanvasFocusModeCommand.TryExecute();
+            return;
+        }
+
+        // 输入框内不劫持复制、剪切、粘贴、退格或删除。
         if (IsTextInputFocused())
         {
+            return;
+        }
+
+        if (e.Key == Key.Space)
+        {
+            if (IsChildControlFocused())
+            {
+                return;
+            }
+            _spacePanMode = true;
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.Home && e.KeyModifiers == KeyModifiers.None)
+        {
+            viewModel.FitViewCommand.TryExecute();
+            e.Handled = true;
             return;
         }
 
@@ -772,12 +1069,43 @@ public partial class WorkspacePageView : UserControl
         }
 
         // Ctrl/Cmd+A 全选
-        var hasCommandModifier = e.KeyModifiers.HasFlag(KeyModifiers.Control)
-            || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+        if (hasCommandModifier && e.Key is Key.D0 or Key.NumPad0)
+        {
+            viewModel.ResetZoomCommand.TryExecute();
+            e.Handled = true;
+            return;
+        }
+        if (hasCommandModifier && e.Key is Key.OemPlus or Key.Add)
+        {
+            viewModel.ZoomInCommand.TryExecute();
+            e.Handled = true;
+            return;
+        }
+        if (hasCommandModifier && e.Key is Key.OemMinus or Key.Subtract)
+        {
+            viewModel.ZoomOutCommand.TryExecute();
+            e.Handled = true;
+            return;
+        }
         if (hasCommandModifier && e.Key == Key.A)
         {
             viewModel.SelectNodes(viewModel.Nodes.ToArray());
             e.Handled = true;
+            return;
+        }
+        if (hasCommandModifier && e.Key == Key.C)
+        {
+            e.Handled = viewModel.CopySelectedNodeCommand.TryExecute();
+            return;
+        }
+        if (hasCommandModifier && e.Key == Key.X)
+        {
+            e.Handled = viewModel.CutSelectedNodeCommand.TryExecute();
+            return;
+        }
+        if (hasCommandModifier && e.Key == Key.V)
+        {
+            e.Handled = viewModel.PasteNodeCommand.TryExecute();
             return;
         }
 
@@ -811,6 +1139,29 @@ public partial class WorkspacePageView : UserControl
                 e.Handled = true;
             }
         }
+    }
+
+    private void OnWorkspaceKeyUp(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Space)
+        {
+            return;
+        }
+
+        if (!IsChildControlFocused())
+        {
+            _spacePanMode = false;
+            e.Handled = true;
+        }
+    }
+
+    private bool IsChildControlFocused()
+    {
+        var focus = TopLevel.GetTopLevel(this)?.FocusManager?.GetFocusedElement();
+        // 空格平移只在页面/画布本身持有焦点时启用；任何可聚焦子控件都保留自己的空格激活语义。
+        return focus is Control control
+               && !ReferenceEquals(control, this)
+               && control.Focusable;
     }
 
     private bool IsTextInputFocused()
@@ -851,9 +1202,10 @@ public partial class WorkspacePageView : UserControl
         }
 
         var point = e.GetCurrentPoint(CanvasOverlay);
-        // W2：中键或 Alt+左键开始平移（产品路径，非仅小地图）。
+        // W2：中键、Alt+左键或空格+左键开始平移（产品路径，非仅小地图）。
         if (point.Properties.IsMiddleButtonPressed
-            || (point.Properties.IsLeftButtonPressed && e.KeyModifiers.HasFlag(KeyModifiers.Alt)))
+            || (point.Properties.IsLeftButtonPressed
+                && (e.KeyModifiers.HasFlag(KeyModifiers.Alt) || _spacePanMode)))
         {
             BeginPan(e.GetPosition(CanvasOverlay));
             e.Pointer.Capture(CanvasOverlay);
@@ -878,7 +1230,8 @@ public partial class WorkspacePageView : UserControl
                 }
 
                 if (c.Name is "MiniMapHost" or "MiniMapCanvas" or "PillLayer"
-                    or "LibraryTogglePill" or "RightPanelTogglePill" or "TopToolbar")
+                    or "LibraryTogglePill" or "WorkspaceRightPill" or "TopToolbar"
+                    or "CanvasStatusHost")
                 {
                     return;
                 }
@@ -898,15 +1251,13 @@ public partial class WorkspacePageView : UserControl
 
     public void OnCanvasBackgroundPointerMoved(object? sender, PointerEventArgs e)
     {
-        if (_panDragging && CanvasOverlay is not null && NodesItemsControl is not null)
+        if (DataContext is WorkspacePageViewModel { CanvasViewport.IsPanning: true } panViewModel
+            && CanvasOverlay is not null
+            && NodesItemsControl is not null)
         {
             var pos = e.GetPosition(CanvasOverlay);
-            var (nx, ny) = CanvasViewportHelpers.ApplyPan(
-                _panOriginX,
-                _panOriginY,
-                pos.X - _panStartScreen.X,
-                pos.Y - _panStartScreen.Y);
-            ApplyCanvasOffset(nx, ny);
+            var state = panViewModel.CanvasViewport.UpdatePan(pos.X, pos.Y);
+            ApplyCanvasViewportState(state);
             e.Handled = true;
             return;
         }
@@ -933,7 +1284,7 @@ public partial class WorkspacePageView : UserControl
 
     public void OnCanvasBackgroundPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
-        if (_panDragging)
+        if (DataContext is WorkspacePageViewModel { CanvasViewport.IsPanning: true })
         {
             EndPan(e.Pointer);
             e.Handled = true;
@@ -970,10 +1321,10 @@ public partial class WorkspacePageView : UserControl
         EndMarquee(null);
     }
 
-    /// <summary>W2：指针滚轮缩放（绑在 CanvasOverlay PointerWheelChanged）。</summary>
+    /// <summary>指针滚轮缩放：保持鼠标下的逻辑点固定。</summary>
     public void OnCanvasPointerWheel(object? sender, PointerWheelEventArgs e)
     {
-        if (DataContext is not WorkspacePageViewModel vm)
+        if (DataContext is not WorkspacePageViewModel vm || CanvasOverlay is null)
         {
             return;
         }
@@ -984,31 +1335,80 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        vm.SetCanvasZoom(next);
+        SetCanvasZoomAt(next, e.GetPosition(CanvasOverlay));
         e.Handled = true;
     }
 
-    private void BeginPan(Point screen)
+    private void ZoomCanvasAtCenterBy(double delta)
     {
-        if (NodesItemsControl is null)
+        if (DataContext is not WorkspacePageViewModel vm)
         {
             return;
         }
 
-        _panDragging = true;
-        _panStartScreen = screen;
-        var t = EnsureTranslateTransform(NodesItemsControl);
-        _panOriginX = t.X;
-        _panOriginY = t.Y;
+        SetCanvasZoomAt(vm.CanvasZoom + delta, CanvasViewportCenter());
+    }
+
+    private void ResetCanvasZoomAtCenter()
+    {
+        SetCanvasZoomAt(1.0, CanvasViewportCenter());
+    }
+
+    private Point CanvasViewportCenter()
+    {
+        return CanvasOverlay is null
+            ? default
+            : new Point(CanvasOverlay.Bounds.Width * 0.5, CanvasOverlay.Bounds.Height * 0.5);
+    }
+
+    private void SetCanvasZoomAt(double requestedZoom, Point anchor)
+    {
+        if (DataContext is not WorkspacePageViewModel vm)
+        {
+            return;
+        }
+
+        var previous = vm.CanvasViewport.Current;
+        var state = vm.SetCanvasZoomAt(requestedZoom, anchor.X, anchor.Y);
+        if (Math.Abs(state.Zoom - previous.Zoom) < 1e-9)
+        {
+            return;
+        }
+
+        ApplyCanvasViewportState(state);
+        vm.StatusText = vm.CanvasZoomText;
+    }
+
+    private void BeginPan(Point screen)
+    {
+        if (DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return;
+        }
+
+        viewModel.CanvasViewport.BeginPan(screen.X, screen.Y);
     }
 
     private void EndPan(IPointer? pointer)
     {
-        _panDragging = false;
+        if (DataContext is WorkspacePageViewModel viewModel)
+        {
+            viewModel.CanvasViewport.EndPan();
+        }
         pointer?.Capture(null);
     }
 
     private void ApplyCanvasOffset(double offsetX, double offsetY)
+    {
+        if (DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return;
+        }
+
+        ApplyCanvasViewportState(viewModel.CanvasViewport.SetOffset(offsetX, offsetY));
+    }
+
+    private void ApplyCanvasViewportState(CanvasViewportState state)
     {
         if (NodesItemsControl is null)
         {
@@ -1016,13 +1416,13 @@ public partial class WorkspacePageView : UserControl
         }
 
         var transform = EnsureTranslateTransform(NodesItemsControl);
-        transform.X = offsetX;
-        transform.Y = offsetY;
+        transform.X = state.OffsetX;
+        transform.Y = state.OffsetY;
         if (EdgesItemsControl is not null)
         {
             var edgeTransform = EnsureTranslateTransform(EdgesItemsControl);
-            edgeTransform.X = offsetX;
-            edgeTransform.Y = offsetY;
+            edgeTransform.X = state.OffsetX;
+            edgeTransform.Y = state.OffsetY;
         }
 
         SyncMiniMapViewportFrame();
@@ -1076,9 +1476,21 @@ public partial class WorkspacePageView : UserControl
         var newX = _nodeDragOriginX + position.X - _nodeDragStart.X;
         var newY = _nodeDragOriginY + position.Y - _nodeDragStart.Y;
         var zoom = CurrentCanvasZoom();
+        var offset = CurrentCanvasOffset();
+        var (safeX, safeY) = CanvasViewportHelpers.KeepNodeReachable(
+            newX,
+            newY,
+            NodePortSpec.NodeWidth,
+            node.CanvasHeight,
+            zoom,
+            offset.X,
+            offset.Y,
+            CanvasOverlay.Bounds.Width,
+            CanvasOverlay.Bounds.Height,
+            CanvasOcclusionRects());
         // C5-a：只写逻辑坐标；主节点布局与相邻边 Geometry 在 Render 帧回调中合并执行。
-        node.X = Clamp(newX, 0, Math.Max(0, (CanvasOverlay.Bounds.Width / zoom) - NodePortSpec.NodeWidth));
-        node.Y = Clamp(newY, 0, Math.Max(0, (CanvasOverlay.Bounds.Height / zoom) - 150));
+        node.X = safeX;
+        node.Y = safeY;
         if (!CanvasDragFrameHelpers.ShouldApplyMainVisualsOnPointerMoved)
         {
             ScheduleDragFrameSync();
@@ -1102,6 +1514,10 @@ public partial class WorkspacePageView : UserControl
         // C5-a：松手前同步 flush 主视觉（节点 Canvas 位 + 邻边 Geometry），
         // 避免先清空 _draggedNode 导致挂起的 Render 回调空转漏最后一帧。
         FlushDragFrameSyncNow();
+        if (_draggedNode is { } draggedNode)
+        {
+            CommitDraggedNodeLayout(draggedNode);
+        }
         _nodeDragging = false;
         if (DataContext is WorkspacePageViewModel viewModel)
         {
@@ -1109,6 +1525,7 @@ public partial class WorkspacePageView : UserControl
         }
         _draggedNode = null;
         SyncMiniMapPositions();
+        ScheduleEdgeLabelLayout();
         e.Pointer.Capture(null);
         e.Handled = true;
     }
@@ -1120,6 +1537,10 @@ public partial class WorkspacePageView : UserControl
             return;
         }
         FlushDragFrameSyncNow();
+        if (_draggedNode is { } draggedNode)
+        {
+            CommitDraggedNodeLayout(draggedNode);
+        }
         _nodeDragging = false;
         if (DataContext is WorkspacePageViewModel viewModel)
         {
@@ -1127,6 +1548,7 @@ public partial class WorkspacePageView : UserControl
         }
         _draggedNode = null;
         SyncMiniMapPositions();
+        ScheduleEdgeLabelLayout();
     }
 
     public void OnNodeSelectPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -1134,7 +1556,105 @@ public partial class WorkspacePageView : UserControl
         if (FindNodeDataContext(sender as Control) is { } node)
         {
             node.SelectCommand.Execute(null);
+            FocusOverviewNodeIfNeeded(node, e);
         }
+    }
+
+    public void OnNodeCardKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!ReferenceEquals(sender, e.Source)
+            || FindNodeDataContext(sender as Control) is not { } node
+            || DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return;
+        }
+
+        if (e.Key is Key.Enter or Key.Space)
+        {
+            viewModel.SelectNode(node);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.KeyModifiers != KeyModifiers.None)
+        {
+            return;
+        }
+
+        var direction = e.Key switch
+        {
+            Key.Left => CanvasKeyboardDirection.Left,
+            Key.Right => CanvasKeyboardDirection.Right,
+            Key.Up => CanvasKeyboardDirection.Up,
+            Key.Down => CanvasKeyboardDirection.Down,
+            _ => (CanvasKeyboardDirection?)null,
+        };
+        if (direction is null)
+        {
+            return;
+        }
+
+        var candidates = viewModel.Nodes
+            .Select(candidate => new CanvasKeyboardNode(
+                candidate.Id,
+                candidate.X,
+                candidate.Y,
+                NodePortSpec.NodeWidth,
+                candidate.CanvasHeight))
+            .ToArray();
+        var targetId = CanvasKeyboardNavigationHelpers.FindDirectionalNode(
+            node.Id,
+            candidates,
+            direction.Value);
+        var target = viewModel.Nodes.FirstOrDefault(candidate =>
+            string.Equals(candidate.Id, targetId, StringComparison.Ordinal));
+        if (target is null)
+        {
+            return;
+        }
+
+        viewModel.SelectNode(target);
+        FocusNodeCard(target);
+        e.Handled = true;
+    }
+
+    private void FocusNodeCard(WorkflowNodeViewModel node)
+    {
+        if (TryFocusNodeCard(node))
+        {
+            return;
+        }
+
+        ScheduleNodeContainerSync();
+        Dispatcher.UIThread.Post(() => TryFocusNodeCard(node), DispatcherPriority.Loaded);
+    }
+
+    private bool TryFocusNodeCard(WorkflowNodeViewModel node)
+    {
+        var container = FindNodeContainer(node, NodesItemsControl, _nodeContainersById);
+        var focusHost = container?
+            .GetVisualDescendants()
+            .OfType<Control>()
+            .FirstOrDefault(control => control.Name == "NodeKeyboardFocusHost");
+        return focusHost?.Focus() == true;
+    }
+
+    private bool FocusOverviewNodeIfNeeded(WorkflowNodeViewModel node, PointerPressedEventArgs e)
+    {
+        if (DataContext is not WorkspacePageViewModel viewModel
+            || viewModel.ShowCanvasPrecisionControls
+            || CanvasOverlay is null)
+        {
+            return false;
+        }
+
+        node.SelectCommand.Execute(null);
+        SetCanvasZoomAt(
+            CanvasSemanticZoomHelpers.FocusZoom,
+            e.GetPosition(CanvasOverlay));
+        viewModel.StatusText = viewModel.CanvasOverviewFocusText;
+        e.Handled = true;
+        return true;
     }
 
     public void OnEdgePointerPressed(object? sender, PointerPressedEventArgs e)
@@ -1169,6 +1689,16 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
+        CancelKeyboardConnection(announce: false);
+
+        if (!viewModel.ShowCanvasPrecisionControls)
+        {
+            node.SelectCommand.Execute(null);
+            viewModel.StatusText = viewModel.CanvasOverviewFocusText;
+            e.Handled = true;
+            return;
+        }
+
         _edgeDragging = true;
         _edgeSourceNode = node;
         _edgeSourceKind = kind;
@@ -1181,6 +1711,69 @@ public partial class WorkspacePageView : UserControl
         UpdateRubberBand(_rubberBandStartLogical);
         e.Pointer.Capture((IInputElement?)sender);
         e.Handled = true;
+    }
+
+    public void OnPortKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!ReferenceEquals(sender, e.Source)
+            || e.Key is not (Key.Enter or Key.Space)
+            || FindNodeDataContext(sender as Control) is not { } node
+            || !TryReadPortTag(sender as Control, out var kind, out var direction, out var handle)
+            || DataContext is not WorkspacePageViewModel viewModel
+            || !viewModel.ShowCanvasPrecisionControls)
+        {
+            return;
+        }
+
+        node.SelectCommand.Execute(null);
+        handle ??= NodePortSpec.HandleName(kind, direction);
+        if (_keyboardEdgeSourceNode is null)
+        {
+            _keyboardEdgeSourceNode = node;
+            _keyboardEdgeSourceKind = kind;
+            _keyboardEdgeSourceDirection = direction;
+            _keyboardEdgeSourceHandle = handle;
+            viewModel.BeginPortDragHighlight(node.Id, kind, direction);
+            viewModel.NotifyKeyboardConnectStarted();
+            e.Handled = true;
+            return;
+        }
+
+        if (viewModel.TryConnectPorts(
+                _keyboardEdgeSourceNode.Id,
+                _keyboardEdgeSourceKind,
+                _keyboardEdgeSourceDirection,
+                node.Id,
+                kind,
+                direction,
+                _keyboardEdgeSourceHandle,
+                handle))
+        {
+            CancelKeyboardConnection(announce: false);
+            ScheduleFullCanvasSync();
+        }
+
+        e.Handled = true;
+    }
+
+    private void CancelKeyboardConnection(bool announce)
+    {
+        if (_keyboardEdgeSourceNode is null)
+        {
+            return;
+        }
+
+        if (DataContext is WorkspacePageViewModel viewModel)
+        {
+            viewModel.EndPortDragHighlight();
+            if (announce)
+            {
+                viewModel.NotifyKeyboardConnectCancelled();
+            }
+        }
+
+        _keyboardEdgeSourceNode = null;
+        _keyboardEdgeSourceHandle = null;
     }
 
     public void OnPortPointerMoved(object? sender, PointerEventArgs e)
@@ -1264,23 +1857,14 @@ public partial class WorkspacePageView : UserControl
         }
 
         var miniPos = e.GetPosition(MiniMapCanvas);
-        var (logicalX, logicalY) = NodePortSpec.MiniMapToLogical(miniPos.X, miniPos.Y);
+        var (logicalX, logicalY) = _miniMapTransform.MiniMapToLogical(miniPos.X, miniPos.Y);
         var zoom = CurrentCanvasZoom();
         var viewW = CanvasOverlay.Bounds.Width / zoom;
         var viewH = CanvasOverlay.Bounds.Height / zoom;
         // 点击处对齐主视口中心。
         var targetLeft = logicalX - (viewW * 0.5);
         var targetTop = logicalY - (viewH * 0.5);
-        var transform = EnsureTranslateTransform(NodesItemsControl);
-        transform.X = -targetLeft * zoom;
-        transform.Y = -targetTop * zoom;
-        if (EdgesItemsControl is not null)
-        {
-            var edgeTransform = EnsureTranslateTransform(EdgesItemsControl);
-            edgeTransform.X = transform.X;
-            edgeTransform.Y = transform.Y;
-        }
-        SyncMiniMapViewportFrame();
+        ApplyCanvasOffset(-targetLeft * zoom, -targetTop * zoom);
         e.Handled = true;
     }
 
@@ -1366,7 +1950,7 @@ public partial class WorkspacePageView : UserControl
             canvasPosition.X >= node.X
             && canvasPosition.X <= node.X + NodePortSpec.NodeWidth
             && canvasPosition.Y >= node.Y
-            && canvasPosition.Y <= node.Y + 150);
+            && canvasPosition.Y <= node.Y + node.CanvasHeight);
     }
 
     private bool TryFindPortAt(
@@ -1514,6 +2098,9 @@ public partial class WorkspacePageView : UserControl
     {
         _nodesById.Clear();
         _edgesByNodeId.Clear();
+        // ItemsControl 在集合变化后会重建容器，旧引用不可继续用于拖拽热路径。
+        _nodeContainersById.Clear();
+        _miniMapContainersById.Clear();
         foreach (var node in viewModel.Nodes)
         {
             _nodesById[node.Id] = node;
@@ -1540,12 +2127,11 @@ public partial class WorkspacePageView : UserControl
 
     private void SyncDraggedNode(WorkflowNodeViewModel node)
     {
-        if (NodesItemsControl?.ContainerFromItem(node) is not Control container)
+        if (FindNodeContainer(node, NodesItemsControl, _nodeContainersById) is not { } container)
         {
             return;
         }
-        Canvas.SetLeft(container, node.X);
-        Canvas.SetTop(container, node.Y);
+        ApplyTransientCanvasPosition(container, node.X, node.Y);
     }
 
     private void SyncConnectedEdges(string nodeId)
@@ -1602,14 +2188,82 @@ public partial class WorkspacePageView : UserControl
         SyncDraggedMiniMapNode(node);
     }
 
-    private void SyncDraggedMiniMapNode(WorkflowNodeViewModel node)
+    /// <summary>发布性能探针：准备真实 ItemsControl 容器和画布索引。</summary>
+    internal void PrepareReleaseProbe()
     {
-        if (MiniMapItemsControl?.ContainerFromItem(node) is not Control container)
+        if (DataContext is not WorkspacePageViewModel viewModel)
         {
             return;
         }
-        Canvas.SetLeft(container, node.MiniMapX);
-        Canvas.SetTop(container, node.MiniMapY);
+
+        RebuildCanvasIndexes(viewModel);
+    }
+
+    /// <summary>发布性能探针：在真实 render callback 内执行拖拽视觉同步。</summary>
+    internal void ApplyReleaseProbeDragFrame(WorkflowNodeViewModel node, double x, double y)
+    {
+        var previousDragging = _nodeDragging;
+        var previousNode = _draggedNode;
+        _nodeDragging = true;
+        _draggedNode = node;
+        try
+        {
+            node.X = x;
+            node.Y = y;
+            ApplyDraggedNodeVisuals(node);
+        }
+        finally
+        {
+            _draggedNode = previousNode;
+            _nodeDragging = previousDragging;
+        }
+    }
+
+    /// <summary>发布性能探针：模拟松手并将 render transform 一次性提交回布局坐标。</summary>
+    internal void CompleteReleaseProbeDrag(WorkflowNodeViewModel node)
+    {
+        CommitDraggedNodeLayout(node);
+    }
+
+    private void SyncDraggedMiniMapNode(WorkflowNodeViewModel node)
+    {
+        if (FindNodeContainer(node, MiniMapItemsControl, _miniMapContainersById) is not { } container)
+        {
+            return;
+        }
+        var (miniX, miniY) = MiniMapMarkerPosition(node);
+        ApplyTransientCanvasPosition(container, miniX, miniY);
+    }
+
+    private void CommitDraggedNodeLayout(WorkflowNodeViewModel node)
+    {
+        if (FindNodeContainer(node, NodesItemsControl, _nodeContainersById) is { } nodeContainer)
+        {
+            CommitCanvasPosition(nodeContainer, node.X, node.Y);
+        }
+        if (FindNodeContainer(node, MiniMapItemsControl, _miniMapContainersById) is { } miniMapContainer)
+        {
+            var (miniX, miniY) = MiniMapMarkerPosition(node);
+            CommitCanvasPosition(miniMapContainer, miniX, miniY);
+        }
+    }
+
+    private static void ApplyTransientCanvasPosition(Control container, double x, double y)
+    {
+        var layoutX = Canvas.GetLeft(container);
+        var layoutY = Canvas.GetTop(container);
+        var translate = EnsureTranslateTransform(container);
+        translate.X = x - (double.IsNaN(layoutX) ? 0 : layoutX);
+        translate.Y = y - (double.IsNaN(layoutY) ? 0 : layoutY);
+    }
+
+    private static void CommitCanvasPosition(Control container, double x, double y)
+    {
+        Canvas.SetLeft(container, x);
+        Canvas.SetTop(container, y);
+        var translate = EnsureTranslateTransform(container);
+        translate.X = 0;
+        translate.Y = 0;
     }
 
     private void SyncNodeContainerPositions()
@@ -1622,7 +2276,7 @@ public partial class WorkspacePageView : UserControl
         // 优先对 ItemsControl 容器设 Canvas 附加属性（DataTemplate 根上的 Canvas.Left 常不生效）
         foreach (var node in viewModel.Nodes)
         {
-            if (NodesItemsControl.ContainerFromItem(node) is Control container)
+            if (FindNodeContainer(node, NodesItemsControl, _nodeContainersById) is { } container)
             {
                 Canvas.SetLeft(container, node.X);
                 Canvas.SetTop(container, node.Y);
@@ -1646,25 +2300,127 @@ public partial class WorkspacePageView : UserControl
         var minX = viewModel.Nodes.Min(node => node.X);
         var minY = viewModel.Nodes.Min(node => node.Y);
         var maxX = viewModel.Nodes.Max(node => node.X + NodePortSpec.NodeWidth);
-        var maxY = viewModel.Nodes.Max(node => node.Y + NodePortSpec.NodeBodyHeight);
-        var viewportW = Math.Max(1.0, CanvasOverlay.Bounds.Width);
-        var viewportH = Math.Max(1.0, CanvasOverlay.Bounds.Height);
-        var (zoom, offsetX, offsetY) = CanvasViewportHelpers.ComputeFitTransform(
-            minX, minY, maxX, maxY, viewportW, viewportH);
-        viewModel.SetCanvasZoom(zoom);
-        var transform = EnsureTranslateTransform(NodesItemsControl);
-        transform.X = offsetX;
-        transform.Y = offsetY;
-        if (EdgesItemsControl is not null)
-        {
-            var edgeTransform = EnsureTranslateTransform(EdgesItemsControl);
-            edgeTransform.X = offsetX;
-            edgeTransform.Y = offsetY;
-        }
+        var maxY = viewModel.Nodes.Max(node => node.Y + node.CanvasHeight);
+        var safeViewport = SafeFitViewport();
+        var state = viewModel.FitCanvasViewport(minX, minY, maxX, maxY, safeViewport);
+        ApplyCanvasViewportState(state);
 
         SyncNodeContainerPositions();
         SyncEdgePositions();
         SyncMiniMapViewportFrame();
+    }
+
+    private void EnsureNodeInSafeViewport(WorkflowNodeViewModel node)
+    {
+        if (CanvasOverlay is null)
+        {
+            return;
+        }
+
+        var zoom = CurrentCanvasZoom();
+        var offset = CurrentCanvasOffset();
+        var (safeX, safeY) = CanvasViewportHelpers.KeepNodeReachable(
+            node.X,
+            node.Y,
+            NodePortSpec.NodeWidth,
+            node.CanvasHeight,
+            zoom,
+            offset.X,
+            offset.Y,
+            CanvasOverlay.Bounds.Width,
+            CanvasOverlay.Bounds.Height,
+            CanvasOcclusionRects());
+        node.X = safeX;
+        node.Y = safeY;
+    }
+
+    private IReadOnlyList<CanvasViewportRect> CanvasOcclusionRects()
+    {
+        if (CanvasOverlay is null)
+        {
+            return Array.Empty<CanvasViewportRect>();
+        }
+
+        var rects = new List<CanvasViewportRect>();
+        AddControlRect(WorkflowSelectorHost, rects);
+        AddControlRect(CanvasToolbarActions, rects);
+        AddControlRect(MiniMapHost, rects);
+        AddControlRect(CanvasStatusHost, rects);
+        AddControlRect(LibraryTogglePill, rects);
+        AddControlRect(WorkspaceRightPill, rects);
+        AddControlRect(RightPanelHost, rects);
+        return rects;
+    }
+
+    private void AddControlRect(Control? control, ICollection<CanvasViewportRect> target)
+    {
+        if (CanvasOverlay is null
+            || control is null
+            || !control.IsVisible
+            || control.Bounds.Width <= 0
+            || control.Bounds.Height <= 0
+            || control.TranslatePoint(new Point(0, 0), CanvasOverlay) is not Point origin)
+        {
+            return;
+        }
+
+        target.Add(new CanvasViewportRect(
+            origin.X,
+            origin.Y,
+            control.Bounds.Width,
+            control.Bounds.Height));
+    }
+
+    private CanvasViewportRect SafeFitViewport()
+    {
+        if (CanvasOverlay is null)
+        {
+            return new CanvasViewportRect(0, 0, 1, 1);
+        }
+
+        const double inset = 12;
+        var left = inset;
+        var top = inset;
+        var right = Math.Max(left + 1, CanvasOverlay.Bounds.Width - inset);
+        var bottom = Math.Max(top + 1, CanvasOverlay.Bounds.Height - inset);
+        foreach (var control in new Control?[] { WorkflowSelectorHost, CanvasToolbarActions })
+        {
+            var rects = new List<CanvasViewportRect>();
+            AddControlRect(control, rects);
+            if (rects.Count > 0)
+            {
+                top = Math.Max(top, rects[0].Bottom + inset);
+            }
+        }
+
+        var miniMapRects = new List<CanvasViewportRect>();
+        AddControlRect(MiniMapHost, miniMapRects);
+        if (miniMapRects.Count > 0)
+        {
+            right = Math.Min(right, miniMapRects[0].X - inset);
+            bottom = Math.Min(bottom, miniMapRects[0].Y - inset);
+        }
+
+        if (DataContext is WorkspacePageViewModel { UseOverlayRightPanel: true, IsRightPanelOpen: true })
+        {
+            var rightPanelRects = new List<CanvasViewportRect>();
+            AddControlRect(RightPanelHost, rightPanelRects);
+            if (rightPanelRects.Count > 0)
+            {
+                right = Math.Min(right, rightPanelRects[0].X - inset);
+            }
+        }
+
+        if (right - left < 160 || bottom - top < 120)
+        {
+            return new CanvasViewportRect(
+                inset,
+                inset,
+                Math.Max(1, CanvasOverlay.Bounds.Width - (inset * 2)),
+                Math.Max(1, CanvasOverlay.Bounds.Height - (inset * 2)));
+        }
+
+        return new CanvasViewportRect(left, top, right - left, bottom - top);
     }
 
     private void SyncEdgePositions()
@@ -1683,6 +2439,79 @@ public partial class WorkspacePageView : UserControl
                 edge.UpdateEdgePath(source.X, source.Y, target.X, target.Y);
             }
         }
+        ScheduleEdgeLabelLayout();
+    }
+
+    private void LayoutEdgeLabels()
+    {
+        if (DataContext is not WorkspacePageViewModel viewModel
+            || EdgesItemsControl is null)
+        {
+            return;
+        }
+
+        // DataTemplate 完成测量后读取真实胶囊尺寸；不可见/尚未生成时才使用文本回退尺寸。
+        EdgesItemsControl.UpdateLayout();
+        var measuredSizes = EdgesItemsControl
+            .GetVisualDescendants()
+            .OfType<Control>()
+            .Where(control => string.Equals(control.Name, "EdgeLabelPlacementHost", StringComparison.Ordinal)
+                              && control.DataContext is WorkflowEdgeViewModel)
+            .GroupBy(control => ((WorkflowEdgeViewModel)control.DataContext!).Id, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group =>
+                {
+                    var control = group.First();
+                    return new Size(
+                        Math.Max(control.Bounds.Width, control.DesiredSize.Width),
+                        Math.Max(control.Bounds.Height, control.DesiredSize.Height));
+                },
+                StringComparer.Ordinal);
+        var requests = viewModel.Edges
+            .Where(edge => edge.HasMidpointLabel)
+            .Select(edge =>
+            {
+                var fallback = CanvasEdgeLabelLayoutHelpers.FallbackSize(edge.MidpointLabel);
+                var width = measuredSizes.TryGetValue(edge.Id, out var measured)
+                            && measured.Width > 0
+                    ? measured.Width
+                    : fallback.Width;
+                var height = measuredSizes.TryGetValue(edge.Id, out measured)
+                             && measured.Height > 0
+                    ? measured.Height
+                    : fallback.Height;
+                return new CanvasEdgeLabelRequest(
+                    edge.Id,
+                    edge.LabelAnchorX,
+                    edge.LabelAnchorY,
+                    edge.LabelTangentX,
+                    edge.LabelTangentY,
+                    width,
+                    height,
+                    edge.IsSelected);
+            })
+            .ToArray();
+        if (requests.Length == 0)
+        {
+            return;
+        }
+
+        var nodeBounds = viewModel.Nodes
+            .Select(node => new CanvasViewportRect(
+                node.X,
+                node.Y,
+                NodePortSpec.NodeWidth,
+                node.CanvasHeight))
+            .ToArray();
+        var edgesById = viewModel.Edges.ToDictionary(edge => edge.Id, StringComparer.Ordinal);
+        foreach (var placement in CanvasEdgeLabelLayoutHelpers.PlaceLabels(requests, nodeBounds))
+        {
+            if (edgesById.TryGetValue(placement.Id, out var edge))
+            {
+                edge.SetLabelLayout(placement.X, placement.Y, placement.IsVisible);
+            }
+        }
     }
 
     private void SyncMiniMapPositions()
@@ -1693,15 +2522,17 @@ public partial class WorkspacePageView : UserControl
         }
 
         // 与主画布一致：对 item 容器设 Canvas 附加属性（DataTemplate 根上的 Canvas.Left 不生效）
+        _miniMapTransform = ComputeMiniMapTransform(viewModel);
         EnsureMiniMapItemsControlSize();
         MiniMapItemsControl.UpdateLayout();
         var missing = 0;
         foreach (var node in viewModel.Nodes)
         {
-            if (MiniMapItemsControl.ContainerFromItem(node) is Control container)
+            if (FindNodeContainer(node, MiniMapItemsControl, _miniMapContainersById) is { } container)
             {
-                Canvas.SetLeft(container, node.MiniMapX);
-                Canvas.SetTop(container, node.MiniMapY);
+                var (miniX, miniY) = MiniMapMarkerPosition(node);
+                Canvas.SetLeft(container, miniX);
+                Canvas.SetTop(container, miniY);
                 // 容器默认可能铺满，压成点状
                 container.Width = 10;
                 container.Height = 6;
@@ -1730,10 +2561,11 @@ public partial class WorkspacePageView : UserControl
                 MiniMapItemsControl.UpdateLayout();
                 foreach (var node in vm.Nodes)
                 {
-                    if (MiniMapItemsControl.ContainerFromItem(node) is Control container)
+                    if (FindNodeContainer(node, MiniMapItemsControl, _miniMapContainersById) is { } container)
                     {
-                        Canvas.SetLeft(container, node.MiniMapX);
-                        Canvas.SetTop(container, node.MiniMapY);
+                        var (miniX, miniY) = MiniMapMarkerPosition(node);
+                        Canvas.SetLeft(container, miniX);
+                        Canvas.SetTop(container, miniY);
                         container.Width = 10;
                         container.Height = 6;
                     }
@@ -1742,6 +2574,27 @@ public partial class WorkspacePageView : UserControl
                 SyncMiniMapViewportFrame();
             }, DispatcherPriority.Loaded);
         }
+    }
+
+    private static Control? FindNodeContainer(
+        WorkflowNodeViewModel node,
+        ItemsControl? itemsControl,
+        Dictionary<string, Control> containersById)
+    {
+        if (containersById.TryGetValue(node.Id, out var cached)
+            && ReferenceEquals(cached.DataContext, node))
+        {
+            return cached;
+        }
+
+        containersById.Remove(node.Id);
+        if (itemsControl?.ContainerFromItem(node) is not Control container)
+        {
+            return null;
+        }
+
+        containersById[node.Id] = container;
+        return container;
     }
 
     private void EnsureMiniMapItemsControlSize()
@@ -1792,7 +2645,7 @@ public partial class WorkspacePageView : UserControl
         var logicalTop = -offset.Y / zoom;
         var logicalW = CanvasOverlay.Bounds.Width / zoom;
         var logicalH = CanvasOverlay.Bounds.Height / zoom;
-        var (mx, my, mw, mh) = NodePortSpec.LogicalViewportToMiniMap(
+        var (mx, my, mw, mh) = _miniMapTransform.ViewportFrame(
             logicalLeft, logicalTop, logicalW, logicalH);
         Canvas.SetLeft(MiniMapViewportFrame, mx);
         Canvas.SetTop(MiniMapViewportFrame, my);
@@ -1814,12 +2667,13 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
-    private static void SyncMiniMapContainerPositions(Control control)
+    private void SyncMiniMapContainerPositions(Control control)
     {
         if (control.DataContext is WorkflowNodeViewModel node)
         {
-            Canvas.SetLeft(control, node.MiniMapX);
-            Canvas.SetTop(control, node.MiniMapY);
+            var (miniX, miniY) = MiniMapMarkerPosition(node);
+            Canvas.SetLeft(control, miniX);
+            Canvas.SetTop(control, miniY);
         }
 
         foreach (var child in control.GetVisualChildren().OfType<Control>())
@@ -1828,13 +2682,36 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
+    private static CanvasMiniMapTransform ComputeMiniMapTransform(WorkspacePageViewModel viewModel)
+    {
+        if (viewModel.Nodes.Count == 0)
+        {
+            return CanvasMiniMapHelpers.ComputeTransform(0, 0, 1400, 840);
+        }
+
+        return CanvasMiniMapHelpers.ComputeTransform(
+            viewModel.Nodes.Min(node => node.X),
+            viewModel.Nodes.Min(node => node.Y),
+            viewModel.Nodes.Max(node => node.X + NodePortSpec.NodeWidth),
+            viewModel.Nodes.Max(node => node.Y + node.CanvasHeight));
+    }
+
+    private (double X, double Y) MiniMapMarkerPosition(WorkflowNodeViewModel node) =>
+        _miniMapTransform.NodeMarkerPosition(
+            node.X,
+            node.Y,
+            NodePortSpec.NodeWidth,
+            node.CanvasHeight);
+
     private Point ToLogicalCanvasPoint(Point canvasPosition)
     {
-        var zoom = CurrentCanvasZoom();
-        var offset = CurrentCanvasOffset();
-        return new Point(
-            (canvasPosition.X - offset.X) / zoom,
-            (canvasPosition.Y - offset.Y) / zoom);
+        if (DataContext is not WorkspacePageViewModel viewModel)
+        {
+            return canvasPosition;
+        }
+
+        var (x, y) = viewModel.CanvasViewport.ToLogical(canvasPosition.X, canvasPosition.Y);
+        return new Point(x, y);
     }
 
     private double CurrentCanvasZoom()
@@ -1846,12 +2723,9 @@ public partial class WorkspacePageView : UserControl
 
     private Point CurrentCanvasOffset()
     {
-        if (NodesItemsControl is null)
-        {
-            return default;
-        }
-        var transform = EnsureTranslateTransform(NodesItemsControl);
-        return new Point(transform.X, transform.Y);
+        return DataContext is WorkspacePageViewModel viewModel
+            ? new Point(viewModel.CanvasViewport.OffsetX, viewModel.CanvasViewport.OffsetY)
+            : default;
     }
 
     private static TranslateTransform EnsureTranslateTransform(Control control)

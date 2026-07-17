@@ -149,7 +149,7 @@ public sealed class ColorAndProviderHelpersTests
         Assert.Equal(expectedId, s.ChapterId);
         Assert.Equal(expectedTitle, s.ChapterTitle);
         Assert.Equal(expectedTarget, s.TargetPath);
-        Assert.Equal("3", s.Order);
+        Assert.Equal(3m, s.Order);
     }
 
     [Fact]
@@ -159,22 +159,22 @@ public sealed class ColorAndProviderHelpersTests
         var id = "keep-id";
         var title = "Keep Title";
         var target = "documents/keep.md";
-        var order = "9";
+        decimal? order = 9m;
         WorksImportHelper.ApplySuggestionIfEmpty(suggestion, ref id, ref title, ref target, ref order);
         Assert.Equal("keep-id", id);
         Assert.Equal("Keep Title", title);
         Assert.Equal("documents/keep.md", target);
-        Assert.Equal("9", order);
+        Assert.Equal(9m, order);
 
         id = "";
         title = "";
         target = "";
-        order = "0";
+        order = 0m;
         WorksImportHelper.ApplySuggestionIfEmpty(suggestion, ref id, ref title, ref target, ref order);
         Assert.Equal(suggestion.ChapterId, id);
         Assert.Equal(suggestion.ChapterTitle, title);
         Assert.Equal(suggestion.TargetPath, target);
-        Assert.Equal("1", order);
+        Assert.Equal(1m, order);
     }
 
     [Fact]
@@ -320,8 +320,7 @@ public sealed class ColorAndProviderHelpersTests
             defaultWorkDir: string.Empty,
             x: 10,
             y: 20,
-            backend: null!,
-            currentWorkflowId: () => "default",
+            runRequested: _ => { },
             clearSelection: () => { },
             markDirty: () => { })
         {
@@ -589,6 +588,7 @@ public sealed class ColorAndProviderHelpersTests
             MakeDefaultLlm = true,
             MakeDefaultEmbedding = false,
             MakeDefaultReranker = false,
+            MakeDefaultSearch = false,
             ModelsText = "claude-3,chat",
             EmbeddingModelId = string.Empty,
         });
@@ -613,6 +613,7 @@ public sealed class ColorAndProviderHelpersTests
             MakeDefaultLlm = false,
             MakeDefaultEmbedding = false,
             MakeDefaultReranker = false,
+            MakeDefaultSearch = false,
             ModelsText = string.Empty,
             EmbeddingModelId = string.Empty,
         });

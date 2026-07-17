@@ -10,48 +10,50 @@ use std::time::Duration;
 
 use ariadne::commands::{
     create_checkpoint_impl, create_project, ensure_index_bootstrap_on_open, fetch_provider_models,
-    fetch_provider_models_impl, get_app_settings_impl, get_app_status,
-    get_automation_settings_impl, get_backend_diagnostics, get_budget_status_impl,
+    fetch_provider_models_impl, fetch_provider_models_with_cancellation, get_app_settings_impl,
+    get_app_status, get_automation_settings_impl, get_backend_diagnostics, get_budget_status_impl,
     get_chapter_summary_view, get_display_name_language_pack_template, get_document_content_impl,
     get_document_tree_impl, get_git_history_impl, get_git_repository_status_impl,
     get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
     get_provider_config_impl, get_rag_settings_impl, get_sidebar_badges,
     get_template_repository_settings, get_template_repository_settings_impl,
-    get_workflow_settings_impl, get_works_tree, import_chapter, list_confirmations,
-    list_external_workflow_tools_impl, list_workflow_graphs_impl, load_workflow_graph_impl,
-    mark_workflow_run_failed_impl, mark_workflow_run_failed_with_lease_impl, open_project,
-    override_confirmation_output, pack_workflow_selection_impl,
-    pack_workflow_selection_impl_with_operation_id, pause_workflow, process_index_outbox_impl,
-    project_ai_chat, project_ai_chat_impl, query_run_logs, quick_edit_impl,
-    register_executor_adapters_for_project, resolve_confirmation_impl, resolve_project_references,
-    resolve_workflow_operation_in_doubt, restore_to_new_branch, resume_from_node, resume_workflow,
-    run_workflow, run_workflow_impl, save_app_settings_impl, save_automation_settings_impl,
-    save_document_content_impl, save_git_settings_impl, save_node_preset_settings_impl,
-    save_permissions_settings_impl, save_provider_key_impl, save_provider_settings_impl,
-    save_rag_settings_impl, save_template_repository_settings,
+    get_workflow_settings_impl, get_works_tree, import_chapter, install_template,
+    list_confirmations, list_external_workflow_tools_impl, list_workflow_graphs_impl,
+    load_workflow_graph_impl, mark_workflow_run_failed_impl,
+    mark_workflow_run_failed_with_lease_impl, open_project, override_confirmation_output,
+    pack_workflow_selection_impl, pack_workflow_selection_impl_with_operation_id, pause_workflow,
+    preview_provider_removal, process_index_outbox_impl, project_ai_chat, project_ai_chat_impl,
+    query_run_logs, quick_edit_impl, register_executor_adapters_for_project, remove_provider,
+    resolve_confirmation_impl, resolve_project_references, resolve_workflow_operation_in_doubt,
+    restore_to_new_branch, resume_from_node, resume_workflow, run_workflow, run_workflow_impl,
+    save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
+    save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
+    save_provider_key, save_provider_key_impl, save_provider_section_settings,
+    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings,
     save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
-    search_project_documents_impl, set_project_root, start_workflow_with_request, stop_workflow,
-    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
-    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
-    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, InDoubtDecision,
-    NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
-    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSettingsUpdate,
-    QuickEditRequest, RagSettings, ResolveConfirmationRequest, ResolveInDoubtOperationRequest,
-    ResumeFromNodeRequest, RunLogQuery, TemplateRepositorySettings, WorkflowGraphData,
-    WorkflowSettings,
+    search_project_documents_impl, search_templates, set_project_root, start_workflow_with_request,
+    stop_workflow, update_budget_config_impl, validate_display_name_language_pack, AppSettings,
+    AriadneAppState, AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy,
+    ConfirmationDecision, ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings,
+    InDoubtDecision, NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
+    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSectionSettings,
+    ProviderSettingsUpdate, QuickEditRequest, RagSettings, ResolveConfirmationRequest,
+    ResolveInDoubtOperationRequest, ResumeFromNodeRequest, RunLogQuery, TemplateRepositoryRequest,
+    TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{
-    ConfigStore, MemorySecretStore, ModelConfig, ProviderConfig, SecretRef, SecretStore,
-    PROVIDERS_CONFIG_FILE,
+    ConfigStore, MemorySecretStore, ModelConfig, PathWriteLock, ProjectCredentialScope,
+    ProviderConfig, SecretRef, SecretStore, SecretValue, PROVIDERS_CONFIG_FILE,
 };
 use ariadne::contracts::{
-    NodeId, NodeInstance, PermissionPolicy, PortValue, ProviderCapability, ProviderType,
-    RunControl, RunId, RunStatus, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
+    ExecutionCancellation, NodeId, NodeInstance, PermissionPolicy, PortValue, ProviderCapability,
+    ProviderType, RunControl, RunId, RunStatus, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
 use ariadne::diagnostics::DiagnosticStatus;
 use ariadne::documents::IndexInvalidationOutbox;
 use ariadne::frontend::{
     ChapterImportRequest, ConfirmationLogEntry, ConfirmationLogState, FileConfirmationLogStore,
+    ProjectAiConversationStore, OFFICIAL_TEMPLATE_REPOSITORY_URL,
 };
 use ariadne::retrieval::{FullTextSearchRequest, FullTextStore, TantivyFullTextStore};
 use ariadne::workflow::{
@@ -693,6 +695,7 @@ fn import_chapter_command_resolves_project_relative_paths() {
             order: 1,
             source_path: "planning/imports/chapter.md".into(),
             target_path: "documents/chapter-001.md".into(),
+            overwrite: false,
             outline_ref: None,
         },
     )
@@ -712,6 +715,41 @@ fn import_chapter_command_resolves_project_relative_paths() {
         .unwrap(),
         "第一章正文"
     );
+
+    std::fs::write(
+        temp.path()
+            .join("planning")
+            .join("imports")
+            .join("chapter-2.md"),
+        "第二版正文",
+    )
+    .unwrap();
+    let replacement = ChapterImportRequest {
+        chapter_id: "stage1:001".to_owned(),
+        title: "第一章第二版".to_owned(),
+        order: 2,
+        source_path: "planning/imports/chapter-2.md".into(),
+        target_path: "documents/chapter-002.md".into(),
+        overwrite: false,
+        outline_ref: None,
+    };
+    let error = import_chapter(&state, replacement.clone()).unwrap_err();
+    assert_eq!(
+        error.code,
+        ariadne::command_error::CommandErrorCode::Conflict
+    );
+    assert!(!temp.path().join("documents/chapter-002.md").exists());
+
+    let replaced = import_chapter(
+        &state,
+        ChapterImportRequest {
+            overwrite: true,
+            ..replacement
+        },
+    )
+    .unwrap();
+    assert_eq!(replaced.entries.len(), 1);
+    assert_eq!(replaced.entries[0].title, "第一章第二版");
 }
 
 #[test]
@@ -1394,7 +1432,10 @@ fn pack_workflow_selection_command_persists_subworkflow_graph() {
                     id: "source".to_owned(),
                     r#type: "document_read".to_owned(),
                     label: None,
-                    data: Value::Null,
+                    data: json!({
+                        "path": "documents/source.md",
+                        "include_content": true
+                    }),
                     position: json!({ "x": 0.0, "y": 0.0 }),
                 },
                 CanvasNode {
@@ -1415,7 +1456,10 @@ fn pack_workflow_selection_command_persists_subworkflow_graph() {
                     id: "sink".to_owned(),
                     r#type: "export".to_owned(),
                     label: None,
-                    data: Value::Null,
+                    data: json!({
+                        "artifact_id": "exports/pack-flow.md",
+                        "format": "markdown"
+                    }),
                     position: json!({ "x": 300.0, "y": 0.0 }),
                 },
             ],
@@ -2033,7 +2077,10 @@ fn run_workflow_start_node_id_must_reference_start_node() {
                 id: "read".to_owned(),
                 r#type: "document_read".to_owned(),
                 label: None,
-                data: Value::Null,
+                data: json!({
+                    "path": "documents/source.md",
+                    "include_content": true
+                }),
                 position: Value::Null,
             }],
             edges: Vec::new(),
@@ -2122,6 +2169,7 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
             make_default_llm: true,
             make_default_embedding: true,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -2148,10 +2196,492 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
         Some("openai")
     );
     assert_eq!(provider.providers[0].provider, "openai");
+    assert!(provider.providers[0].configured);
     assert_eq!(provider.providers[0].models[0].model_id, "gpt-test");
     let config = ConfigStore::new(temp.path()).load_or_create().unwrap();
     assert!(config.providers.providers[0].api_key.is_none());
     assert!(secrets.get_secret("provider.openai").unwrap().is_none());
+}
+
+#[test]
+fn regular_provider_key_save_rejects_unconfigured_provider_without_side_effects() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let secrets = Arc::new(MemorySecretStore::default());
+    let state = AriadneAppState::new(project.path(), app_state.path(), secrets.clone());
+    let before = ConfigStore::new(project.path()).load().unwrap();
+    assert!(get_provider_config_impl(project.path(), secrets.as_ref())
+        .unwrap()
+        .providers
+        .iter()
+        .all(|provider| !provider.configured));
+
+    let error = save_provider_key(
+        &state,
+        "draft-provider".to_owned(),
+        "draft-secret".to_owned(),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .diagnostic
+        .as_deref()
+        .is_some_and(|message| message.contains("provider is not configured")));
+    assert_eq!(ConfigStore::new(project.path()).load().unwrap(), before);
+    assert!(!get_provider_config_impl(project.path(), secrets.as_ref())
+        .unwrap()
+        .providers
+        .iter()
+        .any(|provider| provider.provider == "draft-provider"));
+}
+
+#[test]
+fn regular_provider_key_save_updates_only_existing_provider_credential() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    save_provider_settings_impl(
+        project.path(),
+        ProviderSettingsUpdate {
+            provider_id: "openai".to_owned(),
+            provider_type: ProviderType::OpenAi,
+            display_name: "OpenAI".to_owned(),
+            enabled: true,
+            base_url: None,
+            models: vec![ModelConfig {
+                model_id: "gpt-test".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(4096),
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    let before = ConfigStore::new(project.path()).load().unwrap();
+    let secrets = Arc::new(MemorySecretStore::default());
+    let state = AriadneAppState::new(project.path(), app_state.path(), secrets.clone());
+
+    save_provider_key(&state, "openai".to_owned(), "replacement-secret".to_owned()).unwrap();
+
+    assert_eq!(ConfigStore::new(project.path()).load().unwrap(), before);
+    assert!(get_provider_config_impl(project.path(), secrets.as_ref())
+        .unwrap()
+        .providers
+        .iter()
+        .any(|provider| provider.provider == "openai" && provider.has_key));
+}
+
+#[test]
+fn provider_section_secret_failure_leaves_config_unchanged() {
+    struct RejectingSecretStore;
+
+    impl SecretStore for RejectingSecretStore {
+        fn set_secret(
+            &self,
+            _key_id: &str,
+            _value: ariadne::config::SecretValue,
+        ) -> ariadne::contracts::CoreResult<()> {
+            Err(ariadne::contracts::CoreError::validation(
+                "injected secret write failure",
+            ))
+        }
+
+        fn get_secret(
+            &self,
+            _key_id: &str,
+        ) -> ariadne::contracts::CoreResult<Option<ariadne::config::SecretValue>> {
+            Ok(None)
+        }
+
+        fn delete_secret(&self, _key_id: &str) -> ariadne::contracts::CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let store = ConfigStore::new(project.path());
+    let before = store.load().unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(RejectingSecretStore),
+    );
+
+    let error = save_provider_section_settings(
+        &state,
+        ProviderSectionSettings {
+            provider: ProviderSettingsUpdate {
+                provider_id: "new-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "New Provider".to_owned(),
+                enabled: true,
+                base_url: Some("https://example.invalid/v1".to_owned()),
+                models: vec![ModelConfig {
+                    model_id: "new-model".to_owned(),
+                    capability: ProviderCapability::Llm,
+                    max_context_tokens: Some(4096),
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                }],
+                make_default_llm: true,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+            api_key: Some("new-secret".to_owned()),
+        },
+    )
+    .unwrap_err();
+
+    assert!(error
+        .diagnostic
+        .as_deref()
+        .is_some_and(|message| message.contains("injected secret write failure")));
+    assert_eq!(store.load().unwrap(), before);
+}
+
+fn configure_removable_provider(
+    project_root: &std::path::Path,
+    provider_id: &str,
+    model_id: &str,
+    make_default: bool,
+) {
+    save_provider_settings_impl(
+        project_root,
+        ProviderSettingsUpdate {
+            provider_id: provider_id.to_owned(),
+            provider_type: ProviderType::OpenAi,
+            display_name: provider_id.to_owned(),
+            enabled: true,
+            base_url: None,
+            models: vec![ModelConfig {
+                model_id: model_id.to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(4096),
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: make_default,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn provider_removal_is_blocked_by_presets_workflows_and_active_run_snapshots() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "target", "target-model", true);
+    configure_removable_provider(project.path(), "remaining", "remaining-model", false);
+
+    let mut presets = NodePresetSettings {
+        default_model_id: "target-model".to_owned(),
+        ..NodePresetSettings::default()
+    };
+    for preset in &mut presets.presets {
+        preset.model_id = "target-model".to_owned();
+    }
+    save_node_preset_settings_impl(project.path(), presets).unwrap();
+
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("provider-reference"),
+        name: "Provider Reference".to_owned(),
+        nodes: vec![NodeInstance {
+            id: NodeId::from("ask"),
+            type_name: "llm".to_owned(),
+            label: None,
+            config: json!({
+                "provider_id": "target",
+                "model_id": "target-model",
+                "prompt_template": "hello"
+            }),
+            position: None,
+        }],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    save_workflow_graph_impl(
+        project.path(),
+        WorkflowGraphData {
+            workflow_id: "provider-reference".to_owned(),
+            name: "Provider Reference".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "ask".to_owned(),
+                r#type: "llm".to_owned(),
+                label: None,
+                data: workflow.nodes[0].config.clone(),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let runtime_store = SqliteWorkflowRuntimeStore::open(project.path()).unwrap();
+    let mut run = WorkflowRunState::new(
+        WorkflowId::from("provider-reference"),
+        RunId::from("active-run"),
+    );
+    run.prepared_workflow = Some(workflow);
+    runtime_store.create_state(&run).unwrap();
+
+    let secrets = Arc::new(MemorySecretStore::default());
+    ProjectCredentialScope::new(project.path(), secrets.as_ref())
+        .unwrap()
+        .set_provider_secret("target", SecretValue::new("target-secret"))
+        .unwrap();
+    let state = AriadneAppState::new(project.path(), app_state.path(), secrets.clone());
+    let before = ConfigStore::new(project.path()).load().unwrap();
+
+    let preview = preview_provider_removal(&state, "target".to_owned()).unwrap();
+    assert!(preview
+        .blocking_references
+        .iter()
+        .any(|reference| reference.reference_type == "node_preset"));
+    assert!(preview
+        .blocking_references
+        .iter()
+        .any(|reference| reference.reference_type == "workflow"));
+    assert!(preview
+        .blocking_references
+        .iter()
+        .any(|reference| reference.reference_type == "active_run"));
+
+    let error = remove_provider(&state, "target".to_owned(), preview.revision).unwrap_err();
+    assert_eq!(
+        error.code,
+        ariadne::command_error::CommandErrorCode::Conflict
+    );
+    assert_eq!(ConfigStore::new(project.path()).load().unwrap(), before);
+    assert!(
+        ProjectCredentialScope::new(project.path(), secrets.as_ref())
+            .unwrap()
+            .get_provider_secret("target")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn provider_removal_rejects_stale_impact_revision_without_side_effects() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "target", "target-model", true);
+    let secrets = Arc::new(MemorySecretStore::default());
+    ProjectCredentialScope::new(project.path(), secrets.as_ref())
+        .unwrap()
+        .set_provider_secret("target", SecretValue::new("target-secret"))
+        .unwrap();
+    let state = AriadneAppState::new(project.path(), app_state.path(), secrets.clone());
+    let preview = preview_provider_removal(&state, "target".to_owned()).unwrap();
+
+    save_provider_settings_impl(
+        project.path(),
+        ProviderSettingsUpdate {
+            provider_id: "target".to_owned(),
+            provider_type: ProviderType::OpenAi,
+            display_name: "renamed target".to_owned(),
+            enabled: true,
+            base_url: None,
+            models: vec![ModelConfig {
+                model_id: "target-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(4096),
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    let before = ConfigStore::new(project.path()).load().unwrap();
+
+    let error = remove_provider(&state, "target".to_owned(), preview.revision).unwrap_err();
+    assert_eq!(
+        error.code,
+        ariadne::command_error::CommandErrorCode::Conflict
+    );
+    assert_eq!(ConfigStore::new(project.path()).load().unwrap(), before);
+    assert!(
+        ProjectCredentialScope::new(project.path(), secrets.as_ref())
+            .unwrap()
+            .get_provider_secret("target")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn provider_removal_secret_failure_restores_config_runtime_and_credential() {
+    #[derive(Default)]
+    struct RejectDeleteSecretStore {
+        inner: MemorySecretStore,
+    }
+
+    impl SecretStore for RejectDeleteSecretStore {
+        fn set_secret(
+            &self,
+            key_id: &str,
+            value: SecretValue,
+        ) -> ariadne::contracts::CoreResult<()> {
+            self.inner.set_secret(key_id, value)
+        }
+
+        fn get_secret(&self, key_id: &str) -> ariadne::contracts::CoreResult<Option<SecretValue>> {
+            self.inner.get_secret(key_id)
+        }
+
+        fn delete_secret(&self, _key_id: &str) -> ariadne::contracts::CoreResult<()> {
+            Err(ariadne::contracts::CoreError::validation(
+                "injected provider credential deletion failure",
+            ))
+        }
+    }
+
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "target", "target-model", true);
+    let secrets = Arc::new(RejectDeleteSecretStore::default());
+    ProjectCredentialScope::new(project.path(), secrets.as_ref())
+        .unwrap()
+        .set_provider_secret("target", SecretValue::new("target-secret"))
+        .unwrap();
+    let state = AriadneAppState::new(project.path(), app_state.path(), secrets.clone());
+    let before = ConfigStore::new(project.path()).load().unwrap();
+    let preview = preview_provider_removal(&state, "target".to_owned()).unwrap();
+
+    let error = remove_provider(&state, "target".to_owned(), preview.revision).unwrap_err();
+    assert!(error.contains("injected provider credential deletion failure"));
+    assert_eq!(ConfigStore::new(project.path()).load().unwrap(), before);
+    assert!(state.retrieval_runtime().is_ok());
+    assert!(
+        ProjectCredentialScope::new(project.path(), secrets.as_ref())
+            .unwrap()
+            .get_provider_secret("target")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn provider_removal_clears_defaults_and_project_credential_atomically() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "target", "target-model", true);
+    let secrets = Arc::new(MemorySecretStore::default());
+    ProjectCredentialScope::new(project.path(), secrets.as_ref())
+        .unwrap()
+        .set_provider_secret("target", SecretValue::new("target-secret"))
+        .unwrap();
+    let state = AriadneAppState::new(project.path(), app_state.path(), secrets.clone());
+    let preview = preview_provider_removal(&state, "target".to_owned()).unwrap();
+    assert_eq!(preview.default_roles, vec!["llm"]);
+    assert!(preview.has_key);
+    assert!(preview.blocking_references.is_empty());
+
+    let status = remove_provider(&state, "target".to_owned(), preview.revision).unwrap();
+    let config = ConfigStore::new(project.path()).load().unwrap();
+    assert!(!config
+        .providers
+        .providers
+        .iter()
+        .any(|provider| provider.provider_id == "target"));
+    assert!(config.providers.default_llm_provider_id.is_none());
+    assert!(status.default_llm_provider_id.is_none());
+    assert!(status
+        .providers
+        .iter()
+        .all(|provider| provider.provider != "target" || !provider.configured));
+    assert!(
+        ProjectCredentialScope::new(project.path(), secrets.as_ref())
+            .unwrap()
+            .get_provider_secret("target")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn provider_removal_and_workflow_save_share_reference_graph_lock() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "target", "target-model", true);
+
+    let lock_target = project
+        .path()
+        .join(".config")
+        .join(".provider-reference-graph");
+    let graph_lock = PathWriteLock::acquire(&lock_target).unwrap();
+    let workflow_project = project.path().to_path_buf();
+    let (workflow_started_tx, workflow_started_rx) = std::sync::mpsc::channel();
+    let (workflow_done_tx, workflow_done_rx) = std::sync::mpsc::channel();
+    let workflow_thread = thread::spawn(move || {
+        workflow_started_tx.send(()).unwrap();
+        let result = save_workflow_graph_impl(
+            &workflow_project,
+            WorkflowGraphData {
+                workflow_id: "reference-lock".to_owned(),
+                name: "Reference Lock".to_owned(),
+                nodes: vec![CanvasNode {
+                    id: "start".to_owned(),
+                    r#type: "start".to_owned(),
+                    label: None,
+                    data: Value::Null,
+                    position: Value::Null,
+                }],
+                edges: Vec::new(),
+                metadata: Value::Null,
+                content_revision: None,
+                expected_revision: None,
+            },
+        );
+        workflow_done_tx.send(result).unwrap();
+    });
+    workflow_started_rx.recv().unwrap();
+    thread::sleep(Duration::from_millis(50));
+    assert!(workflow_done_rx.try_recv().is_err());
+    drop(graph_lock);
+    workflow_done_rx.recv().unwrap().unwrap();
+    workflow_thread.join().unwrap();
+
+    let secrets = Arc::new(MemorySecretStore::default());
+    let state = AriadneAppState::new(project.path(), app_state.path(), secrets);
+    let preview = preview_provider_removal(&state, "target".to_owned()).unwrap();
+    let graph_lock = PathWriteLock::acquire(&lock_target).unwrap();
+    let (removal_started_tx, removal_started_rx) = std::sync::mpsc::channel();
+    let (removal_done_tx, removal_done_rx) = std::sync::mpsc::channel();
+    let removal_thread = thread::spawn(move || {
+        removal_started_tx.send(()).unwrap();
+        let result = remove_provider(&state, "target".to_owned(), preview.revision);
+        removal_done_tx.send(result).unwrap();
+    });
+    removal_started_rx.recv().unwrap();
+    thread::sleep(Duration::from_millis(50));
+    assert!(removal_done_rx.try_recv().is_err());
+    drop(graph_lock);
+    removal_done_rx.recv().unwrap().unwrap();
+    removal_thread.join().unwrap();
 }
 
 #[test]
@@ -2481,6 +3011,7 @@ fn provider_model_fetch_returns_configured_and_embedding_models() {
             make_default_llm: true,
             make_default_embedding: true,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -2547,6 +3078,7 @@ fn provider_model_fetch_calls_remote_models_endpoint() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -2580,6 +3112,79 @@ fn provider_model_fetch_calls_remote_models_endpoint() {
         .iter()
         .any(|model| model.model_id == "text-embedding-3-small"
             && model.capability == ProviderCapability::Embedding));
+}
+
+#[test]
+fn c9_provider_model_fetch_can_cancel_stalled_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicBool::new(false));
+    let server_accepted = Arc::clone(&accepted);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 2048];
+        let _ = stream.read(&mut buffer).unwrap();
+        server_accepted.store(true, Ordering::Release);
+        thread::sleep(Duration::from_millis(500));
+    });
+
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "cancellable_models".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Cancellable Models".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            models: vec![ModelConfig {
+                model_id: "chat-alpha".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(8192),
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path().to_path_buf(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let cancellation = ExecutionCancellation::new();
+    let cancel_from_thread = cancellation.clone();
+    let canceller = thread::spawn(move || {
+        let started = std::time::Instant::now();
+        while !accepted.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        cancel_from_thread.cancel();
+    });
+
+    let started = std::time::Instant::now();
+    let error = fetch_provider_models_with_cancellation(
+        &state,
+        Some("cancellable_models".to_owned()),
+        &cancellation,
+    )
+    .unwrap_err();
+    let request_elapsed = started.elapsed();
+
+    canceller.join().unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        error.code,
+        ariadne::command_error::CommandErrorCode::Cancelled
+    );
+    assert!(request_elapsed < Duration::from_millis(300));
 }
 
 #[test]
@@ -2621,6 +3226,7 @@ fn provider_model_fetch_rejects_oversized_streaming_response() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -2657,6 +3263,7 @@ fn provider_settings_reject_non_http_base_url() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap_err();
@@ -2685,6 +3292,7 @@ fn node_preset_settings_reject_unknown_configured_model() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -2919,6 +3527,25 @@ fn automation_and_permission_settings_round_trip_config_files() {
         Some(&false)
     );
     assert!(permissions.tool_controls.contains_key("writer"));
+    for (scope, tool) in [
+        ("project_ai", "project-ai-search"),
+        ("project_ai", "project-ai-web-search"),
+        ("llm", "llm-search"),
+        ("llm", "llm-web-search"),
+        ("summarizer", "summarizer-search"),
+        ("summarizer", "summarizer-web-search"),
+        ("executor_adapter", "executor-adapter-search"),
+        ("executor_adapter", "executor-adapter-web-search"),
+    ] {
+        assert_eq!(
+            permissions
+                .tool_controls
+                .get(scope)
+                .and_then(|controls| controls.get(tool)),
+            Some(&true),
+            "{scope}/{tool} should be enabled by default"
+        );
+    }
     assert_eq!(
         permissions
             .tool_controls
@@ -3211,6 +3838,55 @@ fn template_repository_settings_are_app_scoped_across_projects() {
         .join(".runtime")
         .join("template_repository_settings.json")
         .exists());
+}
+
+#[test]
+fn default_official_template_repository_searches_without_configuration() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    assert_eq!(
+        get_template_repository_settings(&state).unwrap().base_url,
+        OFFICIAL_TEMPLATE_REPOSITORY_URL
+    );
+    fs::write(
+        app_state.path().join("template_repository_settings.json"),
+        "{\"base_url\":\"\"}",
+    )
+    .unwrap();
+    assert_eq!(
+        get_template_repository_settings(&state).unwrap().base_url,
+        OFFICIAL_TEMPLATE_REPOSITORY_URL
+    );
+    let results = search_templates(
+        TemplateRepositoryRequest { base_url: None },
+        "".to_owned(),
+        Vec::new(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].id, "official-novel-starter");
+    let report = install_template(
+        &state,
+        TemplateRepositoryRequest { base_url: None },
+        "official-novel-starter".to_owned(),
+    )
+    .unwrap();
+    assert_eq!(report.workflow_id, "official-novel-starter");
+    assert!(project
+        .path()
+        .join("workflows")
+        .join("official-novel-starter")
+        .join("workflow.json")
+        .is_file());
 }
 
 #[test]
@@ -3576,6 +4252,7 @@ fn d3a_maintenance_rejects_provider_model_fetch_before_network_dispatch() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -3750,6 +4427,10 @@ fn project_ai_resolves_references_and_updates_memory_without_llm() {
             chat_history: Vec::new(),
             references: vec!["@确认项/confirm-1".to_owned()],
             workflow_id_to_run: None,
+            reference_workflow_id: None,
+            reference_run_id: None,
+            conversation_id: None,
+            conversation_revision: None,
             append_memory: Some("长期偏好：保持第三人称。".to_owned()),
         },
     )
@@ -3759,6 +4440,44 @@ fn project_ai_resolves_references_and_updates_memory_without_llm() {
     assert!(response.project_memory.contains("第三人称"));
     assert_eq!(response.resolved_references[0].id, "confirm-1");
     assert_eq!(response.answer, "已处理项目记忆或工作流请求。");
+}
+
+#[test]
+fn project_ai_impl_rejects_workflow_start_without_application_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "project-ai-low-level".to_owned(),
+            name: "Project AI Low Level".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-main".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Start".to_owned()),
+                data: Value::Null,
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+
+    let error = project_ai_chat_impl(
+        temp.path(),
+        &MemorySecretStore::default(),
+        ProjectAiRequest {
+            workflow_id_to_run: Some("project-ai-low-level".to_owned()),
+            ..ProjectAiRequest::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("requires the application runtime"));
+    assert!(!temp.path().join("runtime.db").exists());
 }
 
 #[test]
@@ -3811,6 +4530,7 @@ fn project_ai_chat_sends_chat_history_through_llm_provider() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -3839,6 +4559,10 @@ fn project_ai_chat_sends_chat_history_through_llm_provider() {
             ],
             references: Vec::new(),
             workflow_id_to_run: None,
+            reference_workflow_id: None,
+            reference_run_id: None,
+            conversation_id: None,
+            conversation_revision: None,
             append_memory: None,
         },
     )
@@ -3849,6 +4573,322 @@ fn project_ai_chat_sends_chat_history_through_llm_provider() {
     assert_eq!(response.chat_history.len(), 4);
     assert_eq!(response.chat_history[2].content, "继续说明");
     assert_eq!(response.chat_history[3].content, "继续回答");
+    assert_eq!(response.conversation_id, "default");
+    assert_eq!(response.conversation_revision, 1);
+    assert_eq!(response.new_messages.len(), 2);
+    assert!(!response.project_memory_revision.is_empty());
+}
+
+#[test]
+fn project_ai_can_call_project_search_and_receive_indexed_document() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_document_content_impl(
+        temp.path(),
+        "documents/search-source.md".to_owned(),
+        "顾言把蓝色罗盘交给苏禾，并要求她在钟楼会合。".to_owned(),
+    )
+    .unwrap();
+    assert_eq!(process_index_outbox_impl(temp.path()).unwrap(), 1);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        for round in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 65536];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.contains("\"name\":\"project-ai-search\""));
+            let response_body = if round == 0 {
+                r#"{
+                  "model":"project-search-chat",
+                  "choices":[{
+                    "message":{
+                      "content":"",
+                      "tool_calls":[{
+                        "id":"call-project-search",
+                        "type":"function",
+                        "function":{"name":"project-ai-search","arguments":"{\"query\":\"蓝色罗盘\",\"limit\":5}"}
+                      }]
+                    },
+                    "finish_reason":"tool_calls"
+                  }],
+                  "usage":{"prompt_tokens":20,"completion_tokens":2}
+                }"#
+            } else {
+                assert!(request.contains("蓝色罗盘"));
+                assert!(request.contains("search-source.md"));
+                r#"{
+                  "model":"project-search-chat",
+                  "choices":[{
+                    "message":{"content":"蓝色罗盘由顾言交给苏禾。","tool_calls":[]},
+                    "finish_reason":"stop"
+                  }],
+                  "usage":{"prompt_tokens":40,"completion_tokens":6}
+                }"#
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+
+    let secrets = MemorySecretStore::default();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "project_search_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Project Search Chat".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            models: vec![ModelConfig {
+                model_id: "project-search-chat".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    save_provider_key_impl(
+        temp.path(),
+        &secrets,
+        "project_search_chat".to_owned(),
+        "local-key".to_owned(),
+    )
+    .unwrap();
+
+    let response = project_ai_chat_impl(
+        temp.path(),
+        &secrets,
+        ProjectAiRequest {
+            message: "谁拿到了蓝色罗盘？".to_owned(),
+            ..ProjectAiRequest::default()
+        },
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(response.answer, "蓝色罗盘由顾言交给苏禾。");
+}
+
+#[test]
+fn project_ai_can_call_web_search_and_receive_cited_results() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let llm_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let llm_base_url = format!("http://{}", llm_listener.local_addr().unwrap());
+    let llm_server = thread::spawn(move || {
+        for round in 0..2 {
+            let (mut stream, _) = llm_listener.accept().unwrap();
+            let mut buffer = [0u8; 65536];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.contains("\"name\":\"project-ai-web-search\""));
+            let response_body = if round == 0 {
+                r#"{
+                  "model":"project-web-chat",
+                  "choices":[{
+                    "message":{
+                      "content":"",
+                      "tool_calls":[{
+                        "id":"call-project-web-search",
+                        "type":"function",
+                        "function":{"name":"project-ai-web-search","arguments":"{\"query\":\"2026 lunar mission\",\"limit\":3}"}
+                      }]
+                    },
+                    "finish_reason":"tool_calls"
+                  }],
+                  "usage":{"prompt_tokens":20,"completion_tokens":2}
+                }"#
+            } else {
+                assert!(request.contains("https://example.test/lunar-2026"));
+                assert!(request.contains("Lunar Mission 2026"));
+                r#"{
+                  "model":"project-web-chat",
+                  "choices":[{
+                    "message":{"content":"已根据公开来源完成检索。","tool_calls":[]},
+                    "finish_reason":"stop"
+                  }],
+                  "usage":{"prompt_tokens":40,"completion_tokens":6}
+                }"#
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+
+    let search_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let search_base_url = format!("http://{}", search_listener.local_addr().unwrap());
+    let search_server = thread::spawn(move || {
+        let (mut stream, _) = search_listener.accept().unwrap();
+        let mut buffer = [0u8; 16384];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /responses "));
+        assert!(request.contains("2026 lunar mission"));
+        let body = r#"{
+          "output":[{
+            "type":"message",
+            "content":[{
+              "type":"output_text",
+              "text":"A cited current result.",
+              "annotations":[{
+                "type":"url_citation",
+                "url":"https://example.test/lunar-2026",
+                "title":"Lunar Mission 2026"
+              }]
+            }]
+          }]
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let secrets = MemorySecretStore::default();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "project_web_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Project Web Chat".to_owned(),
+            enabled: true,
+            base_url: Some(llm_base_url),
+            models: vec![ModelConfig {
+                model_id: "project-web-chat".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "project_web_search".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Project Web Search".to_owned(),
+            enabled: true,
+            base_url: Some(search_base_url),
+            models: vec![ModelConfig {
+                model_id: "web-search-model".to_owned(),
+                capability: ProviderCapability::Search,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: false,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: true,
+        },
+    )
+    .unwrap();
+    let mut permissions = get_permissions_settings_impl(temp.path()).unwrap();
+    permissions.policy.allow_network = true;
+    permissions.policy.allow_web_search = true;
+    save_permissions_settings_impl(temp.path(), permissions).unwrap();
+
+    let response = project_ai_chat_impl(
+        temp.path(),
+        &secrets,
+        ProjectAiRequest {
+            message: "查询 2026 月球任务".to_owned(),
+            ..ProjectAiRequest::default()
+        },
+    )
+    .unwrap();
+    llm_server.join().unwrap();
+    search_server.join().unwrap();
+
+    assert_eq!(response.answer, "已根据公开来源完成检索。");
+}
+
+#[test]
+fn project_ai_chat_rejects_stale_revision_before_provider_resolution() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let store = ProjectAiConversationStore::open(temp.path()).unwrap();
+    store.load_or_seed("stale-revision", &[]).unwrap();
+    store
+        .append_messages(
+            "stale-revision",
+            0,
+            &[
+                ("user".to_owned(), "已持久化问题".to_owned()),
+                ("assistant".to_owned(), "已持久化回答".to_owned()),
+            ],
+        )
+        .unwrap();
+
+    let error = project_ai_chat_impl(
+        temp.path(),
+        &MemorySecretStore::default(),
+        ProjectAiRequest {
+            message: "不应进入 provider 解析".to_owned(),
+            chat_history: Vec::new(),
+            references: Vec::new(),
+            workflow_id_to_run: None,
+            reference_workflow_id: None,
+            reference_run_id: None,
+            conversation_id: Some("stale-revision".to_owned()),
+            conversation_revision: Some(0),
+            append_memory: None,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code.as_str(), "conflict");
+    assert!(error.contains("expected 0, actual 1"));
+}
+
+#[test]
+fn project_ai_chat_rejects_concurrent_turn_before_provider_resolution() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let _active =
+        ProjectAiConversationStore::try_acquire_conversation(temp.path(), "concurrent-turn")
+            .unwrap()
+            .unwrap();
+
+    let error = project_ai_chat_impl(
+        temp.path(),
+        &MemorySecretStore::default(),
+        ProjectAiRequest {
+            message: "不应进入 provider 解析".to_owned(),
+            conversation_id: Some("concurrent-turn".to_owned()),
+            ..ProjectAiRequest::default()
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code.as_str(), "conflict");
+    assert!(error.contains("already processing another revision"));
 }
 
 #[test]
@@ -3859,23 +4899,29 @@ fn project_ai_chat_bounds_history_to_model_context_window() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = vec![0u8; 65536];
-        let read = stream.read(&mut buffer).unwrap();
-        let request = String::from_utf8_lossy(&buffer[..read]);
-        assert!(!request.contains("oldest-history-marker"));
-        assert!(request.contains("newest-history-marker"));
-        let response_body = r#"{
-          "model":"bounded-chat",
-          "choices":[{"message":{"content":"bounded answer"},"finish_reason":"stop"}],
-          "usage":{"prompt_tokens":1000,"completion_tokens":4}
-        }"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        stream.write_all(response.as_bytes()).unwrap();
+        for answer in ["bounded answer", "resumed answer"] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = vec![0u8; 65536];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.contains("oldest-history-marker"));
+            assert!(request.contains("summary_id="));
+            assert!(request.contains("revision=0 sequence=1 role=user"));
+            assert!(request.contains("newest-history-marker"));
+            let response_body = format!(
+                r#"{{
+                  "model":"bounded-chat",
+                  "choices":[{{"message":{{"content":"{answer}"}},"finish_reason":"stop"}}],
+                  "usage":{{"prompt_tokens":1000,"completion_tokens":4}}
+                }}"#
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
     });
 
     let secrets = MemorySecretStore::default();
@@ -3897,6 +4943,7 @@ fn project_ai_chat_bounds_history_to_model_context_window() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -3935,20 +4982,201 @@ fn project_ai_chat_bounds_history_to_model_context_window() {
             chat_history: history,
             references: Vec::new(),
             workflow_id_to_run: None,
+            reference_workflow_id: None,
+            reference_run_id: None,
+            conversation_id: Some("bounded-restart".to_owned()),
+            conversation_revision: None,
+            append_memory: None,
+        },
+    )
+    .unwrap();
+    assert!(response.history_truncated);
+    assert!(!response.conversation_summary.is_empty());
+    assert_eq!(response.conversation_revision, 1);
+    assert_eq!(response.new_messages.len(), 2);
+    assert_eq!(response.context_limit_tokens, 4096);
+    assert!(response.estimated_input_tokens < 4096);
+    assert!(response.chat_history.is_empty());
+    assert!(response.conversation_snapshot.len() < original_len + 2);
+    assert_eq!(
+        response.conversation_snapshot.last().unwrap().content,
+        "bounded answer"
+    );
+
+    let resumed = project_ai_chat_impl(
+        temp.path(),
+        &secrets,
+        ProjectAiRequest {
+            message: "resume after desktop restart".to_owned(),
+            chat_history: Vec::new(),
+            references: Vec::new(),
+            workflow_id_to_run: None,
+            reference_workflow_id: None,
+            reference_run_id: None,
+            conversation_id: Some("bounded-restart".to_owned()),
+            conversation_revision: Some(response.conversation_revision),
             append_memory: None,
         },
     )
     .unwrap();
     server.join().unwrap();
 
-    assert!(response.history_truncated);
-    assert_eq!(response.context_limit_tokens, 4096);
-    assert!(response.estimated_input_tokens < 4096);
-    assert!(response.chat_history.len() < original_len + 2);
+    assert_eq!(resumed.conversation_revision, 2);
+    assert_eq!(resumed.new_messages.len(), 2);
+    assert!(resumed.chat_history.is_empty());
+    assert!(resumed.conversation_snapshot.is_empty());
     assert_eq!(
-        response.chat_history.last().unwrap().content,
-        "bounded answer"
+        resumed.new_messages.last().unwrap().content,
+        "resumed answer"
     );
+}
+
+#[test]
+fn project_ai_chat_assembles_document_knowledge_artifact_and_node_references() {
+    use ariadne::contracts::{SourceSpan, TextRange};
+    use ariadne::rag::{MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, StorySegment};
+
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let document_path = temp.path().join("documents/reference.md");
+    std::fs::write(&document_path, "DOC-F5-SENTINEL\n第二行正文").unwrap();
+
+    let artifact_path = temp.path().join(".runtime/artifacts/exports/reference.md");
+    std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+    std::fs::write(&artifact_path, "ARTIFACT-F6-SENTINEL\n导出正文").unwrap();
+
+    let knowledge = MemoryWritingKnowledgeBase::new();
+    knowledge
+        .upsert_segment(StorySegment {
+            segment_id: "knowledge-1".to_owned(),
+            number: "1".to_owned(),
+            chapter_id: "chapter-1".to_owned(),
+            summary: "KNOWLEDGE-F6-SENTINEL".to_owned(),
+            source: SourceSpan {
+                document_id: "documents/reference.md".to_owned(),
+                range: TextRange { start: 0, end: 12 },
+                version: Some("knowledge-v1".to_owned()),
+            },
+            metadata: Value::Null,
+        })
+        .unwrap();
+    SqliteWritingKnowledgeStore::open(temp.path())
+        .unwrap()
+        .save_knowledge(&knowledge)
+        .unwrap();
+
+    let workflow_id = WorkflowId::from("reference-flow");
+    let run_id = RunId::from("reference-run");
+    let mut run_state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    run_state.status = RunStatus::Succeeded;
+    let mut outputs = ariadne::contracts::PortMap::new();
+    outputs.insert("draft".to_owned(), PortValue::inline("NODE-F6-SENTINEL"));
+    run_state.nodes.insert(
+        NodeId::from("writer"),
+        WorkflowNodeRuntimeState {
+            node_id: NodeId::from("writer"),
+            status: RunStatus::Succeeded,
+            outputs,
+            communication_output: None,
+            communication_control: Default::default(),
+            prompt_trace_hash: None,
+            patch_session_commit_id: None,
+            checkpoint_id: None,
+            patch_write_back_state: None,
+            metadata: Value::Null,
+            error: None,
+            error_state: None,
+            execution_attempts: 1,
+        },
+    );
+    SqliteWorkflowRuntimeStore::open(temp.path())
+        .unwrap()
+        .create_state(&run_state)
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = vec![0u8; 256 * 1024];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.contains("DOC-F5-SENTINEL"));
+        assert!(request.contains("KNOWLEDGE-F6-SENTINEL"));
+        assert!(request.contains("ARTIFACT-F6-SENTINEL"));
+        assert!(request.contains("NODE-F6-SENTINEL"));
+        assert!(request.contains("lines=1-2"));
+        let response_body = r#"{
+          "model":"reference-chat",
+          "choices":[{"message":{"content":"引用已装配"},"finish_reason":"stop"}],
+          "usage":{"prompt_tokens":64,"completion_tokens":4}
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let secrets = MemorySecretStore::default();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "reference_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Reference Chat".to_owned(),
+            enabled: true,
+            base_url: Some(base_url),
+            models: vec![ModelConfig {
+                model_id: "reference-chat".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: Some(4096),
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    save_provider_key_impl(
+        temp.path(),
+        &secrets,
+        "reference_chat".to_owned(),
+        "reference-key".to_owned(),
+    )
+    .unwrap();
+
+    let response = project_ai_chat_impl(
+        temp.path(),
+        &secrets,
+        ProjectAiRequest {
+            message: "比较 @文档/documents/reference.md @知识/knowledge-1 @artifact/exports/reference.md @节点/writer/输出/draft".to_owned(),
+            chat_history: Vec::new(),
+            references: Vec::new(),
+            workflow_id_to_run: None,
+            reference_workflow_id: Some(workflow_id.as_str().to_owned()),
+            reference_run_id: Some(run_id.as_str().to_owned()),
+            conversation_id: None,
+            conversation_revision: None,
+            append_memory: None,
+        },
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(response.answer, "引用已装配");
+    assert_eq!(response.resolved_references.len(), 4);
+    assert!(!response.references_truncated);
+    assert!(response.resolved_references.iter().any(|reference| {
+        reference.kind == ariadne::frontend::ProjectReferenceKind::Document
+            && reference.payload["fragments"][0]["source_version"]
+                .as_str()
+                .is_some()
+    }));
 }
 
 #[test]
@@ -4080,6 +5308,7 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -4100,6 +5329,10 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
             chat_history: Vec::new(),
             references: Vec::new(),
             workflow_id_to_run: None,
+            reference_workflow_id: None,
+            reference_run_id: None,
+            conversation_id: None,
+            conversation_revision: None,
             append_memory: None,
         },
     )
@@ -4215,7 +5448,9 @@ fn project_ai_chat_respects_disabled_workflow_tool_permission() {
         let read = stream.read(&mut buffer).unwrap();
         let request = String::from_utf8_lossy(&buffer[..read]);
         assert!(request.starts_with("POST /chat/completions "));
-        assert!(!request.contains("\"tools\""));
+        assert!(request.contains("\"tools\""));
+        assert!(request.contains("\"name\":\"project-ai-search\""));
+        assert!(!request.contains("\"name\":\"list_start_nodes\""));
         assert!(!request.contains("\"name\":\"draft_tool\""));
         let response_body = r#"{
           "model":"local-chat",
@@ -4252,6 +5487,7 @@ fn project_ai_chat_respects_disabled_workflow_tool_permission() {
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
+            make_default_search: false,
         },
     )
     .unwrap();
@@ -4271,6 +5507,10 @@ fn project_ai_chat_respects_disabled_workflow_tool_permission() {
             chat_history: Vec::new(),
             references: Vec::new(),
             workflow_id_to_run: None,
+            reference_workflow_id: None,
+            reference_run_id: None,
+            conversation_id: None,
+            conversation_revision: None,
             append_memory: None,
         },
     )
@@ -5248,10 +6488,10 @@ fn resolve_confirmation_knowledge_failure_leaves_runtime_pending() {
 }
 
 /// F14-a product path: after knowledge is durably applied (KnowledgeCommitted),
-/// runtime NotFound must compensate that confirmation pre_image — not leave
-/// knowledge-Approved with no runtime, and never whole-file metadata.db restore.
+/// runtime NotFound is corruption/in-doubt state. Product must preserve the
+/// receipt for explicit recovery and ignore project-owned pre-image authority.
 #[test]
-fn resolve_confirmation_knowledge_committed_runtime_not_found_compensates_pre_image() {
+fn resolve_confirmation_runtime_not_found_preserves_receipt_and_ignores_project_pre_image() {
     use ariadne::contracts::{AutoModeState, SourceSpan, TextRange};
     use ariadne::rag::{
         ConfirmationState, MemoryWritingKnowledgeBase, SqliteWritingKnowledgeStore, StoryEvent,
@@ -5415,7 +6655,7 @@ fn resolve_confirmation_knowledge_committed_runtime_not_found_compensates_pre_im
         op.status,
         ariadne::workflow::ConfirmationResolutionStatus::Prepared
     ));
-    // Persist pre_image the same way the product path does before knowledge apply.
+    // A project-owned pre-image is untrusted and must never authorize recovery writes.
     let pre_image_path = project
         .join(".runtime")
         .join("confirmation_pre_images")
@@ -5475,18 +6715,21 @@ fn resolve_confirmation_knowledge_committed_runtime_not_found_compensates_pre_im
         );
     }
 
-    // Product entry: resolve_confirmation_impl re-enters existing KnowledgeCommitted
-    // operation and must compensate pre_image (not theater on never-applied knowledge).
+    // Product entry re-enters the KnowledgeCommitted operation and fails loud without
+    // executing the forged project-owned inverse payload or deleting the receipt.
     let err = resolve_confirmation_impl(project, request).expect_err("must fail after NotFound");
     assert!(
-        err.to_string().contains("not found") && err.to_string().contains("compensated"),
+        err.to_string().contains("not found")
+            && err.to_string().contains("receipt preserved")
+            && !err.to_string().contains("compensated"),
         "unexpected error: {err}"
     );
 
     let kb2 = knowledge_store.load_knowledge().unwrap();
-    assert!(
-        kb2.all_segments().unwrap().is_empty(),
-        "F14-a compensate must dematerialize segments from pre_image payload"
+    assert_eq!(
+        kb2.all_segments().unwrap().len(),
+        1,
+        "project-owned pre-image must not reverse committed knowledge"
     );
     let item = kb2
         .confirmations(None)
@@ -5495,13 +6738,29 @@ fn resolve_confirmation_knowledge_committed_runtime_not_found_compensates_pre_im
         .find(|c| c.confirmation_id == segment_confirmation)
         .expect("confirmation still present");
     assert!(
-        matches!(item.state, ConfirmationState::Pending),
-        "knowledge confirmation must be restored to Pending; got {:?}",
+        matches!(item.state, ConfirmationState::Approved),
+        "knowledge confirmation receipt must remain Approved; got {:?}",
         item.state
     );
     assert!(
-        item.metadata.get("pending_payload").is_some(),
-        "pending_payload must be restored for retry"
+        item.metadata.get("pending_payload").is_none(),
+        "committed confirmation must not be rewritten from forged pre-image"
+    );
+    assert!(
+        knowledge_store
+            .load_operation_receipt(&operation_id, &request_hash)
+            .unwrap()
+            .is_some(),
+        "knowledge receipt must remain available for explicit recovery"
+    );
+    let recoverable = runtime_store
+        .list_recoverable_confirmation_resolutions()
+        .unwrap();
+    assert_eq!(recoverable.len(), 1);
+    assert_eq!(
+        recoverable[0].status,
+        ariadne::workflow::ConfirmationResolutionStatus::KnowledgeCommitted,
+        "saga must remain recoverable instead of being silently aborted"
     );
     // No whole-db bak residual.
     assert!(
@@ -5671,6 +6930,44 @@ fn automation_settings_mid_fail_leaves_journal_and_recover_completes() {
     );
 }
 
+#[test]
+fn general_settings_mid_fail_recovers_config_and_project_memory_together() {
+    use ariadne::commands::commit_general_settings_files_with_fail_after;
+    use ariadne::config::atomic_commit::{has_pending_journal, recover_pending_commit};
+    use ariadne::frontend::initialize_project;
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let app_state = temp.path().join("app-state");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&app_state).unwrap();
+    initialize_project(&project).unwrap();
+
+    let store = ConfigStore::with_app_state(&project, &app_state);
+    let mut config = store.load_or_create().unwrap();
+    config.app.project_name = "同一事务版本".to_owned();
+    let memory = b"# project memory\ntransaction-version\n";
+
+    let error = commit_general_settings_files_with_fail_after(
+        &project,
+        &app_state,
+        &config,
+        memory,
+        Some(1),
+    )
+    .unwrap_err();
+    assert!(error.contains("injected") || error.contains("atomic"));
+    assert!(has_pending_journal(&project, &app_state));
+
+    recover_pending_commit(&project, &app_state).unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.app.project_name, "同一事务版本");
+    assert_eq!(
+        fs::read(project.join(".runtime/project_memory.md")).unwrap(),
+        memory
+    );
+}
+
 fn seed_command_in_doubt_search_run(
     project_root: &std::path::Path,
     workflow_name: &str,
@@ -5785,7 +7082,7 @@ fn resolve_in_doubt_use_response_command_replays_and_commits_without_provider_ca
         temp.path(),
         "use-response-flow",
         "run-1",
-        WorkflowOperationPolicy::remote_response(),
+        WorkflowOperationPolicy::replayable_remote(),
     );
     let state = AriadneAppState::new(
         temp.path(),

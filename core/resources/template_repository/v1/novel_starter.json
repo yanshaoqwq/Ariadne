@@ -1,0 +1,44 @@
+{
+  "workflow_id": "official-novel-starter",
+  "name": "长篇小说起步",
+  "version": "1.0.0",
+  "workflow": {
+    "id": "official-novel-starter",
+    "name": "长篇小说起步",
+    "nodes": [
+      {
+        "id": "planner",
+        "type_name": "planner",
+        "config": {},
+        "position": { "x": 120.0, "y": 120.0 }
+      },
+      {
+        "id": "writer",
+        "type_name": "writer",
+        "config": {},
+        "position": { "x": 390.0, "y": 120.0 }
+      }
+    ],
+    "edges": [
+      {
+        "id": "plan-to-write",
+        "kind": "control",
+        "from": { "node_id": "planner", "port_name": "exec_out" },
+        "to": { "node_id": "writer", "port_name": "exec_in" }
+      }
+    ],
+    "metadata": {
+      "official_template": true,
+      "catalog_schema": 1
+    }
+  },
+  "prompt_templates": [],
+  "required_node_types": ["planner", "writer"],
+  "required_tools": [],
+  "required_permissions": [],
+  "minimum_ariadne_version": "0.1.0",
+  "metadata": {
+    "official_template": true,
+    "catalog_schema": 1
+  }
+}

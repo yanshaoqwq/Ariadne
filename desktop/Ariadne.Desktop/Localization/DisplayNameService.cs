@@ -50,6 +50,11 @@ public sealed class DisplayNameService
     public static DisplayNameService LoadDefault()
     {
         var resourceDir = FindResourceDir();
+        return LoadFromDirectory(resourceDir, DetectSystemLanguage());
+    }
+
+    internal static DisplayNameService LoadFromDirectory(string resourceDir, string? initialLanguage)
+    {
         var baseNames = LoadJson(Path.Combine(resourceDir, "display_name.json"));
         var availableLanguages = DiscoverLanguages(resourceDir);
         var bootstrap = new DisplayNameService(
@@ -58,12 +63,12 @@ public sealed class DisplayNameService
             resourceDir,
             availableLanguages);
 
-        var systemLang = bootstrap.NormalizeAvailableLanguage(DetectSystemLanguage());
-        var overlay = LoadOverlay(resourceDir, systemLang);
+        var selectedLanguage = bootstrap.NormalizeAvailableLanguage(initialLanguage);
+        var overlay = LoadOverlay(resourceDir, selectedLanguage);
 
         var service = new DisplayNameService(baseNames, overlay, resourceDir, availableLanguages)
         {
-            CurrentLanguage = systemLang,
+            CurrentLanguage = selectedLanguage,
         };
         return service;
     }

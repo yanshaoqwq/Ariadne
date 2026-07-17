@@ -2,13 +2,7 @@
   "schema_version": 1,
   "release_ready": false,
   "open_blockers": [
-    "WASM_PREEMPTION",
-    "REMOTE_SIDE_EFFECT_RECOVERY",
-    "C5_A_UI_PERFORMANCE",
-    "MILLION_CHARACTER_RETRIEVAL",
-    "QDRANT_SIDECAR_E2E",
-    "UI_WCAG_MATRIX",
-    "U1_DIAGNOSTICS_AND_TYPED_ERRORS"
+    "LEGAL_REVIEW"
   ],
-  "note": "F9 持久化 runnable queue 与退避自动唤醒已关闭；00 诚实边界中的抢占、副作用恢复、性能、无障碍、sidecar E2E 与诊断错误契约尚未全部验收，tag 发布继续阻断。"
+  "note": "静态 readiness 仅记录发布前已知且不能由本次流水线生成的外部输入。性能、WCAG 与五 RID Qdrant 运行时供给证据由 tag 流水线生成后在 evidence-gate 动态验证，不能作为前置 blocker 形成门禁死锁。"
 }

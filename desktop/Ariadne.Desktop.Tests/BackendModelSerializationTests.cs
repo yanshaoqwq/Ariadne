@@ -7,6 +7,66 @@ namespace Ariadne.Desktop.Tests;
 public sealed class BackendModelSerializationTests
 {
     [Fact]
+    public void ProviderStatus_PreservesConfiguredBoundary()
+    {
+        const string json = """
+        {
+          "has_openai_key": false,
+          "has_anthropic_key": false,
+          "has_gemini_key": false,
+          "providers": [{
+            "provider": "openai",
+            "display_name": "OpenAI",
+            "provider_type": "open_ai",
+            "configured": false,
+            "enabled": false,
+            "models": [],
+            "has_key": false
+          }]
+        }
+        """;
+
+        var status = JsonSerializer.Deserialize<ProviderConfigStatus>(
+            json,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(status);
+        Assert.False(Assert.Single(status.Providers).Configured);
+    }
+
+    [Fact]
+    public void ProviderRemovalPreview_PreservesRevisionAndReferenceLocations()
+    {
+        const string json = """
+        {
+          "provider_id": "openai",
+          "display_name": "OpenAI",
+          "revision": "abc123",
+          "has_key": true,
+          "default_roles": ["llm"],
+          "blocking_references": [{
+            "reference_type": "workflow",
+            "owner_id": "draft-flow",
+            "node_id": "writer",
+            "model_id": "gpt-test"
+          }]
+        }
+        """;
+
+        var preview = JsonSerializer.Deserialize<ProviderRemovalPreview>(
+            json,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(preview);
+        Assert.Equal("abc123", preview.Revision);
+        Assert.True(preview.HasKey);
+        Assert.Equal("llm", Assert.Single(preview.DefaultRoles));
+        var reference = Assert.Single(preview.BlockingReferences);
+        Assert.Equal("draft-flow", reference.OwnerId);
+        Assert.Equal("writer", reference.NodeId);
+    }
+
+    [Fact]
     public void WorkflowRunState_DeserializesStructuredRunFailure()
     {
         const string json = """

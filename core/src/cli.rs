@@ -73,9 +73,11 @@ fn run_workflow_command(args: &[String]) -> Result<Value, String> {
                 start_node_id: options.start.clone(),
                 initial_inputs,
             };
-            commands::start_workflow_with_request(&state, request.clone()).map(|started| {
-                workflow_started_json(request.workflow_id, request.start_node_id, started)
-            })
+            commands::start_workflow_with_request(&state, request.clone())
+                .map(|started| {
+                    workflow_started_json(request.workflow_id, request.start_node_id, started)
+                })
+                .map_err(Into::into)
         }
         "status" => {
             let workflow_id = required(&options.workflow, "--workflow")?;
@@ -102,6 +104,7 @@ fn run_workflow_command(args: &[String]) -> Result<Value, String> {
                 options.limit,
             )
             .map(|events| json!(events))
+            .map_err(Into::into)
         }
         "logs" => {
             let run_id = required(&options.run, "--run")?;
@@ -115,25 +118,32 @@ fn run_workflow_command(args: &[String]) -> Result<Value, String> {
                 after_timestamp_ms: None,
                 after_log_id: None,
                 limit: options.limit,
+                descending: false,
             };
-            commands::query_run_logs(&state, Some(query)).map(|items| json!({ "items": items }))
+            commands::query_run_logs(&state, Some(query))
+                .map(|items| json!({ "items": items }))
+                .map_err(Into::into)
         }
         "pause" => {
             let workflow_id = required(&options.workflow, "--workflow")?;
             let run_id = required(&options.run, "--run")?;
             commands::pause_workflow(&state, workflow_id, run_id, options.reason)
                 .map(|result| json!(result))
+                .map_err(Into::into)
         }
         "resume" => {
             let workflow_id = required(&options.workflow, "--workflow")?;
             let run_id = required(&options.run, "--run")?;
-            commands::resume_workflow(&state, workflow_id, run_id).map(|result| json!(result))
+            commands::resume_workflow(&state, workflow_id, run_id)
+                .map(|result| json!(result))
+                .map_err(Into::into)
         }
         "stop" => {
             let workflow_id = required(&options.workflow, "--workflow")?;
             let run_id = required(&options.run, "--run")?;
             commands::stop_workflow(&state, workflow_id, run_id, options.reason)
                 .map(|result| json!(result))
+                .map_err(Into::into)
         }
         other => Err(format!(
             "unsupported workflow command: {other}\n{}",
@@ -152,9 +162,9 @@ fn run_tools_command(args: &[String]) -> Result<Value, String> {
     let options = CliOptions::parse(&args[1..])?;
     let state = state_from_options(&options)?;
     match action {
-        "list" => {
-            commands::list_external_workflow_tools(&state).map(|tools| json!({ "tools": tools }))
-        }
+        "list" => commands::list_external_workflow_tools(&state)
+            .map(|tools| json!({ "tools": tools }))
+            .map_err(Into::into),
         other => Err(format!(
             "unsupported tools command: {other}\n{}",
             tools_usage()

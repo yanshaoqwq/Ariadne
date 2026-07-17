@@ -15,9 +15,22 @@ if ($env:ARIADNE_REQUIRE_SIGNED_RELEASE -eq "1" -and [string]::IsNullOrWhiteSpac
     throw "formal release requires ARIADNE_WINDOWS_SIGNTOOL"
 }
 
-$output = [System.IO.Path]::GetFullPath((Join-Path $root $OutputDirectory))
+$output = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
+    [System.IO.Path]::GetFullPath($OutputDirectory)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $root $OutputDirectory))
+}
 New-Item -ItemType Directory -Force -Path $output | Out-Null
-$iscc = (Get-Command ISCC.exe -ErrorAction Stop).Source
+$isccCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+$iscc = if ($null -ne $isccCommand) {
+    $isccCommand.Source
+} else {
+    @(
+        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+        (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if ([string]::IsNullOrWhiteSpace($iscc)) { throw "ISCC.exe was not found after installing Inno Setup" }
 $arguments = @(
     "/DAppVersion=$($manifest.version)",
     "/DAppName=$appName",
@@ -29,7 +42,11 @@ if (-not [string]::IsNullOrWhiteSpace($env:ARIADNE_WINDOWS_SIGNTOOL)) {
     $arguments += "/Sariadnesign=$($env:ARIADNE_WINDOWS_SIGNTOOL)"
 }
 $arguments += (Join-Path $PSScriptRoot "Ariadne.iss")
-& $iscc $arguments
-if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+$compilerOutput = & $iscc $arguments 2>&1
+$compilerExitCode = $LASTEXITCODE
+$compilerOutput | ForEach-Object { Write-Host $_ }
+if ($compilerExitCode -ne 0) { throw "Inno Setup failed with exit code $compilerExitCode" }
 
-Get-ChildItem $output -Filter "Ariadne-$($manifest.version)-win-x64-setup.exe" | Select-Object -ExpandProperty FullName
+$installers = @(Get-ChildItem $output -Filter "Ariadne-$($manifest.version)-win-x64-setup.exe")
+if ($installers.Count -ne 1) { throw "Inno Setup did not produce exactly one expected installer" }
+Write-Output $installers[0].FullName

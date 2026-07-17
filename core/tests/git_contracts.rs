@@ -104,6 +104,33 @@ fn git_service_creates_archive_and_checkpoint_commits() {
 }
 
 #[test]
+fn git_history_exposes_time_author_head_and_checkpoint_semantics() {
+    let (temp_dir, service) = init_test_repo();
+    fs::write(temp_dir.path().join("chapter.md"), "first").unwrap();
+    let archive = service.create_archive_point("draft-1", None).unwrap();
+
+    let commits = service.recent_commits(5).unwrap();
+    let graph = service.branch_graph(5).unwrap();
+
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].commit_id, archive.commit_id);
+    assert!(commits[0].timestamp_ms > 0);
+    assert_eq!(commits[0].author.as_deref(), Some("Ariadne Test"));
+    assert_eq!(commits[0].checkpoint_kind, Some(CheckpointKind::Manual));
+
+    assert_eq!(graph.len(), 1);
+    assert_eq!(graph[0].commit_id, archive.commit_id);
+    assert!(graph[0].timestamp_ms > 0);
+    assert_eq!(graph[0].author.as_deref(), Some("Ariadne Test"));
+    assert_eq!(graph[0].checkpoint_kind, Some(CheckpointKind::Manual));
+    assert!(graph[0].is_head);
+    assert!(graph[0]
+        .refs
+        .iter()
+        .any(|reference| reference.starts_with("HEAD -> ")));
+}
+
+#[test]
 fn git_service_streams_bounded_diff_preview_and_reuses_porcelain_status() {
     let (temp_dir, service) = init_test_repo();
     let document = temp_dir.path().join("chapter.md");

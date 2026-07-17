@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PKG="$(realpath "${1:?usage: packaging/macos/smoke-installer.sh <pkg>}")"
+PKG_INPUT="${1:?usage: packaging/macos/smoke-installer.sh <pkg>}"
+[[ -f "$PKG_INPUT" ]] || { echo "pkg does not exist: $PKG_INPUT" >&2; exit 1; }
+PKG="$(cd "$(dirname "$PKG_INPUT")" && pwd -P)/$(basename "$PKG_INPUT")"
 SENTINEL_DIR="$HOME/Library/Application Support/Ariadne"
 SENTINEL="$SENTINEL_DIR/release-smoke-sentinel"
 mkdir -p "$SENTINEL_DIR"

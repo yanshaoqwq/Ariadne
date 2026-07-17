@@ -53,38 +53,48 @@ pub fn validate_prompt_resources(resources: &PromptResources) -> crate::contract
         "node_template.prudent.default",
         "node_template.polisher.default",
         "node_template.summarizer.default",
-        "tool.outliner_register",      // outliner-register 工具提示词
-        "tool.outliner_find",          // outliner-find 工具提示词
-        "tool.outliner_search",        // outliner-search 工具提示词
-        "tool.outliner_insert_lines",  // outliner-insert-lines 工具提示词
+        "tool.outliner_register", // outliner-register 工具提示词
+        "tool.outliner_find",     // outliner-find 工具提示词
+        "tool.outliner_search",   // outliner-search 工具提示词
+        "tool.outliner_web_search",
+        "tool.outliner_insert_lines", // outliner-insert-lines 工具提示词
         "tool.outliner_replace_lines", // outliner-replace-lines 工具提示词
-        "tool.outliner_rewrite_file",  // outliner-rewrite-file 工具提示词
-        "tool.designer_register",      // designer-register 工具提示词
-        "tool.designer_find",          // designer-find 工具提示词
-        "tool.designer_search",        // designer-search 工具提示词
-        "tool.designer_insert_lines",  // designer-insert-lines 工具提示词
+        "tool.outliner_rewrite_file", // outliner-rewrite-file 工具提示词
+        "tool.designer_register",     // designer-register 工具提示词
+        "tool.designer_find",         // designer-find 工具提示词
+        "tool.designer_search",       // designer-search 工具提示词
+        "tool.designer_web_search",
+        "tool.designer_insert_lines", // designer-insert-lines 工具提示词
         "tool.designer_replace_lines", // designer-replace-lines 工具提示词
-        "tool.designer_rewrite_file",  // designer-rewrite-file 工具提示词
-        "tool.planner_register",       // planner-register 工具提示词
-        "tool.planner_find",           // planner-find 工具提示词
-        "tool.planner_search",         // planner-search 工具提示词
-        "tool.planner_insert_lines",   // planner-insert-lines 工具提示词
-        "tool.planner_replace_lines",  // planner-replace-lines 工具提示词
-        "tool.planner_rewrite_file",   // planner-rewrite-file 工具提示词
-        "tool.detail_find",            // detail-find 工具提示词
-        "tool.detail_search",          // detail-search 工具提示词
-        "tool.writer_find",            // writer-find 工具提示词
-        "tool.writer_search",          // writer-search 工具提示词
-        "tool.writer_insert_lines",    // writer-insert-lines 工具提示词
-        "tool.writer_replace_lines",   // writer-replace-lines 工具提示词
-        "tool.critic_find",            // critic-find 工具提示词
-        "tool.critic_search",          // critic-search 工具提示词
-        "tool.prudent_find",           // prudent-find 工具提示词
-        "tool.prudent_search",         // prudent-search 工具提示词
-        "tool.polisher_find",          // polisher-find 工具提示词
-        "tool.polisher_search",        // polisher-search 工具提示词
-        "tool.polisher_insert_lines",  // polisher-insert-lines 工具提示词
+        "tool.designer_rewrite_file", // designer-rewrite-file 工具提示词
+        "tool.planner_register",      // planner-register 工具提示词
+        "tool.planner_find",          // planner-find 工具提示词
+        "tool.planner_search",        // planner-search 工具提示词
+        "tool.planner_web_search",
+        "tool.planner_insert_lines",  // planner-insert-lines 工具提示词
+        "tool.planner_replace_lines", // planner-replace-lines 工具提示词
+        "tool.planner_rewrite_file",  // planner-rewrite-file 工具提示词
+        "tool.detail_find",           // detail-find 工具提示词
+        "tool.detail_search",         // detail-search 工具提示词
+        "tool.detail_web_search",
+        "tool.writer_find",   // writer-find 工具提示词
+        "tool.writer_search", // writer-search 工具提示词
+        "tool.writer_web_search",
+        "tool.writer_insert_lines",  // writer-insert-lines 工具提示词
+        "tool.writer_replace_lines", // writer-replace-lines 工具提示词
+        "tool.critic_find",          // critic-find 工具提示词
+        "tool.critic_search",        // critic-search 工具提示词
+        "tool.critic_web_search",
+        "tool.prudent_find",   // prudent-find 工具提示词
+        "tool.prudent_search", // prudent-search 工具提示词
+        "tool.prudent_web_search",
+        "tool.polisher_find",   // polisher-find 工具提示词
+        "tool.polisher_search", // polisher-search 工具提示词
+        "tool.polisher_web_search",
+        "tool.polisher_insert_lines", // polisher-insert-lines 工具提示词
         "tool.polisher_replace_lines", // polisher-replace-lines 工具提示词
+        "tool.summarizer_search",     // summarizer-search 工具提示词
+        "tool.summarizer_web_search",
         "auto_audit.planning_output",  // 规划节点输出自动审计提示词
         "auto_audit.register",         // register 自动审计提示词
         "auto_audit.review",           // 审稿节点输出自动审计提示词
@@ -114,6 +124,20 @@ pub fn validate_prompt_resources(resources: &PromptResources) -> crate::contract
 pub fn validate_display_name_resources(
     resources: &DisplayNameResources,
 ) -> crate::contracts::CoreResult<()> {
+    for code in crate::command_error::CommandErrorCode::ALL {
+        let key = code.message_key();
+        let Some(value) = resources.get(&key) else {
+            return Err(crate::contracts::CoreError::validation(format!(
+                "missing command error display resource: {key}"
+            )));
+        };
+        if value.trim().is_empty() {
+            return Err(crate::contracts::CoreError::validation(format!(
+                "command error display resource cannot be empty: {key}"
+            )));
+        }
+    }
+
     for key in [
         "agent.outliner",         // OutlinerAgent 显示名
         "agent.designer",         // DesignerAgent 显示名
@@ -127,35 +151,45 @@ pub fn validate_display_name_resources(
         "tool.outliner-register", // outliner-register 显示名
         "tool.outliner-find",     // outliner-find 显示名
         "tool.outliner-search",   // outliner-search 显示名
+        "tool.outliner-web-search",
         "tool.outliner-insert-lines",
         "tool.outliner-replace-lines",
         "tool.outliner-rewrite-file",
         "tool.designer-register", // designer-register 显示名
         "tool.designer-find",     // designer-find 显示名
         "tool.designer-search",   // designer-search 显示名
+        "tool.designer-web-search",
         "tool.designer-insert-lines",
         "tool.designer-replace-lines",
         "tool.designer-rewrite-file",
         "tool.planner-register", // planner-register 显示名
         "tool.planner-find",     // planner-find 显示名
         "tool.planner-search",   // planner-search 显示名
+        "tool.planner-web-search",
         "tool.planner-insert-lines",
         "tool.planner-replace-lines",
         "tool.planner-rewrite-file",
-        "tool.detail-find",          // detail-find 显示名
-        "tool.detail-search",        // detail-search 显示名
-        "tool.writer-find",          // writer-find 显示名
-        "tool.writer-search",        // writer-search 显示名
+        "tool.detail-find",   // detail-find 显示名
+        "tool.detail-search", // detail-search 显示名
+        "tool.detail-web-search",
+        "tool.writer-find",   // writer-find 显示名
+        "tool.writer-search", // writer-search 显示名
+        "tool.writer-web-search",
         "tool.writer-insert-lines",  // writer-insert-lines 显示名
         "tool.writer-replace-lines", // writer-replace-lines 显示名
         "tool.critic-find",          // critic-find 显示名
         "tool.critic-search",        // critic-search 显示名
-        "tool.prudent-find",         // prudent-find 显示名
-        "tool.prudent-search",       // prudent-search 显示名
-        "tool.polisher-find",        // polisher-find 显示名
-        "tool.polisher-search",      // polisher-search 显示名
+        "tool.critic-web-search",
+        "tool.prudent-find",   // prudent-find 显示名
+        "tool.prudent-search", // prudent-search 显示名
+        "tool.prudent-web-search",
+        "tool.polisher-find",   // polisher-find 显示名
+        "tool.polisher-search", // polisher-search 显示名
+        "tool.polisher-web-search",
         "tool.polisher-insert-lines",
         "tool.polisher-replace-lines",
+        "tool.summarizer-search",
+        "tool.summarizer-web-search",
         "confirmation.outliner.output",
         "confirmation.designer.output",
         "confirmation.planner.output",

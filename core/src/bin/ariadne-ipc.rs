@@ -19,7 +19,8 @@ fn run() -> Result<(), String> {
             if args.next().is_some() {
                 return Err("usage: ariadne-ipc call <method> [params-json]".to_owned());
             }
-            let response = ariadne::ipc::run_single_call(&method, params_json.as_deref())?;
+            let response = ariadne::ipc::run_single_call(&method, params_json.as_deref())
+                .map_err(|error| error.to_string())?;
             println!(
                 "{}",
                 serde_json::to_string(&response)
@@ -55,6 +56,13 @@ fn run() -> Result<(), String> {
                 Some(100),
                 500,
             )
+            .map_err(|error| error.to_string())
+        }
+        Some("wasm-worker") => {
+            if args.next().is_some() {
+                return Err("wasm-worker does not accept arguments".to_owned());
+            }
+            ariadne::skills::run_wasm_worker_stdio()
         }
         Some("--help") | Some("-h") => {
             println!("usage: ariadne-ipc [stdio|call <method> [params-json]|watch-events <workflow-id> <run-id> [after-sequence]]");

@@ -90,6 +90,7 @@ public sealed class ProviderFormSnapshot
     public required bool MakeDefaultLlm { get; init; }
     public required bool MakeDefaultEmbedding { get; init; }
     public required bool MakeDefaultReranker { get; init; }
+    public required bool MakeDefaultSearch { get; init; }
     public required string ModelsText { get; init; }
     public required string EmbeddingModelId { get; init; }
 }

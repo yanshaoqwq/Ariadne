@@ -2,6 +2,8 @@
 
 发布矩阵由 `release-matrix.json` 固定：Linux x64/arm64、Windows x64、macOS x64/arm64。每个目标必须在对应原生 runner 上构建和执行烟雾测试，不接受在单一开发机上只复制 Debug 输出。
 
+`python3 scripts/verify-release-engineering.py` 校验固定工具链、质量门禁、tag 发布拒绝、原生 RID 矩阵、签名输入、法律清单和 `workspace.package.version` 的跨 Rust/.NET/安装器传播。`release-legal.json` 固定许可证表达式、Required Notice、许可文本哈希、CLA 接受语句和法律复核状态；CI、tag gate 与打包 job 均先运行该合同。`scripts/check-release-readiness.py --static-only` 只消费必须人工维护的外部批准清单，当前仅有 `LEGAL_REVIEW`；最终 evidence gate 再独立校验性能、WCAG 和五 RID Qdrant 运行时证据，任一缺失都会拒绝发布。
+
 ## 统一发布目录
 
 ```bash
@@ -17,6 +19,27 @@ scripts/build-release.sh linux-arm64
 - `release-manifest.json` 文件大小与 SHA-256 清单。
 
 `verify-package` 会拒绝 PDB、target/obj/bin、密钥/数据库、`ariadne-server`、构建仓库绝对路径、缺失资源和 hash 漂移，并从包内桌面入口启动包内 sidecar。
+
+## 本机发布证据
+
+性能证据必须来自 Release 构建；探针会写入 `build_profile=release`，`verify-release-evidence.py` 会拒绝 Debug 证据。Linux 本机可执行：
+
+```bash
+ARIADNE_RELEASE_EVIDENCE_DIR="$PWD/artifacts/release-evidence" \
+ARIADNE_SCHEDULER_SOAK_SECONDS=300 \
+cargo test --release --test release_acceptance -- --ignored --test-threads=1
+
+dotnet build desktop/Ariadne.Desktop/Ariadne.Desktop.csproj --configuration Release --no-restore
+dotnet desktop/Ariadne.Desktop/bin/Release/net10.0/Ariadne.Desktop.dll \
+  --release-wcag-probe artifacts/release-evidence/wcag-contrast.json
+xvfb-run -a -s "-screen 0 1600x900x24" \
+  dotnet desktop/Ariadne.Desktop/bin/Release/net10.0/Ariadne.Desktop.dll \
+  --release-ui-probe artifacts/release-evidence/desktop-ui-performance.json
+```
+
+随后运行 `python3 scripts/verify-release-evidence.py --rid linux-arm64`。Qdrant 不进入 Ariadne 安装包；检索首次使用时才从 `qdrant-sidecars.json` 的固定 HTTPS 地址下载对应 RID 的官方归档，逐项校验版本、归档 SHA-256 和二进制 SHA-256 后写入用户缓存，后续直接复用。当前 Qdrant 1.18.2 Linux arm64 归档约 28 MiB、解压二进制约 71 MiB，向量索引数据另计；升级成功后会清理旧的受管版本缓存。
+
+最终校验要求五个原生 RID 各自产出 runtime provisioning、cache reuse、index-upsert-search 与 clean shutdown 证据。单一 Linux arm64 开发机只可验收本 RID，不得伪造其它平台结果。
 
 ## 安装产物
 

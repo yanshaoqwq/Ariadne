@@ -2,9 +2,21 @@
     x:Class="Ariadne.Desktop.Views.WorksPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ae="clr-namespace:AvaloniaEdit;assembly=AvaloniaEdit"
     xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
-    x:DataType="vm:WorksPageViewModel">
+    x:DataType="vm:WorksPageViewModel"
+    KeyDown="OnWorksPageKeyDown">
+  <UserControl.Styles>
+    <Style Selector="Border.works-tree-node">
+      <Setter Property="Padding" Value="7,5" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="Border.works-tree-node.current">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+    </Style>
+  </UserControl.Styles>
   <!-- 作品页：中阅读/修改器 + 右栏（顶部标签切换 导航树/项目 AI，可收起）。无左栏。 -->
   <Grid Background="{DynamicResource Ariadne.BackgroundMain}">
     <Grid.ColumnDefinitions>
@@ -18,7 +30,10 @@
       <!-- 顶部工具条 -->
       <Border DockPanel.Dock="Top" Background="{DynamicResource Ariadne.BackgroundSurface}" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" Padding="16,8">
         <Grid ColumnDefinitions="*,Auto">
-          <TextBlock Grid.Column="0" Text="{Binding CurrentDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
+          <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+            <TextBlock Text="{Binding CurrentDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
+            <TextBlock Text="{Binding DocumentSaveStateText}" Classes="caption" IsVisible="{Binding HasCurrentDocument}" VerticalAlignment="Center" />
+          </StackPanel>
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
             <Button Classes="subtle" ctl:SelectedClass.IsSelected="{Binding !IsEditMode}" Padding="10,5" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
             <Button Classes="subtle" ctl:SelectedClass.IsSelected="{Binding IsEditMode}" Padding="10,5" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
@@ -47,14 +62,14 @@
         </Grid>
       </Border>
 
-      <!-- 正文阅读/编辑区：按块虚拟化渲染，避免整章 TextBox 常驻。 -->
+      <!-- 正文阅读按块虚拟化；编辑由单一 TextDocument + 行虚拟化控件承载。 -->
       <Grid Background="{DynamicResource Ariadne.EditorBackground}">
         <Grid.ContextMenu>
           <ContextMenu Classes="ariadne">
             <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopyCommand}" />
             <MenuItem Header="{Binding CtxSelectAllText}" Command="{Binding SelectAllCommand}" />
             <Separator />
-            <MenuItem Header="{Binding CtxQuickAiText}" Command="{Binding QuickAiCommand}" />
+            <MenuItem Header="{Binding CtxQuickAiText}" Command="{Binding OpenQuickEditCommand}" />
             <MenuItem Header="{Binding CtxInsertOutlineText}" Command="{Binding InsertOutlineCommand}" />
             <Separator />
             <MenuItem Header="{Binding CtxToggleEditText}" Command="{Binding ToggleEditCommand}" />
@@ -74,6 +89,31 @@
               <Button Classes="primary" HorizontalAlignment="Center" Margin="0,8,0,0"
                       Content="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}" />
             </StackPanel>
+          </Border>
+
+          <Border Grid.Row="0" Grid.RowSpan="2" Classes="empty-state"
+                  IsVisible="{Binding IsWorksTreeLoading}"
+                  VerticalAlignment="Center" HorizontalAlignment="Center"
+                  Padding="40,48">
+            <TextBlock Text="{Binding WorksTreeLoadingText}" Classes="subtitle" TextAlignment="Center" />
+          </Border>
+
+          <Border Grid.Row="0" Grid.RowSpan="2" Classes="empty-state"
+                  IsVisible="{Binding IsWorksTreeError}"
+                  VerticalAlignment="Center" HorizontalAlignment="Center"
+                  Padding="40,48">
+            <StackPanel Spacing="12" HorizontalAlignment="Center" MaxWidth="420">
+              <TextBlock Text="{Binding WorksTreeErrorText}" Classes="subtitle" TextWrapping="Wrap" TextAlignment="Center" />
+              <Button Classes="primary" HorizontalAlignment="Center"
+                      Content="{Binding RetryWorksTreeText}" Command="{Binding RetryWorksTreeCommand}" />
+            </StackPanel>
+          </Border>
+
+          <Border Grid.Row="0" Grid.RowSpan="2" Classes="empty-state"
+                  IsVisible="{Binding IsDocumentLoading}"
+                  VerticalAlignment="Center" HorizontalAlignment="Center"
+                  Padding="40,48">
+            <TextBlock Text="{Binding DocumentLoadingTargetText}" Classes="subtitle" TextWrapping="Wrap" TextAlignment="Center" />
           </Border>
 
           <!-- 有索引但未选文档：单一空态，不重复「未选择」与文档壳（U72） -->
@@ -108,7 +148,7 @@
               <TextBlock Grid.Row="0"
                          Text="{Binding DocumentBodyText}"
                          Classes="reading"
-                         IsVisible="{Binding !HasDocumentBlocks}"
+                         IsVisible="{Binding ShowReadModeEmptyDocument}"
                          HorizontalAlignment="Center"
                          VerticalAlignment="Center" />
               <ListBox Grid.Row="0"
@@ -130,44 +170,34 @@
                   </DataTemplate>
                 </ListBox.ItemTemplate>
               </ListBox>
-              <ListBox x:Name="DocumentEditor"
-                       Grid.Row="0"
-                       ItemsSource="{Binding DocumentBlocks}"
-                       IsVisible="{Binding IsEditMode}"
-                       Background="Transparent"
-                       BorderThickness="0"
-                       SelectionMode="Single">
-                <ListBox.ItemsPanel>
-                  <ItemsPanelTemplate>
-                    <VirtualizingStackPanel />
-                  </ItemsPanelTemplate>
-                </ListBox.ItemsPanel>
-                <ListBox.ItemTemplate>
-                  <DataTemplate DataType="{x:Type vm:DocumentBlockViewModel}">
-                    <TextBox Text="{Binding Text, Mode=TwoWay}"
-                             Classes="document-editor"
-                             KeyDown="OnDocumentBlockEditorKeyDown"
-                             KeyUp="OnDocumentBlockEditorKeyUp"
-                             GotFocus="OnDocumentBlockEditorGotFocus"
-                             LostFocus="OnDocumentBlockEditorLostFocus"
-                             PointerReleased="OnDocumentBlockEditorPointerReleased"
-                             AcceptsReturn="True"
-                             TextWrapping="Wrap"
-                             MinHeight="96"
-                             BorderThickness="0"
+              <ae:TextEditor x:Name="DocumentEditor"
+                             Grid.Row="0"
+                             Document="{Binding EditorDocument}"
+                             IsVisible="{Binding IsEditMode}"
+                             IsReadOnly="False"
+                             WordWrap="True"
+                             ShowLineNumbers="False"
+                             HorizontalScrollBarVisibility="Disabled"
+                             VerticalScrollBarVisibility="Auto"
+                             KeyDown="OnDocumentEditorKeyDown"
+                             KeyUp="OnDocumentEditorKeyUp"
+                             GotFocus="OnDocumentEditorGotFocus"
+                             LostFocus="OnDocumentEditorLostFocus"
+                             PointerReleased="OnDocumentEditorPointerReleased"
+                             AutomationProperties.Name="{Binding DocumentTitle}"
                              Background="Transparent"
-                             Margin="0,0,0,18"
-                             PlaceholderText="{Binding $parent[UserControl].DataContext.QuickAiHint}" />
-                  </DataTemplate>
-                </ListBox.ItemTemplate>
-              </ListBox>
+                             Foreground="{DynamicResource Ariadne.TextPrimary}"
+                             FontFamily="{DynamicResource Ariadne.Font.Reading}"
+                             FontSize="16" />
               <Border Grid.Row="1" Classes="soft-panel" Padding="16" IsVisible="{Binding IsEditMode}">
                 <StackPanel Spacing="12">
                   <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
                     <TextBlock Grid.Column="0" Text="{Binding QuickEditTitle}" Classes="subtitle" VerticalAlignment="Center" />
                     <Button Grid.Column="1" Classes="secondary" Content="{Binding QuickEditGenerateText}" Command="{Binding QuickAiCommand}" />
                   </Grid>
-                  <TextBox Text="{Binding QuickEditInstruction, Mode=TwoWay}" PlaceholderText="{Binding QuickEditPlaceholder}" />
+                  <TextBox x:Name="QuickEditInstructionBox"
+                           Text="{Binding QuickEditInstruction, Mode=TwoWay}"
+                           PlaceholderText="{Binding QuickEditPlaceholder}" />
                   <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption" />
                   <TextBox Text="{Binding QuickEditDiff}"
                            AcceptsReturn="True"
@@ -237,14 +267,78 @@
                 <Border Classes="layer" Padding="12" IsVisible="{Binding IsImportPanelOpen}">
                   <StackPanel Spacing="8">
                     <TextBlock Text="{Binding ImportTitle}" Classes="subtitle" />
-                    <TextBox Text="{Binding ImportChapterId, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterIdText}" />
-                    <TextBox Text="{Binding ImportChapterTitle, Mode=TwoWay}" PlaceholderText="{Binding ImportChapterTitleText}" />
-                    <TextBox Text="{Binding ImportOrder, Mode=TwoWay}" PlaceholderText="{Binding ImportOrderText}" />
+                    <StackPanel Spacing="4">
+                      <TextBlock Text="{Binding ImportChapterIdText}" Classes="caption" />
+                      <TextBox Text="{Binding ImportChapterId, Mode=TwoWay}"
+                               AutomationProperties.Name="{Binding ImportChapterIdText}" />
+                      <TextBlock Text="{Binding ImportChapterIdErrorText}"
+                                 Classes="caption"
+                                 Foreground="{DynamicResource Ariadne.StatusError}"
+                                 IsVisible="{Binding HasImportChapterIdError}" />
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                      <TextBlock Text="{Binding ImportChapterTitleText}" Classes="caption" />
+                      <TextBox Text="{Binding ImportChapterTitle, Mode=TwoWay}"
+                               AutomationProperties.Name="{Binding ImportChapterTitleText}" />
+                      <TextBlock Text="{Binding ImportChapterTitleErrorText}"
+                                 Classes="caption"
+                                 Foreground="{DynamicResource Ariadne.StatusError}"
+                                 IsVisible="{Binding HasImportChapterTitleError}" />
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                      <TextBlock Text="{Binding ImportOrderText}" Classes="caption" />
+                      <NumericUpDown Value="{Binding ImportOrder, Mode=TwoWay}"
+                                     Minimum="0"
+                                     Maximum="9223372036854775807"
+                                     Increment="1"
+                                     FormatString="0"
+                                     AutomationProperties.Name="{Binding ImportOrderText}" />
+                      <TextBlock Text="{Binding ImportOrderErrorText}"
+                                 Classes="caption"
+                                 Foreground="{DynamicResource Ariadne.StatusError}"
+                                 IsVisible="{Binding HasImportOrderError}" />
+                    </StackPanel>
+                    <TextBlock Text="{Binding ImportSourceGroupText}" Classes="subtitle" Margin="0,4,0,0" />
+                    <TextBlock Text="{Binding ImportSourcePathText}" Classes="caption" />
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                      <TextBox Grid.Column="0" Text="{Binding ImportSourcePath, Mode=TwoWay}" PlaceholderText="{Binding ImportSourcePlaceholder}" />
+                      <TextBox Grid.Column="0"
+                               Text="{Binding ImportSourcePath, Mode=TwoWay}"
+                               PlaceholderText="{Binding ImportSourcePlaceholder}"
+                               AutomationProperties.Name="{Binding ImportSourcePathText}" />
                       <Button Grid.Column="1" Classes="secondary" Content="{Binding BrowseImportSourceText}" Command="{Binding BrowseImportSourceCommand}" />
                     </Grid>
-                    <TextBox Text="{Binding ImportTargetPath, Mode=TwoWay}" PlaceholderText="{Binding ImportTargetPlaceholder}" />
+                    <TextBlock Text="{Binding ImportSourceErrorText}"
+                               Classes="caption"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource Ariadne.StatusError}"
+                               IsVisible="{Binding HasImportSourceError}" />
+                    <TextBlock Text="{Binding ImportTargetGroupText}" Classes="subtitle" Margin="0,4,0,0" />
+                    <TextBlock Text="{Binding ImportTargetPathText}" Classes="caption" />
+                    <TextBox Text="{Binding ImportTargetPath, Mode=TwoWay}"
+                             PlaceholderText="{Binding ImportTargetPlaceholder}"
+                             AutomationProperties.Name="{Binding ImportTargetPathText}" />
+                    <TextBlock Text="{Binding ImportTargetErrorText}"
+                               Classes="caption"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource Ariadne.StatusError}"
+                               IsVisible="{Binding HasImportTargetError}" />
+                    <TextBlock Text="{Binding ImportTargetPreviewText}"
+                               Classes="caption"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource Ariadne.StatusInfo}"
+                               IsVisible="{Binding HasImportTargetPreview}" />
+                    <TextBlock Text="{Binding ImportConflictText}"
+                               Classes="caption"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource Ariadne.StatusWarning}"
+                               IsVisible="{Binding HasImportConflict}" />
+                    <CheckBox IsChecked="{Binding AllowImportOverwrite, Mode=TwoWay}"
+                              Content="{Binding ImportOverwriteText}"
+                              IsVisible="{Binding HasImportConflict}" />
+                    <TextBlock Text="{Binding ImportConfirmationText}"
+                               Classes="caption"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding HasImportConfirmation}" />
                     <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
                   </StackPanel>
                 </Border>
@@ -402,18 +496,81 @@
                   </StackPanel>
                 </Border>
 
-                <ItemsControl ItemsSource="{Binding WorksTreeNodes}">
-                  <ItemsControl.ItemTemplate>
-                    <DataTemplate DataType="{x:Type vm:WorksTreeItemViewModel}">
-                      <Button Classes="nav" Command="{Binding OpenCommand}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
-                        <Grid RowDefinitions="Auto,Auto" RowSpacing="2">
-                          <TextBlock Grid.Row="0" Text="{Binding DisplayTitle}" Classes="caption" TextWrapping="Wrap" />
-                          <TextBlock Grid.Row="1" Text="{Binding DisplayPath}" Classes="subtle" TextWrapping="Wrap" IsVisible="{Binding HasPath}" />
-                        </Grid>
-                      </Button>
-                    </DataTemplate>
-                  </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <StackPanel Spacing="8" IsVisible="{Binding IsWorksTreeContent}">
+                  <Border Classes="soft-panel" Padding="8">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="7">
+                      <Path Grid.Column="0"
+                            Classes="icon"
+                            Width="14"
+                            Height="14"
+                            VerticalAlignment="Center"
+                            Data="{StaticResource Ariadne.Icon.Search}" />
+                      <TextBox Grid.Column="1"
+                               Text="{Binding WorksTreeSearchText, Mode=TwoWay}"
+                               PlaceholderText="{Binding WorksTreeSearchPlaceholder}"
+                               AutomationProperties.Name="{Binding WorksTreeSearchName}" />
+                    </Grid>
+                  </Border>
+                  <TreeView ItemsSource="{Binding VisibleWorksTreeRoots}"
+                            SelectedItem="{Binding SelectedWorksTreeNode, Mode=TwoWay}"
+                            SelectionMode="Single"
+                            AutoScrollToSelectedItem="True"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            AutomationProperties.Name="{Binding NavTreeText}">
+                    <TreeView.Styles>
+                      <Style Selector="TreeViewItem">
+                        <Setter Property="IsExpanded" Value="{ReflectionBinding IsExpanded, Mode=TwoWay}" />
+                      </Style>
+                    </TreeView.Styles>
+                    <TreeView.ItemTemplate>
+                      <TreeDataTemplate DataType="{x:Type vm:WorksTreeItemViewModel}"
+                                        ItemsSource="{Binding VisibleChildren}">
+                        <Border Classes="works-tree-node"
+                                Classes.current="{Binding IsCurrentDocument}"
+                                ToolTip.Tip="{Binding DisplayPath}"
+                                AutomationProperties.Name="{Binding AccessibleName}">
+                          <Grid ColumnDefinitions="3,Auto,*,Auto" ColumnSpacing="7">
+                            <Border Grid.Column="0"
+                                    Width="3"
+                                    CornerRadius="2"
+                                    Background="{DynamicResource Ariadne.AccentPrimary}"
+                                    IsVisible="{Binding IsCurrentDocument}" />
+                            <Panel Grid.Column="1" Width="15" Height="15" VerticalAlignment="Center">
+                              <Path Classes="icon" IsVisible="{Binding IsGlobalOutline}"
+                                    Data="{StaticResource Ariadne.Icon.Workspace}" />
+                              <Path Classes="icon" IsVisible="{Binding IsStageOutline}"
+                                    Data="{StaticResource Ariadne.Icon.Templates}" />
+                              <Path Classes="icon" IsVisible="{Binding IsChapter}"
+                                    Data="{StaticResource Ariadne.Icon.Works}" />
+                            </Panel>
+                            <TextBlock Grid.Column="2"
+                                       Text="{Binding Title}"
+                                       Classes="caption"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="3"
+                                       Text="{Binding KindLabel}"
+                                       Classes="subtle"
+                                       VerticalAlignment="Center" />
+                          </Grid>
+                        </Border>
+                      </TreeDataTemplate>
+                    </TreeView.ItemTemplate>
+                  </TreeView>
+                  <TextBlock Text="{Binding WorksTreeSearchEmptyText}"
+                             Classes="caption"
+                             TextWrapping="Wrap"
+                             IsVisible="{Binding ShowWorksTreeSearchEmpty}" />
+                </StackPanel>
+                <TextBlock Text="{Binding WorksTreeLoadingText}" Classes="caption"
+                           IsVisible="{Binding IsWorksTreeLoading}" TextWrapping="Wrap" />
+                <Border Classes="soft-panel" Padding="10" IsVisible="{Binding IsWorksTreeError}">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="{Binding WorksTreeErrorText}" Classes="caption" TextWrapping="Wrap" />
+                    <Button Classes="secondary" Content="{Binding RetryWorksTreeText}" Command="{Binding RetryWorksTreeCommand}" />
+                  </StackPanel>
+                </Border>
                 <!-- 侧栏索引空：主栏已有打响指全幅空态，此处只保留短提示 -->
                 <Border Classes="empty-state" Padding="12,16" IsVisible="{Binding IsWorksTreeEmpty}">
                   <StackPanel Spacing="6">

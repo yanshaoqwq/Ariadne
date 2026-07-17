@@ -5,7 +5,8 @@
     xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:Name="Root"
-    x:DataType="vm:TemplateMarketPageViewModel">
+    x:DataType="vm:TemplateMarketPageViewModel"
+    Loaded="OnLoaded">
   <Grid RowDefinitions="52,*" Background="{DynamicResource Ariadne.BackgroundMain}">
 
     <!-- 顶栏 -->
@@ -36,7 +37,10 @@
           </Button>
         </Grid>
 
-        <ItemsControl ItemsSource="{Binding Tags}" HorizontalAlignment="Center" Margin="0,16,0,24">
+        <ItemsControl ItemsSource="{Binding Tags}"
+                      IsEnabled="{Binding CanInteract}"
+                      HorizontalAlignment="Center"
+                      Margin="0,16,0,24">
           <ItemsControl.ItemsPanel>
             <ItemsPanelTemplate>
               <WrapPanel />
@@ -53,7 +57,9 @@
           </ItemsControl.ItemTemplate>
         </ItemsControl>
 
-        <ItemsControl ItemsSource="{Binding Templates}">
+        <ItemsControl ItemsSource="{Binding Templates}"
+                      IsVisible="{Binding HasResults}"
+                      IsEnabled="{Binding CanInteract}">
           <ItemsControl.ItemsPanel>
             <ItemsPanelTemplate>
               <UniformGrid Columns="3" />
@@ -83,15 +89,64 @@
           </ItemsControl.ItemTemplate>
         </ItemsControl>
 
-        <Border Classes="empty-state" Margin="8,24" HorizontalAlignment="Stretch">
+        <Border Classes="empty-state"
+                IsVisible="{Binding IsLoading}"
+                Margin="8,24"
+                HorizontalAlignment="Stretch">
+          <TextBlock Text="{Binding LoadingText}"
+                     Classes="secondary"
+                     HorizontalAlignment="Center"
+                     AutomationProperties.LiveSetting="Polite" />
+        </Border>
+
+        <Border Classes="empty-state"
+                IsVisible="{Binding IsEmpty}"
+                Margin="8,24"
+                HorizontalAlignment="Stretch">
           <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="400">
             <ctl:EmptyStateArt Kind="Templates" Width="140" Height="100" HorizontalAlignment="Center" />
-            <TextBlock Text="{Binding StatusText}" Classes="secondary" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding EmptyText}"
+                       Classes="secondary"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap" />
           </StackPanel>
         </Border>
 
+        <Border Classes="empty-state"
+                IsVisible="{Binding IsError}"
+                Margin="8,24"
+                HorizontalAlignment="Stretch">
+          <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="420">
+            <TextBlock Text="{Binding StatusText}"
+                       Classes="secondary"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       AutomationProperties.LiveSetting="Assertive" />
+            <Button Classes="secondary"
+                    Content="{Binding RetryText}"
+                    Command="{Binding SearchCommand}"
+                    HorizontalAlignment="Center" />
+          </StackPanel>
+        </Border>
+
+        <Border Classes="empty-state"
+                IsVisible="{Binding IsEndOfList}"
+                Margin="8,18"
+                HorizontalAlignment="Stretch">
+          <TextBlock Text="{Binding EndOfListText}"
+                     Classes="caption"
+                     HorizontalAlignment="Center"
+                     TextAlignment="Center" />
+        </Border>
+
         <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center" Margin="0,8">
-          <Button Classes="secondary" Content="{Binding LoadMoreText}" Command="{Binding LoadMoreCommand}" />
+          <Button Classes="secondary"
+                  IsVisible="{Binding IsLoadMoreVisible}"
+                  IsEnabled="{Binding CanLoadMore}"
+                  Content="{Binding LoadMoreText}"
+                  Command="{Binding LoadMoreCommand}" />
         </StackPanel>
       </StackPanel>
     </ScrollViewer>

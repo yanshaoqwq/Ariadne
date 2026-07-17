@@ -1,0 +1,44 @@
+{
+  "workflow_id": "official-review-polish",
+  "name": "审查与润色",
+  "version": "1.0.0",
+  "workflow": {
+    "id": "official-review-polish",
+    "name": "审查与润色",
+    "nodes": [
+      {
+        "id": "critic",
+        "type_name": "critic",
+        "config": {},
+        "position": { "x": 120.0, "y": 120.0 }
+      },
+      {
+        "id": "polisher",
+        "type_name": "polisher",
+        "config": {},
+        "position": { "x": 390.0, "y": 120.0 }
+      }
+    ],
+    "edges": [
+      {
+        "id": "review-to-polish",
+        "kind": "control",
+        "from": { "node_id": "critic", "port_name": "exec_out" },
+        "to": { "node_id": "polisher", "port_name": "exec_in" }
+      }
+    ],
+    "metadata": {
+      "official_template": true,
+      "catalog_schema": 1
+    }
+  },
+  "prompt_templates": [],
+  "required_node_types": ["critic", "polisher"],
+  "required_tools": [],
+  "required_permissions": [],
+  "minimum_ariadne_version": "0.1.0",
+  "metadata": {
+    "official_template": true,
+    "catalog_schema": 1
+  }
+}

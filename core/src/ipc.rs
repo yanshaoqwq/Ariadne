@@ -1,4 +1,6 @@
-use std::io::{self, BufRead};
+use std::collections::HashMap;
+use std::io::{self, BufRead, Write};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -6,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::command_error::{CommandError, CommandErrorCode};
 use crate::commands::{self, AriadneAppState, CommandResult};
 
 #[derive(Debug, Deserialize)]
@@ -15,9 +18,19 @@ pub struct IpcRequest {
     pub params: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct IpcEnvelopeRequest {
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(flatten)]
+    request: IpcRequest,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct IpcResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
@@ -35,6 +48,7 @@ pub struct IpcResponse {
 impl IpcResponse {
     fn ok(data: impl Serialize) -> Self {
         Self {
+            request_id: None,
             ok: true,
             data: Some(serde_json::to_value(data).unwrap_or(Value::Null)),
             error: None,
@@ -43,23 +57,29 @@ impl IpcResponse {
         }
     }
 
-    fn error(error: impl Into<crate::command_error::CommandError>) -> Self {
-        let error = error.into();
+    fn error(error: CommandError) -> Self {
         Self {
+            request_id: None,
             ok: false,
             data: None,
             error: error.diagnostic.clone(),
-            error_code: Some(error.code),
+            error_code: Some(error.code.as_str().to_owned()),
             error_key: Some(error.message_key),
         }
     }
+
+    fn with_request_id(mut self, request_id: Option<String>) -> Self {
+        self.request_id = request_id;
+        self
+    }
 }
 
-/// Legacy free-form → code (IPC protocol adapter only). Prefer structured [`CommandError`].
-pub use crate::command_error::classify_legacy_message as classify_ipc_error;
-
 pub fn handle_request(state: &AriadneAppState, request: IpcRequest) -> IpcResponse {
-    match dispatch_request(state, request) {
+    match dispatch_request(
+        state,
+        request,
+        &crate::contracts::ExecutionCancellation::new(),
+    ) {
         Ok(value) => IpcResponse::ok(value),
         Err(error) => IpcResponse::error(error),
     }
@@ -68,26 +88,257 @@ pub fn handle_request(state: &AriadneAppState, request: IpcRequest) -> IpcRespon
 pub fn run_json_line_stdio() -> io::Result<()> {
     let state = AriadneAppState::default_for_process();
     let stdin = io::stdin();
-    for line in stdin.lock().lines() {
+    run_json_line_session(stdin.lock(), Arc::new(Mutex::new(io::stdout())), state)
+}
+
+const MAX_CONCURRENT_IPC_REQUESTS: usize = 8;
+const MAX_PENDING_IPC_REQUESTS: usize = 256;
+const MAX_IPC_REQUEST_ID_BYTES: usize = 128;
+
+struct IpcWorkItem {
+    request_id: String,
+    request: IpcRequest,
+    cancellation: crate::contracts::ExecutionCancellation,
+}
+
+type IpcRequestHandler =
+    dyn Fn(IpcRequest, &crate::contracts::ExecutionCancellation) -> IpcResponse + Send + Sync;
+
+fn run_json_line_session<R, W>(
+    reader: R,
+    writer: Arc<Mutex<W>>,
+    state: AriadneAppState,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write + Send + 'static,
+{
+    let project_gate = Arc::new(RwLock::new(()));
+    let handler = Arc::new(
+        move |request: IpcRequest, cancellation: &crate::contracts::ExecutionCancellation| {
+            let changes_project = matches!(
+                request.method.as_str(),
+                "create_project" | "open_project" | "set_project_root"
+            );
+            let result = if changes_project {
+                project_gate
+                    .write()
+                    .map_err(|_| CommandError::internal("ipc project gate poisoned"))
+                    .and_then(|_guard| dispatch_request(&state, request, cancellation))
+            } else {
+                project_gate
+                    .read()
+                    .map_err(|_| CommandError::internal("ipc project gate poisoned"))
+                    .and_then(|_guard| dispatch_request(&state, request, cancellation))
+            };
+            match result {
+                Ok(value) => IpcResponse::ok(value),
+                Err(error) => IpcResponse::error(error),
+            }
+        },
+    );
+    run_json_line_session_with_handler(reader, writer, handler)
+}
+
+fn run_json_line_session_with_handler<R, W>(
+    reader: R,
+    writer: Arc<Mutex<W>>,
+    handler: Arc<IpcRequestHandler>,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write + Send + 'static,
+{
+    let worker_count = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .clamp(2, MAX_CONCURRENT_IPC_REQUESTS);
+    let (work_sender, work_receiver) = mpsc::channel::<IpcWorkItem>();
+    let work_receiver = Arc::new(Mutex::new(work_receiver));
+    let active = Arc::new(Mutex::new(HashMap::<
+        String,
+        crate::contracts::ExecutionCancellation,
+    >::new()));
+    let write_error = Arc::new(Mutex::new(None::<io::Error>));
+    let mut workers = Vec::with_capacity(worker_count);
+    for index in 0..worker_count {
+        let receiver = Arc::clone(&work_receiver);
+        let active = Arc::clone(&active);
+        let writer = Arc::clone(&writer);
+        let handler = Arc::clone(&handler);
+        let write_error = Arc::clone(&write_error);
+        workers.push(
+            thread::Builder::new()
+                .name(format!("ariadne-ipc-worker-{index}"))
+                .spawn(move || loop {
+                    let item = match receiver.lock() {
+                        Ok(receiver) => receiver.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(item) = item else { return };
+                    let response = handler(item.request, &item.cancellation)
+                        .with_request_id(Some(item.request_id.clone()));
+                    if let Ok(mut active) = active.lock() {
+                        active.remove(&item.request_id);
+                    }
+                    if let Err(error) = write_ipc_response(&writer, &response) {
+                        record_ipc_write_error(&write_error, error);
+                        return;
+                    }
+                })?,
+        );
+    }
+
+    for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<IpcRequest>(&line) {
-            Ok(request) => handle_request(&state, request),
-            Err(error) => IpcResponse::error(error.to_string()),
+        let envelope = match serde_json::from_str::<IpcEnvelopeRequest>(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                write_ipc_response(
+                    &writer,
+                    &IpcResponse::error(CommandError::validation(error.to_string())),
+                )?;
+                continue;
+            }
         };
-        println!(
-            "{}",
-            serde_json::to_string(&response).expect("ipc response should serialize")
-        );
+        if envelope.request.method == "cancel_request" {
+            let response =
+                cancel_ipc_request(&active, envelope.request_id, envelope.request.params);
+            write_ipc_response(&writer, &response)?;
+            continue;
+        }
+        let Some(request_id) = envelope.request_id else {
+            let cancellation = crate::contracts::ExecutionCancellation::new();
+            let response = handler(envelope.request, &cancellation);
+            write_ipc_response(&writer, &response)?;
+            continue;
+        };
+        if request_id.trim().is_empty() || request_id.len() > MAX_IPC_REQUEST_ID_BYTES {
+            write_ipc_response(
+                &writer,
+                &IpcResponse::error(CommandError::validation(
+                    "ipc request_id must contain 1 to 128 bytes",
+                ))
+                .with_request_id(Some(request_id)),
+            )?;
+            continue;
+        }
+        let cancellation = crate::contracts::ExecutionCancellation::new();
+        let accepted = {
+            let mut active = active
+                .lock()
+                .map_err(|_| io::Error::other("ipc active request lock poisoned"))?;
+            if active.contains_key(&request_id) {
+                false
+            } else if active.len() >= MAX_PENDING_IPC_REQUESTS {
+                drop(active);
+                write_ipc_response(
+                    &writer,
+                    &IpcResponse::error(CommandError::new(
+                        CommandErrorCode::ResourceLimit,
+                        "ipc pending request limit exceeded",
+                    ))
+                    .with_request_id(Some(request_id.clone())),
+                )?;
+                continue;
+            } else {
+                active.insert(request_id.clone(), cancellation.clone());
+                true
+            }
+        };
+        if !accepted {
+            write_ipc_response(
+                &writer,
+                &IpcResponse::error(CommandError::conflict("duplicate ipc request_id"))
+                    .with_request_id(Some(request_id)),
+            )?;
+            continue;
+        }
+        if work_sender
+            .send(IpcWorkItem {
+                request_id,
+                request: envelope.request,
+                cancellation,
+            })
+            .is_err()
+        {
+            return Err(io::Error::other("ipc worker queue is unavailable"));
+        }
+    }
+
+    drop(work_sender);
+    for worker in workers {
+        if worker.join().is_err() {
+            return Err(io::Error::other("ipc worker panicked"));
+        }
+    }
+    if let Some(error) = write_error
+        .lock()
+        .map_err(|_| io::Error::other("ipc write error lock poisoned"))?
+        .take()
+    {
+        return Err(error);
     }
     Ok(())
 }
 
+fn cancel_ipc_request(
+    active: &Arc<Mutex<HashMap<String, crate::contracts::ExecutionCancellation>>>,
+    request_id: Option<String>,
+    request_params: Value,
+) -> IpcResponse {
+    #[derive(Deserialize)]
+    struct CancelParams {
+        target_request_id: String,
+    }
+    let result = params::<CancelParams>(request_params).and_then(|params| {
+        let active = active
+            .lock()
+            .map_err(|_| CommandError::internal("ipc active request lock poisoned"))?;
+        let cancelled = active
+            .get(params.target_request_id.trim())
+            .map(|token| {
+                token.cancel();
+                true
+            })
+            .unwrap_or(false);
+        Ok(json!({
+            "target_request_id": params.target_request_id,
+            "cancelled": cancelled,
+        }))
+    });
+    match result {
+        Ok(value) => IpcResponse::ok(value),
+        Err(error) => IpcResponse::error(error),
+    }
+    .with_request_id(request_id)
+}
+
+fn write_ipc_response<W: Write>(writer: &Arc<Mutex<W>>, response: &IpcResponse) -> io::Result<()> {
+    let body = serde_json::to_string(response)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut writer = writer
+        .lock()
+        .map_err(|_| io::Error::other("ipc stdout lock poisoned"))?;
+    writer.write_all(body.as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+fn record_ipc_write_error(slot: &Arc<Mutex<Option<io::Error>>>, error: io::Error) {
+    if let Ok(mut slot) = slot.lock() {
+        if slot.is_none() {
+            *slot = Some(error);
+        }
+    }
+}
+
 pub fn run_single_call(method: &str, params_json: Option<&str>) -> CommandResult<IpcResponse> {
     if method.trim().is_empty() {
-        return Err("ipc method cannot be empty".to_owned());
+        return Err(CommandError::validation("ipc method cannot be empty"));
     }
     let state = AriadneAppState::default_for_process();
     Ok(handle_request(
@@ -107,10 +358,10 @@ pub fn run_watch_workflow_events(
     interval_ms: u64,
 ) -> CommandResult<()> {
     if workflow_id.trim().is_empty() {
-        return Err("workflow_id cannot be empty".to_owned());
+        return Err(CommandError::validation("workflow_id cannot be empty"));
     }
     if run_id.trim().is_empty() {
-        return Err("run_id cannot be empty".to_owned());
+        return Err(CommandError::validation("run_id cannot be empty"));
     }
     let state = AriadneAppState::default_for_process();
     let mut next_sequence = after_sequence;
@@ -126,7 +377,7 @@ pub fn run_watch_workflow_events(
         ) {
             Ok(result) => result,
             Err(error)
-                if error.contains("workflow run not found") && missing_run_wait_ms < 30_000 =>
+                if error.code == CommandErrorCode::NotFound && missing_run_wait_ms < 30_000 =>
             {
                 thread::sleep(interval);
                 missing_run_wait_ms =
@@ -141,8 +392,7 @@ pub fn run_watch_workflow_events(
             next_sequence = result.next_sequence;
             println!(
                 "{}",
-                serde_json::to_string(&IpcResponse::ok(&result))
-                    .map_err(|error| error.to_string())?
+                serde_json::to_string(&IpcResponse::ok(&result)).map_err(CommandError::from)?
             );
         }
         if terminal {
@@ -156,14 +406,20 @@ pub fn parse_call_params(params_json: Option<&str>) -> CommandResult<Value> {
     let Some(params_json) = params_json.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(Value::Null);
     };
-    serde_json::from_str(params_json).map_err(|error| format!("invalid ipc params JSON: {error}"))
+    serde_json::from_str(params_json)
+        .map_err(|error| CommandError::validation(format!("invalid ipc params JSON: {error}")))
 }
 
 fn workflow_status_is_terminal(status: &str) -> bool {
     matches!(status, "stopped" | "succeeded" | "failed")
 }
 
-fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResult<Value> {
+fn dispatch_request(
+    state: &AriadneAppState,
+    request: IpcRequest,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<Value> {
+    cancellation.check().map_err(CommandError::from)?;
     match request.method.as_str() {
         "list_recent_projects" => ok(commands::list_recent_projects(state)?),
         "create_project" => {
@@ -287,15 +543,9 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             )?)
         }
         "pack_workflow_selection" => {
-            let params: PackWorkflowSelectionParams = params(request.params)?;
+            let params: commands::WorkflowPackRequest = params(request.params)?;
             ok(commands::pack_workflow_selection_with_operation_id(
-                state,
-                params.workflow_id,
-                params.selected_node_ids,
-                params.subworkflow_node_id,
-                params.title,
-                params.expected_revision,
-                params.operation_id,
+                state, params,
             )?)
         }
         "get_pack_operation" => {
@@ -394,6 +644,13 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             let params: SettingsParam<commands::AppSettings> = params(request.params)?;
             ok(commands::save_app_settings(state, params.settings)?)
         }
+        "save_general_section_settings" => {
+            let params: SettingsParam<commands::GeneralSectionSettings> = params(request.params)?;
+            ok(commands::save_general_section_settings(
+                state,
+                params.settings,
+            )?)
+        }
         "get_rag_settings" => ok(commands::get_rag_settings(state)?),
         "save_rag_settings" => {
             let params: SettingsParam<commands::RagSettings> = params(request.params)?;
@@ -408,6 +665,13 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         "save_git_settings" => {
             let params: SettingsParam<commands::GitSettings> = params(request.params)?;
             ok(commands::save_git_settings(state, params.settings)?)
+        }
+        "save_misc_section_settings" => {
+            let params: SettingsParam<commands::MiscSectionSettings> = params(request.params)?;
+            ok(commands::save_misc_section_settings(
+                state,
+                params.settings,
+            )?)
         }
         "get_template_repository_settings" => {
             ok(commands::get_template_repository_settings(state)?)
@@ -450,6 +714,14 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             let params: SettingsParam<commands::AutomationSettings> = params(request.params)?;
             ok(commands::save_automation_settings(state, params.settings)?)
         }
+        "save_automation_section_settings" => {
+            let params: SettingsParam<commands::AutomationSectionSettings> =
+                params(request.params)?;
+            ok(commands::save_automation_section_settings(
+                state,
+                params.settings,
+            )?)
+        }
         "get_permissions_settings" => ok(commands::get_permissions_settings(state)?),
         "save_permissions_settings" => {
             let params: SettingsParam<commands::PermissionsSettings> = params(request.params)?;
@@ -462,7 +734,30 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "fetch_provider_models" => {
             let params: ProviderModelsParams = params(request.params)?;
-            ok(commands::fetch_provider_models(state, params.provider_id)?)
+            ok(commands::fetch_provider_models_with_cancellation(
+                state,
+                params.provider_id,
+                cancellation,
+            )?)
+        }
+        "save_provider_section_settings" => {
+            let params: SettingsParam<commands::ProviderSectionSettings> = params(request.params)?;
+            ok(commands::save_provider_section_settings(
+                state,
+                params.settings,
+            )?)
+        }
+        "preview_provider_removal" => {
+            let params: ProviderRemovalParams = params(request.params)?;
+            ok(commands::preview_provider_removal(state, params.provider)?)
+        }
+        "remove_provider" => {
+            let params: RemoveProviderParams = params(request.params)?;
+            ok(commands::remove_provider(
+                state,
+                params.provider,
+                params.expected_revision,
+            )?)
         }
         "list_confirmations" => ok(commands::list_confirmations(state)?),
         "get_confirmation" => {
@@ -488,22 +783,37 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             let params: RequestParam<commands::ResumeFromNodeRequest> = params(request.params)?;
             ok(commands::resume_from_node(state, params.request)?)
         }
-        "get_git_history" => ok(commands::get_git_history(state)?),
-        "get_git_repository_status" => ok(commands::get_git_repository_status(state)?),
+        "get_git_history" => ok(commands::get_git_history_with_cancellation(
+            state,
+            cancellation,
+        )?),
+        "get_git_repository_status" => ok(commands::get_git_repository_status_with_cancellation(
+            state,
+            cancellation,
+        )?),
         "get_git_branch_graph" => {
             let params: LimitParams = params(request.params)?;
-            ok(commands::get_git_branch_graph(state, params.limit)?)
+            ok(commands::get_git_branch_graph_with_cancellation(
+                state,
+                params.limit,
+                cancellation,
+            )?)
         }
         "create_checkpoint" => {
             let params: MessageParams = params(request.params)?;
-            ok(commands::create_checkpoint(state, params.message)?)
+            ok(commands::create_checkpoint_with_cancellation(
+                state,
+                params.message,
+                cancellation,
+            )?)
         }
         "restore_to_new_branch" => {
             let params: RestoreToNewBranchParams = params(request.params)?;
-            ok(commands::restore_to_new_branch(
+            ok(commands::restore_to_new_branch_with_cancellation(
                 state,
                 params.commit_id,
                 params.new_branch,
+                cancellation,
             )?)
         }
         "get_provider_config" => ok(commands::get_provider_config(state)?),
@@ -532,7 +842,10 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             let params: RunLogFilterParams = params(request.params)?;
             ok(commands::query_run_logs(state, params.filter)?)
         }
-        "mark_run_logs_read" => ok(commands::mark_run_logs_read(state)?),
+        "mark_run_logs_read" => {
+            let params: RunLogFilterParams = params(request.params)?;
+            ok(commands::mark_run_logs_read(state, params.filter)?)
+        }
         "read_project_memory" => ok(commands::read_project_memory(state)?),
         "append_project_memory" => {
             let params: ContentParams = params(request.params)?;
@@ -544,7 +857,11 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "quick_edit" => {
             let params: RequestParam<commands::QuickEditRequest> = params(request.params)?;
-            ok(commands::quick_edit(state, params.request)?)
+            ok(commands::quick_edit_with_cancellation(
+                state,
+                params.request,
+                cancellation,
+            )?)
         }
         "apply_quick_edit" => {
             let params: ApplyQuickEditParams = params(request.params)?;
@@ -559,15 +876,20 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "search_project_documents" => {
             let params: SearchProjectDocumentsParams = params(request.params)?;
-            ok(commands::search_project_documents(
+            ok(commands::search_project_documents_with_cancellation(
                 state,
                 params.query,
                 params.limit.unwrap_or(20),
+                cancellation,
             )?)
         }
         "project_ai_chat" => {
             let params: RequestParam<commands::ProjectAiRequest> = params(request.params)?;
-            ok(commands::project_ai_chat(state, params.request)?)
+            ok(commands::project_ai_chat_with_cancellation(
+                state,
+                params.request,
+                cancellation,
+            )?)
         }
         "list_workflow_tools" => ok(commands::list_external_workflow_tools(state)?),
         "resolve_project_reference" => {
@@ -584,23 +906,29 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
         }
         "search_templates" => {
             let params: SearchTemplatesParams = params(request.params)?;
-            ok(commands::search_templates(
+            ok(commands::search_templates_with_cancellation(
                 params.request,
                 params.query,
                 params.tags,
                 params.page,
+                cancellation,
             )?)
         }
         "get_template_detail" => {
             let params: TemplateDetailParams = params(request.params)?;
-            ok(commands::get_template_detail(params.request, params.id)?)
+            ok(commands::get_template_detail_with_cancellation(
+                params.request,
+                params.id,
+                cancellation,
+            )?)
         }
         "install_template" => {
             let params: TemplateDetailParams = params(request.params)?;
-            ok(commands::install_template(
+            ok(commands::install_template_with_cancellation(
                 state,
                 params.request,
                 params.id,
+                cancellation,
             )?)
         }
         "get_backend_diagnostics" => ok(commands::get_backend_diagnostics(state)?),
@@ -610,17 +938,20 @@ fn dispatch_request(state: &AriadneAppState, request: IpcRequest) -> CommandResu
             "product_version": crate::PRODUCT_VERSION,
             "ipc_schema_version": crate::IPC_SCHEMA_VERSION,
         })),
-        other => Err(format!("unsupported ipc method: {other}")),
+        other => Err(CommandError::not_found(format!(
+            "unsupported ipc method: {other}"
+        ))),
     }
 }
 
 fn ok(data: impl Serialize) -> CommandResult<Value> {
-    serde_json::to_value(data).map_err(|error| error.to_string())
+    serde_json::to_value(data).map_err(CommandError::from)
 }
 
 fn params<T: DeserializeOwned>(value: Value) -> CommandResult<T> {
     let value = if value.is_null() { json!({}) } else { value };
-    serde_json::from_value(value).map_err(|error| format!("invalid ipc params: {error}"))
+    serde_json::from_value(value)
+        .map_err(|error| CommandError::validation(format!("invalid ipc params: {error}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -713,6 +1044,17 @@ struct ProviderModelsParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProviderRemovalParams {
+    provider: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoveProviderParams {
+    provider: String,
+    expected_revision: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct WorkflowGraphParams {
     graph_data: commands::WorkflowGraphData,
 }
@@ -741,21 +1083,6 @@ struct WorkflowSelectionParams {
     workflow_id: String,
     #[serde(default)]
     selected_node_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackWorkflowSelectionParams {
-    workflow_id: String,
-    #[serde(default)]
-    selected_node_ids: Vec<String>,
-    #[serde(default)]
-    subworkflow_node_id: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    expected_revision: Option<String>,
-    #[serde(default)]
-    operation_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -907,4 +1234,82 @@ struct SearchTemplatesParams {
 struct TemplateDetailParams {
     request: commands::TemplateRepositoryRequest,
     id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    #[test]
+    fn c9_stdio_routes_fast_response_before_slow_request() {
+        let input = Cursor::new(
+            b"{\"request_id\":\"slow\",\"method\":\"slow\"}\n{\"request_id\":\"fast\",\"method\":\"fast\"}\n",
+        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let handler = Arc::new(
+            |request: IpcRequest, _: &crate::contracts::ExecutionCancellation| {
+                if request.method == "slow" {
+                    thread::sleep(Duration::from_millis(120));
+                }
+                IpcResponse::ok(json!({ "method": request.method }))
+            },
+        );
+
+        run_json_line_session_with_handler(input, Arc::clone(&output), handler).unwrap();
+
+        let body = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let responses = body
+            .lines()
+            .map(|line| serde_json::from_str::<IpcResponse>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0].request_id.as_deref(), Some("fast"));
+        assert_eq!(responses[1].request_id.as_deref(), Some("slow"));
+    }
+
+    #[test]
+    fn c9_cancel_request_reaches_active_execution_token() {
+        let input = Cursor::new(
+            b"{\"request_id\":\"target\",\"method\":\"slow\"}\n{\"request_id\":\"cancel\",\"method\":\"cancel_request\",\"params\":{\"target_request_id\":\"target\"}}\n",
+        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let observed_cancellation = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&observed_cancellation);
+        let handler = Arc::new(
+            move |_: IpcRequest, cancellation: &crate::contracts::ExecutionCancellation| {
+                let started = Instant::now();
+                while !cancellation.is_cancelled() && started.elapsed() < Duration::from_secs(1) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if cancellation.is_cancelled() {
+                    observed.store(true, Ordering::Release);
+                    IpcResponse::error(CommandError::from(crate::contracts::CoreError::Cancelled))
+                } else {
+                    IpcResponse::ok(Value::Null)
+                }
+            },
+        );
+
+        run_json_line_session_with_handler(input, Arc::clone(&output), handler).unwrap();
+
+        assert!(observed_cancellation.load(Ordering::Acquire));
+        let body = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let responses = body
+            .lines()
+            .map(|line| serde_json::from_str::<IpcResponse>(line).unwrap())
+            .collect::<Vec<_>>();
+        let cancel = responses
+            .iter()
+            .find(|response| response.request_id.as_deref() == Some("cancel"))
+            .unwrap();
+        let target = responses
+            .iter()
+            .find(|response| response.request_id.as_deref() == Some("target"))
+            .unwrap();
+        assert_eq!(cancel.data.as_ref().unwrap()["cancelled"], true);
+        assert_eq!(target.error_code.as_deref(), Some("cancelled"));
+    }
 }

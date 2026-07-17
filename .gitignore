@@ -1,6 +1,8 @@
 /target/
 /.target-*/
 /artifacts/
+/core/artifacts/
+/.qdrant-initialized
 /core/target/
 /core/gen/
 /.agents/
@@ -9,6 +11,7 @@
 /CLAUDE.md
 /docs/
 /指导性文件/
+/项目检验报告/
 /后端需做.md
 /实施记录.md
 /项目完成情况.md
@@ -37,7 +40,6 @@ __pycache__/
 /runtime.db
 /metadata.db
 /package-lock.json
-/项目检验报告/
 *.log
 .DS_Store
 .env

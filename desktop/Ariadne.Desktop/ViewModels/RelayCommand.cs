@@ -25,6 +25,20 @@ public sealed class RelayCommand : ICommand
         _execute();
     }
 
+    /// <summary>
+    /// 供键盘、代码路径等非 Avalonia CommandSource 调用：先检查当前能力，再执行动作。
+    /// </summary>
+    public bool TryExecute(object? parameter = null)
+    {
+        if (!CanExecute(parameter))
+        {
+            return false;
+        }
+
+        Execute(parameter);
+        return true;
+    }
+
     public void NotifyCanExecuteChanged()
     {
         CanExecuteChanged?.Invoke(this, EventArgs.Empty);

@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -9,8 +9,8 @@ use ariadne::config::{
     SecretValue, VectorStoreBackend,
 };
 use ariadne::contracts::{
-    CoreError, CoreResult, ExternalDispatchAuthorization, ProviderCapability, ProviderType,
-    SourceSpan, TextRange,
+    CoreError, CoreResult, ExecutionCancellation, ExternalDispatchAuthorization,
+    ExternalDispatchOutcome, ProviderCapability, ProviderType, SourceSpan, TextRange,
 };
 use ariadne::documents::IndexInvalidationOutbox;
 use ariadne::providers::ProviderCallContext;
@@ -1248,6 +1248,50 @@ fn qdrant_health_detects_collection_dimension_drift() {
 
     assert_eq!(health.status, StoreStatus::Unavailable);
     assert!(health.reason.unwrap().contains("configured dimension 2"));
+}
+
+#[test]
+fn c9_qdrant_search_can_cancel_stalled_response_after_dispatch() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicBool::new(false));
+    let server_accepted = Arc::clone(&accepted);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        assert!(request.starts_with("POST /collections/ariadne/points/search "));
+        server_accepted.store(true, Ordering::Release);
+        thread::sleep(std::time::Duration::from_millis(500));
+    });
+    let store = QdrantVectorStore::new(endpoint, "ariadne", 2).unwrap();
+    let cancellation = ExecutionCancellation::new();
+    let cancel_from_thread = cancellation.clone();
+    let canceller = thread::spawn(move || {
+        let started = std::time::Instant::now();
+        while !accepted.load(Ordering::Acquire)
+            && started.elapsed() < std::time::Duration::from_secs(2)
+        {
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cancel_from_thread.cancel();
+    });
+
+    let started = std::time::Instant::now();
+    let error = store
+        .search_with_cancellation(VectorSearchRequest::new(vec![1.0, 0.0], 5), &cancellation)
+        .unwrap_err();
+    let request_elapsed = started.elapsed();
+
+    canceller.join().unwrap();
+    server.join().unwrap();
+    assert!(matches!(
+        error,
+        CoreError::ExternalCancellation {
+            outcome: ExternalDispatchOutcome::DispatchedUnknown,
+            ..
+        }
+    ));
+    assert!(request_elapsed < std::time::Duration::from_millis(300));
 }
 
 #[test]

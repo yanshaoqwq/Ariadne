@@ -364,19 +364,21 @@ impl WorkflowDefinition {
                         edge.id.as_str()
                     )));
                 }
-                if edge.kind != WorkflowEdgeKind::Data {
+                if edge.kind == WorkflowEdgeKind::Communication {
                     return Err(CoreError::validation(format!(
-                        "edge {} alias is only allowed on data edges",
+                        "edge {} alias is not allowed on communication edges",
                         edge.id.as_str()
                     )));
                 }
-                let key = (edge.to.node_id.as_str().to_owned(), alias.trim().to_owned());
-                if !data_aliases.insert(key) {
-                    return Err(CoreError::validation(format!(
-                        "duplicate input alias for node {}: {}",
-                        edge.to.node_id.as_str(),
-                        alias.trim()
-                    )));
+                if edge.kind == WorkflowEdgeKind::Data {
+                    let key = (edge.to.node_id.as_str().to_owned(), alias.trim().to_owned());
+                    if !data_aliases.insert(key) {
+                        return Err(CoreError::validation(format!(
+                            "duplicate input alias for node {}: {}",
+                            edge.to.node_id.as_str(),
+                            alias.trim()
+                        )));
+                    }
                 }
             }
         }

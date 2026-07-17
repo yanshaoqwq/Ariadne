@@ -1,7 +1,7 @@
 using System.Collections.ObjectModel;
-using System.Text;
 using System.Text.Json;
 using Avalonia.Controls;
+using AvaloniaEdit.Document;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -9,24 +9,25 @@ namespace Ariadne.Desktop.ViewModels;
 
 public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable
 {
+    private const string ProjectAiConversationId = "works";
     private const double MinRightPanelWidth = 280;
     private const double MaxRightPanelWidth = 520;
     private const double CollapsedRightPanelWidth = 24;
     private const int TargetDocumentBlockSize = 4_000;
     private const int HardDocumentBlockSize = 6_000;
-    private const int RebalanceDocumentBlockSize = HardDocumentBlockSize * 2;
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
+    private readonly ContinuousDocumentBuffer _editorBuffer = new();
     private bool _isRightPanelOpen = true;
     private GridLength _rightPanelColumnWidth = new(320);
     private bool _isNavTreeTab = true;
     private bool _isImportPanelOpen;
-    private string _documentContent = string.Empty;
     private string _statusText = string.Empty;
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
     private readonly List<ProjectAiChatMessage> _projectAiHistory = new();
+    private long? _projectAiConversationRevision;
     private string _quickEditInstruction = string.Empty;
     private string _quickEditDiff = string.Empty;
     private string _exportFormat = "markdown";
@@ -36,17 +37,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private string _documentTitle;
     private string _importChapterId = string.Empty;
     private string _importChapterTitle = string.Empty;
-    private string _importOrder = "0";
+    private decimal? _importOrder = 0m;
     private string _importSourcePath = string.Empty;
     private string _importTargetPath = string.Empty;
+    private string _importProjectRoot = string.Empty;
+    private bool _allowImportOverwrite;
     private string _savedSnapshot = string.Empty;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
-    private bool _suppressDocumentBlockChanges;
     private bool _documentDirty;
-    private bool _documentContentCacheValid = true;
     private int _documentCharacterCount;
-    private int _nextDocumentBlockId;
     private bool _isEditMode;
     private QuickEditSession? _pendingQuickEdit;
     private QuickEditUndoState? _quickEditUndo;
@@ -62,14 +62,40 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private string? _summaryStageId;
     private string? _stageSummaryText;
     private string _activeSummarySegmentText = string.Empty;
+    private CancellationTokenSource? _worksTreeLoadCts;
+    private long _worksTreeLoadGeneration;
+    private WorksTreeLoadState _worksTreeState = WorksTreeLoadState.Empty;
+    private string _worksTreeErrorText = string.Empty;
+    private readonly HashSet<string> _expandedWorksTreeNodeIds = new(StringComparer.Ordinal);
+    private bool _worksTreeExpansionInitialized;
+    private string _worksTreeSearchText = string.Empty;
+    private WorksTreeItemViewModel? _selectedWorksTreeNode;
+    private WorksTreeItemViewModel? _currentWorksTreeNode;
+    private bool _suppressWorksTreeSelectionNavigation;
+    private CancellationTokenSource? _documentLoadCts;
+    private long _documentLoadGeneration;
+    private long _documentEditRevision;
+    private bool _isDocumentSaving;
+    private bool _isDocumentLoading;
+    private string _documentLoadingTarget = string.Empty;
+
+    private enum WorksTreeLoadState
+    {
+        Loading,
+        Content,
+        Empty,
+        Error,
+    }
 
     public WorksPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
         _displayNames = displayNames;
         _backend = backend;
+        _editorBuffer.TextChanged += OnEditorDocumentTextChanged;
         _projectAiAnswer = displayNames.Text("ui.works.project_ai.empty");
         _documentTitle = displayNames.Text("ui.works.no_document_selected");
-        WorksTreeNodes = new ObservableCollection<WorksTreeItemViewModel>();
+        WorksTreeRoots = new ObservableCollection<WorksTreeItemViewModel>();
+        VisibleWorksTreeRoots = new ObservableCollection<WorksTreeItemViewModel>();
         DocumentBlocks = new ObservableCollection<DocumentBlockViewModel>();
         ProjectAiBubbles = new ObservableCollection<ChatBubbleViewModel>();
         SummarySegments = new ObservableCollection<WorksSummarySegmentItemViewModel>();
@@ -81,15 +107,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
         OpenImportPanelCommand = new RelayCommand(OpenImportPanel);
-        ToggleImportPanelCommand = new RelayCommand(() => IsImportPanelOpen = !IsImportPanelOpen);
+        ToggleImportPanelCommand = new RelayCommand(ToggleImportPanel);
         BrowseImportSourceCommand = new RelayCommand(() => _ = BrowseImportSourceAsync());
         ImportCommand = new RelayCommand(() => _ = ImportChapterAsync(), CanImportChapter);
-        ExportCommand = new RelayCommand(() => _ = ExportAsync(), () => WorksTreeNodes.Count > 0);
-        SaveCommand = new RelayCommand(() => _ = SaveAsync(), () => HasCurrentDocument);
+        ExportCommand = new RelayCommand(() => _ = ExportAsync(), () => WorksTreeRoots.Count > 0);
+        SaveCommand = new RelayCommand(() => _ = SaveAsync(), () => HasCurrentDocument && !IsDocumentSaving);
+        RetryWorksTreeCommand = new RelayCommand(() => _ = LoadWorksTreeAsync(), () => IsWorksTreeError && !IsWorksTreeLoading);
         ReadModeCommand = new RelayCommand(() => IsEditMode = false);
         EditModeCommand = new RelayCommand(() => IsEditMode = true);
         CopyCommand = new RelayCommand(() => RequestEditorCopy?.Invoke());
         SelectAllCommand = new RelayCommand(() => RequestEditorSelectAll?.Invoke());
+        OpenQuickEditCommand = new RelayCommand(OpenQuickEdit, CanOpenQuickEdit);
         QuickAiCommand = new RelayCommand(() =>
         {
             IsEditMode = true;
@@ -106,7 +134,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             new("epub", displayNames.Text("ui.works.export_format.epub")),
             new("pdf", displayNames.Text("ui.works.export_format.pdf")),
         };
-        _ = InitializeAsync();
         CaptureSnapshot();
     }
 
@@ -191,6 +218,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public RelayCommand SaveCommand { get; }
 
+    public RelayCommand RetryWorksTreeCommand { get; }
+
     public RelayCommand ReadModeCommand { get; }
 
     public RelayCommand EditModeCommand { get; }
@@ -198,6 +227,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public RelayCommand CopyCommand { get; }
 
     public RelayCommand SelectAllCommand { get; }
+
+    public RelayCommand OpenQuickEditCommand { get; }
 
     public RelayCommand QuickAiCommand { get; }
 
@@ -213,16 +244,58 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public Action? RequestEditorSelectAll { get; set; }
     public Func<EditorTextSelection>? RequestEditorSelection { get; set; }
 
-    /// <summary>View 注入：把全局 UTF-16 正文范围滚动并选中到分块编辑器。</summary>
+    /// <summary>View 注入：把全局 UTF-16 正文范围滚动并选中到连续编辑器。</summary>
     public Action<int, int>? RequestRevealEditorRange { get; set; }
+
+    /// <summary>View 注入：快捷改写面板出现后把焦点交给说明输入框。</summary>
+    public Action? RequestFocusQuickEditInstruction { get; set; }
 
     /// <summary>View 注册：文档切换/打开时清空粘性选区，避免旧索引打到新正文。</summary>
     public Action? ClearStickyEditorSelection { get; set; }
 
-    public ObservableCollection<WorksTreeItemViewModel> WorksTreeNodes { get; }
+    /// <summary>后端作品树的单一层级身份源；显示筛选只复用这些节点实例。</summary>
+    public ObservableCollection<WorksTreeItemViewModel> WorksTreeRoots { get; }
+
+    /// <summary>按标题搜索后的根投影；子层投影由每个节点的 VisibleChildren 维护。</summary>
+    public ObservableCollection<WorksTreeItemViewModel> VisibleWorksTreeRoots { get; }
+
+    public WorksTreeItemViewModel? SelectedWorksTreeNode
+    {
+        get => _selectedWorksTreeNode;
+        set
+        {
+            if (!SetProperty(ref _selectedWorksTreeNode, value)
+                || _suppressWorksTreeSelectionNavigation
+                || value is null
+                || !value.CanOpen)
+            {
+                return;
+            }
+
+            _ = LoadDocumentAsync(value);
+        }
+    }
+
+    public string WorksTreeSearchText
+    {
+        get => _worksTreeSearchText;
+        set
+        {
+            if (SetProperty(ref _worksTreeSearchText, value ?? string.Empty))
+            {
+                ApplyWorksTreeSearch();
+            }
+        }
+    }
+
+    public bool IsWorksTreeSearchActive => !string.IsNullOrWhiteSpace(WorksTreeSearchText);
+    public bool ShowWorksTreeSearchEmpty => _worksTreeState == WorksTreeLoadState.Content
+                                            && IsWorksTreeSearchActive
+                                            && VisibleWorksTreeRoots.Count == 0;
 
     public ObservableCollection<DocumentBlockViewModel> DocumentBlocks { get; }
     public bool HasDocumentBlocks => DocumentBlocks.Count > 0;
+    public TextDocument EditorDocument => _editorBuffer.Document;
     public ObservableCollection<ChatBubbleViewModel> ProjectAiBubbles { get; }
     public bool HasProjectAiBubbles => ProjectAiBubbles.Count > 0;
     public ObservableCollection<WorksSummarySegmentItemViewModel> SummarySegments { get; }
@@ -233,13 +306,29 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public ObservableCollection<ExportFormatOption> ExportFormats { get; }
 
-    public bool IsWorksTreeEmpty => WorksTreeNodes.Count == 0;
+    public bool IsWorksTreeLoading => _worksTreeState == WorksTreeLoadState.Loading;
+
+    public bool IsWorksTreeError => _worksTreeState == WorksTreeLoadState.Error;
+
+    public bool IsWorksTreeEmpty => _worksTreeState == WorksTreeLoadState.Empty;
+
+    public bool IsWorksTreeContent => _worksTreeState == WorksTreeLoadState.Content;
+
+    public string WorksTreeLoadingText => _displayNames.Text("ui.works.loading_tree");
+
+    public string WorksTreeErrorText => _worksTreeErrorText;
+
+    public string RetryWorksTreeText => _displayNames.Text("ui.works.retry_tree");
+
+    public string WorksTreeSearchPlaceholder => _displayNames.Text("ui.works.tree_search_placeholder");
+    public string WorksTreeSearchName => _displayNames.Text("ui.works.tree_search_name");
+    public string WorksTreeSearchEmptyText => _displayNames.Text("ui.works.tree_search_empty");
 
     /// <summary>有作品树但未选文档：只显示一处空态（U72）。</summary>
-    public bool ShowNoDocumentEmpty => !IsWorksTreeEmpty && !HasCurrentDocument;
+    public bool ShowNoDocumentEmpty => _worksTreeState == WorksTreeLoadState.Content && !HasCurrentDocument;
 
     /// <summary>已选文档时才渲染文档头与正文面。</summary>
-    public bool ShowDocumentChrome => !IsWorksTreeEmpty && HasCurrentDocument;
+    public bool ShowDocumentChrome => _worksTreeState == WorksTreeLoadState.Content && HasCurrentDocument;
 
     public bool IsSummaryLoading
     {
@@ -344,14 +433,28 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public bool IsEditMode
     {
         get => _isEditMode;
-        set => SetProperty(ref _isEditMode, value);
+        set
+        {
+            if (!SetProperty(ref _isEditMode, value))
+            {
+                return;
+            }
+
+            if (!value)
+            {
+                RebuildDocumentBlocks(_editorBuffer.Text);
+            }
+            OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
+        }
     }
 
     public string DocumentContent
     {
-        get => AssembleDocumentContent();
+        get => _editorBuffer.Text;
         set => ReplaceDocumentContent(value ?? string.Empty);
     }
+
+    public bool ShowReadModeEmptyDocument => !IsEditMode && _documentCharacterCount == 0;
 
     public bool HasUnsavedChanges
     {
@@ -361,11 +464,51 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             if (SetProperty(ref _hasUnsavedChanges, value))
             {
                 OnPropertyChanged(nameof(DocumentInfoText));
+                OnPropertyChanged(nameof(DocumentSaveStateText));
             }
         }
     }
 
     public bool HasCurrentDocument => !string.IsNullOrWhiteSpace(_currentDocumentId);
+
+    public bool IsDocumentSaving
+    {
+        get => _isDocumentSaving;
+        private set
+        {
+            if (SetProperty(ref _isDocumentSaving, value))
+            {
+                SaveCommand.NotifyCanExecuteChanged();
+                OnPropertyChanged(nameof(DocumentInfoText));
+                OnPropertyChanged(nameof(DocumentSaveStateText));
+            }
+        }
+    }
+
+    public string DocumentLoadingText => _displayNames.Text("ui.works.loading_document");
+
+    public bool IsDocumentLoading
+    {
+        get => _isDocumentLoading;
+        private set => SetProperty(ref _isDocumentLoading, value);
+    }
+
+    public string DocumentLoadingTargetText => string.IsNullOrWhiteSpace(_documentLoadingTarget)
+        ? DocumentLoadingText
+        : _displayNames.Format("ui.works.loading_document_target", new Dictionary<string, string>
+        {
+            ["title"] = _documentLoadingTarget,
+        });
+
+    public string SavingText => _displayNames.Text("ui.works.saving");
+
+    public string DocumentSaveStateText => !HasCurrentDocument
+        ? string.Empty
+        : IsDocumentSaving
+            ? SavingText
+            : HasUnsavedChanges
+                ? _displayNames.Text("ui.works.save_state.unsaved")
+                : _displayNames.Text("ui.works.save_state.saved");
 
     public string StatusText
     {
@@ -419,6 +562,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             {
                 OnPropertyChanged(nameof(QuickEditGenerateText));
                 QuickAiCommand.NotifyCanExecuteChanged();
+                OpenQuickEditCommand.NotifyCanExecuteChanged();
                 ApplyQuickEditCommand.NotifyCanExecuteChanged();
             }
         }
@@ -442,11 +586,79 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
     }
 
-    public string ImportChapterId { get => _importChapterId; set { if (SetProperty(ref _importChapterId, value)) ImportCommand.NotifyCanExecuteChanged(); } }
-    public string ImportChapterTitle { get => _importChapterTitle; set { if (SetProperty(ref _importChapterTitle, value)) ImportCommand.NotifyCanExecuteChanged(); } }
-    public string ImportOrder { get => _importOrder; set { if (SetProperty(ref _importOrder, value)) ImportCommand.NotifyCanExecuteChanged(); } }
-    public string ImportSourcePath { get => _importSourcePath; set { if (SetProperty(ref _importSourcePath, value)) ImportCommand.NotifyCanExecuteChanged(); } }
-    public string ImportTargetPath { get => _importTargetPath; set { if (SetProperty(ref _importTargetPath, value)) ImportCommand.NotifyCanExecuteChanged(); } }
+    public string ImportChapterId
+    {
+        get => _importChapterId;
+        set
+        {
+            if (SetProperty(ref _importChapterId, value))
+            {
+                AllowImportOverwrite = false;
+                NotifyImportFormStateChanged();
+            }
+        }
+    }
+
+    public string ImportChapterTitle
+    {
+        get => _importChapterTitle;
+        set
+        {
+            if (SetProperty(ref _importChapterTitle, value))
+            {
+                NotifyImportFormStateChanged();
+            }
+        }
+    }
+
+    public decimal? ImportOrder
+    {
+        get => _importOrder;
+        set
+        {
+            if (SetProperty(ref _importOrder, value))
+            {
+                NotifyImportFormStateChanged();
+            }
+        }
+    }
+
+    public string ImportSourcePath
+    {
+        get => _importSourcePath;
+        set
+        {
+            if (SetProperty(ref _importSourcePath, value))
+            {
+                NotifyImportFormStateChanged();
+            }
+        }
+    }
+
+    public string ImportTargetPath
+    {
+        get => _importTargetPath;
+        set
+        {
+            if (SetProperty(ref _importTargetPath, value))
+            {
+                AllowImportOverwrite = false;
+                NotifyImportFormStateChanged();
+            }
+        }
+    }
+
+    public bool AllowImportOverwrite
+    {
+        get => _allowImportOverwrite;
+        set
+        {
+            if (SetProperty(ref _allowImportOverwrite, value))
+            {
+                ImportCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
 
     public string SidebarTitle => _displayNames.Text("ui.works.sidebar.title");
 
@@ -498,7 +710,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         {
             ["path"] = string.IsNullOrWhiteSpace(_currentDocumentPath) ? _currentDocumentId : _currentDocumentPath,
             ["version"] = ShortValue(_currentDocumentVersion),
-            ["blocks"] = DocumentBlocks.Count.ToString(),
             ["state"] = HasUnsavedChanges
                 ? _displayNames.Text("ui.works.save_state.unsaved")
                 : _displayNames.Text("ui.works.save_state.saved"),
@@ -535,6 +746,49 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public string ImportSourcePlaceholder => _displayNames.Text("ui.works.import.source_placeholder");
     public string ImportTargetPlaceholder => _displayNames.Text("ui.works.import.target_placeholder");
     public string BrowseImportSourceText => _displayNames.Text("ui.works.import.browse_source");
+    public string ImportSourceGroupText => _displayNames.Text("ui.works.import.source_group");
+    public string ImportTargetGroupText => _displayNames.Text("ui.works.import.target_group");
+    public string ImportOverwriteText => _displayNames.Text("ui.works.import.overwrite_confirm");
+    public string ImportChapterIdErrorText => HasImportChapterIdError
+        ? _displayNames.Text("ui.works.import.error.chapter_id_required")
+        : string.Empty;
+    public string ImportChapterTitleErrorText => HasImportChapterTitleError
+        ? _displayNames.Text("ui.works.import.error.chapter_title_required")
+        : string.Empty;
+    public string ImportOrderErrorText => HasImportOrderError
+        ? _displayNames.Text("ui.works.import.error.order_invalid")
+        : string.Empty;
+    public string ImportSourceErrorText => ImportPathErrorText(ImportSourceValidation.Error);
+    public string ImportTargetErrorText => ImportPathErrorText(ImportTargetValidation.Error);
+    public string ImportConflictText => HasImportConflict
+        ? _displayNames.Text("ui.works.import.conflict")
+        : string.Empty;
+    public string ImportTargetPreviewText => ImportTargetValidation.IsValid
+        ? _displayNames.Format(
+            "ui.works.import.target_preview",
+            new Dictionary<string, string> { ["path"] = ImportTargetValidation.NormalizedPath })
+        : string.Empty;
+    public string ImportConfirmationText => HasImportConfirmation
+        ? _displayNames.Format(
+            "ui.works.import.confirmation",
+            new Dictionary<string, string>
+            {
+                ["title"] = ImportChapterTitle.Trim(),
+                ["path"] = ImportTargetValidation.NormalizedPath,
+            })
+        : string.Empty;
+    public bool HasImportChapterIdError => string.IsNullOrWhiteSpace(ImportChapterId);
+    public bool HasImportChapterTitleError => string.IsNullOrWhiteSpace(ImportChapterTitle);
+    public bool HasImportOrderError => ImportOrder is null
+                                           or < 0
+                                           or > long.MaxValue
+                                       || decimal.Truncate(ImportOrder.Value) != ImportOrder.Value;
+    public bool HasImportSourceError => !ImportSourceValidation.IsValid;
+    public bool HasImportTargetError => !ImportTargetValidation.IsValid;
+    public bool HasImportTargetPreview => ImportTargetValidation.IsValid;
+    public bool HasImportConfirmation => !string.IsNullOrWhiteSpace(ImportChapterTitle)
+                                         && ImportTargetValidation.IsValid;
+    public bool HasImportConflict => HasImportChapterConflict() || HasImportDocumentConflict();
     public string QuickEditTitle => _displayNames.Text("ui.works.quick_edit.title");
     public string QuickEditPlaceholder => _displayNames.Text("ui.works.quick_edit.placeholder");
     public string QuickEditGenerateText => _displayNames.Text(IsQuickEditGenerating
@@ -553,11 +807,89 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private bool CanImportChapter()
     {
-        return !string.IsNullOrWhiteSpace(ImportChapterId)
-               && !string.IsNullOrWhiteSpace(ImportChapterTitle)
-               && long.TryParse(ImportOrder, out _)
-               && !string.IsNullOrWhiteSpace(ImportSourcePath)
-               && !string.IsNullOrWhiteSpace(ImportTargetPath);
+        return !HasImportChapterIdError
+               && !HasImportChapterTitleError
+               && !HasImportOrderError
+               && ImportSourceValidation.IsValid
+               && ImportTargetValidation.IsValid
+               && (!HasImportConflict || AllowImportOverwrite);
+    }
+
+    private ImportPathValidation ImportSourceValidation => WorksImportHelper.ValidateProjectPath(
+        ImportSourcePath,
+        _importProjectRoot,
+        requireDocumentsDirectory: false);
+
+    private ImportPathValidation ImportTargetValidation => WorksImportHelper.ValidateProjectPath(
+        ImportTargetPath,
+        _importProjectRoot,
+        requireDocumentsDirectory: true);
+
+    private bool HasImportChapterConflict()
+    {
+        var chapterId = ImportChapterId.Trim();
+        return chapterId.Length > 0
+               && EnumerateWorksTreeNodes().Any(item => string.Equals(
+                   item.ChapterId,
+                   chapterId,
+                   StringComparison.Ordinal));
+    }
+
+    private bool HasImportDocumentConflict()
+    {
+        var target = ImportTargetValidation;
+        if (!target.IsValid)
+        {
+            return false;
+        }
+
+        return EnumerateWorksTreeNodes().Any(item =>
+        {
+            var existing = WorksImportHelper.ValidateProjectPath(
+                item.Path,
+                _importProjectRoot,
+                requireDocumentsDirectory: false);
+            return existing.IsValid
+                   && string.Equals(
+                       existing.NormalizedPath,
+                       target.NormalizedPath,
+                       StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    private string ImportPathErrorText(ImportPathError error)
+    {
+        var key = error switch
+        {
+            ImportPathError.None => string.Empty,
+            ImportPathError.Required => "ui.works.import.error.path_required",
+            ImportPathError.OutsideProject => "ui.works.import.error.path_outside_project",
+            ImportPathError.ParentTraversal => "ui.works.import.error.path_parent_traversal",
+            ImportPathError.TargetOutsideDocuments => "ui.works.import.error.target_outside_documents",
+            _ => "ui.works.import.error.path_invalid",
+        };
+        return key.Length == 0 ? string.Empty : _displayNames.Text(key);
+    }
+
+    private void NotifyImportFormStateChanged()
+    {
+        OnPropertyChanged(nameof(ImportChapterIdErrorText));
+        OnPropertyChanged(nameof(ImportChapterTitleErrorText));
+        OnPropertyChanged(nameof(ImportOrderErrorText));
+        OnPropertyChanged(nameof(ImportSourceErrorText));
+        OnPropertyChanged(nameof(ImportTargetErrorText));
+        OnPropertyChanged(nameof(ImportConflictText));
+        OnPropertyChanged(nameof(ImportTargetPreviewText));
+        OnPropertyChanged(nameof(ImportConfirmationText));
+        OnPropertyChanged(nameof(HasImportChapterIdError));
+        OnPropertyChanged(nameof(HasImportChapterTitleError));
+        OnPropertyChanged(nameof(HasImportOrderError));
+        OnPropertyChanged(nameof(HasImportSourceError));
+        OnPropertyChanged(nameof(HasImportTargetError));
+        OnPropertyChanged(nameof(HasImportTargetPreview));
+        OnPropertyChanged(nameof(HasImportConfirmation));
+        OnPropertyChanged(nameof(HasImportConflict));
+        ImportCommand.NotifyCanExecuteChanged();
     }
 
     private bool CanGenerateQuickEdit()
@@ -566,6 +898,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                && _documentCharacterCount > 0
                && !IsQuickEditGenerating
                && !string.IsNullOrWhiteSpace(QuickEditInstruction);
+    }
+
+    private bool CanOpenQuickEdit()
+    {
+        return HasCurrentDocument && !IsQuickEditGenerating;
+    }
+
+    private void OpenQuickEdit()
+    {
+        IsEditMode = true;
+        RequestFocusQuickEditInstruction?.Invoke();
     }
 
     private bool CanApplyQuickEdit()
@@ -594,13 +937,44 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private void OnCurrentDocumentChanged()
     {
+        RefreshCurrentWorksTreeNode();
         OnPropertyChanged(nameof(HasCurrentDocument));
         OnPropertyChanged(nameof(ShowNoDocumentEmpty));
         OnPropertyChanged(nameof(ShowDocumentChrome));
         OnPropertyChanged(nameof(DocumentInfoText));
+        OnPropertyChanged(nameof(DocumentSaveStateText));
         SaveCommand.NotifyCanExecuteChanged();
+        OpenQuickEditCommand.NotifyCanExecuteChanged();
         InsertOutlineCommand.NotifyCanExecuteChanged();
         QuickAiCommand.NotifyCanExecuteChanged();
+    }
+
+    private void SetWorksTreeState(WorksTreeLoadState state)
+    {
+        if (_worksTreeState == state && (state != WorksTreeLoadState.Error || !string.IsNullOrWhiteSpace(_worksTreeErrorText)))
+        {
+            RetryWorksTreeCommand.NotifyCanExecuteChanged();
+            ExportCommand.NotifyCanExecuteChanged();
+            return;
+        }
+
+        _worksTreeState = state;
+        if (state != WorksTreeLoadState.Error)
+        {
+            _worksTreeErrorText = string.Empty;
+            OnPropertyChanged(nameof(WorksTreeErrorText));
+        }
+        OnPropertyChanged(nameof(IsWorksTreeLoading));
+        OnPropertyChanged(nameof(IsWorksTreeError));
+        OnPropertyChanged(nameof(IsWorksTreeEmpty));
+        OnPropertyChanged(nameof(IsWorksTreeContent));
+        OnPropertyChanged(nameof(ShowWorksTreeSearchEmpty));
+        OnPropertyChanged(nameof(ShowNoDocumentEmpty));
+        OnPropertyChanged(nameof(ShowDocumentChrome));
+        OnPropertyChanged(nameof(EmptyIndexTitle));
+        OnPropertyChanged(nameof(EmptyIndexHint));
+        RetryWorksTreeCommand.NotifyCanExecuteChanged();
+        ExportCommand.NotifyCanExecuteChanged();
     }
 
     private void NotifySummaryStateChanged()
@@ -1058,53 +1432,37 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private void ReplaceDocumentContent(string content)
     {
-        _suppressDocumentBlockChanges = true;
-        try
+        var resetUndoHistory = _suppressDirtyTracking;
+        var changed = _editorBuffer.Replace(content, resetUndoHistory);
+        if (!changed && (resetUndoHistory || !IsEditMode))
         {
-            _documentContent = content;
-            _documentContentCacheValid = true;
-            _documentCharacterCount = content.Length;
             RebuildDocumentBlocks(content);
-        }
-        finally
-        {
-            _suppressDocumentBlockChanges = false;
-        }
-
-        OnPropertyChanged(nameof(DocumentContent));
-        OnPropertyChanged(nameof(DocumentBodyText));
-        OnPropertyChanged(nameof(CharacterCountText));
-        OnPropertyChanged(nameof(HasDocumentBlocks));
-        OnPropertyChanged(nameof(DocumentInfoText));
-        QuickAiCommand.NotifyCanExecuteChanged();
-        if (!_suppressDirtyTracking)
-        {
-            InvalidateQuickEditGeneration();
         }
     }
 
-    private void OnDocumentBlockTextChanged(DocumentBlockViewModel block, string oldText, string newText)
+    private void OnEditorDocumentTextChanged(object? sender, EventArgs e)
     {
-        if (_suppressDocumentBlockChanges)
+        _documentCharacterCount = _editorBuffer.Length;
+        OnPropertyChanged(nameof(DocumentContent));
+        OnPropertyChanged(nameof(DocumentBodyText));
+        OnPropertyChanged(nameof(CharacterCountText));
+        OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
+        OnPropertyChanged(nameof(DocumentInfoText));
+        QuickAiCommand.NotifyCanExecuteChanged();
+
+        if (_suppressDirtyTracking || !IsEditMode)
+        {
+            RebuildDocumentBlocks(_editorBuffer.Text);
+        }
+
+        if (_suppressDirtyTracking)
         {
             return;
         }
 
-        _documentCharacterCount += newText.Length - oldText.Length;
-        _documentContentCacheValid = false;
-        OnPropertyChanged(nameof(CharacterCountText));
-        OnPropertyChanged(nameof(DocumentInfoText));
-        QuickAiCommand.NotifyCanExecuteChanged();
-        if (!_suppressDirtyTracking)
-        {
-            InvalidateQuickEditGeneration();
-            ClearQuickEditUndo();
-            MarkDocumentDirty();
-        }
-        if (newText.Length > RebalanceDocumentBlockSize)
-        {
-            RebalanceDocumentBlocks();
-        }
+        Interlocked.Increment(ref _documentEditRevision);
+        InvalidateQuickEditGeneration();
+        ClearQuickEditUndo();
     }
 
     private void MarkDocumentDirty()
@@ -1114,44 +1472,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         RefreshSummarySourceFreshness();
     }
 
-    private string AssembleDocumentContent()
-    {
-        if (_documentContentCacheValid)
-        {
-            return _documentContent;
-        }
-
-        if (DocumentBlocks.Count == 0)
-        {
-            _documentContent = string.Empty;
-            _documentContentCacheValid = true;
-            return _documentContent;
-        }
-
-        var builder = new StringBuilder(_documentCharacterCount);
-        foreach (var block in DocumentBlocks.OrderBy(block => block.Index))
-        {
-            builder.Append(block.Text);
-        }
-        _documentContent = builder.ToString();
-        _documentContentCacheValid = true;
-        return _documentContent;
-    }
-
-    private void RebalanceDocumentBlocks()
-    {
-        _suppressDocumentBlockChanges = true;
-        try
-        {
-            RebuildDocumentBlocks(AssembleDocumentContent());
-        }
-        finally
-        {
-            _suppressDocumentBlockChanges = false;
-        }
-        OnPropertyChanged(nameof(HasDocumentBlocks));
-        OnPropertyChanged(nameof(DocumentInfoText));
-    }
+    private string AssembleDocumentContent() => _editorBuffer.Text;
 
     private void RebuildDocumentBlocks(string content)
     {
@@ -1160,66 +1481,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         foreach (var block in SplitDocumentBlocks(content))
         {
             DocumentBlocks.Add(new DocumentBlockViewModel(
-                $"block-{++_nextDocumentBlockId}",
+                $"read-block-{index}",
                 index++,
-                block,
-                OnDocumentBlockTextChanged));
+                block));
         }
+        OnPropertyChanged(nameof(HasDocumentBlocks));
+        OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
         OnPropertyChanged(nameof(DocumentInfoText));
-    }
-
-    public EditorTextSelection SelectionForBlock(DocumentBlockViewModel block, int localStart, int localEnd, string selectedText)
-    {
-        var start = Math.Clamp(Math.Min(localStart, localEnd), 0, block.Text.Length);
-        var end = Math.Clamp(Math.Max(localStart, localEnd), 0, block.Text.Length);
-        var prefixLength = 0;
-        foreach (var item in DocumentBlocks.OrderBy(item => item.Index))
-        {
-            if (ReferenceEquals(item, block))
-            {
-                break;
-            }
-            prefixLength += item.Text.Length;
-        }
-        return new EditorTextSelection(prefixLength + start, prefixLength + end, selectedText);
-    }
-
-    /// <summary>
-    /// 将全局 UTF-16 半开区间映射到第一个相交的编辑块。跨块来源先定位并选中
-    /// 首个相交部分，保证虚拟化列表能够稳定滚动到来源起点。
-    /// </summary>
-    public bool TryResolveBlockSelection(
-        int globalStart,
-        int globalEnd,
-        out DocumentBlockViewModel? block,
-        out int localStart,
-        out int localEnd)
-    {
-        block = null;
-        localStart = 0;
-        localEnd = 0;
-        if (globalStart < 0 || globalEnd <= globalStart || globalEnd > _documentCharacterCount)
-        {
-            return false;
-        }
-
-        var blockStart = 0;
-        foreach (var candidate in DocumentBlocks.OrderBy(item => item.Index))
-        {
-            var blockEnd = blockStart + candidate.Text.Length;
-            var intersectionStart = Math.Max(globalStart, blockStart);
-            var intersectionEnd = Math.Min(globalEnd, blockEnd);
-            if (intersectionEnd > intersectionStart)
-            {
-                block = candidate;
-                localStart = intersectionStart - blockStart;
-                localEnd = intersectionEnd - blockStart;
-                return true;
-            }
-            blockStart = blockEnd;
-        }
-
-        return false;
     }
 
     private static IEnumerable<string> SplitDocumentBlocks(string content)
@@ -1261,59 +1529,85 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
     }
 
-    private async Task InitializeAsync()
+    private async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        await LoadWorksTreeAsync().ConfigureAwait(true);
+        await LoadWorksTreeAsync(cancellationToken).ConfigureAwait(true);
     }
 
-    private async Task LoadWorksTreeAsync()
+    private async Task LoadWorksTreeAsync(CancellationToken cancellationToken = default)
     {
+        var generation = Interlocked.Increment(ref _worksTreeLoadGeneration);
+        _worksTreeLoadCts?.Cancel();
+        _worksTreeLoadCts?.Dispose();
+        using var loadCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _worksTreeLoadCts = loadCts;
+        SetWorksTreeState(WorksTreeLoadState.Loading);
+
         if (!_backend.HasProjectRoot)
         {
-            WorksTreeNodes.Clear();
+            ReplaceWorksTree(Array.Empty<WorksTreeItemViewModel>(), new Dictionary<string, WorksTreeItemViewModel>(StringComparer.Ordinal));
+            SetCurrentWorksTreeNode(null);
+            SetSelectedWorksTreeNode(null, navigate: false);
             ClearSummaryState();
+            NotifyImportFormStateChanged();
             StatusText = string.Empty;
-            OnPropertyChanged(nameof(IsWorksTreeEmpty));
-            OnPropertyChanged(nameof(ShowNoDocumentEmpty));
-            OnPropertyChanged(nameof(ShowDocumentChrome));
-            OnPropertyChanged(nameof(EmptyIndexTitle));
-            OnPropertyChanged(nameof(EmptyIndexHint));
-            ExportCommand.NotifyCanExecuteChanged();
+            if (generation == _worksTreeLoadGeneration)
+            {
+                SetWorksTreeState(WorksTreeLoadState.Empty);
+            }
             return;
         }
 
         try
         {
-            var tree = await _backend.GetWorksTreeAsync().ConfigureAwait(true);
-            WorksTreeNodes.Clear();
-            foreach (var item in FlattenTree(tree))
+            var tree = await _backend.GetWorksTreeAsync(loadCts.Token).ConfigureAwait(true);
+            loadCts.Token.ThrowIfCancellationRequested();
+            if (generation != _worksTreeLoadGeneration)
             {
-                WorksTreeNodes.Add(item);
+                return;
             }
-            // 列表数量留给树本身；状态行不重复空文案（U72）
-            StatusText = WorksTreeNodes.Count == 0 ? string.Empty : string.Empty;
-        }
-        catch
-        {
-            WorksTreeNodes.Clear();
+
+            var nodesById = new Dictionary<string, WorksTreeItemViewModel>(StringComparer.Ordinal);
+            var root = BuildWorksTree(tree, parent: null, nodesById);
+            ReplaceWorksTree(new[] { root }, nodesById);
+            _worksTreeExpansionInitialized = true;
+            RestoreWorksTreeSelectionAndCurrentDocument();
+            NotifyImportFormStateChanged();
             StatusText = string.Empty;
+            SetWorksTreeState(WorksTreeRoots.Count == 0
+                ? WorksTreeLoadState.Empty
+                : WorksTreeLoadState.Content);
+        }
+        catch (OperationCanceledException) when (loadCts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (generation == _worksTreeLoadGeneration)
+            {
+                _worksTreeErrorText = UserFacingError.Format(ex, _displayNames);
+                OnPropertyChanged(nameof(WorksTreeErrorText));
+                StatusText = _worksTreeErrorText;
+                SetWorksTreeState(WorksTreeLoadState.Error);
+            }
         }
         finally
         {
-            OnPropertyChanged(nameof(IsWorksTreeEmpty));
-            OnPropertyChanged(nameof(ShowNoDocumentEmpty));
-            OnPropertyChanged(nameof(ShowDocumentChrome));
-            OnPropertyChanged(nameof(EmptyIndexTitle));
-            OnPropertyChanged(nameof(EmptyIndexHint));
-            ExportCommand.NotifyCanExecuteChanged();
+            if (generation == _worksTreeLoadGeneration)
+            {
+                _worksTreeLoadCts = null;
+                RetryWorksTreeCommand.NotifyCanExecuteChanged();
+            }
         }
     }
 
     private async Task LoadDocumentAsync(WorksTreeItemViewModel item)
     {
+        var nextDocumentId = ProjectRelativePath(item.Path);
+        long generation = 0;
+        CancellationTokenSource? loadCts = null;
         try
         {
-            var nextDocumentId = ProjectRelativePath(item.Path);
             if (string.Equals(nextDocumentId, _currentDocumentId, StringComparison.Ordinal)
                 && !string.IsNullOrWhiteSpace(_currentDocumentId))
             {
@@ -1333,10 +1627,25 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             ClearQuickEditUndo();
             ClearStickyEditorSelection?.Invoke();
 
+            generation = Interlocked.Increment(ref _documentLoadGeneration);
+            _documentLoadCts?.Cancel();
+            _documentLoadCts?.Dispose();
+            loadCts = new CancellationTokenSource();
+            _documentLoadCts = loadCts;
+            _documentLoadingTarget = item.Title;
+            OnPropertyChanged(nameof(DocumentLoadingTargetText));
+            IsDocumentLoading = true;
+            StatusText = DocumentLoadingText;
+
             _suppressDirtyTracking = true;
             try
             {
-                var document = await _backend.GetDocumentContentDetailsByPathAsync(item.Path).ConfigureAwait(true);
+                var document = await _backend.GetDocumentContentDetailsByPathAsync(item.Path, loadCts.Token).ConfigureAwait(true);
+                loadCts.Token.ThrowIfCancellationRequested();
+                if (generation != _documentLoadGeneration)
+                {
+                    return;
+                }
                 DocumentContent = document.Content;
                 _currentDocumentId = nextDocumentId;
                 _currentDocumentPath = document.Metadata.Path;
@@ -1349,6 +1658,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             {
                 _suppressDirtyTracking = false;
             }
+            if (generation != _documentLoadGeneration)
+            {
+                return;
+            }
             CaptureSnapshot();
             if (!string.IsNullOrWhiteSpace(item.ChapterId))
             {
@@ -1360,9 +1673,29 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             }
             StatusText = _displayNames.Text("ui.common.open");
         }
+        catch (OperationCanceledException) when (loadCts?.IsCancellationRequested == true
+                                                 || generation != 0 && generation != _documentLoadGeneration)
+        {
+        }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            if (generation == _documentLoadGeneration
+                && (string.Equals(nextDocumentId, _currentDocumentId, StringComparison.Ordinal)
+                    || string.IsNullOrWhiteSpace(_currentDocumentId)))
+            {
+                StatusText = UserFacingError.Format(ex, _displayNames);
+            }
+        }
+        finally
+        {
+            if (loadCts is not null && ReferenceEquals(_documentLoadCts, loadCts))
+            {
+                _documentLoadCts = null;
+                IsDocumentLoading = false;
+                _documentLoadingTarget = string.Empty;
+                OnPropertyChanged(nameof(DocumentLoadingTargetText));
+            }
+            loadCts?.Dispose();
         }
     }
 
@@ -1376,6 +1709,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
         try
         {
+            await EnsureImportProjectRootAsync().ConfigureAwait(true);
             var path = await PickImportSourceFile().ConfigureAwait(true);
             if (string.IsNullOrWhiteSpace(path))
             {
@@ -1384,7 +1718,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
             ImportSourcePath = path;
             // 从文件名推导 id/标题/目标/排序；已填字段不覆盖
-            var suggestion = WorksImportHelper.SuggestFromSourcePath(path, WorksTreeNodes.Count);
+            var suggestion = WorksImportHelper.SuggestFromSourcePath(path, CountWorksTreeChapters());
             var chapterId = ImportChapterId;
             var chapterTitle = ImportChapterTitle;
             var targetPath = ImportTargetPath;
@@ -1410,14 +1744,23 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     {
         try
         {
+            if (!CanImportChapter())
+            {
+                return;
+            }
+
+            var source = ImportSourceValidation.NormalizedPath;
+            var target = ImportTargetValidation.NormalizedPath;
             await _backend.ImportChapterAsync(new ChapterImportRequest(
-                ImportChapterId,
-                ImportChapterTitle,
-                long.TryParse(ImportOrder, out var order) ? order : 0,
-                ImportSourcePath,
-                ImportTargetPath)).ConfigureAwait(true);
+                ImportChapterId.Trim(),
+                ImportChapterTitle.Trim(),
+                decimal.ToInt64(ImportOrder!.Value),
+                source,
+                target,
+                AllowImportOverwrite)).ConfigureAwait(true);
             StatusText = _displayNames.Text("ui.common.import");
             IsImportPanelOpen = false;
+            AllowImportOverwrite = false;
             await LoadWorksTreeAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
@@ -1428,26 +1771,61 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private async Task SaveAsync()
     {
+        if (IsDocumentSaving)
+        {
+            return;
+        }
+
+        var saveDocumentId = _currentDocumentId;
+        var saveDocumentPath = _currentDocumentPath;
+        var saveVersion = _currentDocumentVersion;
+        var saveRevision = _documentEditRevision;
+        var saveContent = AssembleDocumentContent();
+        if (string.IsNullOrWhiteSpace(saveDocumentId))
+        {
+            StatusText = NoDocumentText;
+            return;
+        }
+
+        IsDocumentSaving = true;
+        StatusText = SavingText;
         try
         {
-            if (string.IsNullOrWhiteSpace(_currentDocumentId))
+            var report = await _backend.SaveDocumentContentAsync(
+                saveDocumentId,
+                saveContent,
+                saveVersion).ConfigureAwait(true);
+            var sameDocument = string.Equals(_currentDocumentId, saveDocumentId, StringComparison.Ordinal)
+                               && (string.IsNullOrWhiteSpace(saveDocumentPath)
+                                   || string.Equals(_currentDocumentPath, saveDocumentPath, StringComparison.Ordinal));
+            if (!sameDocument)
             {
-                StatusText = NoDocumentText;
                 return;
             }
-            var report = await _backend.SaveDocumentContentAsync(
-                _currentDocumentId,
-                AssembleDocumentContent(),
-                _currentDocumentVersion).ConfigureAwait(true);
+
             _currentDocumentPath = report.Metadata.Path;
             _currentDocumentVersion = report.Metadata.Version;
             OnPropertyChanged(nameof(DocumentInfoText));
-            CaptureSnapshot();
-            StatusText = _displayNames.Text("ui.common.save");
+            var unchangedSinceSave = saveRevision == _documentEditRevision
+                                     && string.Equals(AssembleDocumentContent(), saveContent, StringComparison.Ordinal);
+            if (unchangedSinceSave)
+            {
+                CaptureSnapshot();
+                StatusText = _displayNames.Text("ui.common.save");
+            }
+            else
+            {
+                StatusText = _displayNames.Text("ui.works.edited_during_save");
+                RefreshDirtyState();
+            }
         }
         catch (Exception ex)
         {
             StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+        finally
+        {
+            IsDocumentSaving = false;
         }
     }
 
@@ -1554,24 +1932,20 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
             var result = await _backend.ProjectAiChatAsync(
                 instruction,
-                _projectAiHistory,
-                workflowIdToRun: null).ConfigureAwait(true);
+                workflowIdToRun: null,
+                conversationId: ProjectAiConversationId,
+                conversationRevision: _projectAiConversationRevision).ConfigureAwait(true);
             ProjectAiAnswer = result.Answer;
-            _projectAiHistory.Clear();
-            ProjectAiBubbles.Clear();
-            foreach (var message in result.ChatHistory)
-            {
-                _projectAiHistory.Add(message);
-                ProjectAiBubbles.Add(new ChatBubbleViewModel(message.Role, message.Content));
-            }
-            if (ProjectAiBubbles.Count == 0 && !string.IsNullOrWhiteSpace(result.Answer))
-            {
-                ProjectAiBubbles.Add(new ChatBubbleViewModel("assistant", result.Answer));
-            }
+            _projectAiConversationRevision = ProjectAiConversationUi.Apply(
+                result,
+                _projectAiHistory,
+                ProjectAiBubbles,
+                _projectAiConversationRevision);
             OnPropertyChanged(nameof(HasProjectAiBubbles));
             ProjectAiMessage = string.Empty;
-            StatusText = noSelectionHint
-                         ?? _displayNames.Text("ui.common.configured");
+            StatusText = ProjectAiConversationUi.ContextWasCompacted(result)
+                ? _displayNames.Text("ui.project_ai.context_compacted")
+                : noSelectionHint ?? _displayNames.Text("ui.common.configured");
         }
         catch (Exception ex)
         {
@@ -1710,7 +2084,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         OnPropertyChanged(nameof(HasCurrentDocument));
         OnPropertyChanged(nameof(ShowDocumentChrome));
         OnPropertyChanged(nameof(ShowNoDocumentEmpty));
+        OnPropertyChanged(nameof(DocumentSaveStateText));
         SaveCommand.NotifyCanExecuteChanged();
+        OpenQuickEditCommand.NotifyCanExecuteChanged();
         InsertOutlineCommand.NotifyCanExecuteChanged();
         QuickAiCommand.NotifyCanExecuteChanged();
     }
@@ -1738,10 +2114,45 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         IsRightPanelOpen = true;
         IsNavTreeTab = true;
         IsImportPanelOpen = true;
-        // 打开时若排序仍是默认 0，用树条目数作下一序号（浏览文件时也会再填）
-        if (string.IsNullOrWhiteSpace(ImportOrder) || ImportOrder.Trim() == "0")
+        _ = EnsureImportProjectRootAsync();
+        // 打开时若排序仍是默认 0，用章节数量作下一序号。
+        if (ImportOrder is null or 0)
         {
-            ImportOrder = Math.Max(0, WorksTreeNodes.Count).ToString();
+            ImportOrder = Math.Max(0, CountWorksTreeChapters());
+        }
+    }
+
+    private void ToggleImportPanel()
+    {
+        if (IsImportPanelOpen)
+        {
+            IsImportPanelOpen = false;
+            return;
+        }
+
+        OpenImportPanel();
+    }
+
+    private async Task EnsureImportProjectRootAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(_importProjectRoot) || !_backend.HasProjectRoot)
+        {
+            return;
+        }
+
+        try
+        {
+            var project = await _backend.GetCurrentProjectAsync().ConfigureAwait(true);
+            if (project is not null
+                && !string.Equals(_importProjectRoot, project.ProjectRoot, StringComparison.Ordinal))
+            {
+                _importProjectRoot = project.ProjectRoot;
+                NotifyImportFormStateChanged();
+            }
+        }
+        catch
+        {
+            // 相对路径仍可由后端安全处理；绝对路径保持字段错误，不吞掉为可提交状态。
         }
     }
 
@@ -2013,17 +2424,26 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
     }
 
-    public async Task ReloadProjectDataAsync()
+    public async Task ReloadProjectDataAsync(CancellationToken cancellationToken = default)
     {
         InvalidateQuickEditGeneration();
         ClearQuickEditUndo();
+        Interlocked.Increment(ref _documentLoadGeneration);
+        _documentLoadCts?.Cancel();
+        _documentLoadCts?.Dispose();
+        _documentLoadCts = null;
+        IsDocumentLoading = false;
+        _documentLoadingTarget = string.Empty;
+        OnPropertyChanged(nameof(DocumentLoadingTargetText));
+        var documentGeneration = _documentLoadGeneration;
         var summaryChapterId = _currentSummaryChapterId;
         Interlocked.Increment(ref _summaryLoadGeneration);
         _summaryLoadCts?.Cancel();
         _summaryLoadCts?.Dispose();
         _summaryLoadCts = null;
         IsSummaryLoading = false;
-        await LoadWorksTreeAsync().ConfigureAwait(true);
+        await LoadWorksTreeAsync(cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(_currentDocumentId))
         {
             ClearSummaryState();
@@ -2033,22 +2453,34 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         try
         {
             _suppressDirtyTracking = true;
-            var document = await _backend.GetDocumentContentDetailsAsync(_currentDocumentId).ConfigureAwait(true);
+            var document = await _backend.GetDocumentContentDetailsAsync(_currentDocumentId, cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (documentGeneration != _documentLoadGeneration)
+            {
+                return;
+            }
             DocumentContent = document.Content;
             _currentDocumentPath = document.Metadata.Path;
             _currentDocumentVersion = document.Metadata.Version;
             DocumentTitle = Path.GetFileNameWithoutExtension(document.Metadata.Path);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
-            ClearStickyEditorSelection?.Invoke();
-            _currentDocumentId = string.Empty;
-            _currentDocumentPath = string.Empty;
-            _currentDocumentVersion = null;
-            DocumentContent = string.Empty;
-            DocumentTitle = NoDocumentText;
-            ClearSummaryState();
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            if (documentGeneration == _documentLoadGeneration)
+            {
+                ClearStickyEditorSelection?.Invoke();
+                _currentDocumentId = string.Empty;
+                _currentDocumentPath = string.Empty;
+                _currentDocumentVersion = null;
+                DocumentContent = string.Empty;
+                DocumentTitle = NoDocumentText;
+                ClearSummaryState();
+                StatusText = UserFacingError.Format(ex, _displayNames);
+            }
         }
         finally
         {
@@ -2060,8 +2492,37 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             && !string.IsNullOrWhiteSpace(summaryChapterId)
             && HasCurrentDocument)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             await LoadChapterSummaryAsync(summaryChapterId).ConfigureAwait(true);
         }
+    }
+
+    public void DeactivateProjectData()
+    {
+        InvalidateQuickEditGeneration();
+        Interlocked.Increment(ref _worksTreeLoadGeneration);
+        _worksTreeLoadCts?.Cancel();
+        _worksTreeLoadCts?.Dispose();
+        _worksTreeLoadCts = null;
+        Interlocked.Increment(ref _documentLoadGeneration);
+        _documentLoadCts?.Cancel();
+        _documentLoadCts?.Dispose();
+        _documentLoadCts = null;
+        IsDocumentLoading = false;
+        _documentLoadingTarget = string.Empty;
+        OnPropertyChanged(nameof(DocumentLoadingTargetText));
+        _summaryLoadCts?.Cancel();
+        _summaryLoadCts?.Dispose();
+        _summaryLoadCts = null;
+        Interlocked.Increment(ref _summaryLoadGeneration);
+        _expandedWorksTreeNodeIds.Clear();
+        _worksTreeExpansionInitialized = false;
+        WorksTreeSearchText = string.Empty;
+        SetSelectedWorksTreeNode(null, navigate: false);
+        SetCurrentWorksTreeNode(null);
+        _importProjectRoot = string.Empty;
+        AllowImportOverwrite = false;
+        NotifyImportFormStateChanged();
     }
 
     private void CaptureSnapshot()
@@ -2116,16 +2577,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
     }
 
-    private IEnumerable<WorksTreeItemViewModel> FlattenTree(WorksTreeNode root)
+    private WorksTreeItemViewModel BuildWorksTree(
+        WorksTreeNode node,
+        WorksTreeItemViewModel? parent,
+        Dictionary<string, WorksTreeItemViewModel> nodesById)
     {
-        foreach (var item in FlattenTree(root, 0))
+        if (string.IsNullOrWhiteSpace(node.NodeId))
         {
-            yield return item;
+            throw new InvalidDataException("works tree node id must not be empty");
         }
-    }
 
-    private IEnumerable<WorksTreeItemViewModel> FlattenTree(WorksTreeNode node, int depth)
-    {
         var title = node.Title.StartsWith("ui.", StringComparison.Ordinal)
             ? _displayNames.Text(node.Title)
             : node.Title;
@@ -2136,47 +2597,180 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 "ui.works.stage_title",
                 new Dictionary<string, string> { ["title"] = title });
         }
-        yield return new WorksTreeItemViewModel(
+
+        var kindLabel = WorksTreeKindLabel(node.Kind);
+        var accessibleName = _displayNames.Format(
+            "ui.works.tree_node_accessible",
+            new Dictionary<string, string>
+            {
+                ["kind"] = kindLabel,
+                ["title"] = title,
+            });
+        var isExpanded = node.Children.Count > 0
+                         && (!_worksTreeExpansionInitialized
+                             || _expandedWorksTreeNodeIds.Contains(node.NodeId));
+        WorksTreeItemViewModel? item = null;
+        item = new WorksTreeItemViewModel(
             node.NodeId,
             title,
             node.Path,
-            new string(' ', Math.Max(0, depth) * 2),
-            () => _ = LoadDocumentAsync(
-                node.Path,
-                title,
-                node.Kind,
-                node.ChapterId,
-                node.StageId),
+            () => ActivateWorksTreeNode(item!),
             node.Kind,
             node.ChapterId,
             node.StageId,
-            !string.IsNullOrWhiteSpace(node.Path));
+            !string.IsNullOrWhiteSpace(node.Path),
+            parent,
+            kindLabel,
+            accessibleName,
+            isExpanded,
+            OnWorksTreeExpansionChanged);
+        if (!nodesById.TryAdd(item.NodeId, item))
+        {
+            throw new InvalidDataException($"duplicate works tree node id: {item.NodeId}");
+        }
+        if (isExpanded)
+        {
+            _expandedWorksTreeNodeIds.Add(item.NodeId);
+        }
+
         foreach (var child in node.Children)
         {
-            foreach (var item in FlattenTree(child, depth + 1))
+            item.Children.Add(BuildWorksTree(child, item, nodesById));
+        }
+        item.ResetVisibleChildren();
+        return item;
+    }
+
+    private string WorksTreeKindLabel(string kind) => kind switch
+    {
+        "global_outline" or "root" => _displayNames.Text("ui.works.tree_kind.global_outline"),
+        "stage_outline" => _displayNames.Text("ui.works.tree_kind.stage_outline"),
+        "chapter" or "document" => _displayNames.Text("ui.works.tree_kind.chapter"),
+        _ => _displayNames.Text("ui.common.unknown"),
+    };
+
+    private void ReplaceWorksTree(
+        IReadOnlyList<WorksTreeItemViewModel> roots,
+        Dictionary<string, WorksTreeItemViewModel> nodesById)
+    {
+        var selectedNodeId = SelectedWorksTreeNode?.NodeId;
+        WorksTreeRoots.Clear();
+        foreach (var root in roots)
+        {
+            WorksTreeRoots.Add(root);
+        }
+        ApplyWorksTreeSearch();
+        SetSelectedWorksTreeNode(
+            selectedNodeId is not null && nodesById.TryGetValue(selectedNodeId, out var selected)
+                ? selected
+                : null,
+            navigate: false);
+        ExportCommand.NotifyCanExecuteChanged();
+    }
+
+    private void ApplyWorksTreeSearch()
+    {
+        var query = WorksTreeSearchText.Trim();
+        VisibleWorksTreeRoots.Clear();
+        foreach (var root in WorksTreeRoots)
+        {
+            if (root.ApplyTitleFilter(query))
             {
-                yield return item;
+                VisibleWorksTreeRoots.Add(root);
+            }
+        }
+        OnPropertyChanged(nameof(IsWorksTreeSearchActive));
+        OnPropertyChanged(nameof(ShowWorksTreeSearchEmpty));
+    }
+
+    private IEnumerable<WorksTreeItemViewModel> EnumerateWorksTreeNodes()
+    {
+        foreach (var root in WorksTreeRoots)
+        {
+            foreach (var node in root.EnumerateSubtree())
+            {
+                yield return node;
             }
         }
     }
 
-    private Task LoadDocumentAsync(
-        string path,
-        string title,
-        string kind,
-        string? chapterId,
-        string? stageId)
+    private int CountWorksTreeChapters() => EnumerateWorksTreeNodes().Count(node => node.IsChapter);
+
+    private void OnWorksTreeExpansionChanged(WorksTreeItemViewModel item, bool isExpanded)
     {
-        return LoadDocumentAsync(new WorksTreeItemViewModel(
-            string.Empty,
-            title,
-            path,
-            string.Empty,
-            () => { },
-            kind,
-            chapterId,
-            stageId,
-            true));
+        if (isExpanded)
+        {
+            _expandedWorksTreeNodeIds.Add(item.NodeId);
+        }
+        else
+        {
+            _expandedWorksTreeNodeIds.Remove(item.NodeId);
+        }
+    }
+
+    private void ActivateWorksTreeNode(WorksTreeItemViewModel item)
+    {
+        SetSelectedWorksTreeNode(item, navigate: false);
+        if (item.CanOpen)
+        {
+            _ = LoadDocumentAsync(item);
+        }
+    }
+
+    private void SetSelectedWorksTreeNode(WorksTreeItemViewModel? item, bool navigate)
+    {
+        _suppressWorksTreeSelectionNavigation = !navigate;
+        try
+        {
+            SelectedWorksTreeNode = item;
+        }
+        finally
+        {
+            _suppressWorksTreeSelectionNavigation = false;
+        }
+    }
+
+    private void SetCurrentWorksTreeNode(WorksTreeItemViewModel? item)
+    {
+        if (ReferenceEquals(_currentWorksTreeNode, item))
+        {
+            return;
+        }
+        if (_currentWorksTreeNode is not null)
+        {
+            _currentWorksTreeNode.IsCurrentDocument = false;
+        }
+        _currentWorksTreeNode = item;
+        if (_currentWorksTreeNode is not null)
+        {
+            _currentWorksTreeNode.IsCurrentDocument = true;
+        }
+    }
+
+    private void RefreshCurrentWorksTreeNode()
+    {
+        if (string.IsNullOrWhiteSpace(_currentDocumentId))
+        {
+            SetCurrentWorksTreeNode(null);
+            return;
+        }
+
+        var current = EnumerateWorksTreeNodes().FirstOrDefault(item =>
+            item.CanOpen
+            && string.Equals(
+                ProjectRelativePath(item.Path),
+                _currentDocumentId,
+                StringComparison.Ordinal));
+        SetCurrentWorksTreeNode(current);
+        if (SelectedWorksTreeNode is null && current is not null)
+        {
+            SetSelectedWorksTreeNode(current, navigate: false);
+        }
+    }
+
+    private void RestoreWorksTreeSelectionAndCurrentDocument()
+    {
+        RefreshCurrentWorksTreeNode();
     }
 
     private static string ProjectRelativePath(string path) =>
@@ -2188,80 +2782,201 @@ public sealed record ExportFormatOption(string Value, string Label);
 
 public sealed record EditorTextSelection(int Start, int End, string Text);
 
-public sealed class DocumentBlockViewModel : ViewModelBase
+/// <summary>只读模式的虚拟化投影；不再承担编辑、选区或光标状态。</summary>
+public sealed class DocumentBlockViewModel
 {
-    private readonly Action<DocumentBlockViewModel, string, string> _textChanged;
-    private string _text;
-
     public DocumentBlockViewModel(
         string id,
         int index,
-        string text,
-        Action<DocumentBlockViewModel, string, string> textChanged)
+        string text)
     {
         Id = id;
         Index = index;
-        _text = text;
-        _textChanged = textChanged;
+        Text = text;
     }
 
     public string Id { get; }
     public int Index { get; }
-
-    public string Text
-    {
-        get => _text;
-        set
-        {
-            if (value == _text)
-            {
-                return;
-            }
-            var oldText = _text;
-            if (SetProperty(ref _text, value))
-            {
-                _textChanged(this, oldText, value);
-            }
-        }
-    }
+    public string Text { get; }
 }
 
-public sealed class WorksTreeItemViewModel
+public sealed class WorksTreeItemViewModel : ViewModelBase
 {
+    private readonly Action<WorksTreeItemViewModel, bool>? _expansionChanged;
+    private bool _isExpanded;
+    private bool? _expandedBeforeSearch;
+    private bool _isCurrentDocument;
+
     public WorksTreeItemViewModel(
         string nodeId,
         string title,
         string path,
-        string indent,
         Action open,
         string kind = "",
         string? chapterId = null,
         string? stageId = null,
-        bool canOpen = true)
+        bool canOpen = true,
+        WorksTreeItemViewModel? parent = null,
+        string kindLabel = "",
+        string accessibleName = "",
+        bool isExpanded = false,
+        Action<WorksTreeItemViewModel, bool>? expansionChanged = null)
     {
         NodeId = nodeId;
         Title = title;
         Path = path;
-        Indent = indent;
         Kind = kind;
         ChapterId = chapterId;
         StageId = stageId;
         CanOpen = canOpen;
+        Parent = parent;
+        KindLabel = kindLabel;
+        AccessibleName = accessibleName;
+        _isExpanded = isExpanded;
+        _expansionChanged = expansionChanged;
+        Children = new ObservableCollection<WorksTreeItemViewModel>();
+        VisibleChildren = new ObservableCollection<WorksTreeItemViewModel>();
         OpenCommand = new RelayCommand(open, () => CanOpen);
     }
 
     public string NodeId { get; }
     public string Title { get; }
     public string Path { get; }
-    public string Indent { get; }
     public string Kind { get; }
     public string? ChapterId { get; }
     public string? StageId { get; }
     public bool CanOpen { get; }
+    public WorksTreeItemViewModel? Parent { get; }
+    public string KindLabel { get; }
+    public string AccessibleName { get; }
+    public ObservableCollection<WorksTreeItemViewModel> Children { get; }
+    public ObservableCollection<WorksTreeItemViewModel> VisibleChildren { get; }
+    public bool HasChildren => Children.Count > 0;
+    public bool IsGlobalOutline => Kind is "global_outline" or "root";
+    public bool IsStageOutline => Kind == "stage_outline";
+    public bool IsChapter => Kind is "chapter" or "document";
     public bool HasPath => !string.IsNullOrWhiteSpace(Path);
-    public string DisplayTitle => $"{Indent}{Title}";
     public string DisplayPath => Path.Replace('\\', '/');
     public RelayCommand OpenCommand { get; }
+
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set
+        {
+            if (SetProperty(ref _isExpanded, value) && _expandedBeforeSearch is null)
+            {
+                _expansionChanged?.Invoke(this, value);
+            }
+        }
+    }
+
+    public bool IsCurrentDocument
+    {
+        get => _isCurrentDocument;
+        internal set => SetProperty(ref _isCurrentDocument, value);
+    }
+
+    public IEnumerable<WorksTreeItemViewModel> EnumerateSubtree()
+    {
+        yield return this;
+        foreach (var child in Children)
+        {
+            foreach (var descendant in child.EnumerateSubtree())
+            {
+                yield return descendant;
+            }
+        }
+    }
+
+    public void ResetVisibleChildren()
+    {
+        ReplaceVisibleChildren(Children);
+        foreach (var child in Children)
+        {
+            child.ResetVisibleChildren();
+        }
+    }
+
+    public bool ApplyTitleFilter(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            RestoreExpansionAfterSearch();
+            ResetVisibleChildren();
+            return true;
+        }
+
+        BeginSearch();
+        if (Title.Contains(query, StringComparison.CurrentCultureIgnoreCase))
+        {
+            foreach (var child in Children)
+            {
+                child.ShowFullSubtreeForSearch();
+            }
+            ReplaceVisibleChildren(Children);
+            SetExpandedForSearch(Children.Count > 0 || IsExpanded);
+            return true;
+        }
+
+        var matchingChildren = new List<WorksTreeItemViewModel>();
+        foreach (var child in Children)
+        {
+            if (child.ApplyTitleFilter(query))
+            {
+                matchingChildren.Add(child);
+            }
+        }
+        ReplaceVisibleChildren(matchingChildren);
+        if (matchingChildren.Count > 0)
+        {
+            SetExpandedForSearch(true);
+            return true;
+        }
+        return false;
+    }
+
+    private void ShowFullSubtreeForSearch()
+    {
+        BeginSearch();
+        ReplaceVisibleChildren(Children);
+        foreach (var child in Children)
+        {
+            child.ShowFullSubtreeForSearch();
+        }
+    }
+
+    private void BeginSearch()
+    {
+        _expandedBeforeSearch ??= _isExpanded;
+    }
+
+    private void RestoreExpansionAfterSearch()
+    {
+        if (_expandedBeforeSearch is { } expanded)
+        {
+            _expandedBeforeSearch = null;
+            SetProperty(ref _isExpanded, expanded, nameof(IsExpanded));
+        }
+        foreach (var child in Children)
+        {
+            child.RestoreExpansionAfterSearch();
+        }
+    }
+
+    private void SetExpandedForSearch(bool value)
+    {
+        SetProperty(ref _isExpanded, value, nameof(IsExpanded));
+    }
+
+    private void ReplaceVisibleChildren(IEnumerable<WorksTreeItemViewModel> children)
+    {
+        VisibleChildren.Clear();
+        foreach (var child in children)
+        {
+            VisibleChildren.Add(child);
+        }
+    }
 }
 
 public sealed class WorksSummarySegmentItemViewModel : ViewModelBase

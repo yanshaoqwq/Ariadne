@@ -80,8 +80,12 @@
     "describe": "Outliner 查询本地创作知识。"
   },
   "tool.outliner_search": {
-    "prompt": "调用外部 SearchProvider，为全局规划补充必要现实考据。搜索结果只返回给 agent，不自动写入知识库。",
-    "describe": "Outliner 外部考据搜索。"
+    "prompt": "检索当前项目的正文、规划与已确认知识，为全局规划补充可追溯的项目事实。结果只返回给 agent，不自动写入知识库。",
+    "describe": "Outliner 项目检索。"
+  },
+  "tool.outliner_web_search": {
+    "prompt": "搜索公开互联网，为全局规划考据现实资料。结果只返回给 agent，不自动写入项目知识库。",
+    "describe": "Outliner Web 搜索。"
   },
   "tool.outliner_insert_lines": {
     "prompt": "按 1-based 行号在全局总纲文件指定行后插入文本，系统会转换为 UTF-8 byte-range patch。",
@@ -104,8 +108,12 @@
     "describe": "Designer 查询本地创作知识。"
   },
   "tool.designer_search": {
-    "prompt": "调用外部 SearchProvider，为阶段设计补充必要现实考据。搜索结果只返回给 agent，不自动写入知识库。",
-    "describe": "Designer 外部考据搜索。"
+    "prompt": "检索当前项目的正文、规划与已确认知识，为阶段设计补充可追溯的项目事实。结果只返回给 agent，不自动写入知识库。",
+    "describe": "Designer 项目检索。"
+  },
+  "tool.designer_web_search": {
+    "prompt": "搜索公开互联网，为阶段设计考据现实资料。结果只返回给 agent，不自动写入项目知识库。",
+    "describe": "Designer Web 搜索。"
   },
   "tool.designer_insert_lines": {
     "prompt": "按 1-based 行号在当前阶段总纲文件指定行后插入文本，系统会转换为 UTF-8 byte-range patch。",
@@ -128,8 +136,12 @@
     "describe": "Planner 查询人物、关系、事件、故事段、伏笔和总结。"
   },
   "tool.planner_search": {
-    "prompt": "调用外部 SearchProvider 进行考据。搜索结果只返回给 agent，不自动写入知识库。",
-    "describe": "Planner 联网或外部资料考据。"
+    "prompt": "检索当前项目的正文、规划与已确认知识。搜索结果只返回给 agent，不自动写入知识库。",
+    "describe": "Planner 项目检索。"
+  },
+  "tool.planner_web_search": {
+    "prompt": "搜索公开互联网，为章节规划考据现实资料。结果只返回给 agent，不自动写入项目知识库。",
+    "describe": "Planner Web 搜索。"
   },
   "tool.planner_insert_lines": {
     "prompt": "按 1-based 行号在当前章节大纲文件指定行后插入文本，系统会转换为 UTF-8 byte-range patch。",
@@ -148,16 +160,24 @@
     "describe": "Detail 查询本地创作知识。"
   },
   "tool.detail_search": {
-    "prompt": "调用外部 SearchProvider，为环境、心理或设定细节生成补充考据资料。",
-    "describe": "Detail 外部考据搜索。"
+    "prompt": "检索当前项目的正文、规划与已确认知识，为环境、心理或设定细节生成补充上下文。",
+    "describe": "Detail 项目检索。"
+  },
+  "tool.detail_web_search": {
+    "prompt": "搜索公开互联网，为环境、心理或设定细节补充现实资料。",
+    "describe": "Detail Web 搜索。"
   },
   "tool.writer_find": {
     "prompt": "查询本地创作知识库，为当前正文写作补充已有设定、前文正文片段、章节总结或伏笔状态。Writer 只能查询，不能注册新设定。",
     "describe": "Writer 查询本地创作知识，用于保持正文连续性和设定一致性。"
   },
   "tool.writer_search": {
-    "prompt": "当你需要知道这一处现实中的情况时调用外部 SearchProvider 考据。结果只用于当前写作判断，不允许自动注册到知识库。",
-    "describe": "Writer 现实细节考据搜索，用于需要确认现实情况的写作位置。"
+    "prompt": "当你需要核对前文、规划或已确认设定时检索当前项目。结果只用于当前写作判断，不允许自动注册到知识库。",
+    "describe": "Writer 项目检索，用于保持正文连续性和设定一致性。"
+  },
+  "tool.writer_web_search": {
+    "prompt": "当你需要核对当前写作位置涉及的现实情况时搜索公开互联网。结果只用于当前写作判断，不自动注册到知识库。",
+    "describe": "Writer Web 搜索。"
   },
   "tool.writer_insert_lines": {
     "prompt": "按 1-based 行号在正文指定行后插入文本，系统会转换为 UTF-8 byte-range patch。",
@@ -172,24 +192,36 @@
     "describe": "Critic 查询本地创作知识。"
   },
   "tool.critic_search": {
-    "prompt": "调用外部 SearchProvider，为审稿意见中的现实细节判断补充考据。搜索结果只用于当前评价，不自动写入知识库。",
-    "describe": "Critic 外部考据搜索。"
+    "prompt": "检索当前项目的正文、规划与已确认知识，为审稿意见补充依据。搜索结果只用于当前评价，不自动写入知识库。",
+    "describe": "Critic 项目检索。"
+  },
+  "tool.critic_web_search": {
+    "prompt": "搜索公开互联网，为合理性与事实性审稿提供外部依据。结果不自动写入知识库。",
+    "describe": "Critic Web 搜索。"
   },
   "tool.prudent_find": {
     "prompt": "查询本地创作知识库，用于判断一个或多个意见者的意见是否符合设定、前文和规划。",
     "describe": "Prudent 查询本地创作知识。"
   },
   "tool.prudent_search": {
-    "prompt": "调用外部 SearchProvider，为审慎判断中的现实细节补充考据。搜索结果只用于当前判断，不自动写入知识库。",
-    "describe": "Prudent 外部考据搜索。"
+    "prompt": "检索当前项目的正文、规划与已确认知识，为审慎判断补充依据。搜索结果只用于当前判断，不自动写入知识库。",
+    "describe": "Prudent 项目检索。"
+  },
+  "tool.prudent_web_search": {
+    "prompt": "搜索公开互联网，复核意见者引用的现实事实。结果不自动写入知识库。",
+    "describe": "Prudent Web 搜索。"
   },
   "tool.polisher_find": {
     "prompt": "查询本地创作知识库，用于返修正文时核对人物、关系、事件、伏笔、章节总结和前文片段。Polisher 只能查询，不能注册新设定。",
     "describe": "Polisher 查询本地创作知识，用于有限返修。"
   },
   "tool.polisher_search": {
-    "prompt": "调用外部 SearchProvider，为返修意见中的现实细节补充考据。结果只用于当前返修判断，不允许自动注册到知识库。",
-    "describe": "Polisher 外部考据搜索。"
+    "prompt": "检索当前项目的前文、规划与已确认知识，为返修判断补充上下文。结果只用于当前返修判断，不允许自动注册到知识库。",
+    "describe": "Polisher 项目检索。"
+  },
+  "tool.polisher_web_search": {
+    "prompt": "搜索公开互联网，为有限返修核对现实资料。结果不自动写入知识库。",
+    "describe": "Polisher Web 搜索。"
   },
   "tool.polisher_insert_lines": {
     "prompt": "按 1-based 行号在当前章节正文指定行后插入返修文本，系统会转换为 UTF-8 byte-range patch。",
@@ -198,6 +230,14 @@
   "tool.polisher_replace_lines": {
     "prompt": "按 1-based 闭区间行号替换当前章节正文文本，系统会转换为 UTF-8 byte-range patch。",
     "describe": "Polisher 按行号替换正文。"
+  },
+  "tool.summarizer_search": {
+    "prompt": "检索当前项目的正文与已确认知识，为故事段、事件、章节和阶段总结补充跨章节上下文。结果只用于当前总结，不自动修改知识库。",
+    "describe": "Summarizer 项目检索。"
+  },
+  "tool.summarizer_web_search": {
+    "prompt": "搜索公开互联网，为总结中涉及的现实事实提供外部核对。结果不自动写入知识库。",
+    "describe": "Summarizer Web 搜索。"
   },
   "auto_audit.planning_output": {
     "prompt": "审计 Outliner、Designer 或 Planner 的纲领输出是否符合当前规划目标、人物安排、主题表达和长期一致性。返回是否通过以及理由。",

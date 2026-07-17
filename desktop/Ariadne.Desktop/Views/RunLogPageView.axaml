@@ -2,83 +2,238 @@
     x:Class="Ariadne.Desktop.Views.RunLogPageView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:backend="clr-namespace:Ariadne.Desktop.Backend"
     xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:RunLogPageViewModel">
-  <Grid RowDefinitions="52,*" Background="{DynamicResource Ariadne.BackgroundMain}">
+  <Grid RowDefinitions="Auto,*" Background="{DynamicResource Ariadne.BackgroundMain}">
 
-    <!-- 顶栏：标题 + 搜索 + 级别筛选 + 刷新 -->
-    <Grid
-        Grid.Row="0"
-        ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto"
-        Background="{DynamicResource Ariadne.BackgroundSurface}"
-        Margin="0"
-        VerticalAlignment="Stretch">
-      <Border Grid.ColumnSpan="6" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" />
-      <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="subtitle" VerticalAlignment="Center" Margin="18,0,0,0" />
-      <TextBox Grid.Column="1" Text="{Binding SearchQuery, Mode=TwoWay}" PlaceholderText="{Binding SearchPlaceholder}" MaxWidth="320" HorizontalAlignment="Left" Margin="18,0,8,0" VerticalAlignment="Center" KeyDown="OnSearchKeyDown" />
-      <ComboBox Grid.Column="2"
-                ItemsSource="{Binding LevelOptions}"
-                SelectedValue="{Binding SelectedLevel, Mode=TwoWay}"
-                SelectedValueBinding="{Binding Value}"
-                MinWidth="110"
-                VerticalAlignment="Center"
-                Margin="0,0,8,0">
-        <ComboBox.ItemTemplate>
-          <DataTemplate DataType="{x:Type vm:RunLogLevelOption}">
-            <TextBlock Text="{Binding Label}" />
-          </DataTemplate>
-        </ComboBox.ItemTemplate>
-      </ComboBox>
-      <Button Grid.Column="3" Classes="primary" Width="36" Height="32" Padding="0" Command="{Binding SearchCommand}" VerticalAlignment="Center" Margin="0,0,8,0" ToolTip.Tip="{Binding SearchText}" AutomationProperties.Name="{Binding SearchText}">
-        <Path Classes="icon" Width="15" Height="15"
-              Stroke="{DynamicResource Ariadne.TextOnAccent}"
-              Data="{StaticResource Ariadne.Icon.Search}" />
-      </Button>
-      <Button Grid.Column="4" Classes="secondary" Content="{Binding MarkReadText}" Command="{Binding MarkReadCommand}" VerticalAlignment="Center" Margin="0,0,8,0" />
-      <Button Grid.Column="5" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshCommand}" VerticalAlignment="Center" Margin="0,0,18,0" />
-    </Grid>
+    <Border Grid.Row="0"
+            Background="{DynamicResource Ariadne.BackgroundSurface}"
+            BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+            BorderThickness="0,0,0,1"
+            Padding="18,10">
+      <StackPanel Spacing="8">
+        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+          <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="subtitle" VerticalAlignment="Center" />
+          <TextBox Grid.Column="1"
+                   Text="{Binding SearchQuery, Mode=TwoWay}"
+                   PlaceholderText="{Binding SearchPlaceholder}"
+                   AutomationProperties.Name="{Binding SearchPlaceholder}"
+                   MaxWidth="360"
+                   HorizontalAlignment="Left"
+                   VerticalAlignment="Center"
+                   KeyDown="OnSearchKeyDown" />
+          <ComboBox Grid.Column="2"
+                    ItemsSource="{Binding LevelOptions}"
+                    SelectedValue="{Binding SelectedLevel, Mode=TwoWay}"
+                    SelectedValueBinding="{Binding Value}"
+                    MinWidth="118"
+                    AutomationProperties.Name="{Binding AllLevelsText}">
+            <ComboBox.ItemTemplate>
+              <DataTemplate DataType="{x:Type vm:RunLogLevelOption}">
+                <TextBlock Text="{Binding Label}" />
+              </DataTemplate>
+            </ComboBox.ItemTemplate>
+          </ComboBox>
+          <ComboBox Grid.Column="3"
+                    ItemsSource="{Binding KindOptions}"
+                    SelectedValue="{Binding SelectedKind, Mode=TwoWay}"
+                    SelectedValueBinding="{Binding Value}"
+                    MinWidth="118"
+                    AutomationProperties.Name="{Binding KindFilterText}">
+            <ComboBox.ItemTemplate>
+              <DataTemplate DataType="{x:Type vm:RunLogKindOption}">
+                <TextBlock Text="{Binding Label}" />
+              </DataTemplate>
+            </ComboBox.ItemTemplate>
+          </ComboBox>
+          <Button Grid.Column="4"
+                  Classes="primary"
+                  Width="36"
+                  Height="32"
+                  Padding="0"
+                  Command="{Binding SearchCommand}"
+                  ToolTip.Tip="{Binding SearchText}"
+                  AutomationProperties.Name="{Binding SearchText}">
+            <Path Classes="icon"
+                  Width="15"
+                  Height="15"
+                  Stroke="{DynamicResource Ariadne.TextOnAccent}"
+                  Data="{StaticResource Ariadne.Icon.Search}" />
+          </Button>
+          <Button Grid.Column="5"
+                  Classes="secondary"
+                  Content="{Binding RefreshText}"
+                  Command="{Binding RefreshCommand}" />
+        </Grid>
 
-    <ScrollViewer Grid.Row="1">
-      <StackPanel Margin="20,16" Spacing="10">
-        <!-- Loading / Error / Empty / Content 互斥（U72） -->
-        <TextBlock Text="{Binding LoadingText}" Classes="caption" IsVisible="{Binding IsLoading}" />
-        <Border Classes="empty-state" IsVisible="{Binding IsError}" Margin="0,24,0,0">
-          <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="420">
-            <TextBlock Text="{Binding ErrorTitle}" Classes="subtitle" HorizontalAlignment="Center" />
-            <TextBlock Text="{Binding ErrorText}" Classes="secondary" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
-            <Button Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshCommand}" HorizontalAlignment="Center" />
+        <Grid ColumnDefinitions="*,*,*,Auto" ColumnSpacing="8">
+          <TextBox Grid.Column="0"
+                   Text="{Binding WorkflowIdFilter, Mode=TwoWay}"
+                   PlaceholderText="{Binding WorkflowFilterText}"
+                   AutomationProperties.Name="{Binding WorkflowFilterText}"
+                   KeyDown="OnSearchKeyDown" />
+          <TextBox Grid.Column="1"
+                   Text="{Binding RunIdFilter, Mode=TwoWay}"
+                   PlaceholderText="{Binding RunFilterText}"
+                   AutomationProperties.Name="{Binding RunFilterText}"
+                   KeyDown="OnSearchKeyDown" />
+          <TextBox Grid.Column="2"
+                   Text="{Binding NodeIdFilter, Mode=TwoWay}"
+                   PlaceholderText="{Binding NodeFilterText}"
+                   AutomationProperties.Name="{Binding NodeFilterText}"
+                   KeyDown="OnSearchKeyDown" />
+          <Button Grid.Column="3"
+                  Classes="secondary"
+                  Content="{Binding MarkReadText}"
+                  Command="{Binding MarkReadCommand}" />
+        </Grid>
+      </StackPanel>
+    </Border>
+
+    <Grid Grid.Row="1" Margin="20,16" RowDefinitions="Auto,*,Auto">
+      <TextBlock Grid.Row="0"
+                 Text="{Binding LoadingText}"
+                 Classes="caption"
+                 IsVisible="{Binding IsLoading}" />
+
+      <Border Grid.Row="1"
+              Classes="empty-state"
+              IsVisible="{Binding IsStandaloneError}"
+              Margin="0,24,0,0">
+        <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="420">
+          <TextBlock Text="{Binding ErrorTitle}" Classes="subtitle" HorizontalAlignment="Center" />
+          <TextBlock Text="{Binding ErrorText}"
+                     Classes="secondary"
+                     HorizontalAlignment="Center"
+                     TextAlignment="Center"
+                     TextWrapping="Wrap" />
+          <Button Classes="secondary"
+                  Content="{Binding RefreshText}"
+                  Command="{Binding RefreshCommand}"
+                  HorizontalAlignment="Center" />
+        </StackPanel>
+      </Border>
+
+      <Grid Grid.Row="1" RowDefinitions="Auto,Auto,*" IsVisible="{Binding ShowContent}">
+        <Border Grid.Row="0"
+                Classes="layer"
+                BorderBrush="{DynamicResource Ariadne.StatusError}"
+                BorderThickness="1"
+                Padding="12,8"
+                Margin="0,0,0,8"
+                IsVisible="{Binding IsContentError}">
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <TextBlock Text="{Binding ErrorText}" Classes="secondary" TextWrapping="Wrap" />
+            <Button Classes="secondary"
+                    Content="{Binding RefreshText}"
+                    Command="{Binding RefreshCommand}" />
           </StackPanel>
         </Border>
-        <TextBlock Text="{Binding StatusText}" Classes="caption" Opacity="0.9"
-                   IsVisible="{Binding ShowContent}" />
-        <ItemsControl ItemsSource="{Binding Logs}" IsVisible="{Binding ShowContent}">
-          <ItemsControl.ItemTemplate>
+        <TextBlock Grid.Row="1"
+                   Text="{Binding StatusText}"
+                   Classes="caption"
+                   Opacity="0.9"
+                   Margin="0,0,0,8" />
+        <ListBox Grid.Row="2"
+                 ItemsSource="{Binding Logs}"
+                 Background="Transparent"
+                 BorderThickness="0"
+                 SelectionMode="Single">
+          <ListBox.ItemsPanel>
+            <ItemsPanelTemplate>
+              <VirtualizingStackPanel />
+            </ItemsPanelTemplate>
+          </ListBox.ItemsPanel>
+          <ListBox.Styles>
+            <Style Selector="ListBoxItem">
+              <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+              <Setter Property="Padding" Value="0" />
+              <Setter Property="Margin" Value="0,0,0,8" />
+              <Setter Property="Background" Value="Transparent" />
+            </Style>
+            <Style Selector="Border.log-row.unread">
+              <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+              <Setter Property="BorderThickness" Value="2,1,1,1" />
+            </Style>
+          </ListBox.Styles>
+          <ListBox.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:RunLogItemViewModel}">
-              <Border Classes="layer log-row" Padding="14,11" Margin="0,0,0,8">
-                <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="12">
-                  <TextBlock Grid.Column="0" Text="{Binding TimestampText}" Classes="mono" Width="112" VerticalAlignment="Center" Opacity="0.85" />
-                  <Border Grid.Column="1" Classes="chip log-level" Padding="8,2" VerticalAlignment="Center"
+              <Border Classes="layer log-row"
+                      Classes.unread="{Binding IsUnread}"
+                      Padding="14,11">
+                <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="Auto,Auto,Auto,*" ColumnSpacing="10" RowSpacing="6">
+                  <TextBlock Grid.Row="0" Grid.Column="0"
+                             Text="{Binding TimestampText}"
+                             Classes="mono"
+                             Width="142"
+                             VerticalAlignment="Center"
+                             Opacity="0.85" />
+                  <Border Grid.Row="0" Grid.Column="1"
+                          Classes="chip log-level"
+                          Padding="8,2"
                           Classes.error="{Binding IsError}"
                           Classes.warning="{Binding IsWarning}"
                           Classes.info="{Binding IsInfo}">
                     <TextBlock Text="{Binding Level}" Classes="caption log-level-text" FontWeight="SemiBold" />
                   </Border>
-                  <TextBlock Grid.Column="2" Text="{Binding Message}" Classes="secondary" VerticalAlignment="Center" TextWrapping="Wrap" LineHeight="20" />
+                  <Border Grid.Row="0" Grid.Column="2" Classes="chip" Padding="8,2">
+                    <TextBlock Text="{Binding KindText}" Classes="caption" />
+                  </Border>
+                  <TextBlock Grid.Row="0" Grid.Column="3"
+                             Text="{Binding UnreadText}"
+                             Classes="caption"
+                             FontWeight="SemiBold"
+                             Foreground="{DynamicResource Ariadne.AccentPrimary}"
+                             HorizontalAlignment="Right"
+                             IsVisible="{Binding IsUnread}" />
+                  <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="4"
+                             Text="{Binding Message}"
+                             Classes="secondary"
+                             TextWrapping="Wrap"
+                             LineHeight="20" />
+                  <TextBlock Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="4"
+                             Text="{Binding ContextText}"
+                             Classes="caption mono"
+                             TextWrapping="Wrap"
+                             IsVisible="{Binding HasContext}" />
                 </Grid>
               </Border>
             </DataTemplate>
-          </ItemsControl.ItemTemplate>
-        </ItemsControl>
-        <Border Classes="empty-state" IsVisible="{Binding ShowEmpty}" Margin="0,40,0,0">
-          <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="380">
-            <ctl:EmptyStateArt Kind="RunLog" Width="140" Height="100" HorizontalAlignment="Center" />
-            <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" />
-            <TextBlock Text="{Binding EmptyHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
-          </StackPanel>
-        </Border>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Grid>
+
+      <Border Grid.Row="1"
+              Classes="empty-state"
+              IsVisible="{Binding ShowEmpty}"
+              Margin="0,40,0,0">
+        <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="380">
+          <ctl:EmptyStateArt Kind="RunLog" Width="140" Height="100" HorizontalAlignment="Center" />
+          <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" />
+          <TextBlock Text="{Binding EmptyHint}"
+                     Classes="caption"
+                     HorizontalAlignment="Center"
+                     TextAlignment="Center"
+                     TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <StackPanel Grid.Row="2"
+                  Orientation="Horizontal"
+                  HorizontalAlignment="Center"
+                  Spacing="10"
+                  Margin="0,10,0,0"
+                  IsVisible="{Binding ShowContent}">
+        <Button Classes="secondary"
+                Content="{Binding LoadMoreText}"
+                Command="{Binding LoadMoreCommand}"
+                IsVisible="{Binding HasMore}" />
+        <TextBlock Text="{Binding LoadingMoreText}"
+                   Classes="caption"
+                   VerticalAlignment="Center"
+                   IsVisible="{Binding IsLoadingMore}" />
       </StackPanel>
-    </ScrollViewer>
+    </Grid>
   </Grid>
 </UserControl>

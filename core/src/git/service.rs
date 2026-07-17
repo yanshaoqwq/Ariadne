@@ -1,10 +1,15 @@
 use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader, Read};
+use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use crate::contracts::{CoreError, CoreResult};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+use crate::contracts::{CoreError, CoreResult, ExecutionCancellation, ExternalDispatchOutcome};
 use crate::git::models::{
     ArchivePoint, BranchGraphNode, Checkpoint, CheckpointKind, GitCommitSummary, GitHealthReport,
     GitHealthStatus, RestoreReport,
@@ -12,6 +17,10 @@ use crate::git::models::{
 
 const DEFAULT_GIT_USER_NAME: &str = "Ariadne";
 const DEFAULT_GIT_USER_EMAIL: &str = "ariadne@local.invalid";
+const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_GIT_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GIT_STDERR_BYTES: usize = 256 * 1024;
 
 /// 有界 Git diff 预览；完整输出只流式计数，不在内存中整体物化。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +34,8 @@ pub struct GitDiffPreview {
 pub struct GitService {
     repo_root: PathBuf,
     lock: Mutex<()>,
+    cancellation: ExecutionCancellation,
+    timeout: Duration,
 }
 
 /// Git 暂存策略。所有路径都按仓库根目录解析，排除项使用 literal pathspec。
@@ -47,7 +58,20 @@ impl GitService {
         Self {
             repo_root: repo_root.into(),
             lock: Mutex::new(()),
+            cancellation: ExecutionCancellation::new(),
+            timeout: DEFAULT_GIT_TIMEOUT,
         }
+    }
+
+    /// 为本次命令链绑定统一取消令牌与墙钟上限。
+    pub fn with_execution_policy(
+        mut self,
+        cancellation: ExecutionCancellation,
+        timeout: Duration,
+    ) -> Self {
+        self.cancellation = cancellation;
+        self.timeout = timeout.max(GIT_POLL_INTERVAL);
+        self
     }
 
     /// 返回仓库根目录。
@@ -74,24 +98,26 @@ impl GitService {
         &self,
         policy: &GitStagePolicy,
     ) -> CoreResult<(GitHealthReport, String)> {
-        let inside = self.run_git(["rev-parse", "--is-inside-work-tree"]);
-        if inside.is_err() {
-            return Ok((
-                GitHealthReport {
-                    status: GitHealthStatus::NotRepository,
-                    branch: None,
-                    head: None,
-                    dirty: false,
-                    reason: Some("not a git repository".to_owned()),
-                },
-                String::new(),
-            ));
+        match self.run_git(["rev-parse", "--is-inside-work-tree"]) {
+            Ok(_) => {}
+            Err(CoreError::External { service, .. }) if service == "git" => {
+                return Ok((
+                    GitHealthReport {
+                        status: GitHealthStatus::NotRepository,
+                        branch: None,
+                        head: None,
+                        dirty: false,
+                        reason: Some("not a git repository".to_owned()),
+                    },
+                    String::new(),
+                ));
+            }
+            Err(error) => return Err(error),
         }
 
-        let head = self.run_git(["rev-parse", "--verify", "HEAD"]).ok();
+        let head = self.optional_git_value(["rev-parse", "--verify", "HEAD"])?;
         let branch = self
-            .run_git(["branch", "--show-current"])
-            .ok()
+            .optional_git_value(["branch", "--show-current"])?
             .filter(|value| !value.trim().is_empty());
         let porcelain = self.status_with_policy(policy)?;
         let dirty = !porcelain.trim().is_empty();
@@ -197,16 +223,9 @@ impl GitService {
         policy: &GitStagePolicy,
         preview_char_limit: usize,
     ) -> CoreResult<GitDiffPreview> {
-        const MAX_LINE_BYTES: usize = 64 * 1024;
-        const MAX_STDERR_BYTES: usize = 256 * 1024;
         let mut args = vec!["diff".to_owned(), "--".to_owned(), ".".to_owned()];
         args.extend(policy.exclude_pathspecs());
-        let mut child = Command::new("git")
-            .args(args)
-            .current_dir(&self.repo_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut child = self.spawn_git(args)?;
         let stdout = child
             .stdout
             .take()
@@ -215,38 +234,14 @@ impl GitService {
             .stderr
             .take()
             .ok_or_else(|| CoreError::validation("git diff stderr pipe is unavailable"))?;
+        let stdout_handle =
+            std::thread::spawn(move || read_diff_preview(stdout, preview_char_limit));
         let stderr_handle = std::thread::spawn(move || {
-            let mut limited = stderr_pipe.take(MAX_STDERR_BYTES as u64);
-            let mut buf = String::new();
-            let _ = limited.read_to_string(&mut buf);
-            buf
+            drain_bounded(stderr_pipe, MAX_GIT_STDERR_BYTES).map_err(CoreError::from)
         });
-        let mut reader = BufReader::new(stdout);
-        let mut bytes = Vec::new();
-        let mut line_count = 0usize;
-        let mut preview = String::new();
-        let mut preview_chars = 0usize;
-        loop {
-            bytes.clear();
-            let n = reader.read_until(b'\n', &mut bytes)?;
-            if n == 0 {
-                break;
-            }
-            // Cap single-line memory (binary/generated files).
-            if bytes.len() > MAX_LINE_BYTES {
-                bytes.truncate(MAX_LINE_BYTES);
-            }
-            line_count = line_count.saturating_add(1);
-            if preview_chars < preview_char_limit {
-                let line = String::from_utf8_lossy(&bytes);
-                let remaining = preview_char_limit - preview_chars;
-                let fragment = line.chars().take(remaining).collect::<String>();
-                preview_chars += fragment.chars().count();
-                preview.push_str(&fragment);
-            }
-        }
-        let status = child.wait()?;
-        let stderr = stderr_handle.join().unwrap_or_default();
+        let status = self.wait_for_git_child(&mut child, "diff")?;
+        let preview_result = join_git_reader(stdout_handle, "git diff stdout")?;
+        let (stderr, _) = join_git_reader(stderr_handle, "git diff stderr")?;
         if !status.success() {
             return Err(CoreError::External {
                 service: "git".to_owned(),
@@ -257,10 +252,7 @@ impl GitService {
                 },
             });
         }
-        Ok(GitDiffPreview {
-            line_count,
-            preview,
-        })
+        Ok(preview_result)
     }
 
     /// 按暂存策略返回 porcelain 状态。
@@ -281,21 +273,18 @@ impl GitService {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        if !self.has_head_commit() {
+        if !self.has_head_commit()? {
             return Ok(Vec::new());
         }
 
-        let output = self.run_git(["log", "--format=%H%x1f%s", &format!("-n{limit}")])?;
+        let output = self.run_git([
+            "log",
+            "--format=%H%x1f%ct%x1f%an%x1f%s",
+            &format!("-n{limit}"),
+        ])?;
         Ok(output
             .lines()
-            .filter_map(|line| {
-                let (commit_id, summary) = line.split_once('\x1f')?;
-                Some(GitCommitSummary {
-                    commit_id: commit_id.to_owned(),
-                    summary: summary.to_owned(),
-                    checkpoint_kind: checkpoint_kind_from_summary(summary),
-                })
-            })
+            .filter_map(parse_git_commit_summary)
             .collect())
     }
 
@@ -304,7 +293,7 @@ impl GitService {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        if !self.has_head_commit() {
+        if !self.has_head_commit()? {
             return Ok(Vec::new());
         }
 
@@ -312,7 +301,7 @@ impl GitService {
             "log",
             "--all",
             "--decorate=short",
-            "--format=%H%x1f%P%x1f%D%x1f%s",
+            "--format=%H%x1f%P%x1f%D%x1f%ct%x1f%an%x1f%s",
             &format!("-n{limit}"),
         ])?;
         Ok(output.lines().filter_map(parse_branch_graph_node).collect())
@@ -390,23 +379,23 @@ impl GitService {
 
     /// Ariadne 管理项目内存档提交；仓库本地缺身份时写入默认身份，避免依赖用户全局 Git 配置。
     fn ensure_local_commit_identity(&self) -> CoreResult<()> {
-        if !self.has_local_config("user.name") {
+        if !self.has_local_config("user.name")? {
             self.run_git(["config", "--local", "user.name", DEFAULT_GIT_USER_NAME])?;
         }
-        if !self.has_local_config("user.email") {
+        if !self.has_local_config("user.email")? {
             self.run_git(["config", "--local", "user.email", DEFAULT_GIT_USER_EMAIL])?;
         }
         Ok(())
     }
 
-    fn has_local_config(&self, key: &str) -> bool {
-        self.run_git(["config", "--local", "--get", key])
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
+    fn has_local_config(&self, key: &str) -> CoreResult<bool> {
+        self.optional_git_value(["config", "--local", "--get", key])
+            .map(|value| value.is_some_and(|value| !value.trim().is_empty()))
     }
 
-    fn has_head_commit(&self) -> bool {
-        self.run_git(["rev-parse", "--verify", "HEAD"]).is_ok()
+    fn has_head_commit(&self) -> CoreResult<bool> {
+        self.optional_git_value(["rev-parse", "--verify", "HEAD"])
+            .map(|value| value.is_some())
     }
 
     /// 回档前要求工作区干净，避免覆盖用户未保存改动。
@@ -427,27 +416,190 @@ impl GitService {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(&self.repo_root)
-            .output()?;
+        let args = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_os_string())
+            .collect::<Vec<_>>();
+        let operation = args
+            .first()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "command".to_owned());
+        let mut child = self.spawn_git(args)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CoreError::validation("git stdout pipe is unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| CoreError::validation("git stderr pipe is unavailable"))?;
+        let stdout_handle = std::thread::spawn(move || {
+            drain_bounded(stdout, MAX_GIT_STDOUT_BYTES).map_err(CoreError::from)
+        });
+        let stderr_handle = std::thread::spawn(move || {
+            drain_bounded(stderr, MAX_GIT_STDERR_BYTES).map_err(CoreError::from)
+        });
+        let status = self.wait_for_git_child(&mut child, &operation)?;
+        let (stdout, stdout_bytes) = join_git_reader(stdout_handle, "git stdout")?;
+        let (stderr, _) = join_git_reader(stderr_handle, "git stderr")?;
 
-        if output.status.success() {
-            return Ok(String::from_utf8_lossy(&output.stdout)
-                .trim_end()
-                .to_owned());
+        if status.success() {
+            if stdout_bytes > MAX_GIT_STDOUT_BYTES as u64 {
+                return Err(CoreError::ResourceLimitExceeded {
+                    resource: "git_stdout".to_owned(),
+                    reason: format!("output exceeds {MAX_GIT_STDOUT_BYTES} bytes"),
+                });
+            }
+            return Ok(stdout.trim_end().to_owned());
         }
 
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         Err(CoreError::External {
             service: "git".to_owned(),
-            message: if stderr.is_empty() {
-                format!("git exited with status {}", output.status)
+            message: if stderr.trim().is_empty() {
+                format!("git exited with status {status}")
             } else {
-                stderr
+                stderr.trim().to_owned()
             },
         })
     }
+
+    fn spawn_git(&self, args: Vec<impl Into<OsString>>) -> CoreResult<Child> {
+        self.cancellation.check()?;
+        let mut command = Command::new("git");
+        command
+            .args(args.into_iter().map(Into::into))
+            .current_dir(&self.repo_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+        Ok(command.spawn()?)
+    }
+
+    fn optional_git_value<I, S>(&self, args: I) -> CoreResult<Option<String>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        match self.run_git(args) {
+            Ok(value) => Ok(Some(value)),
+            Err(error @ (CoreError::ExternalCancellation { .. } | CoreError::Cancelled)) => {
+                Err(error)
+            }
+            Err(CoreError::External { service, .. }) if service == "git" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn wait_for_git_child(&self, child: &mut Child, operation: &str) -> CoreResult<ExitStatus> {
+        let started = Instant::now();
+        loop {
+            if self.cancellation.is_cancelled() {
+                terminate_git_process_tree(child);
+                return Err(CoreError::external_cancelled(
+                    "git",
+                    ExternalDispatchOutcome::DispatchedUnknown,
+                ));
+            }
+            if started.elapsed() >= self.timeout {
+                terminate_git_process_tree(child);
+                return Err(CoreError::ExternalOperation {
+                    service: "git".to_owned(),
+                    outcome: ExternalDispatchOutcome::DispatchedUnknown,
+                    message: format!(
+                        "git {operation} timed out after {} ms",
+                        self.timeout.as_millis()
+                    ),
+                });
+            }
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            std::thread::sleep(GIT_POLL_INTERVAL);
+        }
+    }
+}
+
+fn terminate_git_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn drain_bounded(mut reader: impl Read, limit: usize) -> std::io::Result<(String, u64)> {
+    let mut retained = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 8192];
+    let mut total = 0u64;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+    Ok((String::from_utf8_lossy(&retained).into_owned(), total))
+}
+
+fn read_diff_preview(
+    mut stdout: impl Read,
+    preview_char_limit: usize,
+) -> CoreResult<GitDiffPreview> {
+    let mut buffer = [0u8; 8192];
+    let mut line_count = 0usize;
+    let mut preview_bytes = Vec::with_capacity(preview_char_limit.saturating_mul(4));
+    let preview_byte_limit = preview_char_limit.saturating_mul(4).saturating_add(4);
+    let mut saw_bytes = false;
+    let mut ended_with_newline = true;
+    loop {
+        let read = stdout.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        saw_bytes = true;
+        ended_with_newline = buffer[read - 1] == b'\n';
+        line_count =
+            line_count.saturating_add(buffer[..read].iter().filter(|byte| **byte == b'\n').count());
+        if preview_bytes.len() < preview_byte_limit {
+            let remaining = preview_byte_limit - preview_bytes.len();
+            preview_bytes.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
+    if saw_bytes && !ended_with_newline {
+        line_count = line_count.saturating_add(1);
+    }
+    Ok(GitDiffPreview {
+        line_count,
+        preview: String::from_utf8_lossy(&preview_bytes)
+            .chars()
+            .take(preview_char_limit)
+            .collect(),
+    })
+}
+
+fn join_git_reader<T>(
+    handle: std::thread::JoinHandle<CoreResult<T>>,
+    stream: &str,
+) -> CoreResult<T> {
+    handle.join().map_err(|_| CoreError::External {
+        service: "git".to_owned(),
+        message: format!("{stream} reader panicked"),
+    })?
 }
 
 impl GitStagePolicy {
@@ -536,7 +688,7 @@ fn validate_branch_name(branch: &str) -> CoreResult<()> {
 
 /// 解析 `git log` 输出为分支图节点。
 fn parse_branch_graph_node(line: &str) -> Option<BranchGraphNode> {
-    let mut parts = line.split('\x1f');
+    let mut parts = line.splitn(6, '\x1f');
     let commit_id = parts.next()?.to_owned();
     let parents = parts
         .next()
@@ -544,26 +696,62 @@ fn parse_branch_graph_node(line: &str) -> Option<BranchGraphNode> {
         .split_whitespace()
         .map(str::to_owned)
         .collect();
-    let refs = parts
+    let refs: Vec<String> = parts
         .next()
         .unwrap_or_default()
         .split(", ")
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect();
+    let timestamp_ms = parse_git_timestamp_ms(parts.next()?)?;
+    let author = non_empty(parts.next().unwrap_or_default());
     let summary = parts.next().unwrap_or_default().to_owned();
+    let checkpoint_kind = checkpoint_kind_from_summary(&summary);
+    let is_head = refs.iter().any(|value| {
+        value == "HEAD" || value.starts_with("HEAD -> ") || value.ends_with(" -> HEAD")
+    });
 
     Some(BranchGraphNode {
         commit_id,
         parents,
         refs,
         summary,
+        timestamp_ms,
+        author,
+        checkpoint_kind,
+        is_head,
     })
+}
+
+fn parse_git_commit_summary(line: &str) -> Option<GitCommitSummary> {
+    let mut parts = line.splitn(4, '\x1f');
+    let commit_id = parts.next()?.to_owned();
+    let timestamp_ms = parse_git_timestamp_ms(parts.next()?)?;
+    let author = non_empty(parts.next().unwrap_or_default());
+    let summary = parts.next().unwrap_or_default().to_owned();
+    Some(GitCommitSummary {
+        checkpoint_kind: checkpoint_kind_from_summary(&summary),
+        commit_id,
+        summary,
+        timestamp_ms,
+        author,
+    })
+}
+
+fn parse_git_timestamp_ms(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()?.checked_mul(1000)
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| value.trim().to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn branch_name_rejects_unsafe_values() {
@@ -574,13 +762,93 @@ mod tests {
 
     #[test]
     fn branch_graph_parser_handles_refs_and_parents() {
-        let node =
-            parse_branch_graph_node("abc\x1fparent1 parent2\x1fHEAD -> main, tag: v1\x1fmsg")
-                .unwrap();
+        let node = parse_branch_graph_node(
+            "abc\x1fparent1 parent2\x1fHEAD -> main, tag: v1\x1f1721000000\x1fAriadne\x1fArchive: msg",
+        )
+        .unwrap();
 
         assert_eq!(node.commit_id, "abc");
         assert_eq!(node.parents, vec!["parent1", "parent2"]);
         assert_eq!(node.refs, vec!["HEAD -> main", "tag: v1"]);
-        assert_eq!(node.summary, "msg");
+        assert_eq!(node.summary, "Archive: msg");
+        assert_eq!(node.timestamp_ms, 1_721_000_000_000);
+        assert_eq!(node.author.as_deref(), Some("Ariadne"));
+        assert_eq!(node.checkpoint_kind, Some(CheckpointKind::Manual));
+        assert!(node.is_head);
+    }
+
+    #[test]
+    fn recent_commit_parser_preserves_time_author_and_kind() {
+        let commit =
+            parse_git_commit_summary("abc\x1f1721000000\x1fAriadne\x1fCheckpoint: chapter")
+                .unwrap();
+
+        assert_eq!(commit.timestamp_ms, 1_721_000_000_000);
+        assert_eq!(commit.author.as_deref(), Some("Ariadne"));
+        assert_eq!(commit.checkpoint_kind, Some(CheckpointKind::Auto));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c9_git_runner_cancels_long_hook_and_process_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        GitService::new(temp.path()).init_repository().unwrap();
+        std::fs::write(temp.path().join("chapter.md"), "draft").unwrap();
+        install_slow_pre_commit_hook(temp.path());
+
+        let cancellation = ExecutionCancellation::new();
+        let cancel_from_thread = cancellation.clone();
+        let marker = temp.path().join("hook-started");
+        let canceller = std::thread::spawn(move || {
+            let started = Instant::now();
+            while !marker.exists() && started.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cancel_from_thread.cancel();
+        });
+        let service = GitService::new(temp.path())
+            .with_execution_policy(cancellation, Duration::from_secs(5));
+        let started = Instant::now();
+        let error = service.create_archive_point("cancelled", None).unwrap_err();
+        canceller.join().unwrap();
+
+        assert!(matches!(
+            error,
+            CoreError::ExternalCancellation { .. } | CoreError::Cancelled
+        ));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c9_git_runner_times_out_long_hook() {
+        let temp = tempfile::tempdir().unwrap();
+        GitService::new(temp.path()).init_repository().unwrap();
+        std::fs::write(temp.path().join("chapter.md"), "draft").unwrap();
+        install_slow_pre_commit_hook(temp.path());
+
+        let service = GitService::new(temp.path())
+            .with_execution_policy(ExecutionCancellation::new(), Duration::from_millis(200));
+        let started = Instant::now();
+        let error = service.create_archive_point("timeout", None).unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    fn install_slow_pre_commit_hook(repo: &Path) {
+        let hook = repo.join(".git").join("hooks").join("pre-commit");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nsleep 30\n",
+                repo.join("hook-started").display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(hook, permissions).unwrap();
     }
 }

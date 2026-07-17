@@ -13,11 +13,22 @@ public static partial class UserFacingError
 {
     private static readonly Regex AbsolutePath = PathRegex();
     private static readonly Regex HomePath = HomePathRegex();
+    private static WeakReference<IUserFailureObserver>? _observer;
+
+    public static void RegisterObserver(IUserFailureObserver observer)
+    {
+        _observer = new WeakReference<IUserFailureObserver>(observer);
+    }
 
     /// <summary>Primary author-facing line for status bars / toasts.</summary>
     public static string Format(Exception? ex, DisplayNameService names, string? contextKey = null)
     {
-        return FromException(ex).PrimaryText(names, contextKey);
+        var failure = FromException(ex);
+        if (_observer?.TryGetTarget(out var observer) == true)
+        {
+            observer.Observe(failure);
+        }
+        return failure.PrimaryText(names, contextKey);
     }
 
     /// <summary>Title-bar / chip: same primary identity, hard length cap (U43).</summary>
@@ -133,6 +144,11 @@ public static partial class UserFacingError
     private static partial Regex HomePathRegex();
 }
 
+public interface IUserFailureObserver
+{
+    void Observe(UserFailure failure);
+}
+
 /// <summary>Stable failure identity + optional redacted diagnostic (secondary only).</summary>
 public readonly record struct UserFailure(string Code, string? Diagnostic, string? MessageKey = null)
 {
@@ -162,6 +178,12 @@ public readonly record struct UserFailure(string Code, string? Diagnostic, strin
             "io" => "ui.error.io",
             "ipc" => "ui.error.ipc",
             "legacy_run" => "ui.error.legacy_run",
+            "resource_limit" => "ui.error.resource_limit",
+            "paused" => "ui.error.paused",
+            "stopped" => "ui.error.stopped",
+            "external_outcome_unknown" => "ui.error.external_outcome_unknown",
+            "serialization" => "ui.error.serialization",
+            "internal" => "ui.error.internal",
             _ => contextKey ?? "ui.error.unknown",
         };
 

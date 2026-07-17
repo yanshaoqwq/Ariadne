@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -22,6 +23,9 @@ public partial class SpectrumColorPicker : UserControl
             defaultValue: "#2E726B",
             defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
 
+    public static readonly StyledProperty<string> AccessibleNameProperty =
+        AvaloniaProperty.Register<SpectrumColorPicker, string>(nameof(AccessibleName), string.Empty);
+
     private bool _suppress;
     private bool _svDragging;
     private bool _hueDragging;
@@ -37,6 +41,7 @@ public partial class SpectrumColorPicker : UserControl
             ApplyChannelLabels();
             ApplyFromHex(SelectedHex, pushProperty: false);
             UpdateVisuals();
+            ApplyAccessibilityText();
         };
         SizeChanged += (_, _) => UpdateCursors();
     }
@@ -75,6 +80,7 @@ public partial class SpectrumColorPicker : UserControl
             {
                 PositionSpectrumPopup();
                 UpdateCursors();
+                SvField?.Focus();
             }, DispatcherPriority.Loaded);
         }
     }
@@ -149,6 +155,12 @@ public partial class SpectrumColorPicker : UserControl
         set => SetValue(SelectedHexProperty, value);
     }
 
+    public string AccessibleName
+    {
+        get => GetValue(AccessibleNameProperty);
+        set => SetValue(AccessibleNameProperty, value);
+    }
+
     protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
     {
         base.OnPropertyChanged(change);
@@ -156,6 +168,10 @@ public partial class SpectrumColorPicker : UserControl
         {
             ApplyFromHex(change.GetNewValue<string>(), pushProperty: false);
             UpdateVisuals();
+        }
+        else if (change.Property == AccessibleNameProperty)
+        {
+            ApplyAccessibilityText();
         }
     }
 
@@ -167,6 +183,7 @@ public partial class SpectrumColorPicker : UserControl
         }
 
         _svDragging = true;
+        SvField.Focus();
         e.Pointer.Capture(SvField);
         PickSv(e.GetPosition(SvField));
         e.Handled = true;
@@ -205,6 +222,7 @@ public partial class SpectrumColorPicker : UserControl
         }
 
         _hueDragging = true;
+        HueBar.Focus();
         e.Pointer.Capture(HueBar);
         PickHue(e.GetPosition(HueBar));
         e.Handled = true;
@@ -234,6 +252,40 @@ public partial class SpectrumColorPicker : UserControl
     }
 
     private void OnHueCaptureLost(object? sender, PointerCaptureLostEventArgs e) => _hueDragging = false;
+
+    private void OnSvKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!TryAdjustSaturationValue(e.Key, e.KeyModifiers.HasFlag(KeyModifiers.Shift), ref _sat, ref _val))
+        {
+            return;
+        }
+
+        CommitHsvChange();
+        e.Handled = true;
+    }
+
+    private void OnHueKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!TryAdjustHue(e.Key, e.KeyModifiers.HasFlag(KeyModifiers.Shift), ref _hue))
+        {
+            return;
+        }
+
+        CommitHsvChange();
+        e.Handled = true;
+    }
+
+    private void OnPopupKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape || SpectrumPopup is null)
+        {
+            return;
+        }
+
+        SpectrumPopup.IsOpen = false;
+        CollapsedSwatch?.Focus();
+        e.Handled = true;
+    }
 
     private void OnRgbSliderChanged(object? sender, RangeBaseValueChangedEventArgs e)
     {
@@ -314,6 +366,82 @@ public partial class SpectrumColorPicker : UserControl
         UpdateVisuals();
     }
 
+    private void CommitHsvChange()
+    {
+        HsvToRgb(_hue, _sat, _val, out var r, out var g, out var b);
+        PushHex(ColorChannelEditor.ToHex(r, g, b));
+        UpdateVisuals();
+    }
+
+    internal static bool TryAdjustSaturationValue(
+        Key key,
+        bool largeStep,
+        ref double saturation,
+        ref double value)
+    {
+        var step = largeStep ? 0.1 : 0.01;
+        switch (key)
+        {
+            case Key.Left:
+                saturation -= step;
+                break;
+            case Key.Right:
+                saturation += step;
+                break;
+            case Key.Up:
+                value += step;
+                break;
+            case Key.Down:
+                value -= step;
+                break;
+            case Key.PageUp:
+                value += 0.1;
+                break;
+            case Key.PageDown:
+                value -= 0.1;
+                break;
+            default:
+                return false;
+        }
+
+        saturation = Math.Clamp(saturation, 0, 1);
+        value = Math.Clamp(value, 0, 1);
+        return true;
+    }
+
+    internal static bool TryAdjustHue(Key key, bool largeStep, ref double hue)
+    {
+        var step = largeStep ? 10.0 : 1.0;
+        switch (key)
+        {
+            case Key.Left:
+            case Key.Up:
+                hue -= step;
+                break;
+            case Key.Right:
+            case Key.Down:
+                hue += step;
+                break;
+            case Key.PageUp:
+                hue -= 10;
+                break;
+            case Key.PageDown:
+                hue += 10;
+                break;
+            case Key.Home:
+                hue = 0;
+                return true;
+            case Key.End:
+                hue = 360;
+                return true;
+            default:
+                return false;
+        }
+
+        hue = Math.Clamp(hue, 0, 360);
+        return true;
+    }
+
     private void PushHex(string hex)
     {
         _suppress = true;
@@ -370,7 +498,12 @@ public partial class SpectrumColorPicker : UserControl
 
         if (RgbLabel is not null)
         {
-            RgbLabel.Text = $"R {r}  G {g}  B {b}";
+            RgbLabel.Text = DisplayNameService.Current.Format("ui.color.rgb_value", new Dictionary<string, string>
+            {
+                ["red"] = r.ToString(),
+                ["green"] = g.ToString(),
+                ["blue"] = b.ToString(),
+            });
         }
 
         if (!skipRgbSliders)
@@ -393,6 +526,67 @@ public partial class SpectrumColorPicker : UserControl
         if (BValue is not null) BValue.Text = b.ToString();
 
         UpdateCursors();
+        ApplyAccessibilityText();
+    }
+
+    private void ApplyAccessibilityText()
+    {
+        var names = DisplayNameService.Current;
+        var fieldName = string.IsNullOrWhiteSpace(AccessibleName)
+            ? names.Text("ui.color.picker.default_name")
+            : AccessibleName;
+        var currentName = names.Format("ui.color.picker.current_value", new Dictionary<string, string>
+        {
+            ["label"] = fieldName,
+            ["value"] = SelectedHex,
+        });
+
+        if (CollapsedSwatch is not null)
+        {
+            AutomationProperties.SetName(CollapsedSwatch, currentName);
+            AutomationProperties.SetHelpText(CollapsedSwatch, names.Text("ui.color.picker.help"));
+            ToolTip.SetTip(CollapsedSwatch, currentName);
+        }
+
+        if (SvField is not null)
+        {
+            AutomationProperties.SetName(SvField, names.Format(
+                "ui.color.saturation_value.current",
+                new Dictionary<string, string>
+                {
+                    ["saturation"] = Math.Round(_sat * 100).ToString(),
+                    ["value"] = Math.Round(_val * 100).ToString(),
+                }));
+            AutomationProperties.SetHelpText(SvField, names.Text("ui.color.saturation_value.help"));
+        }
+
+        if (HueBar is not null)
+        {
+            AutomationProperties.SetName(HueBar, names.Format(
+                "ui.color.hue.current",
+                new Dictionary<string, string> { ["value"] = Math.Round(_hue).ToString() }));
+            AutomationProperties.SetHelpText(HueBar, names.Text("ui.color.hue.help"));
+        }
+
+        if (HexBox is not null)
+        {
+            AutomationProperties.SetName(HexBox, names.Text("ui.color.hex"));
+        }
+
+        if (RSlider is not null)
+        {
+            AutomationProperties.SetName(RSlider, names.Text("ui.color.channel_red"));
+        }
+
+        if (GSlider is not null)
+        {
+            AutomationProperties.SetName(GSlider, names.Text("ui.color.channel_green"));
+        }
+
+        if (BSlider is not null)
+        {
+            AutomationProperties.SetName(BSlider, names.Text("ui.color.channel_blue"));
+        }
     }
 
     private void UpdateCursors()

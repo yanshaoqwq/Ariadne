@@ -344,6 +344,7 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 |---|---:|---|---|
 | `Avalonia` | `12.0.5` | `MIT` | <https://github.com/AvaloniaUI/Avalonia/> |
 | `Avalonia.Angle.Windows.Natives` | `2.1.27548.20260419` | `file:LICENSE` | <https://github.com/AvaloniaUI/angle/> |
+| `Avalonia.AvaloniaEdit` | `12.0.0` | `MIT` | <https://github.com/AvaloniaUI/AvaloniaEdit/> |
 | `Avalonia.BuildServices` | `11.3.2` | `MIT` | <https://github.com/AvaloniaUI/Avalonia.BuildServices> |
 | `Avalonia.Desktop` | `12.0.5` | `MIT` | <https://github.com/AvaloniaUI/Avalonia/> |
 | `Avalonia.Fonts.Inter` | `12.0.5` | `MIT` | <https://github.com/AvaloniaUI/Avalonia/> |

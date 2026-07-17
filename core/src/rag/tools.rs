@@ -20,32 +20,42 @@ use crate::rag::resources::PromptResources;
 pub const TOOL_OUTLINER_REGISTER: &str = "outliner-register";
 pub const TOOL_OUTLINER_FIND: &str = "outliner-find";
 pub const TOOL_OUTLINER_SEARCH: &str = "outliner-search";
+pub const TOOL_OUTLINER_WEB_SEARCH: &str = "outliner-web-search";
 pub const TOOL_OUTLINER_INSERT_LINES: &str = "outliner-insert-lines";
 pub const TOOL_OUTLINER_REPLACE_LINES: &str = "outliner-replace-lines";
 pub const TOOL_DESIGNER_REGISTER: &str = "designer-register";
 pub const TOOL_DESIGNER_FIND: &str = "designer-find";
 pub const TOOL_DESIGNER_SEARCH: &str = "designer-search";
+pub const TOOL_DESIGNER_WEB_SEARCH: &str = "designer-web-search";
 pub const TOOL_DESIGNER_INSERT_LINES: &str = "designer-insert-lines";
 pub const TOOL_DESIGNER_REPLACE_LINES: &str = "designer-replace-lines";
 pub const TOOL_PLANNER_REGISTER: &str = "planner-register";
 pub const TOOL_PLANNER_FIND: &str = "planner-find";
 pub const TOOL_PLANNER_SEARCH: &str = "planner-search";
+pub const TOOL_PLANNER_WEB_SEARCH: &str = "planner-web-search";
 pub const TOOL_PLANNER_INSERT_LINES: &str = "planner-insert-lines";
 pub const TOOL_PLANNER_REPLACE_LINES: &str = "planner-replace-lines";
 pub const TOOL_DETAIL_FIND: &str = "detail-find";
 pub const TOOL_DETAIL_SEARCH: &str = "detail-search";
+pub const TOOL_DETAIL_WEB_SEARCH: &str = "detail-web-search";
 pub const TOOL_WRITER_FIND: &str = "writer-find";
 pub const TOOL_WRITER_SEARCH: &str = "writer-search";
+pub const TOOL_WRITER_WEB_SEARCH: &str = "writer-web-search";
 pub const TOOL_WRITER_INSERT_LINES: &str = "writer-insert-lines";
 pub const TOOL_WRITER_REPLACE_LINES: &str = "writer-replace-lines";
 pub const TOOL_CRITIC_FIND: &str = "critic-find";
 pub const TOOL_CRITIC_SEARCH: &str = "critic-search";
+pub const TOOL_CRITIC_WEB_SEARCH: &str = "critic-web-search";
 pub const TOOL_PRUDENT_FIND: &str = "prudent-find";
 pub const TOOL_PRUDENT_SEARCH: &str = "prudent-search";
+pub const TOOL_PRUDENT_WEB_SEARCH: &str = "prudent-web-search";
 pub const TOOL_POLISHER_FIND: &str = "polisher-find";
 pub const TOOL_POLISHER_SEARCH: &str = "polisher-search";
+pub const TOOL_POLISHER_WEB_SEARCH: &str = "polisher-web-search";
 pub const TOOL_POLISHER_INSERT_LINES: &str = "polisher-insert-lines";
 pub const TOOL_POLISHER_REPLACE_LINES: &str = "polisher-replace-lines";
+pub const TOOL_SUMMARIZER_SEARCH: &str = "summarizer-search";
+pub const TOOL_SUMMARIZER_WEB_SEARCH: &str = "summarizer-web-search";
 
 /// 为指定写作 agent 生成工具定义，描述文本来自 prompt_list.json。
 pub fn tool_definitions_for_agent(
@@ -69,6 +79,12 @@ pub fn tool_definitions_for_agent(
             tool_definition(
                 TOOL_OUTLINER_SEARCH,
                 "tool.outliner_search",
+                prompts,
+                search_schema(),
+            )?,
+            tool_definition(
+                TOOL_OUTLINER_WEB_SEARCH,
+                "tool.outliner_web_search",
                 prompts,
                 search_schema(),
             )?,
@@ -105,6 +121,12 @@ pub fn tool_definitions_for_agent(
                 search_schema(),
             )?,
             tool_definition(
+                TOOL_DESIGNER_WEB_SEARCH,
+                "tool.designer_web_search",
+                prompts,
+                search_schema(),
+            )?,
+            tool_definition(
                 TOOL_DESIGNER_INSERT_LINES,
                 "tool.designer_insert_lines",
                 prompts,
@@ -137,6 +159,12 @@ pub fn tool_definitions_for_agent(
                 search_schema(),
             )?,
             tool_definition(
+                TOOL_PLANNER_WEB_SEARCH,
+                "tool.planner_web_search",
+                prompts,
+                search_schema(),
+            )?,
+            tool_definition(
                 TOOL_PLANNER_INSERT_LINES,
                 "tool.planner_insert_lines",
                 prompts,
@@ -157,12 +185,24 @@ pub fn tool_definitions_for_agent(
                 prompts,
                 search_schema(),
             )?,
+            tool_definition(
+                TOOL_DETAIL_WEB_SEARCH,
+                "tool.detail_web_search",
+                prompts,
+                search_schema(),
+            )?,
         ]),
         WritingAgentKind::Writer => Ok(vec![
             tool_definition(TOOL_WRITER_FIND, "tool.writer_find", prompts, find_schema())?,
             tool_definition(
                 TOOL_WRITER_SEARCH,
                 "tool.writer_search",
+                prompts,
+                search_schema(),
+            )?,
+            tool_definition(
+                TOOL_WRITER_WEB_SEARCH,
+                "tool.writer_web_search",
                 prompts,
                 search_schema(),
             )?,
@@ -187,6 +227,12 @@ pub fn tool_definitions_for_agent(
                 prompts,
                 search_schema(),
             )?,
+            tool_definition(
+                TOOL_CRITIC_WEB_SEARCH,
+                "tool.critic_web_search",
+                prompts,
+                search_schema(),
+            )?,
         ]),
         WritingAgentKind::Prudent => Ok(vec![
             tool_definition(
@@ -198,6 +244,12 @@ pub fn tool_definitions_for_agent(
             tool_definition(
                 TOOL_PRUDENT_SEARCH,
                 "tool.prudent_search",
+                prompts,
+                search_schema(),
+            )?,
+            tool_definition(
+                TOOL_PRUDENT_WEB_SEARCH,
+                "tool.prudent_web_search",
                 prompts,
                 search_schema(),
             )?,
@@ -216,6 +268,12 @@ pub fn tool_definitions_for_agent(
                 search_schema(),
             )?,
             tool_definition(
+                TOOL_POLISHER_WEB_SEARCH,
+                "tool.polisher_web_search",
+                prompts,
+                search_schema(),
+            )?,
+            tool_definition(
                 TOOL_POLISHER_INSERT_LINES,
                 "tool.polisher_insert_lines",
                 prompts,
@@ -228,7 +286,20 @@ pub fn tool_definitions_for_agent(
                 writer_replace_schema(),
             )?,
         ]),
-        WritingAgentKind::Summarizer => Ok(Vec::new()),
+        WritingAgentKind::Summarizer => Ok(vec![
+            tool_definition(
+                TOOL_SUMMARIZER_SEARCH,
+                "tool.summarizer_search",
+                prompts,
+                search_schema(),
+            )?,
+            tool_definition(
+                TOOL_SUMMARIZER_WEB_SEARCH,
+                "tool.summarizer_web_search",
+                prompts,
+                search_schema(),
+            )?,
+        ]),
     }
 }
 
@@ -585,11 +656,14 @@ impl ToolExecutor for WritingToolExecutor<'_> {
             | TOOL_PLANNER_REPLACE_LINES
             | TOOL_WRITER_REPLACE_LINES
             | TOOL_POLISHER_REPLACE_LINES => self.execute_line_replace(&call.name, &call.arguments),
-            TOOL_OUTLINER_SEARCH | TOOL_DESIGNER_SEARCH | TOOL_PLANNER_SEARCH
-            | TOOL_DETAIL_SEARCH | TOOL_WRITER_SEARCH | TOOL_CRITIC_SEARCH
-            | TOOL_PRUDENT_SEARCH | TOOL_POLISHER_SEARCH => {
-                self.execute_search_tool(&call.name, &call.arguments)
-            }
+            TOOL_OUTLINER_WEB_SEARCH
+            | TOOL_DESIGNER_WEB_SEARCH
+            | TOOL_PLANNER_WEB_SEARCH
+            | TOOL_DETAIL_WEB_SEARCH
+            | TOOL_WRITER_WEB_SEARCH
+            | TOOL_CRITIC_WEB_SEARCH
+            | TOOL_PRUDENT_WEB_SEARCH
+            | TOOL_POLISHER_WEB_SEARCH => self.execute_search_tool(&call.name, &call.arguments),
             other => Err(CoreError::validation(format!(
                 "unsupported writing tool: {other}"
             ))),

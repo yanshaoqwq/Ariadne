@@ -1,0 +1,44 @@
+{
+  "workflow_id": "official-worldbuilding",
+  "name": "世界观构建",
+  "version": "1.0.0",
+  "workflow": {
+    "id": "official-worldbuilding",
+    "name": "世界观构建",
+    "nodes": [
+      {
+        "id": "designer",
+        "type_name": "designer",
+        "config": {},
+        "position": { "x": 120.0, "y": 120.0 }
+      },
+      {
+        "id": "detail",
+        "type_name": "detail",
+        "config": {},
+        "position": { "x": 390.0, "y": 120.0 }
+      }
+    ],
+    "edges": [
+      {
+        "id": "design-to-detail",
+        "kind": "control",
+        "from": { "node_id": "designer", "port_name": "exec_out" },
+        "to": { "node_id": "detail", "port_name": "exec_in" }
+      }
+    ],
+    "metadata": {
+      "official_template": true,
+      "catalog_schema": 1
+    }
+  },
+  "prompt_templates": [],
+  "required_node_types": ["designer", "detail"],
+  "required_tools": [],
+  "required_permissions": [],
+  "minimum_ariadne_version": "0.1.0",
+  "metadata": {
+    "official_template": true,
+    "catalog_schema": 1
+  }
+}

@@ -4,12 +4,18 @@ use std::time::Duration;
 
 use ariadne::commands::{
     process_index_outbox_impl, save_document_content_impl, save_permissions_settings_impl,
-    save_workflow_graph_impl, AriadneAppState, CanvasNode, PermissionsSettings, WorkflowGraphData,
+    save_workflow_graph_impl, AriadneAppState, CanvasEdge, CanvasNode, PermissionsSettings,
+    WorkflowGraphData,
 };
 use ariadne::config::{
     ConfigStore, MemorySecretStore, ProviderConfig, SecretRef, PROVIDERS_CONFIG_FILE,
 };
-use ariadne::contracts::{NodeId, PermissionPolicy, ProviderType, RunId, RunStatus, WorkflowId};
+use ariadne::contracts::{
+    NodeId, PermissionPolicy, ProviderType, RunId, RunStatus, WorkflowEdgeKind, WorkflowId,
+};
+use ariadne::frontend::{
+    now_timestamp_ms, UiRunLogEntry, UiRunLogKind, UiRunLogLevel, UiRunLogStore,
+};
 use ariadne::ipc::{handle_request, parse_call_params, IpcRequest};
 use ariadne::workflow::{SqliteWorkflowRuntimeStore, WorkflowRunState, WorkflowRuntimeStore};
 use serde_json::{json, Value};
@@ -72,6 +78,167 @@ fn ipc_update_budget_returns_saved_budget_status_instead_of_null() {
     assert_eq!(data["preauthorized_usd"], 3.5);
     assert!(data.get("spent_usd").is_some());
     assert!(data.get("auto_mode_enabled").is_some());
+}
+
+#[test]
+fn ipc_run_logs_preserve_context_page_newest_first_and_mark_only_filtered_scope() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let store = UiRunLogStore::default_for_project(project.path());
+    let timestamp_ms = now_timestamp_ms();
+    for (log_id, timestamp_ms, run_id, level) in [
+        ("a", timestamp_ms, "run-a", UiRunLogLevel::Error),
+        ("b", timestamp_ms + 1, "run-b", UiRunLogLevel::Error),
+        ("c", timestamp_ms + 2, "run-a", UiRunLogLevel::Info),
+    ] {
+        store
+            .append(UiRunLogEntry {
+                log_id: log_id.to_owned(),
+                timestamp_ms,
+                kind: UiRunLogKind::Node,
+                level,
+                message: format!("message-{log_id}"),
+                workflow_id: Some(WorkflowId::from("workflow-a")),
+                run_id: Some(RunId::from(run_id)),
+                node_id: Some(NodeId::from("writer")),
+                unread: false,
+                metadata: Value::Null,
+            })
+            .unwrap();
+    }
+
+    let queried = handle_request(
+        &state,
+        IpcRequest {
+            method: "query_run_logs".to_owned(),
+            params: json!({
+                "filter": {
+                    "level": "error",
+                    "descending": true,
+                    "limit": 2
+                }
+            }),
+        },
+    );
+    assert!(queried.ok, "{:?}", queried.error);
+    let logs = queried.data.unwrap();
+    assert_eq!(logs[0]["log_id"], "b");
+    assert_eq!(logs[0]["workflow_id"], "workflow-a");
+    assert_eq!(logs[0]["run_id"], "run-b");
+    assert_eq!(logs[0]["node_id"], "writer");
+    assert_eq!(logs[0]["unread"], true);
+
+    let marked = handle_request(
+        &state,
+        IpcRequest {
+            method: "mark_run_logs_read".to_owned(),
+            params: json!({ "filter": { "run_id": "run-a" } }),
+        },
+    );
+    assert!(marked.ok, "{:?}", marked.error);
+    assert_eq!(marked.data, Some(json!(2)));
+
+    let entries = store.read_all().unwrap();
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.log_id == "b")
+            .unwrap()
+            .unread
+    );
+    assert!(entries
+        .iter()
+        .filter(|entry| entry
+            .run_id
+            .as_ref()
+            .is_some_and(|id| id.as_str() == "run-a"))
+        .all(|entry| !entry.unread));
+}
+
+#[test]
+fn ipc_provider_removal_previews_revision_then_deletes_config_and_key() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let secrets = Arc::new(MemorySecretStore::default());
+    let state = AriadneAppState::new(project.path(), app_state.path(), secrets.clone());
+
+    let saved = handle_request(
+        &state,
+        IpcRequest {
+            method: "save_provider_settings".to_owned(),
+            params: json!({
+                "update": {
+                    "provider_id": "target",
+                    "provider_type": "open_ai",
+                    "display_name": "Target",
+                    "enabled": true,
+                    "models": [{
+                        "model_id": "target-model",
+                        "capability": "llm"
+                    }],
+                    "make_default_llm": true,
+                    "make_default_embedding": false,
+                    "make_default_reranker": false
+                }
+            }),
+        },
+    );
+    assert!(saved.ok, "{:?}", saved.error);
+    let key_saved = handle_request(
+        &state,
+        IpcRequest {
+            method: "save_provider_key".to_owned(),
+            params: json!({ "provider": "target", "key": "secret" }),
+        },
+    );
+    assert!(key_saved.ok, "{:?}", key_saved.error);
+
+    let preview = handle_request(
+        &state,
+        IpcRequest {
+            method: "preview_provider_removal".to_owned(),
+            params: json!({ "provider": "target" }),
+        },
+    );
+    assert!(preview.ok, "{:?}", preview.error);
+    let preview = preview.data.unwrap();
+    assert_eq!(preview["has_key"], true);
+    assert_eq!(preview["default_roles"], json!(["llm"]));
+    assert_eq!(preview["blocking_references"], json!([]));
+    let revision = preview["revision"].as_str().unwrap().to_owned();
+
+    let removed = handle_request(
+        &state,
+        IpcRequest {
+            method: "remove_provider".to_owned(),
+            params: json!({
+                "provider": "target",
+                "expected_revision": revision
+            }),
+        },
+    );
+    assert!(removed.ok, "{:?}", removed.error);
+    let status = removed.data.unwrap();
+    assert!(status["default_llm_provider_id"].is_null());
+    assert!(!status["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|provider| provider["provider"] == "target" && provider["configured"] == true));
+    assert!(
+        !ariadne::commands::get_provider_config_impl(project.path(), secrets.as_ref())
+            .unwrap()
+            .providers
+            .iter()
+            .any(|provider| provider.provider == "target" && provider.has_key)
+    );
 }
 
 #[test]
@@ -623,6 +790,106 @@ fn ipc_run_workflow_starts_background_run_for_tool_callers() {
 }
 
 #[test]
+fn ipc_project_ai_submits_workflow_without_waiting_for_approval() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "project-ai-approval".to_owned(),
+            name: "Project AI Approval".to_owned(),
+            nodes: vec![
+                CanvasNode {
+                    id: "start-main".to_owned(),
+                    r#type: "start".to_owned(),
+                    label: Some("Start".to_owned()),
+                    data: Value::Null,
+                    position: Value::Null,
+                },
+                CanvasNode {
+                    id: "approval".to_owned(),
+                    r#type: "approval".to_owned(),
+                    label: Some("Approval".to_owned()),
+                    data: json!({
+                        "approval_id": "project-ai-approval-1",
+                        "auto_approve": false
+                    }),
+                    position: Value::Null,
+                },
+            ],
+            edges: vec![CanvasEdge {
+                id: "start-approval".to_owned(),
+                source: "start-main".to_owned(),
+                target: "approval".to_owned(),
+                source_handle: "exec_out".to_owned(),
+                target_handle: "exec_in".to_owned(),
+                kind: WorkflowEdgeKind::Control,
+                label: None,
+                data: Value::Null,
+            }],
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "project_ai_chat".to_owned(),
+            params: json!({
+                "request": {
+                    "message": "",
+                    "workflow_id_to_run": "project-ai-approval"
+                }
+            }),
+        },
+    );
+
+    assert!(response.ok, "{:?}", response.error);
+    let data = response
+        .data
+        .expect("project AI response should include data");
+    let run = data["workflow_run"]
+        .as_object()
+        .expect("project AI response should include a workflow run");
+    assert_eq!(run["status"], "queued");
+    let run_id = RunId::from(run["run_id"].as_str().unwrap());
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let workflow_id = WorkflowId::from("project-ai-approval");
+    let queued = store
+        .load_state(&workflow_id, &run_id)
+        .unwrap()
+        .expect("queued project AI run should already be queryable");
+    assert!(queued
+        .structured_events
+        .iter()
+        .any(|event| event.event_type == ariadne::workflow::WorkflowRuntimeEventType::RunQueued));
+
+    let mut paused = None;
+    for _ in 0..100 {
+        paused = store.load_state(&workflow_id, &run_id).unwrap();
+        if paused
+            .as_ref()
+            .is_some_and(|state| state.status == RunStatus::Paused)
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let paused = paused.expect("background project AI run should remain queryable");
+    assert_eq!(paused.status, RunStatus::Paused);
+    assert!(paused.confirmations.contains_key("project-ai-approval-1"));
+}
+
+#[test]
 fn ipc_start_workflow_preflight_failure_does_not_return_queued() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -848,23 +1115,6 @@ fn ipc_project_scoped_commands_reject_uninitialized_project_root() {
 
 #[test]
 fn ipc_error_response_includes_stable_error_code() {
-    assert_eq!(
-        ariadne::ipc::classify_ipc_error("validation failed: name required"),
-        "validation"
-    );
-    assert_eq!(
-        ariadne::ipc::classify_ipc_error("permission denied for tool: network"),
-        "permission"
-    );
-    assert_eq!(
-        ariadne::ipc::classify_ipc_error("workflow run not found: wf/run"),
-        "not_found"
-    );
-    assert_eq!(
-        ariadne::ipc::classify_ipc_error("connection refused to 127.0.0.1"),
-        "network"
-    );
-
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
     let state = ariadne::commands::AriadneAppState::new(
@@ -872,33 +1122,20 @@ fn ipc_error_response_includes_stable_error_code() {
         app_state.path(),
         std::sync::Arc::new(ariadne::config::MemorySecretStore::default()),
     );
-    // Open a path that is not an Ariadne project → validation/not_found style failure with error_code.
+    // Product dispatch creates the stable identity directly; no diagnostic keyword classifier exists.
     let response = handle_request(
         &state,
         IpcRequest {
-            method: "open_project".to_owned(),
-            params: json!({
-                "project_root": temp.path().join("missing-project").to_string_lossy(),
-            }),
+            method: "unsupported_method".to_owned(),
+            params: Value::Null,
         },
     );
-    assert!(!response.ok, "expected failure for missing project");
-    let code = response
-        .error_code
-        .as_deref()
-        .expect("ok:false must include error_code");
-    assert!(!code.is_empty(), "error_code must be non-empty");
+    assert!(!response.ok, "unsupported method must fail");
+    assert_eq!(response.error_code.as_deref(), Some("not_found"));
+    assert_eq!(response.error_key.as_deref(), Some("ui.error.not_found"));
     assert!(
         response.error.as_ref().is_some_and(|e| !e.is_empty()),
         "diagnostic error string still present for tools"
-    );
-    // Free-form English stays in diagnostic only; code is stable identity.
-    assert!(
-        matches!(
-            code,
-            "validation" | "not_found" | "io" | "unknown" | "permission"
-        ),
-        "unexpected code {code}"
     );
 }
 

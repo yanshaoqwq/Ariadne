@@ -28,6 +28,10 @@ argon2 = "0.5"
 getrandom = "0.2"
 sha2 = "0.10"
 fs4 = "0.8.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+libc = "0.2"
 tantivy = "0.22"
 thiserror = "1"
 wasmi = "0.40"

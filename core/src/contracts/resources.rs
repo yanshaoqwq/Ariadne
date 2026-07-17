@@ -1,11 +1,70 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::errors::{CoreError, CoreResult};
+
+/// 调用方取消后仍可能等待系统调用/阻塞 HTTP timeout 的后台任务全进程上限。
+pub(crate) const MAX_DETACHED_BLOCKING_TASKS: usize = 16;
+static DETACHED_BLOCKING_TASKS: DetachedBlockingTaskLimiter =
+    DetachedBlockingTaskLimiter::new(MAX_DETACHED_BLOCKING_TASKS);
+
+#[derive(Debug)]
+struct DetachedBlockingTaskLimiter {
+    active: AtomicUsize,
+    limit: usize,
+}
+
+impl DetachedBlockingTaskLimiter {
+    const fn new(limit: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    fn acquire(&self) -> CoreResult<DetachedBlockingTaskPermit<'_>> {
+        let mut current = self.active.load(Ordering::Acquire);
+        loop {
+            if current >= self.limit {
+                return Err(CoreError::ResourceLimitExceeded {
+                    resource: "detached_blocking_tasks".to_owned(),
+                    reason: format!("active blocking tasks reached process limit {}", self.limit),
+                });
+            }
+            match self.active.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(DetachedBlockingTaskPermit { limiter: self }),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+/// 后台阻塞任务许可；必须由实际 worker 持有到线程退出，不能随调用方取消提前释放。
+#[derive(Debug)]
+pub(crate) struct DetachedBlockingTaskPermit<'a> {
+    limiter: &'a DetachedBlockingTaskLimiter,
+}
+
+impl Drop for DetachedBlockingTaskPermit<'_> {
+    fn drop(&mut self) {
+        self.limiter.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// 尝试获取一个可脱离调用方生命周期的阻塞任务许可。
+pub(crate) fn acquire_detached_blocking_task_permit(
+) -> CoreResult<DetachedBlockingTaskPermit<'static>> {
+    DETACHED_BLOCKING_TASKS.acquire()
+}
 
 /// 运行时共享资源类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -304,5 +363,22 @@ mod tests {
 
         token.cancel();
         assert!(matches!(token.check(), Err(CoreError::Cancelled)));
+    }
+
+    #[test]
+    fn c9_detached_blocking_task_limit_is_enforced_and_released() {
+        let limiter = DetachedBlockingTaskLimiter::new(MAX_DETACHED_BLOCKING_TASKS);
+        let permits = (0..MAX_DETACHED_BLOCKING_TASKS)
+            .map(|_| limiter.acquire().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            limiter.acquire(),
+            Err(CoreError::ResourceLimitExceeded { ref resource, .. })
+                if resource == "detached_blocking_tasks"
+        ));
+
+        drop(permits);
+        assert!(limiter.acquire().is_ok());
     }
 }

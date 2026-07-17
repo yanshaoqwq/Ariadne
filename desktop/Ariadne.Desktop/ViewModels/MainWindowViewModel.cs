@@ -6,7 +6,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class MainWindowViewModel : ViewModelBase
+public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 {
     private static readonly string AppVersion =
         typeof(MainWindowViewModel).Assembly
@@ -35,7 +35,16 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string? _lastNavId;
     private string _maintenanceBannerText = string.Empty;
     private bool _isMaintenanceBlocking;
+    private string _diagnosticSummaryText = string.Empty;
+    private string _diagnosticDetailText = string.Empty;
+    private UserFailure? _diagnosticFailure;
+    private bool _hasDiagnostic;
+    private bool _isDiagnosticExpanded;
     private readonly Dictionary<string, object> _pageCache = new();
+    private readonly HashSet<string> _loadedPageIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Task> _pageLoadTasks = new(StringComparer.Ordinal);
+    private CancellationTokenSource _projectPageSessionCts = new();
+    private long _projectPageSessionGeneration;
 
     public MainWindowViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
     {
@@ -48,6 +57,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         _budgetStatusText = displayNames.Text("ui.common.none");
         ProjectMenuItems = new ObservableCollection<ProjectMenuItemViewModel>();
         ToggleSidebarCommand = new RelayCommand(() => SidebarExpanded = !SidebarExpanded);
+        ToggleDiagnosticCommand = new RelayCommand(() => IsDiagnosticExpanded = !IsDiagnosticExpanded);
+        ClearDiagnosticCommand = new RelayCommand(ClearDiagnostic);
+        UserFacingError.RegisterObserver(this);
         // 标题栏：始终可打开/切换项目
         SwitchProjectCommand = new RelayCommand(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectCommand));
 
@@ -105,6 +117,43 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string SwitchProjectText => _displayNames.Text("ui.layout.switch_project");
 
     public string LeaveProjectText => _displayNames.Text("ui.layout.leave_project");
+
+    public string DiagnosticTitleText => _displayNames.Text("ui.diagnostics.title");
+
+    public string DiagnosticToggleText => _displayNames.Text(
+        IsDiagnosticExpanded ? "ui.diagnostics.hide" : "ui.diagnostics.show");
+
+    public string DiagnosticClearText => _displayNames.Text("ui.diagnostics.clear");
+
+    public string DiagnosticSummaryText
+    {
+        get => _diagnosticSummaryText;
+        private set => SetProperty(ref _diagnosticSummaryText, value);
+    }
+
+    public string DiagnosticDetailText
+    {
+        get => _diagnosticDetailText;
+        private set => SetProperty(ref _diagnosticDetailText, value);
+    }
+
+    public bool HasDiagnostic
+    {
+        get => _hasDiagnostic;
+        private set => SetProperty(ref _hasDiagnostic, value);
+    }
+
+    public bool IsDiagnosticExpanded
+    {
+        get => _isDiagnosticExpanded;
+        private set
+        {
+            if (SetProperty(ref _isDiagnosticExpanded, value))
+            {
+                OnPropertyChanged(nameof(DiagnosticToggleText));
+            }
+        }
+    }
 
     /// <summary>D3：维护中/失败时的标题栏横幅文案；空表示无门禁。</summary>
     public string MaintenanceBannerText
@@ -259,6 +308,10 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public RelayCommand ToggleSidebarCommand { get; }
 
+    public RelayCommand ToggleDiagnosticCommand { get; }
+
+    public RelayCommand ClearDiagnosticCommand { get; }
+
     public RelayCommand OpenVersionCommand => new(() => _ = ShowVersionAsync());
 
     public RelayCommand OpenFeedbackCommand => new(() => _ = ShowFeedbackAsync());
@@ -271,6 +324,30 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand SwitchProjectCommand { get; }
 
     public RelayCommand LeaveProjectCommand => new(() => _ = LeaveProjectAsync());
+
+    public void Observe(UserFailure failure)
+    {
+        var detail = failure.RedactedDiagnostic;
+        if (string.IsNullOrWhiteSpace(detail))
+        {
+            return;
+        }
+
+        DiagnosticSummaryText = failure.PrimaryText(_displayNames);
+        DiagnosticDetailText = detail;
+        _diagnosticFailure = failure;
+        HasDiagnostic = true;
+        IsDiagnosticExpanded = false;
+    }
+
+    private void ClearDiagnostic()
+    {
+        IsDiagnosticExpanded = false;
+        HasDiagnostic = false;
+        DiagnosticSummaryText = string.Empty;
+        DiagnosticDetailText = string.Empty;
+        _diagnosticFailure = null;
+    }
 
     public bool HasOpenProject
     {
@@ -288,7 +365,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             BackendStatus = _displayNames.Text("ui.status.unavailable");
             // 无后端时仍允许侧栏进入空页面
-            TryRestoreLastNavWithoutProject();
+            await TryRestoreLastNavWithoutProjectAsync().ConfigureAwait(true);
             return;
         }
 
@@ -304,7 +381,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (status.CurrentProject is not null
             && !string.IsNullOrWhiteSpace(status.CurrentProject.ProjectRoot))
         {
-            await EnterProjectAsync(status.CurrentProject, createPage: false).ConfigureAwait(true);
+            await EnterProjectAsync(status.CurrentProject).ConfigureAwait(true);
             await RefreshSidebarBadgesAsync(status.Badges).ConfigureAwait(true);
         }
         else
@@ -312,16 +389,11 @@ public sealed class MainWindowViewModel : ViewModelBase
             HasOpenProject = false;
             BackendStatus = _displayNames.Text("ui.status.healthy");
             // 上次侧栏跳过开始页：恢复到暂存的导航页
-            TryRestoreLastNavWithoutProject();
+            await TryRestoreLastNavWithoutProjectAsync().ConfigureAwait(true);
         }
     }
 
     private async Task EnterProjectAsync(CurrentProjectStatus project)
-    {
-        await EnterProjectAsync(project, createPage: true).ConfigureAwait(true);
-    }
-
-    private async Task EnterProjectAsync(CurrentProjectStatus project, bool createPage)
     {
         // 同步桌面侧项目根，避免页面误判「无项目」而只显示空态
         if (!string.IsNullOrWhiteSpace(project.ProjectRoot) && !_backend.HasProjectRoot)
@@ -344,8 +416,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             ["name"] = project.ProjectName,
         });
-        // 切换项目必须清缓存并重载，避免旧项目页面残留
-        ClearProjectScopedPageCache();
+        // 页面会话按项目隔离；旧实例先失效，再创建当前项目的唯一实例。
+        ResetProjectPageSession();
         BackendStatus = _displayNames.Text("ui.status.healthy");
         NotificationText = string.Empty;
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
@@ -356,8 +428,13 @@ public sealed class MainWindowViewModel : ViewModelBase
             : "workspace";
         var target = AllNavigationItems().FirstOrDefault(n => n.Id == targetId)
                      ?? PrimaryNavigationItems[0];
-        SelectNavigationItem(target, createPage: true);
-        await LoadProjectDataPagesAsync().ConfigureAwait(true);
+        var pageSessionGeneration = _projectPageSessionGeneration;
+        await SelectNavigationItemForProjectAsync(target).ConfigureAwait(true);
+        if (pageSessionGeneration != _projectPageSessionGeneration)
+        {
+            return;
+        }
+        await LoadProjectDataPagesAsync(pageSessionGeneration).ConfigureAwait(true);
     }
 
     private async Task ApplySavedLanguageAsync()
@@ -390,7 +467,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         ProjectTitle = _displayNames.Text("ui.window.no_project_title");
         BackendStatus = _displayNames.Text("ui.status.unavailable");
         NotificationText = string.Empty;
-        ClearProjectScopedPageCache();
+        ResetProjectPageSession();
         BudgetStatusText = _displayNames.Text("ui.common.none");
         BudgetUsagePercent = 0;
         // 离开项目回到开始页；侧栏暂存的 nav 仍保留，便于再次点侧栏进入
@@ -418,7 +495,13 @@ public sealed class MainWindowViewModel : ViewModelBase
     private async Task ShowFeedbackAsync()
     {
         NotificationText = FeedbackText;
-        await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateFeedbackDialog(_displayNames)).ConfigureAwait(true);
+        var result = await DialogService.Current
+            .ConfirmAsync(HelpDialogFactory.CreateFeedbackDialog(_displayNames))
+            .ConfigureAwait(true);
+        if (result == 1 && !ExternalLinkOpener.TryOpen(HelpDialogFactory.FeedbackIssueUrl))
+        {
+            NotificationText = _displayNames.Text("ui.feedback.open_failed");
+        }
     }
 
     private NavigationItemViewModel CreateNav(string id, string key, Avalonia.Media.Geometry? icon)
@@ -427,7 +510,6 @@ public sealed class MainWindowViewModel : ViewModelBase
             id,
             _displayNames.Text(key),
             icon,
-            () => CreatePage(id, key),
             item => _ = SelectNavigationItemAsync(item));
     }
 
@@ -445,6 +527,13 @@ public sealed class MainWindowViewModel : ViewModelBase
         OnPropertyChanged(nameof(OpenProjectText));
         OnPropertyChanged(nameof(SwitchProjectText));
         OnPropertyChanged(nameof(LeaveProjectText));
+        OnPropertyChanged(nameof(DiagnosticTitleText));
+        OnPropertyChanged(nameof(DiagnosticToggleText));
+        OnPropertyChanged(nameof(DiagnosticClearText));
+        if (HasDiagnostic && _diagnosticFailure is { } failure)
+        {
+            DiagnosticSummaryText = failure.PrimaryText(_displayNames);
+        }
         OnPropertyChanged(nameof(FeedbackText));
         OnPropertyChanged(nameof(VersionText));
         OnPropertyChanged(nameof(HeaderStatusText));
@@ -463,7 +552,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
     }
 
-    private object CreatePage(string id, string key)
+    private object GetOrCreatePage(string id)
     {
         if (_pageCache.TryGetValue(id, out var cached))
         {
@@ -483,7 +572,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         return page;
     }
 
-    private async Task OpenNavigationItemByIdAsync(string id)
+    internal async Task OpenNavigationItemByIdAsync(string id)
     {
         var item = AllNavigationItems().FirstOrDefault(nav => nav.Id == id);
         if (item is not null)
@@ -518,7 +607,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         // 从开始页点侧栏 = 进入工作台页（可无项目，显示空态）；记住导航以便下次恢复
         try
         {
-            CurrentPage = item.PageFactory();
+            var page = GetOrCreatePage(item.Id);
+            CurrentPage = page;
+            await EnsurePageLoadedAsync(item.Id, page).ConfigureAwait(true);
         }
         catch (Exception)
         {
@@ -555,7 +646,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
 
     /// <summary>无打开项目时恢复上次侧栏页（跳过开始页的暂存）。</summary>
-    private void TryRestoreLastNavWithoutProject()
+    private async Task TryRestoreLastNavWithoutProjectAsync()
     {
         if (string.IsNullOrWhiteSpace(_lastNavId) || !AlwaysAvailablePageIds.Contains(_lastNavId))
         {
@@ -575,7 +666,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
         try
         {
-            CurrentPage = item.PageFactory();
+            var page = GetOrCreatePage(item.Id);
+            CurrentPage = page;
+            await EnsurePageLoadedAsync(item.Id, page).ConfigureAwait(true);
         }
         catch
         {
@@ -663,48 +756,142 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task ReloadCachedProjectPagesAsync()
     {
-        foreach (var page in _pageCache.Values)
+        foreach (var (id, page) in _pageCache.ToArray())
         {
-            if (page is IProjectDataReloadable reloadable)
+            if (page is IProjectDataReloadable)
             {
-                await reloadable.ReloadProjectDataAsync().ConfigureAwait(true);
+                await ReloadPageAsync(id, page).ConfigureAwait(true);
             }
         }
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
         await RefreshSidebarBadgesAsync(new SidebarBadgeCounts(0, 0, 0)).ConfigureAwait(true);
     }
 
-    private async Task LoadProjectDataPagesAsync()
+    private async Task LoadProjectDataPagesAsync(long? expectedGeneration = null)
     {
+        var generation = expectedGeneration ?? _projectPageSessionGeneration;
         foreach (var id in PreloadedProjectPageIds)
         {
-            var page = CreatePage(id, string.Empty);
-            if (page is IProjectDataReloadable reloadable)
+            if (generation != _projectPageSessionGeneration)
             {
-                await reloadable.ReloadProjectDataAsync().ConfigureAwait(true);
+                return;
             }
+            var page = GetOrCreatePage(id);
+            await EnsurePageLoadedAsync(id, page).ConfigureAwait(true);
+        }
+        if (generation != _projectPageSessionGeneration)
+        {
+            return;
         }
         await RefreshSidebarBadgesAsync(new SidebarBadgeCounts(0, 0, 0)).ConfigureAwait(true);
     }
 
-    private void ClearProjectScopedPageCache()
+    private async Task EnsurePageLoadedAsync(string id, object page)
     {
+        if (page is not IProjectDataReloadable reloadable || _loadedPageIds.Contains(id))
+        {
+            return;
+        }
+
+        if (_pageLoadTasks.TryGetValue(id, out var pending))
+        {
+            await pending.ConfigureAwait(true);
+            return;
+        }
+
+        var generation = _projectPageSessionGeneration;
+        var cancellationToken = _projectPageSessionCts.Token;
+        var loadTask = LoadPageForSessionAsync(id, page, reloadable, generation, cancellationToken);
+        _pageLoadTasks[id] = loadTask;
+        try
+        {
+            await loadTask.ConfigureAwait(true);
+        }
+        finally
+        {
+            if (generation == _projectPageSessionGeneration
+                && _pageLoadTasks.TryGetValue(id, out var current)
+                && ReferenceEquals(current, loadTask))
+            {
+                _pageLoadTasks.Remove(id);
+            }
+        }
+    }
+
+    private async Task LoadPageForSessionAsync(
+        string id,
+        object page,
+        IProjectDataReloadable reloadable,
+        long generation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await reloadable.ReloadProjectDataAsync(cancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (!cancellationToken.IsCancellationRequested
+            && generation == _projectPageSessionGeneration
+            && _pageCache.TryGetValue(id, out var current)
+            && ReferenceEquals(current, page))
+        {
+            _loadedPageIds.Add(id);
+        }
+    }
+
+    private async Task ReloadPageAsync(string id, object page)
+    {
+        if (_pageLoadTasks.TryGetValue(id, out var pending))
+        {
+            await pending.ConfigureAwait(true);
+        }
+        if (!_pageCache.TryGetValue(id, out var current) || !ReferenceEquals(current, page))
+        {
+            return;
+        }
+
+        _loadedPageIds.Remove(id);
+        await EnsurePageLoadedAsync(id, page).ConfigureAwait(true);
+    }
+
+    private void ResetProjectPageSession()
+    {
+        _projectPageSessionGeneration++;
+        _projectPageSessionCts.Cancel();
+        _projectPageSessionCts.Dispose();
+        _projectPageSessionCts = new CancellationTokenSource();
+        _loadedPageIds.Clear();
+        _pageLoadTasks.Clear();
         foreach (var id in ProjectScopedPageIds)
         {
+            if (_pageCache.TryGetValue(id, out var page)
+                && page is IProjectDataReloadable reloadable)
+            {
+                reloadable.DeactivateProjectData();
+            }
             _pageCache.Remove(id);
         }
     }
 
-    private void SelectNavigationItem(NavigationItemViewModel item, bool createPage)
+    internal object GetPageForTests(string id) => GetOrCreatePage(id);
+
+    internal Task PreloadProjectPagesForTestsAsync() => LoadProjectDataPagesAsync();
+
+    internal void ResetProjectPageSessionForTests() => ResetProjectPageSession();
+
+    private async Task SelectNavigationItemForProjectAsync(NavigationItemViewModel item)
     {
         foreach (var nav in AllNavigationItems())
         {
             nav.IsSelected = nav == item;
         }
-        if (createPage || ReferenceEquals(CurrentPage, Welcome))
-        {
-            CurrentPage = item.PageFactory();
-        }
+        var page = GetOrCreatePage(item.Id);
+        CurrentPage = page;
+        await EnsurePageLoadedAsync(item.Id, page).ConfigureAwait(true);
     }
 
     private void RefreshProjectMenuItems()

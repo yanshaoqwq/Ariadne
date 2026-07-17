@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::contracts::{CoreError, CoreResult, SourceSpan, TextRange};
+use crate::contracts::{CoreError, CoreResult, ExecutionCancellation, SourceSpan, TextRange};
 use crate::documents::{IndexInvalidationEvent, IndexInvalidationOutbox};
 use crate::providers::ProviderCallContext;
 use crate::retrieval::models::VectorRecord;
@@ -126,10 +126,18 @@ impl IndexingWorker {
 
     /// 处理一个待索引事件；没有事件时返回 None。
     pub fn process_next(&self) -> CoreResult<Option<IndexingWorkerReport>> {
+        self.process_next_with_cancellation(&ExecutionCancellation::new())
+    }
+
+    pub fn process_next_with_cancellation(
+        &self,
+        cancellation: &ExecutionCancellation,
+    ) -> CoreResult<Option<IndexingWorkerReport>> {
+        cancellation.check()?;
         let Some(event) = self.outbox.claim_next()? else {
             return Ok(None);
         };
-        match self.process_event(&event) {
+        match self.process_event(&event, cancellation) {
             Ok(report) => {
                 if !report.superseded {
                     self.outbox.complete(&event.event_id)?;
@@ -143,18 +151,26 @@ impl IndexingWorker {
         }
     }
 
-    fn process_event(&self, event: &IndexInvalidationEvent) -> CoreResult<IndexingWorkerReport> {
+    fn process_event(
+        &self,
+        event: &IndexInvalidationEvent,
+        cancellation: &ExecutionCancellation,
+    ) -> CoreResult<IndexingWorkerReport> {
+        cancellation.check()?;
         if event.full_rebuild_required {
             let records = collect_project_full_text_records(
                 Path::new(&event.document_id),
                 self.chunk_size_chars,
                 self.chunk_overlap_chars,
+                cancellation,
             )?;
             let indexed_chunks = records.len();
-            let vectors = self.embed_records(event, &records)?;
+            let vectors = self.embed_records(event, &records, cancellation)?;
+            cancellation.check()?;
             let _index_lock = crate::retrieval::knowledge::acquire_retrieval_index_lock(
                 &self.mutation_lock_path,
             )?;
+            cancellation.check()?;
             self.tantivy.rebuild_from_records(records.clone())?;
             self.sqlite.rebuild_from_records(records)?;
             let vector_indexed = if let (Some(vector), Some(vectors)) = (&self.vector, vectors) {
@@ -191,6 +207,7 @@ impl IndexingWorker {
             &content,
             self.chunk_size_chars,
             self.chunk_overlap_chars,
+            cancellation,
         )?;
         let records = chunks
             .iter()
@@ -198,9 +215,11 @@ impl IndexingWorker {
             .map(|chunk| FullTextRecord { chunk })
             .collect::<Vec<_>>();
         // 远端 embedding 先完成，再修改任一索引；失败时旧索引保持原状。
-        let vectors = self.embed_records(event, &records)?;
+        let vectors = self.embed_records(event, &records, cancellation)?;
+        cancellation.check()?;
         let _index_lock =
             crate::retrieval::knowledge::acquire_retrieval_index_lock(&self.mutation_lock_path)?;
+        cancellation.check()?;
         self.tantivy.delete_document(&event.document_id)?;
         self.sqlite.delete_document(&event.document_id)?;
         if let Some(vector) = &self.vector {
@@ -233,13 +252,16 @@ impl IndexingWorker {
         &self,
         event: &IndexInvalidationEvent,
         records: &[FullTextRecord],
+        cancellation: &ExecutionCancellation,
     ) -> CoreResult<Option<Vec<VectorRecord>>> {
         let Some(embedder) = &self.embedder else {
             return Ok(None);
         };
         let mut vector_records = Vec::with_capacity(records.len());
         for (batch_index, batch) in records.chunks(EMBEDDING_BATCH_SIZE).enumerate() {
+            cancellation.check()?;
             let mut context = ProviderCallContext::new(embedder.provider_id());
+            context.cancellation = cancellation.clone();
             context.operation_id = Some(format!(
                 "retrieval-index-embedding:{}:{}:{batch_index}",
                 event.event_id, event.source_version
@@ -284,6 +306,7 @@ fn collect_project_full_text_records(
     project_root: &Path,
     chunk_size_chars: usize,
     overlap_chars: usize,
+    cancellation: &ExecutionCancellation,
 ) -> CoreResult<Vec<FullTextRecord>> {
     let mut paths = Vec::new();
     for directory in ["documents", "planning"] {
@@ -292,6 +315,7 @@ fn collect_project_full_text_records(
     paths.sort();
     let mut records = Vec::new();
     for path in paths {
+        cancellation.check()?;
         let content = fs::read_to_string(&path)?;
         let version = content_version(content.as_bytes());
         let document_id = path
@@ -306,6 +330,7 @@ fn collect_project_full_text_records(
                 &content,
                 chunk_size_chars,
                 overlap_chars,
+                cancellation,
             )?
             .into_iter()
             .map(|chunk| FullTextRecord { chunk }),
@@ -344,7 +369,9 @@ fn chunk_document(
     content: &str,
     chunk_size_chars: usize,
     overlap_chars: usize,
+    cancellation: &ExecutionCancellation,
 ) -> CoreResult<Vec<ChunkDocument>> {
+    cancellation.check()?;
     if content.is_empty() {
         return Ok(Vec::new());
     }
@@ -358,6 +385,9 @@ fn chunk_document(
     let mut chunks = Vec::new();
     let mut start_char = 0;
     while start_char < char_count {
+        if chunks.len() % 256 == 0 {
+            cancellation.check()?;
+        }
         let end_char = start_char.saturating_add(chunk_size_chars).min(char_count);
         let start = boundaries[start_char];
         let end = boundaries[end_char];
