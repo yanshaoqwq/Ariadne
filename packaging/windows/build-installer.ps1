@@ -49,4 +49,14 @@ if ($compilerExitCode -ne 0) { throw "Inno Setup failed with exit code $compiler
 
 $installers = @(Get-ChildItem $output -Filter "Ariadne-$($manifest.version)-win-x64-setup.exe")
 if ($installers.Count -ne 1) { throw "Inno Setup did not produce exactly one expected installer" }
-Write-Output $installers[0].FullName
+$installer = $installers[0].FullName
+if (-not [string]::IsNullOrWhiteSpace($env:ARIADNE_WINDOWS_SIGNTOOL)) {
+    $signature = Get-AuthenticodeSignature -FilePath $installer
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+        throw "Windows installer signature is not valid: $($signature.Status)"
+    }
+    if ($env:ARIADNE_REQUIRE_SIGNED_RELEASE -eq "1" -and $null -eq $signature.TimeStamperCertificate) {
+        throw "formal Windows installer signature is missing a trusted timestamp"
+    }
+}
+Write-Output $installer

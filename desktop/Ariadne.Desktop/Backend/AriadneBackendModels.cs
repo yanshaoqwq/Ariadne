@@ -45,7 +45,9 @@ public sealed record UiPreferences(
     /// 夜·强调。
     [property: JsonPropertyName("theme_brand_color_dark")] string? ThemeBrandColorDark = null,
     /// 自定义三色是否按系统明暗分别应用昼/夜。
-    [property: JsonPropertyName("theme_follow_system_colors")] bool ThemeFollowSystemColors = true);
+    [property: JsonPropertyName("theme_follow_system_colors")] bool ThemeFollowSystemColors = true,
+    /// 减少非必要位移与缩放动效。
+    [property: JsonPropertyName("reduce_motion")] bool ReduceMotion = false);
 
 public sealed record AppStatus(
     [property: JsonPropertyName("current_project")] CurrentProjectStatus CurrentProject,

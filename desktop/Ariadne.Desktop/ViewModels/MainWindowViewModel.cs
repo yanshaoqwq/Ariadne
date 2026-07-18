@@ -378,6 +378,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
                 status.Preferences.ThemeSurfaceColorDark,
                 status.Preferences.ThemeBrandColorDark,
                 status.Preferences.ThemeFollowSystemColors);
+        MotionPreferences.Apply(status.Preferences.ReduceMotion);
         if (status.CurrentProject is not null
             && !string.IsNullOrWhiteSpace(status.CurrentProject.ProjectRoot))
         {

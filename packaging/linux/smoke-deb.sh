@@ -2,6 +2,10 @@
 set -euo pipefail
 
 DEB="$(realpath "${1:?usage: packaging/linux/smoke-deb.sh <deb>}")"
+if [[ "${ARIADNE_REQUIRE_SIGNED_RELEASE:-0}" == "1" ]]; then
+  [[ -f "$DEB.asc" ]] || { echo "formal release detached signature is missing: $DEB.asc" >&2; exit 1; }
+  gpg --batch --verify "$DEB.asc" "$DEB"
+fi
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ariadne-deb-smoke.XXXXXX")"
 USER_DATA="$(mktemp -d "${TMPDIR:-/tmp}/ariadne-user-data.XXXXXX")"
 trap 'rm -rf "$ROOT" "$USER_DATA"' EXIT

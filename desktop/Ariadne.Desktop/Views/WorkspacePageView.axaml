@@ -16,6 +16,74 @@
     <Style Selector="Border.keyboard-target:focus">
       <Setter Property="BoxShadow" Value="0 0 0 3 #B32E726B" />
     </Style>
+    <!-- 画布微动效：短时、低幅度，只强化悬停/选中/视口操作反馈。 -->
+    <Style Selector="Grid.canvas-node Border.node-card">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.10" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Grid.canvas-node:pointerover Border.node-card">
+      <Setter Property="RenderTransform" Value="translate(0px,-1px) scale(1.006)" />
+      <Setter Property="BoxShadow" Value="0 5 14 0 #22000000" />
+    </Style>
+    <Style Selector="Grid.canvas-node Border.node-flow-ring">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.12" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Grid.canvas-node.selected Border.node-flow-ring">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="Button.zoom-readout">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.10" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.zoom-readout.motion-pulse">
+      <Setter Property="RenderTransform" Value="scale(1.04)" />
+    </Style>
+    <Style Selector="Border.viewport-frame">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.14" Easing="CubicEaseOut" />
+          <DoubleTransition Property="Opacity" Duration="0:0:0.14" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.viewport-frame.motion-settle">
+      <Setter Property="RenderTransform" Value="scale(1.06)" />
+      <Setter Property="Opacity" Value="0.72" />
+    </Style>
+    <!-- 无障碍降级：偏好开启后保留状态变化，去掉位移/缩放插值。 -->
+    <Style Selector="UserControl.reduce-motion Grid.canvas-node Border.node-card">
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions"><Transitions /></Setter>
+    </Style>
+    <Style Selector="UserControl.reduce-motion Grid.canvas-node Border.node-flow-ring">
+      <Setter Property="Transitions"><Transitions /></Setter>
+    </Style>
+    <Style Selector="UserControl.reduce-motion Button.zoom-readout">
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions"><Transitions /></Setter>
+    </Style>
+    <Style Selector="UserControl.reduce-motion Border.viewport-frame">
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="Transitions"><Transitions /></Setter>
+    </Style>
   </UserControl.Styles>
   <!-- 根 Panel：拖库 ghost 叠在最上层且不裁剪 -->
   <Panel Background="{DynamicResource Ariadne.BackgroundMain}">
@@ -167,6 +235,7 @@
               -->
               <Grid Width="200"
                     Height="{Binding CanvasHeight}"
+                    Classes="canvas-node"
                     ctl:SelectedClass.IsSelected="{Binding IsSelected}">
                 <Grid.RowDefinitions>
                   <RowDefinition Height="10" />
@@ -203,7 +272,7 @@
                         Margin="-2.5"
                         CornerRadius="12"
                         IsHitTestVisible="False"
-                        IsVisible="{Binding IsSelected}" />
+                        IsVisible="True" />
 
                 <!-- 整卡：标题 + 内容，引脚都在内侧 -->
                 <Border x:Name="NodeKeyboardFocusHost"
@@ -214,7 +283,7 @@
                         CornerRadius="10"
                         ClipToBounds="True"
                         Focusable="True"
-                        Classes="keyboard-target node-keyboard-target"
+                        Classes="keyboard-target node-keyboard-target node-card"
                         AutomationProperties.Name="{Binding Name}"
                         KeyDown="OnNodeCardKeyDown"
                         PointerPressed="OnNodeSelectPointerPressed">
@@ -492,7 +561,7 @@
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomOutText}" AutomationProperties.Name="{Binding ZoomOutText}" Command="{Binding ZoomOutCommand}">
                   <TextBlock Text="{Binding ZoomOutGlyphText}" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Button>
-                <Button Classes="subtle" MinWidth="58" Padding="8,0" ToolTip.Tip="{Binding ResetZoomText}" AutomationProperties.Name="{Binding ResetZoomText}" Command="{Binding ResetZoomCommand}">
+                <Button x:Name="ZoomReadoutButton" Classes="subtle zoom-readout" MinWidth="58" Padding="8,0" ToolTip.Tip="{Binding ResetZoomText}" AutomationProperties.Name="{Binding ResetZoomText}" Command="{Binding ResetZoomCommand}">
                   <TextBlock Text="{Binding CanvasZoomText}" Classes="caption" VerticalAlignment="Center" />
                 </Button>
                 <Button Classes="icon-btn"
@@ -576,6 +645,7 @@
               </ItemsControl.ItemTemplate>
             </ItemsControl>
             <Border x:Name="MiniMapViewportFrame"
+                    Classes="viewport-frame"
                     BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
                     BorderThickness="1.5"
                     Background="#182E726B"

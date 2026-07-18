@@ -729,10 +729,17 @@
             <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
                 <TextBlock Text="{Binding WorkspaceSectionTitle}" Classes="subtitle" />
-                <Grid RowDefinitions="Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
                   <CheckBox Grid.Row="0" Grid.Column="1"
                             IsChecked="{Binding ProjectPanelVisible, Mode=TwoWay}"
                             Content="{Binding ProjectPanelVisibleText}" />
+                  <StackPanel Grid.Row="1" Grid.Column="1" Spacing="4">
+                    <CheckBox IsChecked="{Binding ReduceMotion, Mode=TwoWay}"
+                              Content="{Binding ReduceMotionText}" />
+                    <TextBlock Text="{Binding ReduceMotionHintText}"
+                               Classes="caption"
+                               TextWrapping="Wrap" />
+                  </StackPanel>
                 </Grid>
               </StackPanel>
             </Border>

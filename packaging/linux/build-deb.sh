@@ -42,5 +42,6 @@ DEB="$OUTPUT_DIR/Ariadne_${VERSION}_${ARCH}.deb"
 dpkg-deb --root-owner-group --build "$STAGE" "$DEB"
 if [[ -n "${ARIADNE_LINUX_SIGNING_KEY:-}" ]]; then
   gpg --batch --yes --local-user "$ARIADNE_LINUX_SIGNING_KEY" --armor --detach-sign "$DEB"
+  gpg --batch --verify "$DEB.asc" "$DEB"
 fi
 echo "$DEB"

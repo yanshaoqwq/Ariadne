@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ariadne::commands::{
     create_checkpoint_impl, create_project, ensure_index_bootstrap_on_open, fetch_provider_models,
@@ -4830,6 +4830,360 @@ fn project_ai_can_call_web_search_and_receive_cited_results() {
 }
 
 #[test]
+fn executor_adapter_web_search_uses_project_permission_policy_in_product_workflow() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let llm_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    llm_listener.set_nonblocking(true).unwrap();
+    let llm_base_url = format!("http://{}", llm_listener.local_addr().unwrap());
+    let llm_server = thread::spawn(move || {
+        for round in 0..2 {
+            let mut stream = accept_with_deadline(&llm_listener, Duration::from_secs(5));
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buffer = [0u8; 65536];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.contains("\"name\":\"executor-adapter-web-search\""));
+            let response_body = if round == 0 {
+                r#"{
+                  "model":"adapter-chat",
+                  "choices":[{
+                    "message":{
+                      "content":"",
+                      "tool_calls":[{
+                        "id":"call-adapter-web-search",
+                        "type":"function",
+                        "function":{"name":"executor-adapter-web-search","arguments":"{\"query\":\"2026 publishing standard\",\"limit\":2}"}
+                      }]
+                    },
+                    "finish_reason":"tool_calls"
+                  }],
+                  "usage":{"prompt_tokens":20,"completion_tokens":2}
+                }"#
+            } else {
+                assert!(request.contains("https://example.test/publishing-2026"));
+                assert!(request.contains("Publishing Standard 2026"));
+                r#"{
+                  "model":"adapter-chat",
+                  "choices":[{
+                    "message":{"content":"ExecutorAdapter 已完成公开资料核对。","tool_calls":[]},
+                    "finish_reason":"stop"
+                  }],
+                  "usage":{"prompt_tokens":40,"completion_tokens":6}
+                }"#
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+
+    let search_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    search_listener.set_nonblocking(true).unwrap();
+    let search_base_url = format!("http://{}", search_listener.local_addr().unwrap());
+    let search_server = thread::spawn(move || {
+        let mut stream = accept_with_deadline(&search_listener, Duration::from_secs(5));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = [0u8; 16384];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /responses "));
+        assert!(request.contains("2026 publishing standard"));
+        let body = r#"{
+          "output":[{
+            "type":"message",
+            "content":[{
+              "type":"output_text",
+              "text":"A current publishing reference.",
+              "annotations":[{
+                "type":"url_citation",
+                "url":"https://example.test/publishing-2026",
+                "title":"Publishing Standard 2026"
+              }]
+            }]
+          }]
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let skill_dir = temp.path().join("skills").join("web-research");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("skill.json"),
+        r#"{
+          "skill_id":"web-research",
+          "name":"Web Research",
+          "version":"1.0.0",
+          "executor":{
+            "kind":"llm",
+            "provider_id":"adapter_chat",
+            "model_id":"adapter-chat",
+            "prompt_template":"核对公开资料"
+          },
+          "schema":{
+            "inputs":[],
+            "outputs":[{"name":"text","type_name":"inline","required":true}]
+          },
+          "limits":{"timeout_ms":5000,"max_output_bytes":4096},
+          "estimated_cost_usd":0.0
+        }"#,
+    )
+    .unwrap();
+
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "adapter_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Adapter Chat".to_owned(),
+            enabled: true,
+            base_url: Some(llm_base_url),
+            models: vec![ModelConfig {
+                model_id: "adapter-chat".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "adapter_web_search".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Adapter Web Search".to_owned(),
+            enabled: true,
+            base_url: Some(search_base_url),
+            models: vec![ModelConfig {
+                model_id: "adapter-web-search".to_owned(),
+                capability: ProviderCapability::Search,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: false,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: true,
+        },
+    )
+    .unwrap();
+    let mut permissions = get_permissions_settings_impl(temp.path()).unwrap();
+    permissions.policy.allow_network = true;
+    permissions.policy.allow_web_search = true;
+    save_permissions_settings_impl(temp.path(), permissions).unwrap();
+
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "adapter-web-search-flow".to_owned(),
+            name: "Adapter Web Search".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "research".to_owned(),
+                r#type: "executor_adapter:web-research".to_owned(),
+                label: Some("Web Research".to_owned()),
+                data: json!({ "skill_id": "web-research" }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+
+    let run = run_workflow_impl(
+        temp.path(),
+        &MemorySecretStore::default(),
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "adapter-web-search-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+
+    llm_server.join().unwrap();
+    search_server.join().unwrap();
+    assert_eq!(run.status, "succeeded");
+}
+
+#[test]
+fn executor_adapter_llm_routes_to_manifest_provider_instead_of_project_default() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let default_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    default_listener.set_nonblocking(true).unwrap();
+    let default_base_url = format!("http://{}", default_listener.local_addr().unwrap());
+
+    let manifest_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    manifest_listener.set_nonblocking(true).unwrap();
+    let manifest_base_url = format!("http://{}", manifest_listener.local_addr().unwrap());
+    let manifest_server = thread::spawn(move || {
+        let mut stream = accept_with_deadline(&manifest_listener, Duration::from_secs(5));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = [0u8; 65536];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /chat/completions "));
+        assert!(request.contains("authorization: Bearer manifest-secret"));
+        assert!(request.contains("\"model\":\"manifest-model\""));
+        let body = r#"{
+          "model":"manifest-model",
+          "choices":[{
+            "message":{"content":"已使用清单指定 Provider。","tool_calls":[]},
+            "finish_reason":"stop"
+          }],
+          "usage":{"prompt_tokens":12,"completion_tokens":5}
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let skill_dir = temp.path().join("skills").join("manifest-provider");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("skill.json"),
+        r#"{
+          "skill_id":"manifest-provider",
+          "name":"Manifest Provider",
+          "version":"1.0.0",
+          "executor":{
+            "kind":"llm",
+            "provider_id":"manifest_chat",
+            "model_id":"manifest-model",
+            "prompt_template":"验证 Provider 路由"
+          },
+          "schema":{
+            "inputs":[],
+            "outputs":[{"name":"text","type_name":"inline","required":true}]
+          },
+          "limits":{"timeout_ms":5000,"max_output_bytes":4096},
+          "estimated_cost_usd":0.0
+        }"#,
+    )
+    .unwrap();
+
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "default_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Default Chat".to_owned(),
+            enabled: true,
+            base_url: Some(default_base_url),
+            models: vec![ModelConfig {
+                model_id: "default-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "manifest_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Manifest Chat".to_owned(),
+            enabled: true,
+            base_url: Some(manifest_base_url),
+            models: vec![ModelConfig {
+                model_id: "manifest-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: false,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    let secrets = MemorySecretStore::default();
+    let credentials = ProjectCredentialScope::new(temp.path(), &secrets).unwrap();
+    credentials
+        .set_provider_secret("default_chat", SecretValue::new("default-secret"))
+        .unwrap();
+    credentials
+        .set_provider_secret("manifest_chat", SecretValue::new("manifest-secret"))
+        .unwrap();
+
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "manifest-provider-flow".to_owned(),
+            name: "Manifest Provider".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "manifest-provider-node".to_owned(),
+                r#type: "executor_adapter:manifest-provider".to_owned(),
+                label: Some("Manifest Provider".to_owned()),
+                data: json!({ "skill_id": "manifest-provider" }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+
+    let run = run_workflow_impl(
+        temp.path(),
+        &secrets,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "manifest-provider-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+
+    manifest_server.join().unwrap();
+    assert_eq!(run.status, "succeeded");
+    assert!(matches!(
+        default_listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
 fn project_ai_chat_rejects_stale_revision_before_provider_resolution() {
     let temp = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
@@ -6828,6 +7182,23 @@ fn register_executor_adapters_for_project_registers_skill_handlers() {
         "handler missing from router; types={:?}",
         external.registered_type_names()
     );
+}
+
+fn accept_with_deadline(listener: &TcpListener, timeout: Duration) -> std::net::TcpStream {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for local HTTP request"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("failed to accept local HTTP request: {error}"),
+        }
+    }
 }
 
 fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {

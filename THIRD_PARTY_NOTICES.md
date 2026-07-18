@@ -7,11 +7,13 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 
 | Package | Version | License | Source |
 |---|---:|---|---|
+| `adler2` | `2.0.1` | `0BSD OR MIT OR Apache-2.0` | <https://github.com/oyvindln/adler2> |
 | `aead` | `0.5.2` | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/traits> |
 | `aes` | `0.8.4` | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/block-ciphers> |
 | `aho-corasick` | `1.1.4` | `Unlicense OR MIT` | <https://github.com/BurntSushi/aho-corasick> |
 | `allocator-api2` | `0.2.21` | `MIT OR Apache-2.0` | <https://github.com/zakarumych/allocator-api2> |
 | `apple-native-keyring-store` | `1.0.0` | `MIT OR Apache-2.0` | <https://github.com/open-source-cooperative/apple-native-keyring-store.git> |
+| `arbitrary` | `1.4.2` | `MIT OR Apache-2.0` | <https://github.com/rust-fuzz/arbitrary/> |
 | `arc-swap` | `1.9.1` | `MIT OR Apache-2.0` | <https://github.com/vorner/arc-swap> |
 | `argon2` | `0.5.3` | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/password-hashes/tree/master/argon2> |
 | `arrayvec` | `0.7.7` | `MIT OR Apache-2.0` | <https://github.com/bluss/arrayvec> |
@@ -58,6 +60,7 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 | `crunchy` | `0.2.4` | `MIT` | <https://github.com/eira-fransham/crunchy> |
 | `crypto-common` | `0.1.7` | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/traits> |
 | `deranged` | `0.5.8` | `MIT OR Apache-2.0` | <https://github.com/jhpratt/deranged> |
+| `derive_arbitrary` | `1.4.2` | `MIT OR Apache-2.0` | <https://github.com/rust-fuzz/arbitrary> |
 | `digest` | `0.10.7` | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/traits> |
 | `displaydoc` | `0.2.6` | `MIT OR Apache-2.0` | <https://github.com/yaahc/displaydoc> |
 | `downcast-rs` | `1.2.1` | `MIT/Apache-2.0` | <https://github.com/marcianx/downcast-rs> |
@@ -73,7 +76,9 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 | `fallible-streaming-iterator` | `0.1.9` | `MIT/Apache-2.0` | <https://github.com/sfackler/fallible-streaming-iterator> |
 | `fastdivide` | `0.4.2` | `zlib-acknowledgement OR MIT` | <https://github.com/fulmicoton/fastdivide> |
 | `fastrand` | `2.4.1` | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/fastrand> |
+| `filetime` | `0.2.29` | `MIT/Apache-2.0` | <https://github.com/alexcrichton/filetime> |
 | `find-msvc-tools` | `0.1.9` | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cc-rs> |
+| `flate2` | `1.1.9` | `MIT OR Apache-2.0` | <https://github.com/rust-lang/flate2-rs> |
 | `fnv` | `1.0.7` | `Apache-2.0 / MIT` | <https://github.com/servo/rust-fnv> |
 | `foldhash` | `0.1.5` | `Zlib` | <https://github.com/orlp/foldhash> |
 | `form_urlencoded` | `1.2.2` | `MIT OR Apache-2.0` | <https://github.com/servo/rust-url> |
@@ -140,6 +145,7 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 | `memmap2` | `0.9.11` | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/memmap2-rs> |
 | `memoffset` | `0.9.1` | `MIT` | <https://github.com/Gilnaa/memoffset> |
 | `minimal-lexical` | `0.2.1` | `MIT/Apache-2.0` | <https://github.com/Alexhuszagh/minimal-lexical> |
+| `miniz_oxide` | `0.8.9` | `MIT OR Zlib OR Apache-2.0` | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
 | `mio` | `1.2.1` | `MIT` | <https://github.com/tokio-rs/mio> |
 | `multi-stash` | `0.2.0` | `MIT/Apache-2.0` | <https://github.com/robbepop/multi-stash> |
 | `murmurhash32` | `0.3.1` | `MIT` | <https://github.com/quickwit-inc/murmurhash32> |
@@ -214,6 +220,7 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 | `sha2` | `0.10.9` | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/hashes> |
 | `shlex` | `2.0.1` | `MIT OR Apache-2.0` | <https://github.com/comex/rust-shlex> |
 | `signal-hook-registry` | `1.4.8` | `MIT OR Apache-2.0` | <https://github.com/vorner/signal-hook> |
+| `simd-adler32` | `0.3.10` | `MIT` | <https://github.com/mcountryman/simd-adler32> |
 | `sketches-ddsketch` | `0.2.2` | `Apache-2.0` | <https://github.com/mheffner/rust-sketches-ddsketch> |
 | `slab` | `0.4.12` | `MIT` | <https://github.com/tokio-rs/slab> |
 | `smallvec` | `1.15.2` | `MIT OR Apache-2.0` | <https://github.com/servo/rust-smallvec> |
@@ -234,6 +241,7 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 | `tantivy-sstable` | `0.3.0` | `MIT` | <https://github.com/quickwit-oss/tantivy> |
 | `tantivy-stacker` | `0.3.0` | `MIT` | <https://github.com/quickwit-oss/tantivy> |
 | `tantivy-tokenizer-api` | `0.3.0` | `MIT` | <https://github.com/quickwit-oss/tantivy> |
+| `tar` | `0.4.46` | `MIT OR Apache-2.0` | <https://github.com/composefs/tar-rs> |
 | `tempfile` | `3.27.0` | `MIT OR Apache-2.0` | <https://github.com/Stebalien/tempfile> |
 | `thiserror` | `1.0.69` | `MIT OR Apache-2.0` | <https://github.com/dtolnay/thiserror> |
 | `thiserror` | `2.0.18` | `MIT OR Apache-2.0` | <https://github.com/dtolnay/thiserror> |
@@ -315,6 +323,7 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 | `winnow` | `1.0.3` | `MIT` | <https://github.com/winnow-rs/winnow> |
 | `wit-bindgen` | `0.57.1` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wit-bindgen> |
 | `writeable` | `0.6.3` | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
+| `xattr` | `1.6.1` | `MIT OR Apache-2.0` | <https://github.com/Stebalien/xattr> |
 | `yaml_serde` | `0.10.4` | `MIT OR Apache-2.0` | <https://github.com/yaml/yaml-serde> |
 | `yoke` | `0.8.3` | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
 | `yoke-derive` | `0.8.2` | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
@@ -330,7 +339,9 @@ Ariadne's own license is in `LICENSE`; each component below remains governed by 
 | `zerotrie` | `0.2.4` | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
 | `zerovec` | `0.11.6` | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
 | `zerovec-derive` | `0.11.3` | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
+| `zip` | `2.4.2` | `MIT` | <https://github.com/zip-rs/zip2.git> |
 | `zmij` | `1.0.21` | `MIT` | <https://github.com/dtolnay/zmij> |
+| `zopfli` | `0.8.3` | `Apache-2.0` | <https://github.com/zopfli-rs/zopfli> |
 | `zstd` | `0.13.3` | `MIT` | <https://github.com/gyscos/zstd-rs> |
 | `zstd-safe` | `7.2.4` | `MIT OR Apache-2.0` | <https://github.com/gyscos/zstd-rs> |
 | `zstd-sys` | `2.0.16+zstd.1.5.7` | `MIT/Apache-2.0` | <https://github.com/gyscos/zstd-rs> |

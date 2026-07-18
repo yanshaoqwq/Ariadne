@@ -2177,6 +2177,9 @@ pub struct UiPreferences {
     pub project_panel_position: Option<(i32, i32)>,
     #[serde(default)]
     pub panel_states: BTreeMap<String, bool>,
+    /// 关闭非必要位移/缩放过渡，仅保留即时状态反馈。
+    #[serde(default)]
+    pub reduce_motion: bool,
     pub onboarding_seen: bool,
 }
 
@@ -2200,6 +2203,7 @@ impl Default for UiPreferences {
             project_panel_visible: true,
             project_panel_position: None,
             panel_states: BTreeMap::new(),
+            reduce_motion: false,
             onboarding_seen: false,
         }
     }

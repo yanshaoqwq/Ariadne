@@ -7,6 +7,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_RIDS = {"linux-x64", "linux-arm64", "win-x64", "osx-x64", "osx-arm64"}
+REQUIRED_RUNNERS = {
+    "linux-x64": "ubuntu-24.04",
+    "linux-arm64": "ubuntu-24.04-arm",
+    "win-x64": "windows-2025",
+    "osx-x64": "macos-15-intel",
+    "osx-arm64": "macos-15",
+}
 REQUIRED_QUALITY_COMMANDS = {
     "cargo fmt --all -- --check",
     "cargo clippy --workspace --all-targets --all-features -- -D warnings",
@@ -81,6 +88,12 @@ def verify_release_matrix(ci: str, release: str) -> None:
     release_package = workflow_job(release, "package")
     release_evidence_gate = workflow_job(release, "evidence-gate")
     release_publish = workflow_job(release, "publish")
+    for workflow_job_body, label in ((ci_package, "CI"), (release_package, "Release")):
+        for rid, runner in REQUIRED_RUNNERS.items():
+            require(
+                f"runner: {runner}\n            rid: {rid}" in workflow_job_body,
+                f"{label} must run {rid} on its native {runner} runner",
+            )
     require("actions/setup-python@v5" in ci_package, "CI native package job must provision Python")
     require("actions/setup-python@v5" in release_gate, "release gate must provision Python")
     require("actions/setup-python@v5" in release_package, "release package job must provision Python")
@@ -157,6 +170,10 @@ def verify_package_security_contract() -> None:
     require("--self-contained true" in build, "Desktop release must be self-contained")
     require("verify-package" in build, "release assembly must run package verification")
     require("--bin ariadne-server" not in build, "formal release must not build the REST server")
+    require("packaging/windows/sign-release-binaries.ps1" in build,
+            "Windows first-party binaries must be signed before package assembly")
+    require(build.index("packaging/windows/sign-release-binaries.ps1") < build.index("  assemble "),
+            "Windows signing must precede release-manifest assembly")
 
     release_tool = read("tools/Ariadne.ReleaseTool/Program.cs")
     require('"ariadne-server", "ariadne-server.exe"' in release_tool,
@@ -186,7 +203,15 @@ def verify_package_security_contract() -> None:
 
 
 def verify_installer_smoke_contract(ci: str, release: str) -> None:
+    windows_sign = read("packaging/windows/sign-release-binaries.ps1")
     windows_build = read("packaging/windows/build-installer.ps1")
+    windows_smoke = read("packaging/windows/smoke-installer.ps1")
+    for binary in ("Ariadne.Desktop.exe", "Ariadne.Desktop.dll", "ariadne.exe", "ariadne-ipc.exe"):
+        require(binary in windows_sign, f"Windows release signing must cover {binary}")
+    require("Get-AuthenticodeSignature" in windows_sign,
+            "Windows first-party signatures must be verified after signing")
+    require("TimeStamperCertificate" in windows_sign,
+            "formal Windows first-party signatures must require a timestamp")
     require("Get-Command ISCC.exe -ErrorAction SilentlyContinue" in windows_build,
             "Windows packaging must tolerate Chocolatey PATH propagation delay")
     require('Inno Setup 6\\ISCC.exe' in windows_build,
@@ -197,6 +222,20 @@ def verify_installer_smoke_contract(ci: str, release: str) -> None:
             "Windows compiler logs must not enter the installer path pipeline")
     require("$installers.Count -ne 1" in windows_build,
             "Windows packaging must require exactly one deterministic installer")
+    require("Get-AuthenticodeSignature -FilePath $installer" in windows_build,
+            "Windows installer Authenticode signature must be verified")
+    require("TimeStamperCertificate" in windows_build,
+            "formal Windows installer signature must require a timestamp")
+    require("Get-AuthenticodeSignature -FilePath $uninstaller" in windows_smoke,
+            "formal Windows smoke must verify the signed uninstaller")
+
+    linux_build = read("packaging/linux/build-deb.sh")
+    linux_smoke = read("packaging/linux/smoke-deb.sh")
+    require('gpg --batch --verify "$DEB.asc" "$DEB"' in linux_build,
+            "Linux package signing must verify the detached signature after creation")
+    require('formal release detached signature is missing' in linux_smoke
+            and 'gpg --batch --verify "$DEB.asc" "$DEB"' in linux_smoke,
+            "formal Linux smoke must require and verify the detached signature")
 
     macos_build = read("packaging/macos/build-installer.sh")
     macos_smoke = read("packaging/macos/smoke-installer.sh")
@@ -206,14 +245,32 @@ def verify_installer_smoke_contract(ci: str, release: str) -> None:
             "macOS pre-install smoke output must not contaminate the package path")
     require('pkgbuild "${PKG_ARGS[@]}" "$PKG" >&2' in macos_build,
             "macOS pkgbuild logs must not contaminate the package path")
+    require('codesign --verify --deep --strict' in macos_build,
+            "macOS app signing must be verified before packaging")
+    require('pkgutil --check-signature "$PKG"' in macos_build,
+            "macOS signed pkg must be verified before notarization")
+    require('xcrun stapler validate "$PKG"' in macos_build
+            and 'xcrun stapler validate "$DMG"' in macos_build,
+            "macOS notarization tickets must be validated after stapling")
     require("printf '%s\\n' \"$PKG\"" in macos_build,
             "macOS packaging must emit exactly the final pkg path on stdout")
+    require('hdiutil attach -readonly -nobrowse -mountpoint' in macos_smoke,
+            "macOS smoke must mount the published DMG")
+    require('codesign --verify --deep --strict' in macos_smoke,
+            "macOS smoke must verify the app from the mounted DMG")
+    require('spctl --assess --type install' in macos_smoke
+            and 'spctl --assess --type execute' in macos_smoke,
+            "formal macOS smoke must assess both pkg and app with Gatekeeper")
 
     for workflow, label in ((ci, "CI"), (release, "Release")):
         require("expected installer is missing" in workflow,
                 f"{label} must locate the Windows installer by its manifest version")
         require('pkg="artifacts/Ariadne-$version-${{ matrix.rid }}.pkg"' in workflow,
                 f"{label} must locate the macOS package by its manifest version and RID")
+        require('dmg="artifacts/Ariadne-$version-${{ matrix.rid }}.dmg"' in workflow,
+                f"{label} must locate the macOS disk image by its manifest version and RID")
+        require('packaging/macos/smoke-installer.sh "$pkg" "$dmg"' in workflow,
+                f"{label} must smoke both the macOS pkg and dmg")
         require('$installer = packaging/windows/build-installer.ps1' not in workflow,
                 f"{label} must not capture Windows build logs as the installer path")
         require('pkg="$(bash packaging/macos/build-installer.sh' not in workflow,

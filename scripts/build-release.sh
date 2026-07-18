@@ -54,6 +54,14 @@ dotnet publish "$ROOT/desktop/Ariadne.Desktop/Ariadne.Desktop.csproj" \
   -p:DebugSymbols=false \
   -p:PublishSingleFile=false
 
+# Windows 第一方二进制必须在 ReleaseTool 生成 manifest 前完成签名，
+# 否则安装器中的文件与 release-manifest.json 哈希会产生第二份身份。
+if [[ "$RID" == "win-x64" ]]; then
+  pwsh -NoProfile -NonInteractive -File "$ROOT/packaging/windows/sign-release-binaries.ps1" \
+    -DesktopPublishDirectory "$DESKTOP_PUBLISH" \
+    -RustBinaryDirectory "$RUST_BIN_DIR"
+fi
+
 dotnet run --project "$ROOT/tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj" -- \
   assemble \
   --root "$ROOT" \

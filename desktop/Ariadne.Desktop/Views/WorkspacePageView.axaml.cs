@@ -80,6 +80,9 @@ public partial class WorkspacePageView : UserControl
 
     private bool _layoutInitialized;
     private WorkspacePageViewModel? _attachedViewModel;
+    private int _zoomFeedbackGeneration;
+    private int _viewportFeedbackGeneration;
+    private bool _motionPreferenceAttached;
 
     public WorkspacePageView()
     {
@@ -99,6 +102,17 @@ public partial class WorkspacePageView : UserControl
             WorkspaceGrid.SizeChanged += OnWorkspacePrimarySizeChanged;
         }
         AttachViewActions();
+    }
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        if (!_motionPreferenceAttached)
+        {
+            MotionPreferences.Changed += OnMotionPreferenceChanged;
+            _motionPreferenceAttached = true;
+        }
+        ApplyMotionPreference();
     }
 
     private void OnWorkspaceViewSizeChanged(object? sender, SizeChangedEventArgs e)
@@ -263,6 +277,11 @@ public partial class WorkspacePageView : UserControl
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        if (_motionPreferenceAttached)
+        {
+            MotionPreferences.Changed -= OnMotionPreferenceChanged;
+            _motionPreferenceAttached = false;
+        }
         _spacePanMode = false;
         _keyboardEdgeSourceNode = null;
         _keyboardEdgeSourceHandle = null;
@@ -288,6 +307,57 @@ public partial class WorkspacePageView : UserControl
         }
 
         base.OnDetachedFromVisualTree(e);
+    }
+
+    private void OnMotionPreferenceChanged(object? sender, EventArgs e)
+    {
+        ApplyMotionPreference();
+    }
+
+    private void ApplyMotionPreference()
+    {
+        Classes.Set("reduce-motion", MotionPreferences.ReduceMotion);
+        if (!MotionPreferences.ReduceMotion)
+        {
+            return;
+        }
+
+        _zoomFeedbackGeneration++;
+        _viewportFeedbackGeneration++;
+        ZoomReadoutButton?.Classes.Set("motion-pulse", false);
+        MiniMapViewportFrame?.Classes.Set("motion-settle", false);
+    }
+
+    private async void PulseZoomFeedback()
+    {
+        if (MotionPreferences.ReduceMotion || ZoomReadoutButton is null)
+        {
+            return;
+        }
+
+        var generation = ++_zoomFeedbackGeneration;
+        ZoomReadoutButton.Classes.Set("motion-pulse", true);
+        await Task.Delay(110);
+        if (generation == _zoomFeedbackGeneration && ZoomReadoutButton is not null)
+        {
+            ZoomReadoutButton.Classes.Set("motion-pulse", false);
+        }
+    }
+
+    private async void PulseViewportFeedback()
+    {
+        if (MotionPreferences.ReduceMotion || MiniMapViewportFrame is null)
+        {
+            return;
+        }
+
+        var generation = ++_viewportFeedbackGeneration;
+        MiniMapViewportFrame.Classes.Set("motion-settle", true);
+        await Task.Delay(150);
+        if (generation == _viewportFeedbackGeneration && MiniMapViewportFrame is not null)
+        {
+            MiniMapViewportFrame.Classes.Set("motion-settle", false);
+        }
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -1352,6 +1422,7 @@ public partial class WorkspacePageView : UserControl
     private void ResetCanvasZoomAtCenter()
     {
         SetCanvasZoomAt(1.0, CanvasViewportCenter());
+        PulseViewportFeedback();
     }
 
     private Point CanvasViewportCenter()
@@ -1377,6 +1448,7 @@ public partial class WorkspacePageView : UserControl
 
         ApplyCanvasViewportState(state);
         vm.StatusText = vm.CanvasZoomText;
+        PulseZoomFeedback();
     }
 
     private void BeginPan(Point screen)
@@ -1865,6 +1937,7 @@ public partial class WorkspacePageView : UserControl
         var targetLeft = logicalX - (viewW * 0.5);
         var targetTop = logicalY - (viewH * 0.5);
         ApplyCanvasOffset(-targetLeft * zoom, -targetTop * zoom);
+        PulseViewportFeedback();
         e.Handled = true;
     }
 
@@ -2304,6 +2377,8 @@ public partial class WorkspacePageView : UserControl
         var safeViewport = SafeFitViewport();
         var state = viewModel.FitCanvasViewport(minX, minY, maxX, maxY, safeViewport);
         ApplyCanvasViewportState(state);
+        PulseZoomFeedback();
+        PulseViewportFeedback();
 
         SyncNodeContainerPositions();
         SyncEdgePositions();

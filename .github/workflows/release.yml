@@ -163,8 +163,10 @@ jobs:
           bash packaging/macos/build-installer.sh "artifacts/staging/ariadne-${{ matrix.rid }}" artifacts
           version="$(jq -er '.version' "artifacts/staging/ariadne-${{ matrix.rid }}/release-manifest.json")"
           pkg="artifacts/Ariadne-$version-${{ matrix.rid }}.pkg"
+          dmg="artifacts/Ariadne-$version-${{ matrix.rid }}.dmg"
           test -f "$pkg"
-          bash packaging/macos/smoke-installer.sh "$pkg"
+          test -f "$dmg"
+          bash packaging/macos/smoke-installer.sh "$pkg" "$dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: ariadne-${{ matrix.rid }}

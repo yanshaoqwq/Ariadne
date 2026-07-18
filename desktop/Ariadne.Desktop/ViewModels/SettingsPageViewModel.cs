@@ -144,6 +144,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(GitAutoColorLabel),
         nameof(GitManualColorLabel),
         nameof(ProjectPanelVisibleText),
+        nameof(ReduceMotionText),
+        nameof(ReduceMotionHintText),
         nameof(SavePersonalizationText),
         nameof(RagLabel),
         nameof(VectorEnabledText),
@@ -250,6 +252,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private string _gitAutoColor = "#8a8f98";
     private string _gitManualColor = "#f59e0b";
     private bool _projectPanelVisible = true;
+    private bool _reduceMotion;
     private UiPreferences? _uiPreferences;
 
     private string _vectorBackend = "qdrant_sidecar";
@@ -729,6 +732,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string GitAutoColorLabel => _displayNames.Text("ui.settings.personalization.git_auto_color");
     public string GitManualColorLabel => _displayNames.Text("ui.settings.personalization.git_manual_color");
     public string ProjectPanelVisibleText => _displayNames.Text("ui.settings.personalization.project_panel");
+    public string ReduceMotionText => _displayNames.Text("ui.settings.personalization.reduce_motion");
+    public string ReduceMotionHintText => _displayNames.Text("ui.settings.personalization.reduce_motion.desc");
     public string SavePersonalizationText => _displayNames.Text("ui.settings.personalization.save");
 
     public string RagLabel => _displayNames.Text("ui.settings.misc.rag");
@@ -1316,6 +1321,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
     }
     public bool ProjectPanelVisible { get => _projectPanelVisible; set => SetProperty(ref _projectPanelVisible, value); }
+    public bool ReduceMotion { get => _reduceMotion; set => SetProperty(ref _reduceMotion, value); }
 
     public bool VectorEnabled { get => _vectorEnabled; set => SetProperty(ref _vectorEnabled, value); }
     public string VectorBackend
@@ -1622,6 +1628,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         GitAutoColor = preferences.GitAutoColor;
         GitManualColor = preferences.GitManualColor;
         ProjectPanelVisible = preferences.ProjectPanelVisible;
+        ReduceMotion = preferences.ReduceMotion;
+        MotionPreferences.Apply(preferences.ReduceMotion);
     }
 
     private void ApplyMisc(RagSettings rag, GitSettings git)
@@ -2509,6 +2517,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         {
             await _backend.SaveUiPreferencesAsync(preferences).ConfigureAwait(true);
             ApplyCurrentThemeColors();
+            MotionPreferences.Apply(preferences.ReduceMotion);
             _uiPreferences = preferences;
         });
     }
@@ -2530,7 +2539,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             ThemeMainColorDark,
             ThemeSurfaceColorDark,
             ThemeBrandColorDark,
-            ThemeFollowSystemColors);
+            ThemeFollowSystemColors,
+            ReduceMotion);
     }
 
     internal async Task ShowTutorialAsync()
@@ -3324,6 +3334,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             [nameof(GitAutoColor)] = GitAutoColor,
             [nameof(GitManualColor)] = GitManualColor,
             [nameof(ProjectPanelVisible)] = ProjectPanelVisible.ToString(),
+            [nameof(ReduceMotion)] = ReduceMotion.ToString(),
             [nameof(VectorEnabled)] = VectorEnabled.ToString(),
             [nameof(VectorBackend)] = VectorBackend,
             [nameof(VectorCollection)] = VectorCollection,
@@ -3383,7 +3394,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 nameof(Theme), nameof(ThemeMainColor), nameof(ThemeSurfaceColor),
                 nameof(ThemeBrandColor), nameof(ThemeMainColorDark), nameof(ThemeSurfaceColorDark),
                 nameof(ThemeBrandColorDark), nameof(ThemeFollowSystemColors), nameof(GitAutoColor),
-                nameof(GitManualColor), nameof(ProjectPanelVisible),
+                nameof(GitManualColor), nameof(ProjectPanelVisible), nameof(ReduceMotion),
             },
             MiscSection => new[]
             {
@@ -3519,7 +3530,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             or nameof(ThemeMainColorDark) or nameof(ThemeSurfaceColorDark) or nameof(ThemeBrandColorDark)
             or nameof(ThemeFollowSystemColors)
             or nameof(GitAutoColor) or nameof(GitManualColor)
-            or nameof(ProjectPanelVisible) or nameof(VectorEnabled)
+            or nameof(ProjectPanelVisible) or nameof(ReduceMotion) or nameof(VectorEnabled)
             or nameof(VectorBackend) or nameof(VectorCollection) or nameof(VectorDimensions)
             or nameof(QdrantHost) or nameof(QdrantPort) or nameof(QdrantDataDir)
             or nameof(QdrantBinaryPath) or nameof(QdrantStartupTimeoutMs) or nameof(RerankerEnabled)

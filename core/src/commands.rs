@@ -4133,7 +4133,7 @@ fn preflight_workflow_runtime_dependencies(
     std::fs::create_dir_all(document_root.join("documents")).map_err(error_to_string)?;
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
     SqliteCostLedger::open(project_root).map_err(error_to_string)?;
-    if workflow_requires_llm_provider(workflow) {
+    if workflow_requires_default_llm_provider(workflow) {
         llm_runtime(project_root, secrets)?;
     }
     if workflow_requires_project_retrieval(project_root, workflow)? {
@@ -4264,17 +4264,105 @@ pub fn register_executor_adapters_for_project(
     register_executor_adapters_for_project_with_search(
         external,
         project_root,
-        provider,
+        ExecutorAdapterLlmProviderSource::Single(provider),
         ledger,
         None,
         None,
     )
 }
 
+enum ExecutorAdapterLlmProviderSource<'a> {
+    ProjectSecrets(&'a dyn SecretStore),
+    Single(OpenAiCompatibleLlmProvider),
+}
+
+fn resolve_executor_adapter_llm_providers(
+    project_root: &Path,
+    project_config: &ProjectConfig,
+    manifests: &[crate::skills::LoadedSkillManifest],
+    source: &ExecutorAdapterLlmProviderSource<'_>,
+) -> CommandResult<BTreeMap<String, OpenAiCompatibleLlmProvider>> {
+    let mut resolved = BTreeMap::new();
+    for loaded in manifests {
+        let crate::skills::SkillExecutorConfig::Llm(config) = &loaded.manifest.executor else {
+            continue;
+        };
+        let provider_id = config.provider_id.trim();
+        let model_id = config.model_id.trim();
+        if provider_id.is_empty() || model_id.is_empty() {
+            return Err(CommandError::validation(format!(
+                "LLM ExecutorAdapter '{}' requires non-empty provider_id and model_id",
+                loaded.manifest.skill_id
+            )));
+        }
+
+        match source {
+            ExecutorAdapterLlmProviderSource::ProjectSecrets(secrets) => {
+                let provider_config = project_config
+                    .providers
+                    .providers
+                    .iter()
+                    .find(|provider| provider.provider_id == provider_id)
+                    .ok_or_else(|| {
+                        CommandError::not_found(format!(
+                            "LLM ExecutorAdapter '{}' references an unconfigured provider: {provider_id}",
+                            loaded.manifest.skill_id
+                        ))
+                    })?;
+                if !provider_config.enabled {
+                    return Err(CommandError::validation(format!(
+                        "LLM ExecutorAdapter '{}' references a disabled provider: {provider_id}",
+                        loaded.manifest.skill_id
+                    )));
+                }
+                let model = provider_config
+                    .models
+                    .iter()
+                    .find(|model| model.model_id == model_id)
+                    .ok_or_else(|| {
+                        CommandError::not_found(format!(
+                            "LLM ExecutorAdapter '{}' references an unconfigured model: {provider_id}/{model_id}",
+                            loaded.manifest.skill_id
+                        ))
+                    })?;
+                if !matches!(
+                    model.capability,
+                    ProviderCapability::Llm | ProviderCapability::ToolUse
+                ) {
+                    return Err(CommandError::validation(format!(
+                        "LLM ExecutorAdapter '{}' model is not LLM-capable: {provider_id}/{model_id}",
+                        loaded.manifest.skill_id
+                    )));
+                }
+                if !resolved.contains_key(provider_id) {
+                    let api_key = provider_api_key(project_root, *secrets, provider_config)?;
+                    let provider =
+                        OpenAiCompatibleLlmProvider::new(provider_config.clone(), api_key)
+                            .map_err(error_to_string)?;
+                    resolved.insert(provider_id.to_owned(), provider);
+                }
+            }
+            ExecutorAdapterLlmProviderSource::Single(provider) => {
+                let actual_provider_id = provider.definition().provider_id;
+                if actual_provider_id != provider_id {
+                    return Err(CommandError::validation(format!(
+                        "LLM ExecutorAdapter '{}' requires provider '{provider_id}', but registration supplied '{actual_provider_id}'",
+                        loaded.manifest.skill_id
+                    )));
+                }
+                resolved
+                    .entry(provider_id.to_owned())
+                    .or_insert_with(|| provider.clone());
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 fn register_executor_adapters_for_project_with_search(
     external: &mut RoutedExternalNodeExecutor,
     project_root: &Path,
-    provider: OpenAiCompatibleLlmProvider,
+    provider_source: ExecutorAdapterLlmProviderSource<'_>,
     ledger: Arc<SqliteCostLedger>,
     retrieval: Option<Arc<ProjectRetrievalRuntime>>,
     web_search_provider: Option<Arc<HttpWebSearchProvider>>,
@@ -4301,11 +4389,25 @@ fn register_executor_adapters_for_project_with_search(
         .with_global_root(&global)
         .with_project_root(&project_skills);
     let manifests = loader.load_manifests().map_err(error_to_string)?;
-    let execution_policy = ExecutionPolicy {
-        auto_mode: AutoModeState::default(),
-        permissions: crate::contracts::permissions::PermissionPolicy::default(),
-    };
+    // LLM Skill 的 provider/model 是可执行清单的一部分，必须在注册前精确解析。
+    // 禁止用项目默认 provider 发请求、再把清单 provider_id 写进账本形成身份漂移。
+    let llm_providers = resolve_executor_adapter_llm_providers(
+        project_root,
+        &project_config,
+        &manifests,
+        &provider_source,
+    )?;
     let auto_mode_config = project_config.auto_mode.clone();
+    let execution_policy = ExecutionPolicy {
+        auto_mode: AutoModeState {
+            enabled: auto_mode_config.enabled_by_default,
+            preauthorized_budget_usd: auto_mode_config.preauthorized_budget_usd,
+        },
+        // ExecutorAdapter 与普通工作流节点必须消费同一份项目硬权限。
+        // 这里若重置为默认拒绝，会让已注入的 Web Search/HTTP/WASM 能力
+        // 在真实执行边界永久不可达，并与设置页保存的权限产生第二状态源。
+        permissions: project_config.permissions.policy.clone(),
+    };
     let max_tool_rounds = project_config.workflow.max_tool_rounds;
     let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls);
     let project_search_enabled = tool_control_enabled(
@@ -4327,7 +4429,20 @@ fn register_executor_adapters_for_project_with_search(
     for loaded in manifests {
         let skill_id = loaded.manifest.skill_id.clone();
         let manifest = loaded.manifest.clone();
-        let provider = provider.clone();
+        let llm_provider = match &manifest.executor {
+            crate::skills::SkillExecutorConfig::Llm(config) => llm_providers
+                .get(config.provider_id.trim())
+                .cloned()
+                .ok_or_else(|| {
+                    CommandError::internal(format!(
+                        "resolved provider missing for LLM ExecutorAdapter '{}': {}",
+                        manifest.skill_id, config.provider_id
+                    ))
+                })?
+                .into(),
+            crate::skills::SkillExecutorConfig::Http(_)
+            | crate::skills::SkillExecutorConfig::Wasm(_) => None,
+        };
         let ledger = Arc::clone(&ledger);
         let execution_policy = execution_policy.clone();
         let auto_mode_config = auto_mode_config.clone();
@@ -4365,7 +4480,9 @@ fn register_executor_adapters_for_project_with_search(
                         auto_mode_config: &auto_mode_config,
                         budget_limits: Default::default(),
                         ledger: ledger.as_ref(),
-                        llm_provider: Some(&provider),
+                        llm_provider: llm_provider.as_ref().map(|provider| {
+                            provider as &dyn crate::providers::LlmProvider
+                        }),
                         http_backend: Some(&http_backend),
                         wasm_backend: Some(&wasm_backend),
                     };
@@ -4445,7 +4562,7 @@ fn execute_workflow_runtime(
     } else {
         retrieval_runtime
     };
-    let llm_runtime = if workflow_requires_llm_provider(workflow) {
+    let llm_runtime = if workflow_requires_default_llm_provider(workflow) {
         Some(llm_runtime(project_root, secrets)?)
     } else {
         None
@@ -4617,11 +4734,16 @@ fn execute_workflow_runtime(
     }
 
     // F11：生产组合根注册 ExecutorAdapter（失败 fail-loud，不得静默丢弃）。
-    if let Some(llm_runtime) = llm_runtime.as_ref() {
+    // Skill 自己声明 provider/model；HTTP/WASM Skill 不得被默认 LLM 配置绑架。
+    if workflow
+        .nodes
+        .iter()
+        .any(|node| node.type_name.starts_with("executor_adapter:"))
+    {
         register_executor_adapters_for_project_with_search(
             &mut external,
             project_root,
-            llm_runtime.provider.clone(),
+            ExecutorAdapterLlmProviderSource::ProjectSecrets(secrets),
             Arc::clone(&ledger),
             retrieval_runtime.clone(),
             web_search_runtime.clone(),
@@ -4767,11 +4889,11 @@ fn json_value_matches_schema_type(value: &Value, expected: &str) -> bool {
     }
 }
 
-fn workflow_requires_llm_provider(workflow: &WorkflowDefinition) -> bool {
-    workflow.nodes.iter().any(|node| {
-        is_llm_workflow_node_type(&node.type_name)
-            || node.type_name.starts_with("executor_adapter:")
-    })
+fn workflow_requires_default_llm_provider(workflow: &WorkflowDefinition) -> bool {
+    workflow
+        .nodes
+        .iter()
+        .any(|node| is_llm_workflow_node_type(&node.type_name))
 }
 
 fn is_llm_workflow_node_type(type_name: &str) -> bool {

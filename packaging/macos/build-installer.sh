@@ -42,6 +42,7 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Ariadne.icns"
 
 SIGNING_IDENTITY="${ARIADNE_MACOS_SIGNING_IDENTITY:--}"
 codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP" >&2
+codesign --verify --deep --strict --verbose=2 "$APP" >&2
 "$APP/Contents/MacOS/Ariadne.Desktop" --verify-installation >&2
 
 PKG="$OUTPUT_DIR/Ariadne-$VERSION-$RID.pkg"
@@ -50,6 +51,9 @@ if [[ -n "${ARIADNE_MACOS_INSTALLER_IDENTITY:-}" ]]; then
   PKG_ARGS+=(--sign "$ARIADNE_MACOS_INSTALLER_IDENTITY")
 fi
 pkgbuild "${PKG_ARGS[@]}" "$PKG" >&2
+if [[ -n "${ARIADNE_MACOS_INSTALLER_IDENTITY:-}" ]]; then
+  pkgutil --check-signature "$PKG" >&2
+fi
 
 DMG_ROOT="$STAGE/dmg"
 mkdir -p "$DMG_ROOT"
@@ -79,7 +83,9 @@ fi
 if (( ${#NOTARY_ARGS[@]} > 0 )); then
   xcrun notarytool submit "$PKG" "${NOTARY_ARGS[@]}" --wait >&2
   xcrun stapler staple "$PKG" >&2
+  xcrun stapler validate "$PKG" >&2
   xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait >&2
   xcrun stapler staple "$DMG" >&2
+  xcrun stapler validate "$DMG" >&2
 fi
 printf '%s\n' "$PKG"

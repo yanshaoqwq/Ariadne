@@ -355,6 +355,8 @@
   "ui.settings.personalization.git_manual_color": "主动/章节完成存档点颜色",
   "ui.settings.personalization.project_panel": "作品页悬浮项目面板",
   "ui.settings.personalization.project_panel.desc": "关闭后作品页右下角项目长期信息入口隐藏。",
+  "ui.settings.personalization.reduce_motion": "减少动态效果",
+  "ui.settings.personalization.reduce_motion.desc": "关闭画布中非必要的位移与缩放过渡，保留即时选中、缩放和状态反馈。",
   "ui.settings.show_all_sections": "显示全部分节",
   "ui.settings.personalization.theme": "主题与调色板",
   "ui.settings.personalization.theme.system": "跟随系统",
