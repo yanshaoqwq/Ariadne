@@ -1,5 +1,6 @@
 using Avalonia.Media;
 using Ariadne.Desktop;
+using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Controls;
 using Ariadne.Desktop.Localization;
 using Ariadne.Desktop.ViewModels;
@@ -12,6 +13,37 @@ namespace Ariadne.Desktop.Tests;
 /// </summary>
 public sealed class SettingsAndPromptHelpersTests
 {
+    [Fact]
+    public void NodePresetModelSelection_KeepsProviderIdentityWhenModelIdsCollide()
+    {
+        var inherited = new PermissionPolicy(
+            false, false, false, false, false,
+            Array.Empty<string>(), Array.Empty<string>());
+        var vm = new NodeTypePresetViewModel(
+            "writer",
+            "agent.writer",
+            "Writer",
+            "provider-a",
+            "shared-model",
+            "300",
+            "1",
+            null,
+            inherited,
+            new Dictionary<string, bool?>(),
+            tool => tool,
+            () => { });
+        var providerA = new WorkflowModelOption("provider-a", "shared-model", "Provider A");
+        var providerB = new WorkflowModelOption("provider-b", "shared-model", "Provider B");
+
+        vm.RebindModelOptions(new[] { providerA, providerB });
+        Assert.Same(providerA, vm.SelectedModelOption);
+
+        vm.SelectedModelOption = providerB;
+        Assert.Equal("provider-b", vm.ProviderId);
+        Assert.Equal("shared-model", vm.ModelId);
+        Assert.Contains("provider-b", vm.Snapshot, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Dirty_FalseAfterCaptureWithIdenticalSnapshot()
     {
@@ -58,6 +90,7 @@ public sealed class SettingsAndPromptHelpersTests
         {
             Assert.Equal("manual_review", p.NormalPolicy);
             Assert.Equal("allow_by_default", p.AutoModePolicy);
+            Assert.Equal(string.Empty, p.ApprovalPrompt);
         });
     }
 
@@ -79,8 +112,8 @@ public sealed class SettingsAndPromptHelpersTests
     {
         var loaded = new[]
         {
-            ("chapter_write", "allow_by_default", "auto_approval"),
-            ("planner_register", "allow_by_default", "auto_approval"),
+            ("chapter_write", "allow_by_default", "auto_approval", "审计章节"),
+            ("planner_register", "allow_by_default", "auto_approval", "审计注册表"),
         };
         var policies = SettingsDirtyHelper.EnsureConfirmationPolicies(loaded);
         Assert.True(policies.Count >= 30);
@@ -90,6 +123,71 @@ public sealed class SettingsAndPromptHelpersTests
         var trait = policies.First(p => p.Kind == "planner_register_character_trait");
         Assert.Equal("allow_by_default", trait.NormalPolicy);
         Assert.Equal("auto_approval", trait.AutoModePolicy);
+        Assert.Equal("审计注册表", trait.ApprovalPrompt);
+    }
+
+    [Fact]
+    public void ConfirmationPolicyViewModel_AutoModeOffMapsToAllowByDefaultNotManualReview()
+    {
+        // Runtime Auto Mode: allow_by_default → Skip, auto_approval → AutoAudit.
+        // UI Off must NOT claim "manual_review" — that would be a no-op lie vs shipped enum.
+        var dirty = 0;
+        var policy = new ConfirmationPolicyViewModel(
+            "chapter_write",
+            "章节写回",
+            normalPolicy: "manual_review",
+            autoModePolicy: "allow_by_default",
+            approvalPrompt: "审计章节写回",
+            markDirty: () => dirty++);
+
+        Assert.False(policy.AutoModeAutoApproval);
+        Assert.Equal("allow_by_default", policy.AutoModePolicy);
+        Assert.Equal("manual_review", policy.NormalPolicy);
+        Assert.Equal("审计章节写回", policy.ApprovalPrompt);
+
+        policy.AutoModeAutoApproval = true;
+        Assert.Equal("auto_approval", policy.AutoModePolicy);
+        Assert.True(dirty >= 1);
+
+        policy.AutoModeAutoApproval = false;
+        Assert.Equal("allow_by_default", policy.AutoModePolicy);
+        Assert.NotEqual("manual_review", policy.AutoModePolicy);
+    }
+
+    [Fact]
+    public void SettingsPageView_AutoModeColumnUsesDistinctToggleLabelsNotReview()
+    {
+        // Product path: Auto Mode toggle must bind PolicyAutoOn/Off, not PolicyReview (审核).
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        string? viewPath = null;
+        for (var depth = 0; directory is not null && depth < 10; depth++)
+        {
+            var candidate = Path.Combine(directory.FullName, "desktop", "Ariadne.Desktop", "Views", "SettingsPageView.axaml");
+            if (File.Exists(candidate))
+            {
+                viewPath = candidate;
+                break;
+            }
+            directory = directory.Parent;
+        }
+        Assert.False(string.IsNullOrEmpty(viewPath));
+        var view = File.ReadAllText(viewPath!);
+        var autoModeBlockStart = view.IndexOf("IsChecked=\"{Binding AutoModeAutoApproval, Mode=TwoWay}\"", StringComparison.Ordinal);
+        Assert.True(autoModeBlockStart >= 0);
+        var autoModeBlock = view.Substring(autoModeBlockStart, Math.Min(420, view.Length - autoModeBlockStart));
+        Assert.Contains("PolicyAutoOnText", autoModeBlock, StringComparison.Ordinal);
+        Assert.Contains("PolicyAutoOffText", autoModeBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("PolicyReviewText", autoModeBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("PolicyAllowText", autoModeBlock, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding ApprovalPrompt, Mode=TwoWay}\"", view, StringComparison.Ordinal);
+        Assert.Contains("ApprovalPromptPlaceholder", view, StringComparison.Ordinal);
+
+        var names = DisplayNameService.LoadDefault();
+        var autoOn = names.Text("ui.settings.automation.confirmation.auto_on");
+        var autoOff = names.Text("ui.settings.automation.confirmation.auto_off");
+        Assert.Contains("审计", autoOn, StringComparison.Ordinal);
+        Assert.Contains("跳过", autoOff, StringComparison.Ordinal);
+        Assert.DoesNotContain("审核", autoOff, StringComparison.Ordinal);
     }
 
     [Fact]

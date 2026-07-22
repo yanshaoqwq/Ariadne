@@ -14,10 +14,12 @@ use crate::documents::IndexInvalidationOutbox;
 use crate::retrieval::models::RetrievalResult;
 use crate::retrieval::runtime::content_version_for_bytes;
 
-/// 项目是否在 `documents/` 或 `planning/` 下有可索引文本源。
+/// 项目是否在配置的文档目录或 `planning/` 下有可索引文本源。
 pub fn has_indexable_project_sources(project_root: &Path) -> CoreResult<bool> {
-    for directory in ["documents", "planning"] {
-        if directory_has_indexable_text(&project_root.join(directory))? {
+    let config = crate::config::ConfigStore::new(project_root).load_or_create()?;
+    let layout = crate::config::ProjectLayout::from_app(project_root, &config.app)?;
+    for directory in [layout.documents, project_root.join("planning")] {
+        if directory_has_indexable_text(&directory)? {
             return Ok(true);
         }
     }

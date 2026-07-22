@@ -13,21 +13,46 @@
             BorderThickness="0,0,0,1"
             Padding="18,10">
       <StackPanel Spacing="8">
-        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" ColumnSpacing="10">
           <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="subtitle" VerticalAlignment="Center" />
-          <TextBox Grid.Column="1"
-                   Text="{Binding SearchQuery, Mode=TwoWay}"
-                   PlaceholderText="{Binding SearchPlaceholder}"
-                   AutomationProperties.Name="{Binding SearchPlaceholder}"
-                   MaxWidth="360"
-                   HorizontalAlignment="Left"
-                   VerticalAlignment="Center"
-                   KeyDown="OnSearchKeyDown" />
+          <!-- 一体搜索壳：与模板市场同一 chrome，避免裸 TextBox + 孤立主色方钮 -->
+          <Border Grid.Column="1"
+                  Classes="search-shell"
+                  MaxWidth="320"
+                  HorizontalAlignment="Left"
+                  VerticalAlignment="Center">
+            <Grid ColumnDefinitions="Auto,*,Auto">
+              <Path Grid.Column="0"
+                    Classes="icon"
+                    Width="14"
+                    Height="14"
+                    Margin="8,0,0,0"
+                    Opacity="0.55"
+                    Data="{StaticResource Ariadne.Icon.Search}"
+                    IsHitTestVisible="False" />
+              <TextBox Grid.Column="1"
+                       Classes="search-input"
+                       Text="{Binding SearchQuery, Mode=TwoWay}"
+                       PlaceholderText="{Binding SearchPlaceholder}"
+                       AutomationProperties.Name="{Binding SearchPlaceholder}"
+                       KeyDown="OnSearchKeyDown" />
+              <Button Grid.Column="2"
+                      Classes="search-submit"
+                      Width="34"
+                      Height="30"
+                      Command="{Binding SearchCommand}"
+                      ToolTip.Tip="{Binding SearchText}"
+                      AutomationProperties.Name="{Binding SearchText}">
+                <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Search}" />
+              </Button>
+            </Grid>
+          </Border>
           <ComboBox Grid.Column="2"
                     ItemsSource="{Binding LevelOptions}"
                     SelectedValue="{Binding SelectedLevel, Mode=TwoWay}"
                     SelectedValueBinding="{Binding Value}"
-                    MinWidth="118"
+                    MinWidth="108"
+                    VerticalAlignment="Center"
                     AutomationProperties.Name="{Binding AllLevelsText}">
             <ComboBox.ItemTemplate>
               <DataTemplate DataType="{x:Type vm:RunLogLevelOption}">
@@ -39,7 +64,8 @@
                     ItemsSource="{Binding KindOptions}"
                     SelectedValue="{Binding SelectedKind, Mode=TwoWay}"
                     SelectedValueBinding="{Binding Value}"
-                    MinWidth="118"
+                    MinWidth="108"
+                    VerticalAlignment="Center"
                     AutomationProperties.Name="{Binding KindFilterText}">
             <ComboBox.ItemTemplate>
               <DataTemplate DataType="{x:Type vm:RunLogKindOption}">
@@ -48,22 +74,9 @@
             </ComboBox.ItemTemplate>
           </ComboBox>
           <Button Grid.Column="4"
-                  Classes="primary"
-                  Width="36"
-                  Height="32"
-                  Padding="0"
-                  Command="{Binding SearchCommand}"
-                  ToolTip.Tip="{Binding SearchText}"
-                  AutomationProperties.Name="{Binding SearchText}">
-            <Path Classes="icon"
-                  Width="15"
-                  Height="15"
-                  Stroke="{DynamicResource Ariadne.TextOnAccent}"
-                  Data="{StaticResource Ariadne.Icon.Search}" />
-          </Button>
-          <Button Grid.Column="5"
-                  Classes="secondary"
+                  Classes="secondary btn-compact"
                   Content="{Binding RefreshText}"
+                  VerticalAlignment="Center"
                   Command="{Binding RefreshCommand}" />
         </Grid>
 

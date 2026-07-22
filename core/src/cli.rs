@@ -407,7 +407,8 @@ mod tests {
     fn cli_tools_list_exposes_workflow_tools() {
         let temp = tempfile::tempdir().unwrap();
         let app_state = tempfile::tempdir().unwrap();
-        crate::frontend::initialize_project(temp.path()).unwrap();
+        crate::frontend::initialize_project_with_app_state(temp.path(), app_state.path(), None)
+            .unwrap();
         save_workflow_graph_impl(
             temp.path(),
             WorkflowGraphData {
@@ -440,9 +441,10 @@ mod tests {
             temp.path(),
             PermissionsSettings {
                 policy: PermissionPolicy::default(),
+                scoped_policies: BTreeMap::new(),
                 tool_controls: BTreeMap::from([(
                     "project_ai".to_owned(),
-                    BTreeMap::from([("project-ai-workflow-tools".to_owned(), true)]),
+                    BTreeMap::from([("project-ai-workflow-tools".to_owned(), Some(true))]),
                 )]),
             },
         )
@@ -464,8 +466,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(output["tools"][0]["name"], "draft_tool");
-        assert_eq!(output["tools"][0]["workflow_id"], "tool-flow");
-        assert_eq!(output["tools"][0]["start_node_id"], "start-draft");
+        assert_eq!(output["tools"][0]["workflow_id"], "default");
+        assert_eq!(
+            output["tools"][0]["start_node_id"],
+            "tool-flow--start-draft"
+        );
     }
 
     #[test]

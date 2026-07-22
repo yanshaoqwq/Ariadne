@@ -7,10 +7,10 @@ use crate::llm::{ToolExecutionContext, ToolExecutionOutput, ToolExecutor};
 use crate::providers::{ProviderCallContext, ToolCall, ToolDefinition};
 use crate::retrieval::ProjectRetrievalRuntime;
 
-pub const PROJECT_AI_SEARCH_TOOL: &str = "project-ai-search";
-pub const GENERIC_LLM_SEARCH_TOOL: &str = "llm-search";
-pub const SUMMARIZER_SEARCH_TOOL: &str = "summarizer-search";
-pub const EXECUTOR_ADAPTER_SEARCH_TOOL: &str = "executor-adapter-search";
+pub use crate::node_capabilities::{
+    EXECUTOR_ADAPTER_SEARCH_TOOL, GENERIC_LLM_SEARCH_TOOL, PROJECT_AI_SEARCH_TOOL,
+    SUMMARIZER_SEARCH_TOOL,
+};
 pub const DEFAULT_PROJECT_SEARCH_LIMIT: usize = 10;
 
 /// 构造项目内检索工具定义。工具只读项目索引，不会修改正文或知识库。

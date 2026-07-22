@@ -28,11 +28,12 @@ impl Default for BudgetLimits {
     }
 }
 
-/// 将用户配置的全局预算（美元）映射为执行侧 `BudgetLimits`。
+/// 将用户配置的日预算（美元）映射为执行侧 `BudgetLimits`。
 ///
-/// - `budget_usd <= 0`：视为未设置限额，日/月硬上限均为 `None`（与 UI「未设置」一致）。
-/// - `budget_usd > 0`：作为**日限额** `daily_usd` 生效，调用 `evaluate_budget` 时累计超限会 Pause。
+/// - `budget_usd <= 0`：视为未设置限额，日/月硬上限均为 `None`（与 UI「0 = 不限制」一致）。
+/// - `budget_usd > 0`：作为**日限额** `daily_usd` 生效，调用 `evaluate_budget` 时今日累计超限会 Pause。
 /// - 保留默认 `high_cost_confirmation_usd = 1.0`，非 Auto Mode 下高成本仍可触发确认。
+/// - 单次/月限额不由该字段映射（保持 `None`，除非他处写入）。
 pub fn budget_limits_from_global_budget(budget_usd: f64) -> BudgetLimits {
     let mut limits = BudgetLimits::default();
     if budget_usd.is_finite() && budget_usd > 0.0 {

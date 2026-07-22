@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::contracts::{ArtifactKind, CoreError, CoreResult, NodeId, PortMap, PortValue};
+use crate::node_capabilities::workflow_node_catalog_entry;
 use crate::skills::{stable_json_hash, stable_text_hash};
 use crate::workflow::{
     RuntimeConfirmation, RuntimeConfirmationState, RuntimeLoopControl, WorkflowNodeExecutionOutput,
@@ -74,8 +75,8 @@ impl WorkflowNodeExecutor for BuiltinWorkflowNodeExecutor<'_> {
         &self,
         request: &WorkflowNodeExecutionRequest,
     ) -> CoreResult<crate::workflow::WorkflowOperationPolicy> {
-        match request.type_name.as_str() {
-            "start" | "condition" | "eval" | "loop" | "approval" => {
+        match canonical_node_type(&request.type_name) {
+            "start" | "condition" | "loop" | "approval" => {
                 Ok(crate::workflow::WorkflowOperationPolicy::Untracked)
             }
             "export" => Ok(self
@@ -91,8 +92,8 @@ impl WorkflowNodeExecutor for BuiltinWorkflowNodeExecutor<'_> {
         &mut self,
         request: &WorkflowNodeExecutionRequest,
     ) -> CoreResult<Option<WorkflowNodeExecutionOutput>> {
-        match request.type_name.as_str() {
-            "start" | "condition" | "eval" | "loop" | "approval" | "export" => Ok(None),
+        match canonical_node_type(&request.type_name) {
+            "start" | "condition" | "loop" | "approval" | "export" => Ok(None),
             _ => self.external.reconcile_operation(request),
         }
     }
@@ -110,7 +111,7 @@ impl WorkflowNodeExecutor for BuiltinWorkflowNodeExecutor<'_> {
         }
         // Module 11 只内置控制语义节点；LLM、Document、Search、写作节点都
         // 通过 external 适配器接入，避免 runtime 直接依赖具体服务。
-        match request.type_name.as_str() {
+        match canonical_node_type(&request.type_name) {
             "start" => {
                 let outputs = start_node_initial_outputs(&request.config);
                 Ok(WorkflowNodeExecutionOutput {
@@ -127,7 +128,7 @@ impl WorkflowNodeExecutor for BuiltinWorkflowNodeExecutor<'_> {
                     ..WorkflowNodeExecutionOutput::default()
                 })
             }
-            "condition" | "eval" => execute_condition(request),
+            "condition" => execute_condition(request),
             "loop" => execute_loop(request),
             "approval" => execute_approval(request),
             "export" => {
@@ -140,6 +141,12 @@ impl WorkflowNodeExecutor for BuiltinWorkflowNodeExecutor<'_> {
             _ => self.external.execute_external(request),
         }
     }
+}
+
+fn canonical_node_type(type_name: &str) -> &str {
+    workflow_node_catalog_entry(type_name)
+        .map(|entry| entry.node_type.as_str())
+        .unwrap_or(type_name)
 }
 
 fn start_node_initial_outputs(config: &Value) -> PortMap {
@@ -326,6 +333,8 @@ fn execute_approval(
         artifact_id: None,
         patch_session_commit_id: None,
         metadata: json!({
+            "kind": "approval",
+            "rejection_behavior": "stop_workflow",
             "prompt_id": config.prompt_id,
             "reason": if config.auto_approve { "auto approved" } else { "pending approval" },
         }),

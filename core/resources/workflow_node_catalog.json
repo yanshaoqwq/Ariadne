@@ -1,0 +1,192 @@
+[
+  {
+    "node_type": "start",
+    "aliases": [],
+    "preset_type": "start",
+    "display_name_key": "ui.workspace.start_node.title",
+    "library_group": "entry",
+    "config_kind": "start",
+    "execution_kind": "builtin",
+    "default_budget_usd": 0.0
+  },
+  {
+    "node_type": "outliner",
+    "aliases": [],
+    "preset_type": "outliner",
+    "display_name_key": "agent.outliner",
+    "library_group": "writing",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "outliner-search",
+    "web_search_tool": "outliner-web-search"
+  },
+  {
+    "node_type": "designer",
+    "aliases": [],
+    "preset_type": "designer",
+    "display_name_key": "agent.designer",
+    "library_group": "writing",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "designer-search",
+    "web_search_tool": "designer-web-search"
+  },
+  {
+    "node_type": "planner",
+    "aliases": [],
+    "preset_type": "planner",
+    "display_name_key": "agent.planner",
+    "library_group": "writing",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "planner-search",
+    "web_search_tool": "planner-web-search"
+  },
+  {
+    "node_type": "detail",
+    "aliases": [],
+    "preset_type": "detail",
+    "display_name_key": "agent.detail",
+    "library_group": "writing",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "detail-search",
+    "web_search_tool": "detail-web-search"
+  },
+  {
+    "node_type": "writer",
+    "aliases": [],
+    "preset_type": "writer",
+    "display_name_key": "agent.writer",
+    "library_group": "writing",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "writer-search",
+    "web_search_tool": "writer-web-search"
+  },
+  {
+    "node_type": "critic",
+    "aliases": [],
+    "preset_type": "critic",
+    "display_name_key": "agent.critic",
+    "library_group": "writing",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "critic-search",
+    "web_search_tool": "critic-web-search"
+  },
+  {
+    "node_type": "prudent",
+    "aliases": [],
+    "preset_type": "prudent",
+    "display_name_key": "agent.prudent",
+    "library_group": "writing",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "prudent-search",
+    "web_search_tool": "prudent-web-search"
+  },
+  {
+    "node_type": "polisher",
+    "aliases": [],
+    "preset_type": "polisher",
+    "display_name_key": "agent.polisher",
+    "library_group": "writing",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "polisher-search",
+    "web_search_tool": "polisher-web-search"
+  },
+  {
+    "node_type": "summarizer",
+    "aliases": [],
+    "preset_type": "summarizer",
+    "display_name_key": "agent.summarizer",
+    "library_group": "writing",
+    "config_kind": "summarizer",
+    "execution_kind": "summarizer",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "summarizer-search",
+    "web_search_tool": "summarizer-web-search"
+  },
+  {
+    "node_type": "llm",
+    "aliases": [],
+    "preset_type": "llm",
+    "display_name_key": "ui.node.llm",
+    "library_group": "utility",
+    "config_kind": "model",
+    "execution_kind": "model",
+    "default_budget_usd": 1.0,
+    "project_search_tool": "llm-search",
+    "web_search_tool": "llm-web-search"
+  },
+  {
+    "node_type": "document_read",
+    "aliases": ["document"],
+    "preset_type": "document",
+    "display_name_key": "ui.node.document",
+    "library_group": "utility",
+    "config_kind": "document",
+    "execution_kind": "builtin",
+    "default_budget_usd": 0.0
+  },
+  {
+    "node_type": "search",
+    "aliases": ["project_search"],
+    "preset_type": "search",
+    "display_name_key": "ui.node.search",
+    "library_group": "utility",
+    "config_kind": "search",
+    "execution_kind": "builtin",
+    "default_budget_usd": 0.0
+  },
+  {
+    "node_type": "condition",
+    "aliases": ["eval"],
+    "preset_type": "condition",
+    "display_name_key": "ui.node.condition",
+    "library_group": "utility",
+    "config_kind": "condition",
+    "execution_kind": "builtin",
+    "default_budget_usd": 0.0
+  },
+  {
+    "node_type": "loop",
+    "aliases": [],
+    "preset_type": "loop",
+    "display_name_key": "ui.node.loop",
+    "library_group": "utility",
+    "config_kind": "loop",
+    "execution_kind": "builtin",
+    "default_budget_usd": 0.0
+  },
+  {
+    "node_type": "approval",
+    "aliases": [],
+    "preset_type": "approval",
+    "display_name_key": "ui.node.approval",
+    "library_group": "utility",
+    "config_kind": "approval",
+    "execution_kind": "builtin",
+    "default_budget_usd": 0.0
+  },
+  {
+    "node_type": "export",
+    "aliases": [],
+    "preset_type": "export",
+    "display_name_key": "ui.node.export",
+    "library_group": "utility",
+    "config_kind": "export",
+    "execution_kind": "builtin",
+    "default_budget_usd": 0.0
+  }
+]

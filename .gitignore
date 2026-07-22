@@ -27,6 +27,8 @@ __pycache__/
 /build/
 /desktop/**/bin/
 /desktop/**/obj/
+/desktop/**/TestResults/
+/desktop/ui-preview.png
 /tools/**/bin/
 /tools/**/obj/
 /.cache/

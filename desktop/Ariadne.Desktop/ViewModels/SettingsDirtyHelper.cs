@@ -82,17 +82,17 @@ public static class SettingsDirtyHelper
     /// 合并已加载策略 + 全集 keys，永远返回完整非空列表。
     /// 旧 <c>planner_register</c> 会扩散到各 register 子功能（尚未单独配置时）。
     /// </summary>
-    public static IReadOnlyList<(string Kind, string NormalPolicy, string AutoModePolicy)> EnsureConfirmationPolicies(
-        IEnumerable<(string Kind, string NormalPolicy, string AutoModePolicy)>? loaded)
+    public static IReadOnlyList<(string Kind, string NormalPolicy, string AutoModePolicy, string ApprovalPrompt)> EnsureConfirmationPolicies(
+        IEnumerable<(string Kind, string NormalPolicy, string AutoModePolicy, string ApprovalPrompt)>? loaded)
     {
-        var map = new Dictionary<string, (string Normal, string Auto)>(StringComparer.Ordinal);
+        var map = new Dictionary<string, (string Normal, string Auto, string Prompt)>(StringComparer.Ordinal);
         if (loaded is not null)
         {
             foreach (var item in loaded)
             {
                 if (!string.IsNullOrWhiteSpace(item.Kind))
                 {
-                    map[item.Kind] = (item.NormalPolicy, item.AutoModePolicy);
+                    map[item.Kind] = (item.NormalPolicy, item.AutoModePolicy, item.ApprovalPrompt ?? string.Empty);
                 }
             }
         }
@@ -113,24 +113,24 @@ public static class SettingsDirtyHelper
             }
         }
 
-        var list = new List<(string, string, string)>(DefaultConfirmationKinds.Length);
+        var list = new List<(string, string, string, string)>(DefaultConfirmationKinds.Length);
         foreach (var kind in DefaultConfirmationKinds)
         {
             if (map.TryGetValue(kind, out var policies))
             {
-                list.Add((kind, policies.Normal, policies.Auto));
+                list.Add((kind, policies.Normal, policies.Auto, policies.Prompt));
                 map.Remove(kind);
             }
             else
             {
-                list.Add((kind, "manual_review", "allow_by_default"));
+                list.Add((kind, "manual_review", "allow_by_default", string.Empty));
             }
         }
 
         // 保留未知但已存的项（兼容）
         foreach (var kv in map.OrderBy(k => k.Key, StringComparer.Ordinal))
         {
-            list.Add((kv.Key, kv.Value.Normal, kv.Value.Auto));
+            list.Add((kv.Key, kv.Value.Normal, kv.Value.Auto, kv.Value.Prompt));
         }
 
         return list;

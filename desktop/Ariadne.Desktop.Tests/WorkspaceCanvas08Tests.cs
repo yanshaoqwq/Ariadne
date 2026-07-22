@@ -13,6 +13,123 @@ namespace Ariadne.Desktop.Tests;
 public sealed class WorkspaceCanvas08Tests
 {
     [Fact]
+    public void NodeLibraryDrag_UsesHandledTunnelRoute_AndRemovesRedundantHoverText()
+    {
+        var axaml = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml.cs"));
+
+        Assert.Contains("PointerPressedEvent,\n            OnNodeLibraryItemPointerPressed", view, StringComparison.Ordinal);
+        Assert.Contains("RoutingStrategies.Tunnel", view, StringComparison.Ordinal);
+        Assert.Equal(3, view.Split("handledEventsToo: true", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("PointerPressed=\"OnNodeLibraryItemPointerPressed\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("CanvasNavigationHintText", axaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip.Tip=\"{Binding CtxFitViewText}\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Content=\"×\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ToolTip.Tip=\"{Binding Title}\"", axaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RightPanelToggle_UsesOneDraggableEdgeControlAcrossWorkspaceWorksAndGit()
+    {
+        var workspace = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var works = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorksPageView.axaml"));
+        var git = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "GitPageView.axaml"));
+        var control = File.ReadAllText(Path.Combine(ResolveDesktopSource("Controls"), "RightPanelTogglePill.axaml.cs"));
+
+        Assert.Contains("<ctl:RightPanelTogglePill", workspace, StringComparison.Ordinal);
+        Assert.Contains("<ctl:RightPanelTogglePill", works, StringComparison.Ordinal);
+        Assert.Contains("<ctl:RightPanelTogglePill", git, StringComparison.Ordinal);
+        Assert.DoesNotContain("Classes=\"panel-float\"", works, StringComparison.Ordinal);
+        Assert.DoesNotContain("Content=\"{Binding ToggleRightPanelText}\"", git, StringComparison.Ordinal);
+        Assert.Contains("Math.Clamp(_originTop + delta", control, StringComparison.Ordinal);
+        Assert.Contains("ToggleCommand.Execute(null)", control, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LlmNodeModelSelection_PersistsProviderAndModelAsOneNodeLevelChoice()
+    {
+        var vm = CreateWorkspaceVm();
+        var option = new WorkflowModelOption("provider-a", "model-a", "Provider A");
+        vm.AvailableModelOptions.Add(option);
+        vm.AddNodeAt("llm", 120, 80);
+
+        vm.SelectedNodeModelOption = option;
+
+        var node = Assert.IsType<WorkflowNodeViewModel>(vm.SelectedNode);
+        Assert.Equal("provider-a", node.ProviderId);
+        Assert.Equal("model-a", node.ModelId);
+        Assert.Equal("provider-a", node.ToData()["provider_id"]);
+        Assert.Equal("model-a", node.ToData()["model_id"]);
+    }
+
+    [Fact]
+    public void LlmNodeModelSelection_InheritsGlobalUntilExplicitlyOverridden()
+    {
+        var vm = CreateWorkspaceVm();
+        var explicitOption = new WorkflowModelOption("provider-a", "model-a", "Provider A");
+        vm.AvailableModelOptions.Add(explicitOption);
+        vm.AddNodeAt("llm", 120, 80);
+
+        var node = Assert.IsType<WorkflowNodeViewModel>(vm.SelectedNode);
+        Assert.True(vm.SelectedNodeModelOption?.IsInherited);
+        Assert.DoesNotContain("provider_id", node.ToData());
+        Assert.DoesNotContain("model_id", node.ToData());
+
+        vm.SelectedNodeModelOption = explicitOption;
+        vm.SelectedNodeModelOption = vm.AvailableModelOptions.Single(option => option.IsInherited);
+
+        Assert.Equal(string.Empty, node.ProviderId);
+        Assert.Equal(string.Empty, node.ModelId);
+        Assert.DoesNotContain("provider_id", node.ToData());
+        Assert.DoesNotContain("model_id", node.ToData());
+    }
+
+    [Fact]
+    public void CanvasMotion_IsLightweightAndHasReducedMotionProductPath()
+    {
+        var axaml = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml.cs"));
+        var settings = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "SettingsPageView.axaml"));
+        var motion = File.ReadAllText(Path.Combine(ResolveDesktopSource(), "MotionPreferences.cs"));
+
+        Assert.Contains("Duration=\"0:0:0.10\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Duration=\"0:0:0.12\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Duration=\"0:0:0.14\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("IterationCount=\"Infinite\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Grid.canvas-node:pointerover Border.node-card", axaml, StringComparison.Ordinal);
+        Assert.Contains("Grid.canvas-node.selected Border.node-flow-ring", axaml, StringComparison.Ordinal);
+        Assert.Contains("Button.zoom-readout.motion-pulse", axaml, StringComparison.Ordinal);
+        Assert.Contains("Border.viewport-frame.motion-settle", axaml, StringComparison.Ordinal);
+        Assert.Contains("UserControl.reduce-motion", axaml, StringComparison.Ordinal);
+        Assert.Contains("MotionPreferences.Changed += OnMotionPreferenceChanged", view, StringComparison.Ordinal);
+        Assert.Contains("MotionPreferences.ReduceMotion", view, StringComparison.Ordinal);
+        Assert.Contains("IsChecked=\"{Binding ReduceMotion, Mode=TwoWay}\"", settings, StringComparison.Ordinal);
+        Assert.Contains("public static bool ReduceMotion", motion, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MotionPreference_NotifiesOnlyWhenValueChanges()
+    {
+        MotionPreferences.Apply(false);
+        var changes = 0;
+        EventHandler handler = (_, _) => changes++;
+        MotionPreferences.Changed += handler;
+        try
+        {
+            MotionPreferences.Apply(true);
+            MotionPreferences.Apply(true);
+            MotionPreferences.Apply(false);
+        }
+        finally
+        {
+            MotionPreferences.Changed -= handler;
+            MotionPreferences.Apply(false);
+        }
+
+        Assert.Equal(2, changes);
+    }
+
+    [Fact]
     public void W1_PreferDeleteEdge_WhenEdgeSelected()
     {
         Assert.True(CanvasSelectionHelpers.PreferDeleteEdgeOverNodes(hasSelectedEdge: true, hasSelectedNode: true));
@@ -71,24 +188,20 @@ public sealed class WorkspaceCanvas08Tests
     }
 
     [Fact]
-    public void W10_DirectedArrow_FollowsBezierTangent_ForRightToLeftGraph()
+    public void W10_DirectedEdgePath_PreservesSourceToTarget_ForRightToLeftGraph()
     {
-        // 即使目标节点在左边，边的终点切线仍决定真实 source → target，而不是用节点 X 猜方向。
+        // Product draws a single cubic EdgePath (no separate arrow-head geometries).
+        // Even when the target sits left of the source, the path must still run source → target.
         var path = NodePortSpec.BuildEdgePath(420, 60, 120, 140, isCommunication: false);
-        var arrow = NodePortSpec.BuildArrowHead(path.End, path.Control2);
-        var incomingX = path.End.X - path.Control2.X;
-        var incomingY = path.End.Y - path.Control2.Y;
-        var arrowX = arrow.Tip.X - ((arrow.Left.X + arrow.Right.X) * 0.5);
-        var arrowY = arrow.Tip.Y - ((arrow.Left.Y + arrow.Right.Y) * 0.5);
-
-        Assert.True((incomingX * arrowX) + (incomingY * arrowY) > 0,
-            "arrow must point along the cubic end tangent");
-        Assert.True(Avalonia.Point.Distance(path.End, arrow.Tip) > 10,
-            "arrow tip must sit outside the node instead of being hidden at the pin center");
+        Assert.Equal(new Avalonia.Point(420, 60), path.Start);
+        Assert.Equal(new Avalonia.Point(120, 140), path.End);
+        // S-curve control points still approach the real target endpoint.
+        Assert.True(Avalonia.Point.Distance(path.Control2, path.End) > 1);
+        Assert.True(Avalonia.Point.Distance(path.Start, path.End) > 100);
     }
 
     [Fact]
-    public void W10_CommunicationEdge_HasTwoFilledArrowHeads()
+    public void W10_CommunicationEdge_UsesJumpPathWithoutSeparateArrowGeometries()
     {
         var edge = new WorkflowEdgeViewModel(
             new CanvasEdge(
@@ -104,13 +217,24 @@ public sealed class WorkspaceCanvas08Tests
             _ => { },
             () => { });
 
+        // UpdateEdgePath offsets by communication LocalCenter (NodeWidth/2, CommPortY).
         edge.UpdateEdgePath(sourceX: 0, sourceY: 80, targetX: 320, targetY: 100);
 
-        var startArrow = Assert.IsType<Avalonia.Media.PathGeometry>(edge.StartArrowPath);
-        var endArrow = Assert.IsType<Avalonia.Media.PathGeometry>(edge.EndArrowPath);
         Assert.True(edge.IsCommunication);
-        Assert.True(Assert.Single(startArrow.Figures!).IsClosed);
-        Assert.True(Assert.Single(endArrow.Figures!).IsClosed);
+        var geometry = Assert.IsType<Avalonia.Media.PathGeometry>(edge.EdgePath);
+        var figure = Assert.Single(geometry.Figures!);
+        var expectedStart = new Avalonia.Point(
+            0 + NodePortSpec.NodeWidth / 2.0,
+            80 + NodePortSpec.CommPortY);
+        var expectedEnd = new Avalonia.Point(
+            320 + NodePortSpec.NodeWidth / 2.0,
+            100 + NodePortSpec.CommPortY);
+        Assert.Equal(expectedStart, figure.StartPoint);
+        var bezier = Assert.IsType<Avalonia.Media.BezierSegment>(Assert.Single(figure.Segments!));
+        Assert.Equal(expectedEnd, bezier.Point3);
+        // Communication jump arches above endpoints (no discrete arrow triangles in the product model).
+        Assert.True(edge.GetType().GetProperty("StartArrowPath") is null);
+        Assert.True(edge.GetType().GetProperty("EndArrowPath") is null);
     }
 
     [Fact]
@@ -328,7 +452,7 @@ public sealed class WorkspaceCanvas08Tests
         var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml.cs"));
         var viewModel = File.ReadAllText(Path.Combine(ResolveDesktopSource("ViewModels"), "WorkspacePageViewModel.cs"));
 
-        Assert.Contains("x:Name=\"WorkflowSelectorHost\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("x:Name=\"WorkflowSelectorHost\"", axaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"CanvasToolbarActions\"", axaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"CanvasStatusHost\"", axaml, StringComparison.Ordinal);
         Assert.Contains("TextTrimming=\"CharacterEllipsis\"", axaml, StringComparison.Ordinal);
@@ -448,11 +572,12 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Equal(2, view.Split("Command=\"{Binding RunCommand}\"", StringSplitOptions.None).Length - 1);
         Assert.Contains("Command=\"{Binding RunSelectedNodeCommand}\"", view, StringComparison.Ordinal);
         Assert.Contains("runRequested: runNode => _ = RunNodeAsync(runNode)", source, StringComparison.Ordinal);
-        Assert.Contains("RunCommand = new RelayCommand(() => runRequested(this));", source, StringComparison.Ordinal);
+        Assert.Contains("RunCommand = new RelayCommand(() => runRequested(this), canRun);", source, StringComparison.Ordinal);
+        Assert.Equal(2, source.Split("canRun: CanPersistWorkflow", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("RunWorkflowAsync(_currentWorkflowId()", source, StringComparison.Ordinal);
 
         Assert.Contains("ValidateWorkflowGraphAsync(graph)", source, StringComparison.Ordinal);
-        Assert.Contains("SaveWorkflowGraphAsync(graph)", source, StringComparison.Ordinal);
+        Assert.Contains("SaveProjectCanvasAsync(graph)", source, StringComparison.Ordinal);
         Assert.Contains("_runSession", source, StringComparison.Ordinal);
         Assert.Contains("var workflowId = CurrentWorkflowId;", source, StringComparison.Ordinal);
         Assert.Contains(".StartAsync(workflowId, startNodeId)", source, StringComparison.Ordinal);
@@ -750,10 +875,12 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("KeyDown=\"OnPortKeyDown\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Classes=\"pin-glass keyboard-target\"", axaml, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"{Binding $parent[UserControl].DataContext.PortDataInTip}\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding AddDataInPinCommand}\"", axaml, StringComparison.Ordinal);
         Assert.Contains("<Button Classes=\"library-chip entry keyboard-target\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding AddCommand}\"", axaml, StringComparison.Ordinal);
         Assert.Contains("KeyDown=\"OnBottomPillKeyDown\"", axaml, StringComparison.Ordinal);
-        Assert.Contains("KeyDown=\"OnRightPillKeyDown\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("<ctl:RightPanelTogglePill x:Name=\"WorkspaceRightPill\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("AccessibleName=\"{Binding ToggleRightPanelText}\"", axaml, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.LiveSetting=\"Polite\"", axaml, StringComparison.Ordinal);
     }
 
@@ -764,6 +891,16 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("CanvasKeyboardNavigationHelpers.FindDirectionalNode", view, StringComparison.Ordinal);
         Assert.Contains("viewModel.BeginPortDragHighlight", view, StringComparison.Ordinal);
         Assert.Contains("viewModel.TryConnectPorts", view, StringComparison.Ordinal);
+        Assert.Contains("TryGetControlCenter(sender as Control", view, StringComparison.Ordinal);
+        Assert.Contains("TryGetPortCanvasCenter", view, StringComparison.Ordinal);
+        Assert.Contains("SyncEdgePosition(edge, source, target)", view, StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            view.Split(
+                "edge.UpdateEdgePath(source.X, source.Y, target.X, target.Y);",
+                StringSplitOptions.None).Length - 1);
+        Assert.Contains("string.IsNullOrWhiteSpace(handle)", view, StringComparison.Ordinal);
+        Assert.DoesNotContain("else if (FindNodeAt", view, StringComparison.Ordinal);
         Assert.Contains("CancelKeyboardConnection(announce: true)", view, StringComparison.Ordinal);
         Assert.Contains("e.Key == Key.S", view, StringComparison.Ordinal);
         Assert.Contains("e.Key == Key.C", view, StringComparison.Ordinal);
@@ -823,19 +960,12 @@ public sealed class WorkspaceCanvas08Tests
 
     private static void ForceCleanBaseline(WorkspacePageViewModel vm)
     {
-        // Sets private _savedSnapshot = CurrentSnapshot and HasUnsavedChanges = false.
-        var field = typeof(WorkspacePageViewModel).GetField(
-            "_savedSnapshot",
+        // 使用生产快照入口同步内容和元数据基线，避免测试绑定到单个私有字段。
+        var capture = typeof(WorkspacePageViewModel).GetMethod(
+            "CaptureSnapshot",
             BindingFlags.Instance | BindingFlags.NonPublic);
-        var current = typeof(WorkspacePageViewModel).GetMethod(
-            "CurrentSnapshot",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(field);
-        Assert.NotNull(current);
-        var snap = current!.Invoke(vm, null);
-        field!.SetValue(vm, snap);
-        var dirty = typeof(WorkspacePageViewModel).GetProperty(nameof(WorkspacePageViewModel.HasUnsavedChanges));
-        dirty!.SetValue(vm, false);
+        Assert.NotNull(capture);
+        capture!.Invoke(vm, null);
     }
 
     [Fact]
@@ -863,9 +993,8 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("BottomPanelToggleText", axaml, StringComparison.Ordinal);
         Assert.Contains("HasUnsavedChanges", axaml, StringComparison.Ordinal);
         Assert.Contains("StrokeOpacity", axaml, StringComparison.Ordinal);
-        Assert.Contains("Data=\"{Binding EndArrowPath}\"", axaml, StringComparison.Ordinal);
-        Assert.Contains("Data=\"{Binding StartArrowPath}\"", axaml, StringComparison.Ordinal);
-        Assert.Contains("IsVisible=\"{Binding IsCommunication}\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Data=\"{Binding EndArrowPath}\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Data=\"{Binding StartArrowPath}\"", axaml, StringComparison.Ordinal);
     }
 
     private static WorkspacePageViewModel CreateWorkspaceVm()

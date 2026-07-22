@@ -12,7 +12,7 @@ use crate::contracts::{
 use crate::workflow::{WorkflowRunState, WorkflowRuntimeStore};
 
 pub const RUNTIME_DB_FILE: &str = "runtime.db";
-pub const RUNTIME_SCHEMA_VERSION: i64 = 11;
+pub const RUNTIME_SCHEMA_VERSION: i64 = 12;
 
 /// 可恢复外部副作用的 operation journal 状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +312,7 @@ struct PersistedWorkflowRunState<'a> {
     workflow_id: &'a WorkflowId,
     run_id: &'a RunId,
     prepared_workflow: &'a Option<WorkflowDefinition>,
+    prepared_dependency_plan: &'a Option<serde_json::Value>,
     start_node_id: &'a Option<crate::contracts::NodeId>,
     status: RunStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -342,6 +343,7 @@ impl<'a> From<&'a WorkflowRunState> for PersistedWorkflowRunState<'a> {
             workflow_id: &state.workflow_id,
             run_id: &state.run_id,
             prepared_workflow: &state.prepared_workflow,
+            prepared_dependency_plan: &state.prepared_dependency_plan,
             start_node_id: &state.start_node_id,
             status: state.status,
             next_retry_at_ms: state.next_retry_at_ms,
@@ -450,6 +452,8 @@ impl SqliteWorkflowRuntimeStore {
                     next_retry_at_ms INTEGER,
                     -- C10：执行定义单独落库一次；revision>0 的 state_json 不再重复整图。
                     prepared_workflow_json TEXT,
+                    -- N27：启动时编译的无秘密依赖计划，恢复时不得读取当前配置重编译。
+                    prepared_dependency_plan_json TEXT,
                     PRIMARY KEY(workflow_id, run_id)
                 );
 
@@ -603,6 +607,15 @@ impl SqliteWorkflowRuntimeStore {
             || !sqlite_column_exists(&connection, "workflow_runs", "next_retry_at_ms")?
         {
             migrate_workflow_run_retry_v11(&mut connection)?;
+        }
+        if previous_version < 12
+            || !sqlite_column_exists(
+                &connection,
+                "workflow_runs",
+                "prepared_dependency_plan_json",
+            )?
+        {
+            migrate_prepared_dependency_plan_column_v12(&mut connection)?;
         }
         connection
             .execute(
@@ -2176,7 +2189,8 @@ fn load_state_for_mutation(
 ) -> CoreResult<Option<WorkflowRunState>> {
     let snapshot = transaction
         .query_row(
-            "SELECT state_revision, state_json, prepared_workflow_json FROM workflow_runs
+            "SELECT state_revision, state_json, prepared_workflow_json,
+                    prepared_dependency_plan_json FROM workflow_runs
              WHERE workflow_id = ?1 AND run_id = ?2",
             params![workflow_id.as_str(), run_id.as_str()],
             |row| {
@@ -2184,17 +2198,21 @@ fn load_state_for_mutation(
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
         .optional()
         .map_err(sqlite_error)?;
-    let Some((revision, state_json, prepared_workflow_json)) = snapshot else {
+    let Some((revision, state_json, prepared_workflow_json, prepared_dependency_plan_json)) =
+        snapshot
+    else {
         return Ok(None);
     };
     let mut state = serde_json::from_str::<WorkflowRunState>(&state_json)?;
     state.state_revision = sqlite_u64(revision, "workflow state revision")?;
     rehydrate_prepared_workflow(&mut state, prepared_workflow_json.as_deref())?;
+    rehydrate_prepared_dependency_plan(&mut state, prepared_dependency_plan_json.as_deref())?;
     state.structured_events = load_structured_events(transaction, workflow_id, run_id)?;
     state.events = load_legacy_events(transaction, workflow_id, run_id)?;
     Ok(Some(state))
@@ -2208,6 +2226,7 @@ fn serialize_state_json_for_persist(
     if slim_prepared_workflow {
         let mut slim = state.clone();
         slim.prepared_workflow = None;
+        slim.prepared_dependency_plan = None;
         Ok(serde_json::to_string(&PersistedWorkflowRunState::from(
             &slim,
         ))?)
@@ -2261,6 +2280,23 @@ fn rehydrate_prepared_workflow(
         return Ok(());
     };
     state.prepared_workflow = Some(serde_json::from_str(raw)?);
+    Ok(())
+}
+
+fn rehydrate_prepared_dependency_plan(
+    state: &mut WorkflowRunState,
+    prepared_dependency_plan_json: Option<&str>,
+) -> CoreResult<()> {
+    if state.prepared_dependency_plan.is_some() {
+        return Ok(());
+    }
+    let Some(raw) = prepared_dependency_plan_json
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    state.prepared_dependency_plan = Some(serde_json::from_str(raw)?);
     Ok(())
 }
 
@@ -2398,6 +2434,23 @@ fn persist_mutated_state(
                 ",
                 params![
                     prepared_json,
+                    state.workflow_id.as_str(),
+                    state.run_id.as_str()
+                ],
+            )
+            .map_err(sqlite_error)?;
+    }
+    if let Some(dependency_plan) = &state.prepared_dependency_plan {
+        let dependency_json = serde_json::to_string(dependency_plan)?;
+        transaction
+            .execute(
+                "
+                UPDATE workflow_runs
+                SET prepared_dependency_plan_json = COALESCE(prepared_dependency_plan_json, ?1)
+                WHERE workflow_id = ?2 AND run_id = ?3
+                ",
+                params![
+                    dependency_json,
                     state.workflow_id.as_str(),
                     state.run_id.as_str()
                 ],
@@ -2738,6 +2791,19 @@ fn migrate_workflow_run_retry_v11(connection: &mut Connection) -> CoreResult<()>
     Ok(())
 }
 
+/// N27：旧运行没有可验证的冻结依赖，列保持 NULL 并由恢复入口 fail-loud。
+fn migrate_prepared_dependency_plan_column_v12(connection: &mut Connection) -> CoreResult<()> {
+    if !sqlite_column_exists(connection, "workflow_runs", "prepared_dependency_plan_json")? {
+        connection
+            .execute(
+                "ALTER TABLE workflow_runs ADD COLUMN prepared_dependency_plan_json TEXT",
+                [],
+            )
+            .map_err(sqlite_error)?;
+    }
+    Ok(())
+}
+
 fn migrate_workflow_operations_v7(connection: &mut Connection) -> CoreResult<()> {
     let has_recovery_policy =
         sqlite_column_exists(connection, "workflow_operations", "recovery_policy")?;
@@ -2833,6 +2899,11 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let prepared_dependency_plan_json = state
+            .prepared_dependency_plan
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let next_retry_at_ms = workflow_next_retry_at_ms(state)?;
         let mut connection = self.connection.lock().map_err(lock_error)?;
         let transaction = connection
@@ -2852,8 +2923,9 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
             .execute(
                 "INSERT INTO workflow_runs(
                     workflow_id, run_id, status, control, updated_at_ms, state_revision,
-                    state_json, next_retry_at_ms, prepared_workflow_json
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
+                    state_json, next_retry_at_ms, prepared_workflow_json,
+                    prepared_dependency_plan_json
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9)",
                 params![
                     state.workflow_id.as_str(),
                     state.run_id.as_str(),
@@ -2863,6 +2935,7 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
                     state_json,
                     next_retry_at_ms,
                     prepared_workflow_json,
+                    prepared_dependency_plan_json,
                 ],
             )
             .map_err(sqlite_error)?;
@@ -2896,6 +2969,23 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
                     ",
                     params![
                         prepared_json,
+                        state.workflow_id.as_str(),
+                        state.run_id.as_str()
+                    ],
+                )
+                .map_err(sqlite_error)?;
+        }
+        if let Some(dependency_plan) = &state.prepared_dependency_plan {
+            let dependency_json = serde_json::to_string(dependency_plan)?;
+            transaction
+                .execute(
+                    "
+                    UPDATE workflow_runs
+                    SET prepared_dependency_plan_json = COALESCE(prepared_dependency_plan_json, ?1)
+                    WHERE workflow_id = ?2 AND run_id = ?3
+                    ",
+                    params![
+                        dependency_json,
                         state.workflow_id.as_str(),
                         state.run_id.as_str()
                     ],
@@ -3045,7 +3135,8 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
         let snapshot = transaction
             .query_row(
                 "
-                SELECT state_revision, state_json, prepared_workflow_json FROM workflow_runs
+                SELECT state_revision, state_json, prepared_workflow_json,
+                       prepared_dependency_plan_json FROM workflow_runs
                 WHERE workflow_id = ?1 AND run_id = ?2
                 ",
                 params![workflow_id.as_str(), run_id.as_str()],
@@ -3054,18 +3145,26 @@ impl WorkflowRuntimeStore for SqliteWorkflowRuntimeStore {
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
             .optional()
             .map_err(sqlite_error)?;
 
-        let Some((state_revision, state_json, prepared_workflow_json)) = snapshot else {
+        let Some((
+            state_revision,
+            state_json,
+            prepared_workflow_json,
+            prepared_dependency_plan_json,
+        )) = snapshot
+        else {
             return Ok(None);
         };
         let mut state = serde_json::from_str::<WorkflowRunState>(&state_json)?;
         state.state_revision = sqlite_u64(state_revision, "workflow state revision")?;
         rehydrate_prepared_workflow(&mut state, prepared_workflow_json.as_deref())?;
+        rehydrate_prepared_dependency_plan(&mut state, prepared_dependency_plan_json.as_deref())?;
         let structured_events = load_structured_events(&transaction, workflow_id, run_id)?;
         if !structured_events.is_empty() {
             state.structured_events = structured_events;
@@ -3276,7 +3375,8 @@ impl SqliteWorkflowRuntimeStore {
         let mut statement = connection
             .prepare(
                 "
-                SELECT state_revision, state_json, prepared_workflow_json FROM workflow_runs
+                SELECT state_revision, state_json, prepared_workflow_json,
+                       prepared_dependency_plan_json FROM workflow_runs
                 WHERE status NOT IN ('stopped', 'succeeded', 'failed')
                 ORDER BY updated_at_ms DESC
                 ",
@@ -3288,15 +3388,21 @@ impl SqliteWorkflowRuntimeStore {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(sqlite_error)?;
         let mut states = Vec::new();
         for row in rows {
-            let (revision, state_json, prepared_workflow_json) = row.map_err(sqlite_error)?;
+            let (revision, state_json, prepared_workflow_json, prepared_dependency_plan_json) =
+                row.map_err(sqlite_error)?;
             let mut state = serde_json::from_str::<WorkflowRunState>(&state_json)?;
             state.state_revision = sqlite_u64(revision, "workflow state revision")?;
             rehydrate_prepared_workflow(&mut state, prepared_workflow_json.as_deref())?;
+            rehydrate_prepared_dependency_plan(
+                &mut state,
+                prepared_dependency_plan_json.as_deref(),
+            )?;
             states.push(state);
         }
         Ok(states)
@@ -3312,7 +3418,8 @@ impl SqliteWorkflowRuntimeStore {
         let mut statement = connection
             .prepare(
                 "
-                SELECT r.state_revision, r.state_json, r.prepared_workflow_json
+                SELECT r.state_revision, r.state_json, r.prepared_workflow_json,
+                       r.prepared_dependency_plan_json
                 FROM workflow_runs r
                 LEFT JOIN workflow_run_worker_leases l
                   ON l.workflow_id = r.workflow_id AND l.run_id = r.run_id
@@ -3339,15 +3446,21 @@ impl SqliteWorkflowRuntimeStore {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(sqlite_error)?;
         let mut states = Vec::new();
         for row in rows {
-            let (revision, state_json, prepared_workflow_json) = row.map_err(sqlite_error)?;
+            let (revision, state_json, prepared_workflow_json, prepared_dependency_plan_json) =
+                row.map_err(sqlite_error)?;
             let mut state = serde_json::from_str::<WorkflowRunState>(&state_json)?;
             state.state_revision = sqlite_u64(revision, "workflow state revision")?;
             rehydrate_prepared_workflow(&mut state, prepared_workflow_json.as_deref())?;
+            rehydrate_prepared_dependency_plan(
+                &mut state,
+                prepared_dependency_plan_json.as_deref(),
+            )?;
             states.push(state);
         }
         Ok(states)
@@ -3397,7 +3510,8 @@ impl SqliteWorkflowRuntimeStore {
         let mut statement = transaction
             .prepare(
                 "
-                SELECT state_revision, state_json, prepared_workflow_json FROM workflow_runs
+                SELECT state_revision, state_json, prepared_workflow_json,
+                       prepared_dependency_plan_json FROM workflow_runs
                 WHERE status NOT IN ('stopped', 'succeeded', 'failed')
                 ORDER BY updated_at_ms DESC
                 ",
@@ -3409,15 +3523,21 @@ impl SqliteWorkflowRuntimeStore {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(sqlite_error)?;
         let mut states = Vec::new();
         for row in rows {
-            let (revision, state_json, prepared_workflow_json) = row.map_err(sqlite_error)?;
+            let (revision, state_json, prepared_workflow_json, prepared_dependency_plan_json) =
+                row.map_err(sqlite_error)?;
             let mut state = serde_json::from_str::<WorkflowRunState>(&state_json)?;
             state.state_revision = sqlite_u64(revision, "workflow state revision")?;
             rehydrate_prepared_workflow(&mut state, prepared_workflow_json.as_deref())?;
+            rehydrate_prepared_dependency_plan(
+                &mut state,
+                prepared_dependency_plan_json.as_deref(),
+            )?;
             states.push(state);
         }
         drop(statement);

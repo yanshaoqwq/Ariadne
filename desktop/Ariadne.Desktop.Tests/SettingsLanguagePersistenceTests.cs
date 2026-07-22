@@ -7,27 +7,39 @@ using Xunit;
 
 namespace Ariadne.Desktop.Tests;
 
+[Collection("GlobalDialogService")]
 public sealed class SettingsLanguagePersistenceTests
 {
     [Fact]
-    public void LanguageSelector_BelongsToGeneralSaveScopeWithoutAutoSaveBypass()
+    public void LanguageSelector_BelongsToGlobalPersonalizationSaveScope()
     {
         var view = File.ReadAllText(ResolveDesktopSource("Views", "SettingsPageView.axaml"));
         var viewModel = File.ReadAllText(ResolveDesktopSource("ViewModels", "SettingsPageViewModel.cs"));
         var generalStart = view.IndexOf("IsGeneralSelected", StringComparison.Ordinal);
         var modelsStart = view.IndexOf("IsModelsSelected", generalStart, StringComparison.Ordinal);
-        var miscStart = view.IndexOf("IsMiscSelected", modelsStart, StringComparison.Ordinal);
+        var personalizationStart = view.IndexOf("IsPersonalizationSelected", modelsStart, StringComparison.Ordinal);
+        var miscStart = view.IndexOf("IsMiscSelected", personalizationStart, StringComparison.Ordinal);
 
-        Assert.True(generalStart >= 0 && modelsStart > generalStart && miscStart > modelsStart);
-        Assert.Contains("SelectedLanguage", view[generalStart..modelsStart], StringComparison.Ordinal);
-        Assert.DoesNotContain("SelectedLanguage", view[miscStart..], StringComparison.Ordinal);
-        Assert.Contains("Locale = language", viewModel, StringComparison.Ordinal);
+        Assert.True(generalStart >= 0 && modelsStart > generalStart
+            && personalizationStart > modelsStart && miscStart > personalizationStart);
+        Assert.DoesNotContain("SelectedLanguage", view[generalStart..modelsStart], StringComparison.Ordinal);
+        Assert.Contains("SelectedLanguage", view[personalizationStart..miscStart], StringComparison.Ordinal);
+        Assert.DoesNotContain("Locale = language", viewModel, StringComparison.Ordinal);
+        Assert.Contains("ApplySavedLanguage(preferences.Locale)", viewModel, StringComparison.Ordinal);
         Assert.DoesNotContain("PersistLanguageAsync", viewModel, StringComparison.Ordinal);
         Assert.DoesNotContain("SaveAppSettingsAsync", viewModel, StringComparison.Ordinal);
+        Assert.Contains("nameof(ProviderScopeHelpText)", viewModel, StringComparison.Ordinal);
+
+        var mainWindow = File.ReadAllText(ResolveDesktopSource("ViewModels", "MainWindowViewModel.cs"));
+        // Product applies locale via ApplyGlobalPreferences(status.Preferences) → preferences.Locale
+        // (not the brittle continuous substring status.Preferences.Locale).
+        Assert.Contains("ApplyGlobalPreferences(status.Preferences)", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("preferences.Locale", mainWindow, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplySavedLanguageAsync", mainWindow, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task LanguageSelection_IsSavedOnlyThroughGeneralTransaction()
+    public async Task LanguageSelection_IsSavedOnlyThroughGlobalPersonalizationTransaction()
     {
         using var resources = CreateLanguageResources();
         var names = DisplayNameService.LoadFromDirectory(resources.Path, "zh");
@@ -38,15 +50,17 @@ public sealed class SettingsLanguagePersistenceTests
         vm.SelectedLanguage = "fr";
 
         Assert.Equal("fr", names.CurrentLanguage);
-        Assert.Equal("fr", vm.Locale);
+        Assert.Equal("zh", vm.Locale);
         Assert.True(vm.HasUnsavedChanges);
-        Assert.Equal(0, backend.SaveAppSettingsCalls);
+        Assert.Equal(0, backend.SaveUiPreferencesCalls);
         Assert.Null(backend.SavedGeneral);
+        Assert.Null(backend.SavedPreferences);
 
         Assert.True(await vm.SaveUnsavedChangesAsync());
 
-        Assert.Equal("fr", backend.SavedGeneral!.App.App.Locale);
-        Assert.Equal(0, backend.SaveAppSettingsCalls);
+        Assert.Equal("fr", backend.SavedPreferences!.Locale);
+        Assert.Null(backend.SavedGeneral);
+        Assert.Equal(1, backend.SaveUiPreferencesCalls);
         Assert.False(vm.HasUnsavedChanges);
     }
 
@@ -64,12 +78,12 @@ public sealed class SettingsLanguagePersistenceTests
 
         Assert.False(await vm.SaveUnsavedChangesAsync());
         Assert.Equal("fr", names.CurrentLanguage);
-        Assert.Equal("fr", vm.Locale);
+        Assert.Equal("zh", vm.Locale);
         Assert.True(vm.HasUnsavedChanges);
 
         backend.SaveFailure = null;
         Assert.True(await vm.SaveUnsavedChangesAsync());
-        Assert.Equal("fr", backend.SavedGeneral!.App.App.Locale);
+        Assert.Equal("fr", backend.SavedPreferences!.Locale);
         Assert.False(vm.HasUnsavedChanges);
     }
 
@@ -95,8 +109,153 @@ public sealed class SettingsLanguagePersistenceTests
         Assert.True(vm.HasUnsavedChanges);
 
         Assert.True(await vm.SaveUnsavedChangesAsync());
-        Assert.Equal("zh", backend.SavedGeneral!.App.App.Locale);
+        Assert.Equal("zh", backend.SavedPreferences!.Locale);
         Assert.False(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public async Task SaveAllDirtySections_StopsAfterFirstSectionFailure()
+    {
+        using var resources = CreateLanguageResources();
+        var names = DisplayNameService.LoadFromDirectory(resources.Path, "zh");
+        var backend = LanguageBackend.Create();
+        var vm = new SettingsPageViewModel(names, backend.Client);
+        await vm.ReloadProjectDataAsync();
+        backend.GeneralSaveFailure = new InvalidOperationException("injected general failure");
+        vm.ProjectName = "Changed";
+        vm.SelectedLanguage = "fr";
+
+        Assert.False(await vm.SaveUnsavedChangesAsync());
+
+        Assert.Equal(1, backend.SaveGeneralCalls);
+        Assert.Equal(0, backend.SaveUiPreferencesCalls);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public async Task PreparedSettingsRejectEditsMadeBeforeCommitWithoutWriting()
+    {
+        using var resources = CreateLanguageResources();
+        var names = DisplayNameService.LoadFromDirectory(resources.Path, "zh");
+        var backend = LanguageBackend.Create();
+        var vm = new SettingsPageViewModel(names, backend.Client);
+        await vm.ReloadProjectDataAsync();
+        vm.ProjectName = "Prepared";
+
+        Assert.True(await vm.PrepareUnsavedChangesAsync());
+        vm.ProjectName = "Edited after prepare";
+
+        Assert.False(await vm.CommitPreparedUnsavedChangesAsync());
+        Assert.Equal(0, backend.SaveGeneralCalls);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public async Task PreparedSettingsUseImmutableDtosWhenAnotherSectionChangesDuringCommit()
+    {
+        using var resources = CreateLanguageResources();
+        var names = DisplayNameService.LoadFromDirectory(resources.Path, "zh");
+        var backend = LanguageBackend.Create();
+        var vm = new SettingsPageViewModel(names, backend.Client);
+        await vm.ReloadProjectDataAsync();
+        vm.ProjectName = "Prepared";
+        vm.SelectedLanguage = "fr";
+        backend.HoldNextSave();
+
+        Assert.True(await vm.PrepareUnsavedChangesAsync());
+        var commit = vm.CommitPreparedUnsavedChangesAsync();
+        await backend.SaveStarted.Task;
+        vm.SelectedLanguage = "zh";
+        backend.ReleaseHeldSave();
+
+        Assert.False(await commit);
+        Assert.Equal("Prepared", backend.SavedGeneral!.App.App.ProjectName);
+        Assert.Equal("fr", backend.SavedPreferences!.Locale);
+        Assert.Equal("zh", vm.SelectedLanguage);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public async Task NavigationSelection_UsesLatestIntentWhileLeaveSaveIsPending()
+    {
+        using var resources = CreateLanguageResources();
+        var names = DisplayNameService.LoadFromDirectory(resources.Path, "zh");
+        DialogService.Initialize(names);
+        var backend = LanguageBackend.Create();
+        var vm = new SettingsPageViewModel(names, backend.Client);
+        await vm.ReloadProjectDataAsync();
+        vm.ProjectName = "Changed";
+
+        var first = vm.SelectNavigationTabForTestsAsync("automation");
+        var dialog = await WaitForDialogAsync();
+        var latest = vm.SelectNavigationTabForTestsAsync("permissions");
+        Assert.Same(first, latest);
+        dialog.Buttons.Single(button =>
+            button.ResultIndex == (int)UnsavedLeaveChoice.Save).Command!.Execute(null);
+        await Task.WhenAll(first, latest);
+
+        Assert.Equal("permissions", vm.SelectedTab.Id);
+        Assert.Equal(1, backend.SaveGeneralCalls);
+        Assert.False(DialogService.Current.IsOpen);
+    }
+
+    [Fact]
+    public async Task NavigationSelection_ClickingCurrentTabCancelsPendingTarget()
+    {
+        using var resources = CreateLanguageResources();
+        var names = DisplayNameService.LoadFromDirectory(resources.Path, "zh");
+        DialogService.Initialize(names);
+        var backend = LanguageBackend.Create();
+        var vm = new SettingsPageViewModel(names, backend.Client);
+        await vm.ReloadProjectDataAsync();
+        vm.ProjectName = "Changed";
+
+        var navigation = vm.SelectNavigationTabForTestsAsync("automation");
+        var dialog = await WaitForDialogAsync();
+        vm.NavigationSelection = vm.SelectedTab;
+        dialog.Buttons.Single(button =>
+            button.ResultIndex == (int)UnsavedLeaveChoice.Save).Command!.Execute(null);
+        await navigation;
+
+        Assert.Equal("general", vm.SelectedTab.Id);
+        Assert.Equal(1, backend.SaveGeneralCalls);
+        Assert.False(DialogService.Current.IsOpen);
+    }
+
+    [Fact]
+    public void LanguagePreview_RefreshesEveryVisibleScopeDescription()
+    {
+        using var resources = CreateLanguageResources();
+        var names = DisplayNameService.LoadFromDirectory(resources.Path, "zh");
+        var backend = LanguageBackend.Create();
+        var vm = new SettingsPageViewModel(names, backend.Client);
+        var changed = new HashSet<string>(StringComparer.Ordinal);
+        vm.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName is not null)
+            {
+                changed.Add(args.PropertyName);
+            }
+        };
+
+        vm.SelectedLanguage = "fr";
+
+        Assert.Equal("Providers global FR", vm.ProviderScopeHelpText);
+        Assert.Equal("Presets mixed FR", vm.PresetScopeHelpText);
+        Assert.Equal("Permissions global FR", vm.PermissionsScopeHelpText);
+        Assert.Equal("Personalization global FR", vm.PersonalizationScopeHelpText);
+        Assert.Equal("General project FR", vm.GeneralScopeHelpText);
+        Assert.Equal("Automation project FR", vm.AutomationScopeHelpText);
+        Assert.Equal("Runtime global FR", vm.AppRuntimeScopeHelpText);
+        Assert.Equal("Retrieval project FR", vm.RetrievalScopeHelpText);
+        Assert.Contains(nameof(SettingsPageViewModel.ProviderScopeHelpText), changed);
+        Assert.Contains(nameof(SettingsPageViewModel.PresetScopeHelpText), changed);
+        Assert.Contains(nameof(SettingsPageViewModel.PermissionsScopeHelpText), changed);
+        Assert.Contains(nameof(SettingsPageViewModel.PersonalizationScopeHelpText), changed);
+        Assert.Contains(nameof(SettingsPageViewModel.GeneralScopeHelpText), changed);
+        Assert.Contains(nameof(SettingsPageViewModel.AutomationScopeHelpText), changed);
+        Assert.Contains(nameof(SettingsPageViewModel.AppRuntimeScopeHelpText), changed);
+        Assert.Contains(nameof(SettingsPageViewModel.RetrievalScopeHelpText), changed);
     }
 
     private static TemporaryDirectory CreateLanguageResources()
@@ -113,12 +272,28 @@ public sealed class SettingsLanguagePersistenceTests
                 ["ui.settings.status.saving"] = "Saving",
                 ["ui.settings.status.section_load_failed"] = "Load failed",
                 ["ui.error.unknown"] = "Save failed",
+                ["ui.settings.models.scope_help"] = "Providers global ZH",
+                ["ui.settings.presets.scope_help"] = "Presets mixed ZH",
+                ["ui.settings.permissions.scope_help"] = "Permissions global ZH",
+                ["ui.settings.personalization.scope_help"] = "Personalization global ZH",
+                ["ui.settings.general.scope_help"] = "General project ZH",
+                ["ui.settings.automation.scope_help"] = "Automation project ZH",
+                ["ui.settings.misc.app_runtime_scope_help"] = "Runtime global ZH",
+                ["ui.settings.misc.retrieval_scope_help"] = "Retrieval project ZH",
             }));
         File.WriteAllText(
             System.IO.Path.Combine(directory.Path, "display_name.fr.json"),
             JsonSerializer.Serialize(new Dictionary<string, string>
             {
                 ["ui.settings.misc.language.fr"] = "Francais",
+                ["ui.settings.models.scope_help"] = "Providers global FR",
+                ["ui.settings.presets.scope_help"] = "Presets mixed FR",
+                ["ui.settings.permissions.scope_help"] = "Permissions global FR",
+                ["ui.settings.personalization.scope_help"] = "Personalization global FR",
+                ["ui.settings.general.scope_help"] = "General project FR",
+                ["ui.settings.automation.scope_help"] = "Automation project FR",
+                ["ui.settings.misc.app_runtime_scope_help"] = "Runtime global FR",
+                ["ui.settings.misc.retrieval_scope_help"] = "Retrieval project FR",
             }));
         return directory;
     }
@@ -140,14 +315,30 @@ public sealed class SettingsLanguagePersistenceTests
         throw new FileNotFoundException(string.Join('/', parts));
     }
 
+    private static async Task<ConfirmDialogViewModel> WaitForDialogAsync()
+    {
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            if (DialogService.Current.ActiveDialog is { } dialog)
+            {
+                return dialog;
+            }
+            await Task.Delay(1);
+        }
+        throw new TimeoutException("settings leave dialog was not shown");
+    }
+
     private class LanguageBackend : DispatchProxy
     {
-        private TaskCompletionSource<GeneralSectionSettings>? _heldSave;
+        private TaskCompletionSource? _heldSave;
 
         public IAriadneBackendClient Client { get; private set; } = null!;
         public GeneralSectionSettings? SavedGeneral { get; private set; }
+        public UiPreferences? SavedPreferences { get; private set; }
         public Exception? SaveFailure { get; set; }
-        public int SaveAppSettingsCalls { get; private set; }
+        public Exception? GeneralSaveFailure { get; set; }
+        public int SaveGeneralCalls { get; private set; }
+        public int SaveUiPreferencesCalls { get; private set; }
         public TaskCompletionSource SaveStarted { get; private set; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -162,15 +353,14 @@ public sealed class SettingsLanguagePersistenceTests
         public void HoldNextSave()
         {
             SaveStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            _heldSave = new TaskCompletionSource<GeneralSectionSettings>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
+            _heldSave = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
         public void ReleaseHeldSave()
         {
             var held = _heldSave ?? throw new InvalidOperationException("save is not held");
             _heldSave = null;
-            held.SetResult(SavedGeneral!);
+            held.SetResult();
         }
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
@@ -184,30 +374,56 @@ public sealed class SettingsLanguagePersistenceTests
             {
                 nameof(IAriadneBackendClient.GetAppSettingsAsync) => Task.FromResult(InitialAppSettings()),
                 nameof(IAriadneBackendClient.ReadProjectMemoryAsync) => Task.FromResult(string.Empty),
+                nameof(IAriadneBackendClient.GetCurrentProjectAsync) => Task.FromResult<CurrentProjectStatus?>(
+                    new CurrentProjectStatus("/tmp/ariadne-language-test", "Ariadne")),
+                nameof(IAriadneBackendClient.GetUiPreferencesAsync) => Task.FromResult(InitialPreferences()),
+                nameof(IAriadneBackendClient.SaveUiPreferencesAsync) => SavePreferences(
+                    (UiPreferences)args![0]!),
                 nameof(IAriadneBackendClient.SaveGeneralSectionSettingsAsync) => SaveGeneral(
                     (GeneralSectionSettings)args![0]!),
-                nameof(IAriadneBackendClient.SaveAppSettingsAsync) => CountLegacySave(),
                 "get_HasProjectRoot" => true,
                 _ => UnsupportedTask(targetMethod),
             };
         }
 
-        private Task<GeneralSectionSettings> SaveGeneral(GeneralSectionSettings settings)
+        private async Task<GeneralSectionSettings> SaveGeneral(GeneralSectionSettings settings)
         {
             SavedGeneral = settings;
+            SaveGeneralCalls++;
+            SaveStarted.TrySetResult();
+            if (GeneralSaveFailure is not null)
+            {
+                throw GeneralSaveFailure;
+            }
+            var held = _heldSave;
+            if (held is not null)
+            {
+                await held.Task;
+            }
+            return settings;
+        }
+
+        private Task SavePreferences(UiPreferences preferences)
+        {
+            SavedPreferences = preferences;
+            SaveUiPreferencesCalls++;
             SaveStarted.TrySetResult();
             if (SaveFailure is not null)
             {
-                return Task.FromException<GeneralSectionSettings>(SaveFailure);
+                return Task.FromException(SaveFailure);
             }
-            return _heldSave?.Task ?? Task.FromResult(settings);
+            return _heldSave?.Task ?? Task.CompletedTask;
         }
 
-        private Task<AppSettings> CountLegacySave()
-        {
-            SaveAppSettingsCalls++;
-            return Task.FromResult(InitialAppSettings());
-        }
+        private static UiPreferences InitialPreferences() => new(
+            "system",
+            "#8a8f98",
+            "#f59e0b",
+            true,
+            null,
+            new Dictionary<string, bool>(),
+            false,
+            Locale: "zh");
 
         private static AppSettings InitialAppSettings() => new(new AppConfig(
             1,

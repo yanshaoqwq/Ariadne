@@ -16,6 +16,9 @@ pub struct ConfirmationPolicySetting {
     pub normal_policy: ConfirmationNormalPolicy,
     #[serde(default)]
     pub auto_mode_policy: ConfirmationAutoModePolicy,
+    /// Auto Mode 选择自动审批时使用的独立审计提示词。
+    #[serde(default)]
+    pub approval_prompt: String,
 }
 
 impl<'de> Deserialize<'de> for ConfirmationPolicySetting {
@@ -30,6 +33,8 @@ impl<'de> Deserialize<'de> for ConfirmationPolicySetting {
             normal_policy: ConfirmationNormalPolicy,
             #[serde(default)]
             auto_mode_policy: ConfirmationAutoModePolicy,
+            #[serde(default)]
+            approval_prompt: String,
             #[serde(default, rename = "policy")]
             policy_code: String,
         }
@@ -45,6 +50,7 @@ impl<'de> Deserialize<'de> for ConfirmationPolicySetting {
             confirmation_kind: raw.confirmation_kind,
             normal_policy,
             auto_mode_policy,
+            approval_prompt: raw.approval_prompt,
         })
     }
 }

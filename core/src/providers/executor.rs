@@ -40,6 +40,7 @@ impl<'a, L: CostLedger + ?Sized> ProviderExecutor<'a, L> {
     ) -> CoreResult<LlmResponse> {
         // 调用前捕获 model_id，保证成本记录能按模型归因；provider 消费 request 后就取不到了。
         let model_id = request.model_id.clone();
+        validate_provider_identity(provider.definition().provider_id.as_str(), context)?;
         authorize_provider_dispatch(context)?;
         let response = provider.complete(context, request)?;
         observe_response(&response)?;
@@ -74,6 +75,7 @@ impl<'a, L: CostLedger + ?Sized> ProviderExecutor<'a, L> {
     ) -> CoreResult<EmbeddingResponse> {
         // 调用前捕获 model_id，供 embedding 成本按模型归因。
         let model_id = request.model_id.clone();
+        validate_provider_identity(provider.definition().provider_id.as_str(), context)?;
         authorize_provider_dispatch(context)?;
         let response = provider.embed(context, request)?;
         self.record_optional_cost(
@@ -96,6 +98,7 @@ impl<'a, L: CostLedger + ?Sized> ProviderExecutor<'a, L> {
     ) -> CoreResult<RerankResponse> {
         // reranker 请求也带 model_id，一并归因到成本记录。
         let model_id = request.model_id.clone();
+        validate_provider_identity(provider.definition().provider_id.as_str(), context)?;
         authorize_provider_dispatch(context)?;
         let response = provider.rerank(context, request)?;
         self.record_optional_cost(
@@ -116,6 +119,7 @@ impl<'a, L: CostLedger + ?Sized> ProviderExecutor<'a, L> {
         context: &ProviderCallContext,
         request: SearchProviderRequest,
     ) -> CoreResult<SearchProviderResponse> {
+        validate_provider_identity(provider.definition().provider_id.as_str(), context)?;
         authorize_provider_dispatch(context)?;
         let response = provider.search(context, request)?;
         self.record_optional_cost(
@@ -167,6 +171,19 @@ impl<'a, L: CostLedger + ?Sized> ProviderExecutor<'a, L> {
             })
             .map(Some)
     }
+}
+
+fn validate_provider_identity(
+    actual_provider_id: &str,
+    context: &ProviderCallContext,
+) -> CoreResult<()> {
+    if actual_provider_id == context.provider_id {
+        return Ok(());
+    }
+    Err(CoreError::validation(format!(
+        "provider dispatch identity mismatch: request declares '{}', actual provider is '{}'",
+        context.provider_id, actual_provider_id
+    )))
 }
 
 fn authorize_provider_dispatch(context: &ProviderCallContext) -> CoreResult<()> {

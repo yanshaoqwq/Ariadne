@@ -5,8 +5,8 @@ namespace Ariadne.Desktop.Backend;
 
 public sealed record RecentProjectEntry(
     [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("project_root")] string ProjectRoot,
-    [property: JsonPropertyName("last_opened_at")] string? LastOpenedAt);
+    [property: JsonPropertyName("path")] string ProjectRoot,
+    [property: JsonPropertyName("last_opened_ms")] ulong LastOpenedMs);
 
 public sealed record CurrentProjectStatus(
     [property: JsonPropertyName("project_root")] string ProjectRoot,
@@ -47,7 +47,9 @@ public sealed record UiPreferences(
     /// 自定义三色是否按系统明暗分别应用昼/夜。
     [property: JsonPropertyName("theme_follow_system_colors")] bool ThemeFollowSystemColors = true,
     /// 减少非必要位移与缩放动效。
-    [property: JsonPropertyName("reduce_motion")] bool ReduceMotion = false);
+    [property: JsonPropertyName("reduce_motion")] bool ReduceMotion = false,
+    /// 应用级显示语言；旧偏好文件缺失时回退中文。
+    [property: JsonPropertyName("locale")] string Locale = "zh");
 
 public sealed record AppStatus(
     [property: JsonPropertyName("current_project")] CurrentProjectStatus CurrentProject,
@@ -64,11 +66,18 @@ public sealed record BackendResult<T>(
 
 public sealed record ProjectInitReport(
     [property: JsonPropertyName("project_root")] string ProjectRoot,
+    [property: JsonPropertyName("project_name")] string ProjectName,
     [property: JsonPropertyName("created_dirs")] IReadOnlyList<string> CreatedDirs,
-    [property: JsonPropertyName("git_initialized")] bool GitInitialized);
+    [property: JsonPropertyName("created_config_files")] IReadOnlyList<string> CreatedConfigFiles,
+    [property: JsonPropertyName("git_initialized")] bool GitInitialized,
+    [property: JsonPropertyName("ready")] bool Ready);
 
 public sealed record AppSettings(
     [property: JsonPropertyName("app")] AppConfig App);
+
+public sealed record AppRuntimeSettings(
+    [property: JsonPropertyName("qdrant_binary_path")] string QdrantBinaryPath,
+    [property: JsonPropertyName("qdrant_startup_timeout_ms")] long QdrantStartupTimeoutMs);
 
 public sealed record GeneralSectionSettings(
     [property: JsonPropertyName("app")] AppSettings App,
@@ -161,11 +170,13 @@ public sealed record AutomationSectionSettings(
 public sealed record ConfirmationPolicySetting(
     [property: JsonPropertyName("confirmation_kind")] string ConfirmationKind,
     [property: JsonPropertyName("normal_policy")] string NormalPolicy,
-    [property: JsonPropertyName("auto_mode_policy")] string AutoModePolicy);
+    [property: JsonPropertyName("auto_mode_policy")] string AutoModePolicy,
+    [property: JsonPropertyName("approval_prompt")] string ApprovalPrompt);
 
 public sealed record PermissionsSettings(
     [property: JsonPropertyName("policy")] PermissionPolicy Policy,
-    [property: JsonPropertyName("tool_controls")] IReadOnlyDictionary<string, IReadOnlyDictionary<string, bool>> ToolControls);
+    [property: JsonPropertyName("scoped_policies")] IReadOnlyDictionary<string, PermissionPolicy?> ScopedPolicies,
+    [property: JsonPropertyName("tool_controls")] IReadOnlyDictionary<string, IReadOnlyDictionary<string, bool?>> ToolControls);
 
 public sealed record PermissionPolicy(
     [property: JsonPropertyName("allow_network")] bool AllowNetwork,
@@ -180,14 +191,18 @@ public sealed record NodePresetSettings(
     [property: JsonPropertyName("presets")] IReadOnlyList<NodeTypePreset> Presets,
     [property: JsonPropertyName("default_model_id")] string DefaultModelId,
     [property: JsonPropertyName("default_timeout_ms")] long DefaultTimeoutMs,
-    [property: JsonPropertyName("default_budget_usd")] double DefaultBudgetUsd);
+    [property: JsonPropertyName("default_budget_usd")] double DefaultBudgetUsd,
+    [property: JsonPropertyName("default_provider_id")] string DefaultProviderId = "");
 
 public sealed record NodeTypePreset(
     [property: JsonPropertyName("node_type")] string NodeType,
     [property: JsonPropertyName("display_name_key")] string DisplayNameKey,
     [property: JsonPropertyName("model_id")] string ModelId,
     [property: JsonPropertyName("timeout_ms")] long TimeoutMs,
-    [property: JsonPropertyName("budget_usd")] double BudgetUsd);
+    [property: JsonPropertyName("budget_usd")] double BudgetUsd,
+    [property: JsonPropertyName("permission_policy")] PermissionPolicy? PermissionPolicy,
+    [property: JsonPropertyName("tool_controls")] IReadOnlyDictionary<string, bool?> ToolControls,
+    [property: JsonPropertyName("provider_id")] string ProviderId = "");
 
 public sealed record TemplateRepositorySettings(
     [property: JsonPropertyName("base_url")] string BaseUrl);

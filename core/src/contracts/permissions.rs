@@ -126,6 +126,45 @@ impl PermissionDecision {
 }
 
 impl PermissionPolicy {
+    /// 校验权限层级关系和文件根目录，防止持久化永远不生效的配置。
+    pub fn validate(&self) -> CoreResult<()> {
+        if !self.allow_network
+            && (self.allow_web_search || self.allow_http_skill || self.allow_wasm_network)
+        {
+            return Err(CoreError::validation(
+                "network child permissions require allow_network",
+            ));
+        }
+
+        for roots in [&self.readable_file_roots, &self.writable_file_roots] {
+            let mut unique = std::collections::BTreeSet::new();
+            for root in roots {
+                if root
+                    .components()
+                    .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+                {
+                    return Err(CoreError::validation(format!(
+                        "permission file root cannot contain dot components: {}",
+                        root.display()
+                    )));
+                }
+                let normalized = normalize_absolute_path(root).ok_or_else(|| {
+                    CoreError::validation(format!(
+                        "permission file root must be absolute: {}",
+                        root.display()
+                    ))
+                })?;
+                if !unique.insert(normalized.clone()) {
+                    return Err(CoreError::validation(format!(
+                        "duplicate permission file root: {}",
+                        normalized.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 根据权限请求计算允许或拒绝结果。
     pub fn evaluate(&self, request: &PermissionRequest) -> PermissionDecision {
         match request {

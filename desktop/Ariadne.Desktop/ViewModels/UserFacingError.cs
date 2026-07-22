@@ -13,18 +13,18 @@ public static partial class UserFacingError
 {
     private static readonly Regex AbsolutePath = PathRegex();
     private static readonly Regex HomePath = HomePathRegex();
-    private static WeakReference<IUserFailureObserver>? _observer;
+    private static readonly AsyncLocal<WeakReference<IUserFailureObserver>?> Observer = new();
 
     public static void RegisterObserver(IUserFailureObserver observer)
     {
-        _observer = new WeakReference<IUserFailureObserver>(observer);
+        Observer.Value = new WeakReference<IUserFailureObserver>(observer);
     }
 
     /// <summary>Primary author-facing line for status bars / toasts.</summary>
     public static string Format(Exception? ex, DisplayNameService names, string? contextKey = null)
     {
         var failure = FromException(ex);
-        if (_observer?.TryGetTarget(out var observer) == true)
+        if (Observer.Value?.TryGetTarget(out var observer) == true)
         {
             observer.Observe(failure);
         }

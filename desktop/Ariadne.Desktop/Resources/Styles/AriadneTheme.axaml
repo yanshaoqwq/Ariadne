@@ -308,10 +308,12 @@
            用法：<Path Data="{StaticResource Ariadne.Icon.X}" .../>，
            Path Stretch=Uniform + Width/Height 控制显示尺寸。
            ============================================================ -->
-      <!-- 窗口控制 -->
-      <StreamGeometry x:Key="Ariadne.Icon.Minimize">M4,12 L20,12</StreamGeometry>
-      <StreamGeometry x:Key="Ariadne.Icon.Maximize">M5,5 L19,5 L19,19 L5,19 Z</StreamGeometry>
-      <StreamGeometry x:Key="Ariadne.Icon.Close">M5,5 L19,19 M19,5 L5,19</StreamGeometry>
+      <!-- 窗口控制（24 viewBox；Minimize 实心横条略低于几何中线，避免视觉上“偏高”） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Minimize">M4.5,13.2 L19.5,13.2 L19.5,15.6 L4.5,15.6 Z</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Maximize">M5.5,5.5 L18.5,5.5 L18.5,18.5 L5.5,18.5 Z</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Restore">M8,9.5 L16.5,9.5 L16.5,18 L8,18 Z M9.5,7 L9.5,5.5 L18.5,5.5 L18.5,14.5 L17,14.5</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Close">M6.5,6.5 L17.5,17.5 M17.5,6.5 L6.5,17.5</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Add">M12,5 L12,19 M5,12 L19,12</StreamGeometry>
       <!-- 侧栏折叠（汉堡） -->
       <StreamGeometry x:Key="Ariadne.Icon.Menu">M3,6 L21,6 M3,12 L21,12 M3,18 L21,18</StreamGeometry>
       <!-- 导航：工作空间（节点/编排——三连点+线） -->
@@ -349,7 +351,7 @@
       <!-- 导出（向上出托盘） -->
       <StreamGeometry x:Key="Ariadne.Icon.Export">M12,13 L12,3 M8,7 L12,3 L16,7 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
       <!-- 搜索（放大镜） -->
-      <StreamGeometry x:Key="Ariadne.Icon.Search">M10.5,4 a6.5,6.5 0 1,0 0.01,0 M15.5,15.5 L20,20</StreamGeometry>
+      <StreamGeometry x:Key="Ariadne.Icon.Search">M10.5,5 a5.5,5.5 0 1,0 0.01,0 M14.8,14.8 L19,19</StreamGeometry>
     </ResourceDictionary>
   </Styles.Resources>
 
@@ -758,6 +760,13 @@
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
   </Style>
+  <!-- 密集区紧凑按钮：模板卡脚、工具条次操作，避免默认 14×6 显得臃肿 -->
+  <Style Selector="Button.btn-compact">
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="Padding" Value="10,4" />
+    <Setter Property="FontSize" Value="12.5" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
 
   <!-- 幽灵按钮：透明，hover 才显底 -->
   <Style Selector="Button.subtle">
@@ -783,24 +792,160 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
   </Style>
 
-  <!-- 窗口控制按钮（标题栏 − □ ×） -->
+  <!-- 窗口控制：与 40px 顶栏同高并垂直居中内容，避免按钮/图标贴顶偏高 -->
   <Style Selector="Button.window-control">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
-    <Setter Property="MinHeight" Value="36" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Width" Value="46" />
+    <Setter Property="Height" Value="40" />
     <Setter Property="MinWidth" Value="46" />
+    <Setter Property="MinHeight" Value="40" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Stretch" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="none" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.window-control Path.icon">
+    <Setter Property="Width" Value="15" />
+    <Setter Property="Height" Value="15" />
+    <Setter Property="StrokeThickness" Value="2.0" />
+    <Setter Property="StrokeLineCap" Value="Round" />
+    <Setter Property="StrokeJoin" Value="Round" />
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="StrokeThickness" Duration="0:0:0.14" />
+        <BrushTransition Property="Stroke" Duration="0:0:0.14" />
+        <DoubleTransition Property="Opacity" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <!-- 最小化：实心主题色横条（比描边线更易辨认） -->
+  <Style Selector="Button.window-control Path.icon.minimize">
+    <Setter Property="Width" Value="16" />
+    <Setter Property="Height" Value="16" />
+    <Setter Property="StrokeThickness" Value="0" />
+    <Setter Property="Stroke" Value="Transparent" />
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
   <Style Selector="Button.window-control:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
-    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
+  <Style Selector="Button.window-control:pointerover">
+    <Setter Property="RenderTransform" Value="scale(1.08)" />
+  </Style>
+  <Style Selector="Button.window-control:pointerover Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentHover}" />
+    <Setter Property="StrokeThickness" Value="2.25" />
+  </Style>
+  <Style Selector="Button.window-control:pointerover Path.icon.minimize">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentHover}" />
+    <Setter Property="StrokeThickness" Value="0" />
+  </Style>
+  <Style Selector="Button.window-control:pressed">
+    <Setter Property="RenderTransform" Value="scale(0.9)" />
+  </Style>
+  <Style Selector="Button.window-control:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentBorder}" />
+  </Style>
+  <Style Selector="Button.window-control:pressed Path.icon">
+    <Setter Property="Opacity" Value="0.92" />
   </Style>
   <Style Selector="Button.window-control.close:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.StatusError}" />
-    <Setter Property="Foreground" Value="White" />
+  </Style>
+  <Style Selector="Button.window-control.close:pointerover">
+    <Setter Property="RenderTransform" Value="scale(1.08)" />
+  </Style>
+  <Style Selector="Button.window-control.close:pointerover Path.icon">
+    <Setter Property="Stroke" Value="White" />
+    <Setter Property="StrokeThickness" Value="2.2" />
+  </Style>
+  <Style Selector="Button.window-control.close:pressed">
+    <Setter Property="RenderTransform" Value="scale(0.9)" />
+  </Style>
+  <Style Selector="Button.window-control.close:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="#C62828" />
+  </Style>
+
+  <!-- 模板市场等：一体搜索壳（左侧图标 + 输入 + 右侧提交） -->
+  <Style Selector="Border.search-shell">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="Padding" Value="4,3,3,3" />
+  </Style>
+  <Style Selector="Border.search-shell:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderStrong}" />
+  </Style>
+  <Style Selector="TextBox.search-input">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="MinHeight" Value="36" />
+    <Setter Property="Padding" Value="4,8,8,8" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBox.search-input:focus /template/ Border#PART_BorderElement">
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.search-submit">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextOnAccent}" />
+    <Setter Property="Width" Value="40" />
+    <Setter Property="Height" Value="36" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.search-submit Path.icon">
+    <Setter Property="Width" Value="16" />
+    <Setter Property="Height" Value="16" />
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.TextOnAccent}" />
+    <Setter Property="StrokeThickness" Value="1.8" />
+  </Style>
+  <Style Selector="Button.search-submit:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentHover}" />
+  </Style>
+  <Style Selector="Button.search-submit:pressed /template/ ContentPresenter">
+    <Setter Property="Opacity" Value="0.92" />
+  </Style>
+  <!-- 模板/筛选：轻量标签芯片按钮 -->
+  <Style Selector="Button.chip-filter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Pill}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="MinHeight" Value="30" />
+    <Setter Property="Padding" Value="12,6" />
+  </Style>
+  <Style Selector="Button.chip-filter:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <Style Selector="Button.chip-filter.selected /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
   <!-- 导航项：左栏满宽横条悬停（左右贴齐、无圆角卡片），渐变沿条横向流动 -->
@@ -1260,9 +1405,9 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="12" />
-    <Setter Property="Padding" Value="6,6" />
-    <Setter Property="MinWidth" Value="208" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Padding" Value="4,4" />
+    <Setter Property="MinWidth" Value="148" />
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="FontSize" Value="13" />
   </Style>
@@ -1270,23 +1415,23 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="CornerRadius" Value="10" />
     <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
     <Setter Property="ClipToBounds" Value="True" />
   </Style>
   <Style Selector="ContextMenu.ariadne">
     <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
-    <Setter Property="CornerRadius" Value="12" />
-    <Setter Property="Padding" Value="6,6" />
-    <Setter Property="MinWidth" Value="208" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Padding" Value="4,4" />
+    <Setter Property="MinWidth" Value="148" />
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
   </Style>
   <Style Selector="ContextMenu.ariadne /template/ Border#PART_LayoutRoot">
     <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
     <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
-    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="CornerRadius" Value="10" />
     <Setter Property="ClipToBounds" Value="True" />
   </Style>
 
@@ -1295,9 +1440,9 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="12" />
-    <Setter Property="Padding" Value="6,6" />
-    <Setter Property="MinWidth" Value="220" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Padding" Value="4,4" />
+    <Setter Property="MinWidth" Value="156" />
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="FontSize" Value="13" />
   </Style>
@@ -1305,7 +1450,7 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.MenuBackground}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.GlassBorder}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="CornerRadius" Value="10" />
     <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
     <Setter Property="ClipToBounds" Value="True" />
   </Style>
@@ -1325,15 +1470,17 @@
     <Setter Property="ClipToBounds" Value="True" />
   </Style>
 
-  <!-- 菜单项：Win11 圆角块 hover，统一字号 -->
+  <!-- 菜单项：紧凑圆角 hover，统一字号（宽度跟内容，不撑大菜单） -->
   <Style Selector="ContextMenu MenuItem, MenuFlyoutPresenter MenuItem">
-    <Setter Property="Padding" Value="12,8" />
-    <Setter Property="MinHeight" Value="34" />
-    <Setter Property="Margin" Value="2,1" />
+    <Setter Property="Padding" Value="10,6" />
+    <Setter Property="MinHeight" Value="30" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="Margin" Value="1,0" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="FontSize" Value="13" />
-    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="CornerRadius" Value="5" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
   </Style>
   <Style Selector="ContextMenu MenuItem /template/ Border#PART_LayoutRoot,
                    MenuFlyoutPresenter MenuItem /template/ Border#PART_LayoutRoot">
@@ -1356,7 +1503,7 @@
   <Style Selector="ContextMenu Separator, MenuFlyoutPresenter Separator">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="Height" Value="1" />
-    <Setter Property="Margin" Value="10,4" />
+    <Setter Property="Margin" Value="8,3" />
     <Setter Property="Opacity" Value="0.85" />
   </Style>
   <Style Selector="ContextMenu MenuItem.danger, MenuFlyoutPresenter MenuItem.danger">

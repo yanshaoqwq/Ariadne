@@ -18,8 +18,9 @@ use crate::providers::{
 };
 use crate::rag::line_patch::line_range_to_text_range;
 use crate::rag::models::{
-    ForeshadowingStatus, ForeshadowingUpdate, RealizedChangeLink, RegisteredChangeStatus,
-    StoryEvent, StoryEventStatus, StorySegment, SummaryGenerationContext, SummaryPipelineDraft,
+    ConfirmationAuditDecision, ConfirmationKind, ForeshadowingStatus, ForeshadowingUpdate,
+    RealizedChangeLink, RegisteredChangeStatus, StoryEvent, StoryEventStatus, StorySegment,
+    SummaryGenerationContext, SummaryPipelineDraft,
 };
 use crate::rag::resources::PromptResources;
 use crate::rag::store::{SqliteWritingKnowledgeStore, SummarizerStagePreparation};
@@ -189,6 +190,51 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
                 "source_version": content_version_for_bytes(chapter_text.as_bytes()),
                 "existing_event_count": context.existing_events.len(),
             }),
+        })
+    }
+
+    /// 使用当前节点的 provider/model 执行单项自动审批，并返回结构化决定。
+    pub fn audit_confirmation(
+        &self,
+        kind: ConfirmationKind,
+        approval_prompt: &str,
+        chapter_text: &str,
+        draft: &SummaryPipelineDraft,
+    ) -> CoreResult<ConfirmationAuditDecision> {
+        if approval_prompt.trim().is_empty() {
+            return Err(CoreError::validation(format!(
+                "Auto Mode approval prompt cannot be empty for {kind:?}"
+            )));
+        }
+        let stage_store = self
+            .config
+            .workflow_operation
+            .as_ref()
+            .map(|operation| SqliteWritingKnowledgeStore::open(&operation.project_root))
+            .transpose()?;
+        let candidate = audit_candidate(kind, chapter_text, draft)?;
+        let instruction = format!(
+            "{}\n\n待审确认类型：{}\n\n候选内容：\n{}\n\n只输出 JSON：\
+             {{\"approved\":true,\"reason\":\"明确说明通过或拒绝的依据\"}}。\
+             approved 必须是布尔值；存在冲突、信息不足或不安全副作用时必须返回 false。",
+            approval_prompt.trim(),
+            confirmation_kind_name(kind),
+            candidate,
+        );
+        let response = self.call_llm(
+            stage_store.as_ref(),
+            &format!("auto_audit_{}", confirmation_kind_name(kind)),
+            &instruction,
+        )?;
+        let parsed: ConfirmationAuditDto = parse_json(&llm_text(&response))?;
+        if parsed.reason.trim().is_empty() {
+            return Err(CoreError::validation(format!(
+                "Auto Mode audit returned an empty reason for {kind:?}"
+            )));
+        }
+        Ok(ConfirmationAuditDecision {
+            approved: parsed.approved,
+            reason: parsed.reason.trim().to_owned(),
         })
     }
 
@@ -847,7 +893,68 @@ struct StageSummaryDto {
     is_new_stage: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConfirmationAuditDto {
+    approved: bool,
+    reason: String,
+}
+
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────
+
+fn confirmation_kind_name(kind: ConfirmationKind) -> &'static str {
+    match kind {
+        ConfirmationKind::SegmentSummary => "segment_summary",
+        ConfirmationKind::EventSummary => "event_summary",
+        ConfirmationKind::ChapterSummary => "chapter_summary",
+        ConfirmationKind::StageSummary => "stage_summary",
+        ConfirmationKind::OutlinerOutput => "outliner_output",
+        ConfirmationKind::DesignerOutput => "designer_output",
+        ConfirmationKind::PlannerOutput => "planner_output",
+        ConfirmationKind::PlannerRegister => "planner_register",
+        ConfirmationKind::CriticReview => "critic_review",
+        ConfirmationKind::PrudentReview => "prudent_review",
+        ConfirmationKind::WriterCorrectionPatch => "writer_correction_patch",
+        ConfirmationKind::PolisherCorrectionPatch => "polisher_correction_patch",
+    }
+}
+
+fn audit_candidate(
+    kind: ConfirmationKind,
+    chapter_text: &str,
+    draft: &SummaryPipelineDraft,
+) -> CoreResult<String> {
+    let value = match kind {
+        ConfirmationKind::SegmentSummary => json!({
+            "chapter_text": chapter_text,
+            "segments": draft.segments,
+            "realized_changes": draft.realized_changes,
+            "foreshadowing_updates": draft.foreshadowing_updates,
+        }),
+        ConfirmationKind::EventSummary => json!({
+            "segments": draft.segments,
+            "events": draft.events,
+        }),
+        ConfirmationKind::ChapterSummary => json!({
+            "chapter_text": chapter_text,
+            "events": draft.events,
+            "chapter_summary": draft.chapter_summary,
+            "realized_changes": draft.realized_changes,
+            "foreshadowing_updates": draft.foreshadowing_updates,
+        }),
+        ConfirmationKind::StageSummary => json!({
+            "chapter_summary": draft.chapter_summary,
+            "stage_id": draft.stage_id,
+            "stage_summary": draft.stage_summary,
+            "is_new_stage": draft.is_new_stage,
+        }),
+        _ => {
+            return Err(CoreError::validation(format!(
+                "unsupported summarizer Auto Mode confirmation kind {kind:?}"
+            )))
+        }
+    };
+    serde_json::to_string_pretty(&value).map_err(Into::into)
+}
 
 fn render_event_change_digest(
     existing_events: &[StoryEvent],

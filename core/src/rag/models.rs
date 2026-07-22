@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::contracts::{CoreError, DocumentPatch, SourceSpan};
+use crate::node_capabilities::{
+    CRITIC_SEARCH_TOOL, CRITIC_WEB_SEARCH_TOOL, DESIGNER_SEARCH_TOOL, DESIGNER_WEB_SEARCH_TOOL,
+    DETAIL_SEARCH_TOOL, DETAIL_WEB_SEARCH_TOOL, OUTLINER_SEARCH_TOOL, OUTLINER_WEB_SEARCH_TOOL,
+    PLANNER_SEARCH_TOOL, PLANNER_WEB_SEARCH_TOOL, POLISHER_SEARCH_TOOL, POLISHER_WEB_SEARCH_TOOL,
+    PRUDENT_SEARCH_TOOL, PRUDENT_WEB_SEARCH_TOOL, SUMMARIZER_SEARCH_TOOL,
+    SUMMARIZER_WEB_SEARCH_TOOL, WRITER_SEARCH_TOOL, WRITER_WEB_SEARCH_TOOL,
+};
 
 /// 写作节点中的 agent 类型；一个节点就是一个 agent。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -322,8 +329,8 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
         WritingAgentKind::Outliner => &[
             "outliner-register",
             "outliner-find",
-            "outliner-search",
-            "outliner-web-search",
+            OUTLINER_SEARCH_TOOL,
+            OUTLINER_WEB_SEARCH_TOOL,
             "outliner-insert-lines",
             "outliner-replace-lines",
             "outliner-rewrite-file",
@@ -331,8 +338,8 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
         WritingAgentKind::Designer => &[
             "designer-register",
             "designer-find",
-            "designer-search",
-            "designer-web-search",
+            DESIGNER_SEARCH_TOOL,
+            DESIGNER_WEB_SEARCH_TOOL,
             "designer-insert-lines",
             "designer-replace-lines",
             "designer-rewrite-file",
@@ -340,30 +347,32 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
         WritingAgentKind::Planner => &[
             "planner-register",
             "planner-find",
-            "planner-search",
-            "planner-web-search",
+            PLANNER_SEARCH_TOOL,
+            PLANNER_WEB_SEARCH_TOOL,
             "planner-insert-lines",
             "planner-replace-lines",
             "planner-rewrite-file",
         ],
-        WritingAgentKind::Detail => &["detail-find", "detail-search", "detail-web-search"],
+        WritingAgentKind::Detail => &["detail-find", DETAIL_SEARCH_TOOL, DETAIL_WEB_SEARCH_TOOL],
         WritingAgentKind::Writer => &[
             "writer-find",
-            "writer-search",
-            "writer-web-search",
+            WRITER_SEARCH_TOOL,
+            WRITER_WEB_SEARCH_TOOL,
             "writer-insert-lines",
             "writer-replace-lines",
         ],
-        WritingAgentKind::Critic => &["critic-find", "critic-search", "critic-web-search"],
-        WritingAgentKind::Prudent => &["prudent-find", "prudent-search", "prudent-web-search"],
+        WritingAgentKind::Critic => &["critic-find", CRITIC_SEARCH_TOOL, CRITIC_WEB_SEARCH_TOOL],
+        WritingAgentKind::Prudent => {
+            &["prudent-find", PRUDENT_SEARCH_TOOL, PRUDENT_WEB_SEARCH_TOOL]
+        }
         WritingAgentKind::Polisher => &[
             "polisher-find",
-            "polisher-search",
-            "polisher-web-search",
+            POLISHER_SEARCH_TOOL,
+            POLISHER_WEB_SEARCH_TOOL,
             "polisher-insert-lines",
             "polisher-replace-lines",
         ],
-        WritingAgentKind::Summarizer => &["summarizer-search", "summarizer-web-search"],
+        WritingAgentKind::Summarizer => &[SUMMARIZER_SEARCH_TOOL, SUMMARIZER_WEB_SEARCH_TOOL],
     }
 }
 
@@ -882,6 +891,13 @@ pub struct ConfirmationItem {
     pub prompt_key: String,
     #[serde(default)]
     pub metadata: Value,
+}
+
+/// Auto Mode 对单个确认项给出的真实模型审计决定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmationAuditDecision {
+    pub approved: bool,
+    pub reason: String,
 }
 
 impl ConfirmationItem {

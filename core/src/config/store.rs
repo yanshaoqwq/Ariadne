@@ -14,6 +14,7 @@ use crate::config::models::{
     GIT_CONFIG_FILE, PERMISSIONS_CONFIG_FILE, PROVIDERS_CONFIG_FILE, RAG_CONFIG_FILE,
     WORKFLOW_CONFIG_FILE,
 };
+use crate::config::{AppPermissionsStore, ProviderCatalogStore};
 use crate::contracts::{CoreError, CoreResult};
 
 /// 项目配置文件存储，负责分文件读写和迁移。
@@ -60,7 +61,7 @@ impl ConfigStore {
         self.recover_pending_commit()?;
         self.create_missing_defaults()?;
         self.migrate_all()?;
-        self.load_internal(true)
+        self.load_internal(true, true, true)
     }
 
     /// 只供“用户重新输入 Provider 密钥”流程读取旧配置。
@@ -70,7 +71,7 @@ impl ConfigStore {
         self.recover_pending_commit()?;
         self.create_missing_defaults()?;
         self.migrate_all()?;
-        let mut config = self.load_internal(false)?;
+        let mut config = self.load_internal(false, true, false)?;
         clear_project_owned_secret_refs(&mut config);
         Ok(config)
     }
@@ -78,7 +79,7 @@ impl ConfigStore {
     /// 加载所有配置文件并执行整体验证。
     pub fn load(&self) -> CoreResult<ProjectConfig> {
         self.recover_pending_commit()?;
-        self.load_internal(true)
+        self.load_internal(true, true, true)
     }
 
     /// 严格只读加载既有配置，不创建默认值、不迁移，也不恢复待提交事务。
@@ -86,7 +87,7 @@ impl ConfigStore {
     /// 仅供 maintenance 期间仍需可读的状态查询使用；普通业务读取仍应走
     /// `load`/`load_or_create`，并在调用侧持有项目 mutation fence。
     pub fn load_read_only(&self) -> CoreResult<ProjectConfig> {
-        self.load_internal(true)
+        self.load_internal(true, false, true)
     }
 
     /// 只读加载项目显示所需的 app 配置。
@@ -103,8 +104,13 @@ impl ConfigStore {
         Ok(Some(yaml_serde::from_str(&raw)?))
     }
 
-    fn load_internal(&self, reject_project_secret_refs: bool) -> CoreResult<ProjectConfig> {
-        let config = ProjectConfig {
+    fn load_internal(
+        &self,
+        reject_project_secret_refs: bool,
+        migrate_app_permissions: bool,
+        validate_config: bool,
+    ) -> CoreResult<ProjectConfig> {
+        let mut config = ProjectConfig {
             app: self.read_config(APP_CONFIG_FILE)?,
             providers: self.read_config(PROVIDERS_CONFIG_FILE)?,
             permissions: self.read_config(PERMISSIONS_CONFIG_FILE)?,
@@ -114,10 +120,27 @@ impl ConfigStore {
             auto_mode: self.read_config(AUTO_MODE_CONFIG_FILE)?,
         };
 
+        ProviderCatalogStore::default_for_app(&self.app_state_root)
+            .read()?
+            .merge_authorized(&mut config.providers)?;
+        config.permissions = if migrate_app_permissions {
+            AppPermissionsStore::read_global_or_migrate(
+                &self.app_state_root,
+                Some(&self.project_root),
+            )?
+        } else {
+            AppPermissionsStore::read_global_or_legacy(
+                &self.app_state_root,
+                Some(&self.project_root),
+            )?
+        };
+
         if reject_project_secret_refs {
             reject_project_owned_secret_refs(&config)?;
         }
-        config.validate()?;
+        if validate_config {
+            config.validate()?;
+        }
         Ok(config)
     }
 
@@ -129,6 +152,9 @@ impl ConfigStore {
         reject_project_owned_secret_refs(config)?;
         config.validate()?;
         self.ensure_config_dir()?;
+        let provider_catalog =
+            ProviderCatalogStore::default_for_app(&self.app_state_root).read()?;
+        let project_providers = provider_catalog.project_projection(&config.providers);
         let pairs: [(&str, String); 7] = [
             (
                 APP_CONFIG_FILE,
@@ -136,11 +162,11 @@ impl ConfigStore {
             ),
             (
                 PROVIDERS_CONFIG_FILE,
-                yaml_serde::to_string(&yaml_serde::to_value(&config.providers)?)?,
+                yaml_serde::to_string(&yaml_serde::to_value(&project_providers)?)?,
             ),
             (
                 PERMISSIONS_CONFIG_FILE,
-                yaml_serde::to_string(&yaml_serde::to_value(&config.permissions)?)?,
+                yaml_serde::to_string(&yaml_serde::to_value(PermissionsConfig::default())?)?,
             ),
             (
                 RAG_CONFIG_FILE,
@@ -289,6 +315,26 @@ fn clear_project_owned_secret_refs(config: &mut ProjectConfig) {
     for provider in &mut config.providers.providers {
         provider.api_key = None;
     }
+}
+
+/// 为单个应用状态域取得跨进程 advisory lock。
+pub(crate) fn acquire_app_state_lock(
+    app_state_root: &Path,
+    lock_file_name: &str,
+    service: &str,
+) -> CoreResult<File> {
+    fs::create_dir_all(app_state_root)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(app_state_root.join(lock_file_name))?;
+    file.lock_exclusive().map_err(|error| CoreError::External {
+        service: service.to_owned(),
+        message: error.to_string(),
+    })?;
+    Ok(file)
 }
 
 /// Write via temp file + rename (best-effort atomic replace on POSIX).

@@ -123,21 +123,29 @@
                      ToolTip.Tip="{Binding BudgetStatusText}" />
         </StackPanel>
 
-        <!-- 窗口控制（U69 AutomationProperties） -->
-        <StackPanel Grid.Column="3" Orientation="Horizontal">
+        <!-- 窗口控制：与 40px 顶栏垂直居中；最小化横条略偏下以对齐 max/close 视觉中心 -->
+        <StackPanel
+            Grid.Column="3"
+            Orientation="Horizontal"
+            Spacing="2"
+            Margin="0,0,4,0"
+            VerticalAlignment="Center"
+            HorizontalAlignment="Right">
           <Button
               Classes="window-control"
               ToolTip.Tip="{Binding MinimizeWindowText}"
               AutomationProperties.Name="{Binding MinimizeWindowText}"
               Click="OnMinimizeClicked">
-            <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Minimize}" />
+            <Path Classes="icon minimize" Data="{StaticResource Ariadne.Icon.Minimize}" />
           </Button>
           <Button
               Classes="window-control"
               ToolTip.Tip="{Binding MaximizeWindowText}"
               AutomationProperties.Name="{Binding MaximizeWindowText}"
               Click="OnMaximizeClicked">
-            <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Maximize}" />
+            <Path x:Name="MaximizeRestoreIcon"
+                  Classes="icon"
+                  Data="{StaticResource Ariadne.Icon.Maximize}" />
           </Button>
           <Button
               Classes="window-control close"
@@ -208,7 +216,7 @@
                 DockPanel.Dock="Top"
                 Classes="subtle"
                 Margin="8,2,8,6"
-                HorizontalAlignment="Center"
+                HorizontalAlignment="Left"
                 Width="36"
                 Height="32"
                 Command="{Binding ToggleSidebarCommand}"

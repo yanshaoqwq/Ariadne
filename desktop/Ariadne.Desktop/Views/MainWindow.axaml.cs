@@ -2,7 +2,9 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -10,20 +12,49 @@ namespace Ariadne.Desktop.Views;
 public partial class MainWindow : Window
 {
     private bool _closeConfirmed;
+    private bool _closeCheckRunning;
+    private bool? _wasCompact;
 
     public MainWindow()
     {
         InitializeComponent();
+        DataContextChanged += (_, _) => AttachProjectFolderPicker();
+        AttachProjectFolderPicker();
         Opened += (_, _) =>
         {
+            AttachProjectFolderPicker();
             RefreshWindowIcon();
             ApplyWindowChromeForState();
+            ApplyResponsiveBreakpoint();
             AppIconDesktopSync.QueueSync();
         };
         PropertyChanged += OnWindowPropertyChanged;
-        LayoutUpdated += (_, _) => ApplyResponsiveBreakpoint();
         AppIconPainter.IconColorsChanged += OnIconColorsChanged;
         Closed += (_, _) => AppIconPainter.IconColorsChanged -= OnIconColorsChanged;
+    }
+
+    private void AttachProjectFolderPicker()
+    {
+        if (DataContext is MainWindowViewModel viewModel)
+        {
+            // 原生目录选择器属于仍附着于桌面的顶层窗口，不能挂在可能被导航切走的 WelcomeView 上。
+            viewModel.Welcome.SetProjectFolderPicker(PickProjectFolderAsync);
+        }
+    }
+
+    private async Task<string?> PickProjectFolderAsync(string? title)
+    {
+        if (!StorageProvider.CanPickFolder)
+        {
+            throw new BackendException("external", "the active desktop storage provider cannot pick folders");
+        }
+
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = string.IsNullOrWhiteSpace(title) ? null : title,
+            AllowMultiple = false,
+        });
+        return folders.FirstOrDefault()?.Path.LocalPath;
     }
 
     private void OnWindowPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
@@ -57,15 +88,19 @@ public partial class MainWindow : Window
 
         if (DataContext is MainWindowViewModel vm)
         {
-            // Auto-collapse only when entering compact; user may re-expand via toggle.
-            if (compact && vm.SidebarExpanded)
+            // 只在进入窄屏时自动收起；窄屏内用户重新展开后，布局刷新不能再次抢回控制权。
+            if (ShouldAutoCollapseSidebar(_wasCompact, compact) && vm.SidebarExpanded)
             {
                 vm.SidebarExpanded = false;
             }
         }
+        _wasCompact = compact;
     }
 
-    /// <summary>最大化时去掉圆角与边框，普通态恢复悬浮圆角窗（U61）。</summary>
+    internal static bool ShouldAutoCollapseSidebar(bool? wasCompact, bool isCompact)
+        => isCompact && wasCompact != true;
+
+    /// <summary>最大化时去掉圆角与边框，普通态恢复悬浮圆角窗（U61）；同步最大化/还原图标。</summary>
     private void ApplyWindowChromeForState()
     {
         if (WindowChrome is null)
@@ -73,7 +108,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (WindowState == WindowState.Maximized)
+        var maximized = WindowState == WindowState.Maximized;
+        if (maximized)
         {
             WindowChrome.CornerRadius = new CornerRadius(0);
             WindowChrome.BorderThickness = new Thickness(0);
@@ -82,6 +118,15 @@ public partial class MainWindow : Window
         {
             WindowChrome.CornerRadius = new CornerRadius(10);
             WindowChrome.BorderThickness = new Thickness(1);
+        }
+
+        if (MaximizeRestoreIcon is not null
+            && this.TryFindResource(
+                maximized ? "Ariadne.Icon.Restore" : "Ariadne.Icon.Maximize",
+                out var geometry)
+            && geometry is Avalonia.Media.Geometry pathData)
+        {
+            MaximizeRestoreIcon.Data = pathData;
         }
     }
 
@@ -127,13 +172,26 @@ public partial class MainWindow : Window
 
     private async Task CloseWithUnsavedCheckAsync()
     {
-        if (DataContext is MainWindowViewModel { CurrentPage: IUnsavedChangesGuard guard }
-            && !await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+        if (_closeCheckRunning)
         {
             return;
         }
-        _closeConfirmed = true;
-        Close();
+
+        _closeCheckRunning = true;
+        try
+        {
+            if (DataContext is MainWindowViewModel { CurrentPage: IUnsavedChangesGuard guard }
+                && !await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+            {
+                return;
+            }
+            _closeConfirmed = true;
+            Close();
+        }
+        finally
+        {
+            _closeCheckRunning = false;
+        }
     }
 
     protected override void OnClosing(WindowClosingEventArgs e)

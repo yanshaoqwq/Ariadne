@@ -117,7 +117,7 @@ public sealed class ColorAndProviderHelpersTests
     }
 
     [Fact]
-    public void LooksLikeInitializedProject_RequiresConfigDir()
+    public void LooksLikeInitializedProject_RequiresProjectIdentityConfig()
     {
         var temp = Path.Combine(Path.GetTempPath(), "ariadne-ux-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
@@ -125,6 +125,8 @@ public sealed class ColorAndProviderHelpersTests
         {
             Assert.False(ProjectPathHelper.LooksLikeInitializedProject(temp));
             Directory.CreateDirectory(Path.Combine(temp, ".config"));
+            Assert.False(ProjectPathHelper.LooksLikeInitializedProject(temp));
+            File.WriteAllText(Path.Combine(temp, ".config", "app.yaml"), "project_name: Test");
             Assert.True(ProjectPathHelper.LooksLikeInitializedProject(temp));
             Assert.False(ProjectPathHelper.LooksLikeInitializedProject(null));
             Assert.False(ProjectPathHelper.LooksLikeInitializedProject("/no/such/path/zzz"));
@@ -242,6 +244,7 @@ public sealed class ColorAndProviderHelpersTests
         {
             ["name"] = "writer-1",
             ["prompt_template"] = "write {{input}}",
+            ["provider_id"] = "provider-a",
             ["model_id"] = "gpt",
             ["tool_enabled"] = new Dictionary<string, object?> { ["search"] = true, ["web"] = false },
             ["input_aliases"] = new Dictionary<string, object?> { ["input"] = "body" },
@@ -253,6 +256,7 @@ public sealed class ColorAndProviderHelpersTests
         var extra = NodeConfigData.CaptureExtra(loaded);
         Assert.False(extra.ContainsKey("name"));
         Assert.False(extra.ContainsKey("prompt_template"));
+        Assert.False(extra.ContainsKey("provider_id"));
         Assert.False(extra.ContainsKey("model_id"));
         Assert.True(extra.ContainsKey("tool_enabled"));
         Assert.True(extra.ContainsKey("input_aliases"));
@@ -289,13 +293,15 @@ public sealed class ColorAndProviderHelpersTests
             modelId: "claude",
             budgetUsd: "2.5",
             timeoutMs: "30000",
-            breakpointEnabled: true);
+            breakpointEnabled: true,
+            providerId: "anthropic-main");
 
         Assert.Equal("renamed-node", saved["name"]);
         Assert.Equal("novels/新篇", saved["work_dir"]);
         Assert.Equal("备注给 AI", saved["user_note"]);
         Assert.Equal("new prompt", saved["prompt_template"]);
         Assert.Equal("claude", saved["model_id"]);
+        Assert.Equal("anthropic-main", saved["provider_id"]);
         // F13：必须写出 JSON number，才能被 core WorkflowLlmNodeConfig (f64/u64) 反序列化。
         Assert.Equal(2.5, Convert.ToDouble(saved["budget_usd"]));
         Assert.Equal(30000L, Convert.ToInt64(saved["timeout_ms"]));
@@ -400,6 +406,31 @@ public sealed class ColorAndProviderHelpersTests
         finally
         {
             try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
+        }
+    }
+
+    [Fact]
+    public void TryMakeRelativeToProjectRoot_RejectsSymlinkEscape()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = Directory.CreateTempSubdirectory("ariadne-rel-root-");
+        var outside = Directory.CreateTempSubdirectory("ariadne-rel-outside-");
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(root.FullName, "linked"), outside.FullName);
+            Assert.False(ProjectPathHelper.TryMakeRelativeToProjectRoot(
+                Path.Combine(root.FullName, "linked"),
+                root.FullName,
+                out _));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+            outside.Delete(recursive: true);
         }
     }
 

@@ -9,6 +9,8 @@ internal enum SettingsInputFailure
     Positive,
     NonNegative,
     ModelLine,
+    PathLine,
+    Required,
 }
 
 internal sealed class SettingsInputException : Exception
@@ -27,6 +29,14 @@ internal sealed class SettingsInputException : Exception
 
 internal static class SettingsInputValidation
 {
+    private static readonly HashSet<string> ModelCapabilities = new(StringComparer.Ordinal)
+    {
+        "llm", "embedding", "reranker", "search",
+    };
+
+    internal static StringComparer PathComparer { get; } =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
     public static int PositiveInt(string? text, string fieldKey)
     {
         var value = RequiredLong(text, fieldKey);
@@ -75,6 +85,7 @@ internal static class SettingsInputValidation
         }
 
         var result = new List<ModelConfig>();
+        var modelIds = new HashSet<string>(StringComparer.Ordinal);
         var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
         for (var index = 0; index < lines.Length; index++)
         {
@@ -87,7 +98,9 @@ internal static class SettingsInputValidation
             var parts = raw.Split(',', StringSplitOptions.TrimEntries);
             if (parts.Length is < 2 or > 5
                 || string.IsNullOrWhiteSpace(parts[0])
-                || string.IsNullOrWhiteSpace(parts[1]))
+                || string.IsNullOrWhiteSpace(parts[1])
+                || !ModelCapabilities.Contains(parts[1])
+                || !modelIds.Add(parts[0]))
             {
                 throw new SettingsInputException(SettingsInputFailure.ModelLine, fieldKey, index + 1);
             }
@@ -109,6 +122,68 @@ internal static class SettingsInputValidation
             }
 
             result.Add(new ModelConfig(parts[0], parts[1], context, input, output));
+        }
+        return result;
+    }
+
+    public static IReadOnlyList<string> AbsolutePaths(string? text, string fieldKey)
+    {
+        return Paths(text, fieldKey, requireAbsolute: true);
+    }
+
+    public static IReadOnlyList<string> RelativePaths(string? text, string fieldKey)
+    {
+        return Paths(text, fieldKey, requireAbsolute: false);
+    }
+
+    private static IReadOnlyList<string> Paths(string? text, string fieldKey, bool requireAbsolute)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return Array.Empty<string>();
+        }
+
+        var result = new List<string>();
+        var unique = new HashSet<string>(PathComparer);
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        for (var index = 0; index < lines.Length; index++)
+        {
+            var raw = lines[index].Trim();
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            string normalized;
+            if (requireAbsolute)
+            {
+                if (!Path.IsPathFullyQualified(raw)
+                    || raw.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                        .Any(component => component == ".."))
+                {
+                    throw new SettingsInputException(SettingsInputFailure.PathLine, fieldKey, index + 1);
+                }
+                normalized = Path.GetFullPath(raw);
+            }
+            else
+            {
+                normalized = raw.Replace('\\', '/').TrimEnd('/');
+                if (Path.IsPathFullyQualified(normalized)
+                    || normalized.StartsWith("/", StringComparison.Ordinal)
+                    || normalized.Length == 0
+                    || normalized.Contains(':')
+                    || normalized.Split('/').Any(component =>
+                        string.IsNullOrEmpty(component) || component is "." or ".."))
+                {
+                    throw new SettingsInputException(SettingsInputFailure.PathLine, fieldKey, index + 1);
+                }
+            }
+
+            if (!unique.Add(normalized))
+            {
+                throw new SettingsInputException(SettingsInputFailure.PathLine, fieldKey, index + 1);
+            }
+            result.Add(normalized);
         }
         return result;
     }

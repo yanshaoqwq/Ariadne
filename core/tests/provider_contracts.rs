@@ -222,6 +222,38 @@ fn provider_executor_does_not_call_backend_when_dispatch_authorization_is_denied
 }
 
 #[test]
+fn provider_executor_rejects_declared_provider_identity_mismatch_before_dispatch() {
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let executor = ProviderExecutor::new(&ledger);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = CountingLlmProvider {
+        calls: calls.clone(),
+    };
+    let context = ProviderCallContext::new("different-provider");
+
+    let error = executor
+        .complete_llm(
+            &provider,
+            &context,
+            LlmRequest {
+                model_id: "model".to_owned(),
+                messages: vec![LlmMessage::user("must not dispatch")],
+                tools: Vec::new(),
+                temperature: None,
+                max_output_tokens: None,
+                stream: false,
+                metadata: Value::Null,
+            },
+        )
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("provider dispatch identity mismatch"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn openai_compatible_http_provider_posts_chat_completions() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());

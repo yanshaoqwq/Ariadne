@@ -37,6 +37,7 @@
     <None Include="..\..\core\resources\display_name.json" Link="Resources\display_name.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\core\resources\display_name.*.json" Link="Resources\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\core\resources\prompt_list.json" Link="Resources\prompt_list.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\core\resources\workflow_node_catalog.json" Link="Resources\workflow_node_catalog.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
     <None Include="..\..\NOTICE" Link="NOTICE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
     <None Include="..\..\COMMERCIAL_LICENSE.md" Link="COMMERCIAL_LICENSE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />

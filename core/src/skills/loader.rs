@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::contracts::{CoreError, CoreResult, SkillRegistry};
 use crate::skills::models::{
     PromptTemplateManifest, PromptTemplateReference, PromptTemplateUpdateKind,
@@ -10,7 +12,7 @@ use crate::skills::models::{
 };
 
 /// Skill 来源位置。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillSourceKind {
     Global,
     Project,
@@ -24,7 +26,7 @@ pub enum TemplateSourceKind {
 }
 
 /// 带来源路径的 Skill manifest。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoadedSkillManifest {
     pub manifest: SkillManifest,
     pub source: SkillSourceKind,
@@ -92,6 +94,36 @@ impl SkillLoader {
         Ok(manifests.into_values().collect())
     }
 
+    /// 只加载当前执行闭包要求的 Skill manifest。
+    ///
+    /// 未引用 Skill 的损坏配置不得阻断其它工作流；被引用 Skill 缺失、损坏或项目
+    /// 覆盖身份不一致时仍 fail-loud。
+    pub fn load_required_manifests(
+        &self,
+        required_skill_ids: &std::collections::BTreeSet<String>,
+    ) -> CoreResult<Vec<LoadedSkillManifest>> {
+        if required_skill_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut manifests = BTreeMap::new();
+        for root in &self.global_roots {
+            load_required_global_root(root, required_skill_ids, &mut manifests)?;
+        }
+        load_required_project_roots(&self.project_roots, required_skill_ids, &mut manifests)?;
+        let missing = required_skill_ids
+            .iter()
+            .filter(|skill_id| !manifests.contains_key(*skill_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(CoreError::validation(format!(
+                "required skill manifest not found: {}",
+                missing.join(", ")
+            )));
+        }
+        Ok(manifests.into_values().collect())
+    }
+
     /// 加载并生成核心 SkillRegistry。
     pub fn load_registry(&self) -> CoreResult<SkillRegistry> {
         let mut registry = SkillRegistry::default();
@@ -108,26 +140,233 @@ impl SkillLoader {
             collect_skill_manifest_paths(root, &mut global_paths)?;
         }
 
-        let mut overrides = BTreeMap::new();
+        let mut project_paths = BTreeMap::new();
         for root in &self.project_roots {
-            let mut project_paths = BTreeMap::new();
             collect_skill_manifest_paths(root, &mut project_paths)?;
-            for (skill_id, project_manifest_path) in project_paths {
-                if let Some(global_manifest_path) = global_paths.get(&skill_id) {
-                    overrides.insert(
-                        skill_id.clone(),
-                        SkillManifestOverride {
-                            skill_id,
-                            global_manifest_path: global_manifest_path.clone(),
-                            project_manifest_path,
-                        },
-                    );
-                }
+        }
+
+        let mut overrides = BTreeMap::new();
+        for (skill_id, project_manifest_path) in project_paths {
+            if let Some(global_manifest_path) = global_paths.get(&skill_id) {
+                overrides.insert(
+                    skill_id.clone(),
+                    SkillManifestOverride {
+                        skill_id,
+                        global_manifest_path: global_manifest_path.clone(),
+                        project_manifest_path,
+                    },
+                );
             }
         }
 
         Ok(overrides.into_values().collect())
     }
+}
+
+/// 建立根目录下一层 manifest 的稳定路径索引；所有 Skill 发现入口共用该顺序。
+fn skill_manifest_paths(root: &Path) -> CoreResult<Vec<PathBuf>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    if !root.is_dir() {
+        return Err(CoreError::validation(format!(
+            "skill root is not a directory: {}",
+            root.display()
+        )));
+    }
+
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest_path = path.join(SKILL_MANIFEST_FILE);
+        if manifest_path.is_file() {
+            paths.push(manifest_path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn parse_skill_manifest(manifest_path: &Path) -> CoreResult<SkillManifest> {
+    let text = fs::read_to_string(manifest_path)?;
+    let manifest: SkillManifest = serde_json::from_str(&text)?;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+fn load_required_global_root(
+    root: &Path,
+    required_skill_ids: &std::collections::BTreeSet<String>,
+    manifests: &mut BTreeMap<String, LoadedSkillManifest>,
+) -> CoreResult<()> {
+    for manifest_path in skill_manifest_paths(root)? {
+        let directory_skill_id = manifest_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str());
+        let directory_is_required =
+            directory_skill_id.is_some_and(|skill_id| required_skill_ids.contains(skill_id));
+        let text = match fs::read_to_string(&manifest_path) {
+            Ok(text) => text,
+            Err(_) if !directory_is_required => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let raw = match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(raw) => raw,
+            Err(_) if !directory_is_required => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let declared_skill_id = raw
+            .get("skill_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|skill_id| !skill_id.is_empty());
+        let Some(declared_skill_id) = declared_skill_id else {
+            if directory_is_required {
+                return Err(CoreError::validation(format!(
+                    "required global skill manifest has no skill_id: {}",
+                    manifest_path.display()
+                )));
+            }
+            continue;
+        };
+        if !required_skill_ids.contains(declared_skill_id) {
+            if directory_is_required {
+                return Err(CoreError::validation(format!(
+                    "required skill directory '{}' declares different skill_id '{}': {}",
+                    directory_skill_id.unwrap_or_default(),
+                    declared_skill_id,
+                    manifest_path.display()
+                )));
+            }
+            continue;
+        }
+
+        let manifest: SkillManifest = serde_json::from_value(raw)?;
+        manifest.validate()?;
+        if manifests
+            .get(&manifest.skill_id)
+            .is_some_and(|existing| existing.source == SkillSourceKind::Global)
+        {
+            return Err(CoreError::validation(format!(
+                "duplicate {:?} skill manifest for '{}': {}",
+                SkillSourceKind::Global,
+                manifest.skill_id,
+                manifest_path.display()
+            )));
+        }
+        manifests.insert(
+            manifest.skill_id.clone(),
+            LoadedSkillManifest {
+                manifest,
+                source: SkillSourceKind::Global,
+                manifest_path,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn load_required_project_roots(
+    roots: &[PathBuf],
+    required_skill_ids: &std::collections::BTreeSet<String>,
+    manifests: &mut BTreeMap<String, LoadedSkillManifest>,
+) -> CoreResult<()> {
+    let mut project_manifests = BTreeMap::new();
+    let mut ambiguous_manifests = Vec::new();
+
+    for root in roots {
+        for manifest_path in skill_manifest_paths(root)? {
+            let directory_skill_id = manifest_path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str());
+            let directory_is_required =
+                directory_skill_id.is_some_and(|skill_id| required_skill_ids.contains(skill_id));
+            let text = match fs::read_to_string(&manifest_path) {
+                Ok(text) => text,
+                Err(error) if !directory_is_required => {
+                    ambiguous_manifests.push((manifest_path, error.to_string()));
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let raw = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(raw) => raw,
+                Err(error) if !directory_is_required => {
+                    ambiguous_manifests.push((manifest_path, format!("invalid JSON: {error}")));
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let declared_skill_id = raw
+                .get("skill_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|skill_id| !skill_id.is_empty());
+            let Some(declared_skill_id) = declared_skill_id else {
+                if directory_is_required {
+                    return Err(CoreError::validation(format!(
+                        "required project skill manifest has no skill_id: {}",
+                        manifest_path.display()
+                    )));
+                }
+                ambiguous_manifests.push((
+                    manifest_path,
+                    "manifest has no declared skill_id".to_owned(),
+                ));
+                continue;
+            };
+            if !required_skill_ids.contains(declared_skill_id) {
+                if directory_is_required {
+                    return Err(CoreError::validation(format!(
+                        "required skill directory '{}' declares different skill_id '{}': {}",
+                        directory_skill_id.unwrap_or_default(),
+                        declared_skill_id,
+                        manifest_path.display()
+                    )));
+                }
+                continue;
+            }
+
+            let manifest: SkillManifest = serde_json::from_value(raw)?;
+            manifest.validate()?;
+            if project_manifests.contains_key(&manifest.skill_id) {
+                return Err(CoreError::validation(format!(
+                    "duplicate {:?} skill manifest for '{}': {}",
+                    SkillSourceKind::Project,
+                    manifest.skill_id,
+                    manifest_path.display()
+                )));
+            }
+            project_manifests.insert(
+                manifest.skill_id.clone(),
+                LoadedSkillManifest {
+                    manifest,
+                    source: SkillSourceKind::Project,
+                    manifest_path,
+                },
+            );
+        }
+    }
+
+    let unresolved = required_skill_ids
+        .iter()
+        .filter(|skill_id| !project_manifests.contains_key(*skill_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unresolved.is_empty() && !ambiguous_manifests.is_empty() {
+        let (path, reason) = &ambiguous_manifests[0];
+        return Err(CoreError::validation(format!(
+            "ambiguous project Skill manifest may override required skill(s) {}: {} ({reason})",
+            unresolved.join(", "),
+            path.display()
+        )));
+    }
+
+    manifests.extend(project_manifests);
+    Ok(())
 }
 
 /// PromptTemplate 加载器，按 template_id + version 管理固定版本。
@@ -280,29 +519,19 @@ fn load_root(
     source: SkillSourceKind,
     manifests: &mut BTreeMap<String, LoadedSkillManifest>,
 ) -> CoreResult<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-    if !root.is_dir() {
-        return Err(CoreError::validation(format!(
-            "skill root is not a directory: {}",
-            root.display()
-        )));
-    }
-
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    for manifest_path in skill_manifest_paths(root)? {
+        let manifest = parse_skill_manifest(&manifest_path)?;
+        if manifests
+            .get(&manifest.skill_id)
+            .is_some_and(|existing| existing.source == source)
+        {
+            return Err(CoreError::validation(format!(
+                "duplicate {:?} skill manifest for '{}': {}",
+                source,
+                manifest.skill_id,
+                manifest_path.display()
+            )));
         }
-        let manifest_path = path.join(SKILL_MANIFEST_FILE);
-        if !manifest_path.exists() {
-            continue;
-        }
-        let text = fs::read_to_string(&manifest_path)?;
-        let manifest: SkillManifest = serde_json::from_str(&text)?;
-        manifest.validate()?;
         manifests.insert(
             manifest.skill_id.clone(),
             LoadedSkillManifest {
@@ -320,30 +549,16 @@ fn collect_skill_manifest_paths(
     root: &Path,
     paths: &mut BTreeMap<String, PathBuf>,
 ) -> CoreResult<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-    if !root.is_dir() {
-        return Err(CoreError::validation(format!(
-            "skill root is not a directory: {}",
-            root.display()
-        )));
-    }
-
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    for manifest_path in skill_manifest_paths(root)? {
+        let manifest = parse_skill_manifest(&manifest_path)?;
+        if let Some(existing) = paths.insert(manifest.skill_id.clone(), manifest_path.clone()) {
+            return Err(CoreError::validation(format!(
+                "duplicate skill manifest for '{}': {} and {}",
+                manifest.skill_id,
+                existing.display(),
+                manifest_path.display()
+            )));
         }
-        let manifest_path = path.join(SKILL_MANIFEST_FILE);
-        if !manifest_path.exists() {
-            continue;
-        }
-        let text = fs::read_to_string(&manifest_path)?;
-        let manifest: SkillManifest = serde_json::from_str(&text)?;
-        manifest.validate()?;
-        paths.insert(manifest.skill_id, manifest_path);
     }
     Ok(())
 }

@@ -55,6 +55,17 @@ public sealed class NodePinAndImportTests
     }
 
     [Fact]
+    public void AddDataInPinCommand_AddsExactlyOnePinPerExecution()
+    {
+        var node = NewNode("writer");
+
+        Assert.True(node.AddDataInPinCommand.TryExecute());
+
+        Assert.Equal(2, node.DataInPins.Count);
+        Assert.Equal("data-in-1", node.DataInPins[1].Handle);
+    }
+
+    [Fact]
     public void RemoveDataInPin_KeepsAtLeastOne_AndDropsHandle()
     {
         var node = NewNode("writer");

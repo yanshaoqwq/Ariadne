@@ -59,7 +59,7 @@ public static class ProjectPathHelper
     }
 
     /// <summary>
-    /// 目录是否已是 Ariadne 项目（含 .config）。用于打开前本地预检，避免冷冰冰后端报错。
+    /// 目录是否已是 Ariadne 项目（含项目身份配置）。用于打开前本地预检，避免把空 .config 误判为项目。
     /// </summary>
     public static bool LooksLikeInitializedProject(string? projectRoot)
     {
@@ -76,7 +76,7 @@ public static class ProjectPathHelper
                 return false;
             }
 
-            return Directory.Exists(Path.Combine(root, ".config"));
+            return File.Exists(Path.Combine(root, ".config", "app.yaml"));
         }
         catch
         {
@@ -134,8 +134,8 @@ public static class ProjectPathHelper
 
         try
         {
-            var full = Path.GetFullPath(absoluteOrAny.Trim());
-            var root = Path.GetFullPath(projectRoot.Trim());
+            var full = ResolveExistingPrefixes(absoluteOrAny.Trim());
+            var root = ResolveExistingPrefixes(projectRoot.Trim());
             // 统一结尾分隔，避免 /proj 与 /project 前缀误匹配
             var rootWithSep = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                              + Path.DirectorySeparatorChar;
@@ -163,6 +163,36 @@ public static class ProjectPathHelper
         {
             return false;
         }
+    }
+
+    private static string ResolveExistingPrefixes(string path)
+    {
+        var full = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(full);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return full;
+        }
+
+        var current = root;
+        var relative = full[root.Length..];
+        foreach (var component in relative.Split(
+                     new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, component);
+            FileSystemInfo? info = Directory.Exists(current)
+                ? new DirectoryInfo(current)
+                : File.Exists(current)
+                    ? new FileInfo(current)
+                    : null;
+            if (info?.LinkTarget is not null)
+            {
+                current = info.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? current;
+            }
+        }
+
+        return Path.GetFullPath(current);
     }
 
     /// <summary>

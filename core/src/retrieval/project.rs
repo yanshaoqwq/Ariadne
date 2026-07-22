@@ -5,8 +5,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::config::{
-    ConfigStore, ProjectConfig, ProjectCredentialScope, ProviderConfig, SecretStore,
-    VectorStoreBackend, VectorStoreConfig,
+    AppRuntimeSettingsStore, ConfigStore, ProjectConfig, ProjectCredentialScope, ProviderConfig,
+    SecretStore, VectorStoreBackend, VectorStoreConfig,
 };
 use crate::contracts::{
     ensure_path_under_root, CoreError, CoreResult, ExternalDispatchOutcome, ProviderCapability,
@@ -63,6 +63,20 @@ impl ProjectRetrievalRuntime {
         Self::from_config(&project_root, secrets, &config, None)
     }
 
+    /// 判断共享组合根是否由同一份项目配置构造。恢复旧工作流时若配置代次不同，
+    /// 调度器必须 fail-loud，不能另开一个隐式检索组合根。
+    pub fn matches_project_config(&self, config: &ProjectConfig) -> CoreResult<bool> {
+        let mut expected = config.clone();
+        let app_state_root = crate::config::trusted_app_state_for_project(&self.project_root);
+        let runtime_settings = AppRuntimeSettingsStore::read_global_or_migrate(
+            app_state_root,
+            Some(&self.project_root),
+        )?;
+        runtime_settings.apply_to_sidecar(&mut expected.rag.vector_store.sidecar);
+        expected.validate()?;
+        Ok(self.config == expected)
+    }
+
     /// 从候选配置构造新 generation；未变的索引/sidecar 与旧 generation 共享。
     pub fn from_config(
         project_root: &Path,
@@ -71,6 +85,11 @@ impl ProjectRetrievalRuntime {
         previous: Option<&Self>,
     ) -> CoreResult<Self> {
         let project_root = project_root.canonicalize()?;
+        let mut config = config.clone();
+        let app_state_root = crate::config::trusted_app_state_for_project(&project_root);
+        let runtime_settings =
+            AppRuntimeSettingsStore::read_global_or_migrate(app_state_root, Some(&project_root))?;
+        runtime_settings.apply_to_sidecar(&mut config.rag.vector_store.sidecar);
         config.validate()?;
 
         let tantivy_path = resolve_project_path(
@@ -217,15 +236,17 @@ impl ProjectRetrievalRuntime {
         }
 
         let vector_signature = match (&vector, &embedder) {
-            (Some(_), Some(embedder)) => Some(vector_index_signature(config, embedder.as_ref())?),
+            (Some(_), Some(embedder)) => Some(vector_index_signature(&config, embedder.as_ref())?),
             (None, None) => None,
             _ => unreachable!("partial vector configuration rejected above"),
         };
         let knowledge_index = KnowledgeIndexSynchronizer::new(&project_root)?;
+        let chunk_size_chars = config.rag.chunk_size_chars as usize;
+        let chunk_overlap_chars = config.rag.chunk_overlap_chars as usize;
 
         Ok(Self {
             project_root: project_root.clone(),
-            config: config.clone(),
+            config,
             outbox: IndexInvalidationOutbox::new(
                 project_root.join(".runtime").join("index_invalidation.db"),
             ),
@@ -239,8 +260,8 @@ impl ProjectRetrievalRuntime {
             knowledge_index,
             vector_signature,
             sidecar,
-            chunk_size_chars: config.rag.chunk_size_chars as usize,
-            chunk_overlap_chars: config.rag.chunk_overlap_chars as usize,
+            chunk_size_chars,
+            chunk_overlap_chars,
         })
     }
 

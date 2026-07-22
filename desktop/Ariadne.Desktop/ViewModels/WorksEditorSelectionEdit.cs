@@ -76,7 +76,11 @@ public static class WorksEditorSelectionEdit
     /// <summary>
     /// 构建带选区上下文的项目 AI 用户气泡文案（展示用，不替代结构化 original/suggested）。
     /// </summary>
-    public static string FormatSelectionUserBubble(string instruction, string selectedText, int maxSnippet = 120)
+    public static string FormatSelectionUserBubble(
+        string instruction,
+        string selectedText,
+        string selectionLabel,
+        int maxSnippet = 120)
     {
         var snippet = selectedText ?? string.Empty;
         if (snippet.Length > maxSnippet)
@@ -84,6 +88,6 @@ public static class WorksEditorSelectionEdit
             snippet = snippet[..(maxSnippet - 1)] + "…";
         }
 
-        return $"{instruction.Trim()}\n\n「选中」{snippet}";
+        return $"{instruction.Trim()}\n\n{selectionLabel.Trim()}: {snippet}";
     }
 }

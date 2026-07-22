@@ -7,19 +7,22 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable
+public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware
 {
     private const string ProjectAiConversationId = "works";
+    private const string RightPanelPreferenceKey = "works.right_panel";
     private const double MinRightPanelWidth = 280;
     private const double MaxRightPanelWidth = 520;
-    private const double CollapsedRightPanelWidth = 24;
     private const int TargetDocumentBlockSize = 4_000;
     private const int HardDocumentBlockSize = 6_000;
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
+    private readonly Func<string, bool, Task>? _persistPanelState;
+    private readonly ProjectAutomationState _projectAutomation;
     private readonly ContinuousDocumentBuffer _editorBuffer = new();
     private bool _isRightPanelOpen = true;
+    private bool _isProjectPanelVisible = true;
     private GridLength _rightPanelColumnWidth = new(320);
     private bool _isNavTreeTab = true;
     private bool _isImportPanelOpen;
@@ -87,10 +90,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         Error,
     }
 
-    public WorksPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
+    public WorksPageViewModel(
+        DisplayNameService displayNames,
+        IAriadneBackendClient backend,
+        Func<string, bool, Task>? persistPanelState = null,
+        ProjectAutomationState? projectAutomation = null)
     {
         _displayNames = displayNames;
         _backend = backend;
+        _persistPanelState = persistPanelState;
+        _projectAutomation = projectAutomation ?? new ProjectAutomationState(displayNames, backend);
         _editorBuffer.TextChanged += OnEditorDocumentTextChanged;
         _projectAiAnswer = displayNames.Text("ui.works.project_ai.empty");
         _documentTitle = displayNames.Text("ui.works.no_document_selected");
@@ -103,7 +112,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         SummaryChanges = new ObservableCollection<WorksSummaryDetailItemViewModel>();
         SummaryForeshadowing = new ObservableCollection<WorksSummaryDetailItemViewModel>();
         SummaryConfirmations = new ObservableCollection<WorksSummaryDetailItemViewModel>();
-        ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
+        ToggleRightPanelCommand = new RelayCommand(() => _ = ToggleRightPanelAsync(), () => IsRightPanelToggleVisible);
         ShowNavTreeCommand = new RelayCommand(() => IsNavTreeTab = true);
         ShowProjectAiCommand = new RelayCommand(() => IsNavTreeTab = false);
         OpenImportPanelCommand = new RelayCommand(OpenImportPanel);
@@ -138,8 +147,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     }
 
     public string ToggleRightPanelText => _displayNames.Text("ui.action.toggle_right_panel");
+    public ProjectAutomationState ProjectAutomation => _projectAutomation;
 
-    /// 右侧栏开合状态；收起后由悬浮左向箭头重新展开。
+    /// 右侧栏开合状态；开合入口由三页共用的边缘控制器承载。
     public bool IsRightPanelOpen
     {
         get => _isRightPanelOpen;
@@ -149,20 +159,41 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             {
                 OnPropertyChanged(nameof(RightPanelSplitterWidth));
                 OnPropertyChanged(nameof(RightPanelColumnWidth));
+                OnPropertyChanged(nameof(IsRightPanelVisible));
             }
         }
     }
 
+    public bool IsProjectPanelVisible
+    {
+        get => _isProjectPanelVisible;
+        private set
+        {
+            if (SetProperty(ref _isProjectPanelVisible, value))
+            {
+                OnPropertyChanged(nameof(IsRightPanelVisible));
+                OnPropertyChanged(nameof(IsRightPanelToggleVisible));
+                OnPropertyChanged(nameof(RightPanelSplitterWidth));
+                OnPropertyChanged(nameof(RightPanelColumnWidth));
+                ToggleRightPanelCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool IsRightPanelToggleVisible => IsProjectPanelVisible || IsImportPanelOpen;
+
+    public bool IsRightPanelVisible => IsRightPanelToggleVisible && IsRightPanelOpen;
+
     public RelayCommand ToggleRightPanelCommand { get; }
 
-    public GridLength RightPanelSplitterWidth => IsRightPanelOpen ? new GridLength(4) : new GridLength(0);
+    public GridLength RightPanelSplitterWidth => IsRightPanelVisible ? new GridLength(4) : new GridLength(0);
 
     public GridLength RightPanelColumnWidth
     {
-        get => IsRightPanelOpen ? _rightPanelColumnWidth : new GridLength(CollapsedRightPanelWidth);
+        get => IsRightPanelVisible ? _rightPanelColumnWidth : new GridLength(0);
         set
         {
-            if (!IsRightPanelOpen)
+            if (!IsRightPanelVisible)
             {
                 return;
             }
@@ -172,6 +203,36 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 _rightPanelColumnWidth = normalized;
                 OnPropertyChanged();
             }
+        }
+    }
+
+    public void ApplyUiPreferences(UiPreferences preferences)
+    {
+        IsProjectPanelVisible = preferences.ProjectPanelVisible;
+        var isOpen = preferences.PanelStates?.TryGetValue(RightPanelPreferenceKey, out var savedOpen) == true
+            ? savedOpen
+            : preferences.ProjectPanelVisible;
+        IsRightPanelOpen = IsImportPanelOpen || isOpen;
+    }
+
+    private async Task ToggleRightPanelAsync()
+    {
+        if (!IsRightPanelToggleVisible)
+        {
+            return;
+        }
+        IsRightPanelOpen = !IsRightPanelOpen;
+        if (!IsProjectPanelVisible || _persistPanelState is null)
+        {
+            return;
+        }
+        try
+        {
+            await _persistPanelState(RightPanelPreferenceKey, IsRightPanelOpen).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -193,7 +254,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public bool IsImportPanelOpen
     {
         get => _isImportPanelOpen;
-        set => SetProperty(ref _isImportPanelOpen, value);
+        set
+        {
+            if (SetProperty(ref _isImportPanelOpen, value))
+            {
+                OnPropertyChanged(nameof(IsRightPanelToggleVisible));
+                OnPropertyChanged(nameof(IsRightPanelVisible));
+                OnPropertyChanged(nameof(RightPanelSplitterWidth));
+                OnPropertyChanged(nameof(RightPanelColumnWidth));
+                ToggleRightPanelCommand.NotifyCanExecuteChanged();
+            }
+        }
     }
 
     public RelayCommand ShowNavTreeCommand { get; }
@@ -1971,7 +2042,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
         var documentId = _currentDocumentId!;
         var baseVersion = _currentDocumentVersion;
-        var userBubble = WorksEditorSelectionEdit.FormatSelectionUserBubble(instruction, selectedText);
+        var userBubble = WorksEditorSelectionEdit.FormatSelectionUserBubble(
+            instruction,
+            selectedText,
+            _displayNames.Text("ui.works.project_ai.selection_context"));
         ProjectAiBubbles.Add(new ChatBubbleViewModel("user", userBubble));
         OnPropertyChanged(nameof(HasProjectAiBubbles));
 
@@ -2335,28 +2409,26 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public Task<bool> PrepareUnsavedChangesAsync()
     {
+        ClearPreparedLeave();
         if (!HasUnsavedChanges)
         {
             _leavePrepared = true;
-            _preparedDocumentId = null;
             return Task.FromResult(true);
         }
 
         if (!HasUnsavedDocumentChanges)
         {
             _leavePrepared = true;
-            _preparedDocumentId = null;
             return Task.FromResult(true);
         }
 
         if (string.IsNullOrWhiteSpace(_currentDocumentId))
         {
-            _leavePrepared = false;
             return Task.FromResult(false);
         }
 
         _preparedDocumentId = _currentDocumentId;
-        _preparedContent = DocumentContent;
+        _preparedContent = AssembleDocumentContent();
         _preparedVersion = _currentDocumentVersion;
         _leavePrepared = true;
         return Task.FromResult(true);
@@ -2371,8 +2443,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
         if (!HasUnsavedChanges || string.IsNullOrWhiteSpace(_preparedDocumentId))
         {
-            _leavePrepared = false;
+            ClearPreparedLeave();
             return true;
+        }
+
+        if (!string.Equals(_currentDocumentId, _preparedDocumentId, StringComparison.Ordinal)
+            || !string.Equals(_currentDocumentVersion, _preparedVersion, StringComparison.Ordinal)
+            || !string.Equals(AssembleDocumentContent(), _preparedContent, StringComparison.Ordinal))
+        {
+            ClearPreparedLeave();
+            return false;
         }
 
         try
@@ -2385,10 +2465,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             _currentDocumentPath = report.Metadata.Path;
             _currentDocumentVersion = report.Metadata.Version;
             OnPropertyChanged(nameof(DocumentInfoText));
-            CaptureSnapshot();
-            _leavePrepared = false;
-            _preparedDocumentId = null;
-            _preparedContent = null;
+            AcceptSavedDocumentSnapshot(_preparedContent ?? string.Empty);
+            ClearPreparedLeave();
             return !HasUnsavedChanges;
         }
         catch
@@ -2399,9 +2477,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public Task AbortPreparedUnsavedChangesAsync()
     {
-        _leavePrepared = false;
-        _preparedDocumentId = null;
-        _preparedContent = null;
+        ClearPreparedLeave();
         return Task.CompletedTask;
     }
 
@@ -2426,6 +2502,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public async Task ReloadProjectDataAsync(CancellationToken cancellationToken = default)
     {
+        await _projectAutomation.EnsureLoadedAsync(cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
         InvalidateQuickEditGeneration();
         ClearQuickEditUndo();
         Interlocked.Increment(ref _documentLoadGeneration);
@@ -2531,6 +2609,22 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         _documentDirty = false;
         HasUnsavedChanges = false;
         RefreshSummarySourceFreshness();
+    }
+
+    private void AcceptSavedDocumentSnapshot(string submittedContent)
+    {
+        _savedSnapshot = submittedContent;
+        _documentDirty = !string.Equals(AssembleDocumentContent(), submittedContent, StringComparison.Ordinal);
+        HasUnsavedChanges = _documentDirty;
+        RefreshSummarySourceFreshness();
+    }
+
+    private void ClearPreparedLeave()
+    {
+        _leavePrepared = false;
+        _preparedDocumentId = null;
+        _preparedContent = null;
+        _preparedVersion = null;
     }
 
     private void RestoreSnapshot()

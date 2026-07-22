@@ -22,11 +22,12 @@
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="*" />
       <ColumnDefinition Width="{Binding RightPanelSplitterWidth}" />
-      <ColumnDefinition Width="{Binding RightPanelColumnWidth, Mode=TwoWay}" MinWidth="24" MaxWidth="520" />
+      <ColumnDefinition Width="{Binding RightPanelColumnWidth, Mode=TwoWay}" MinWidth="0" MaxWidth="520" />
     </Grid.ColumnDefinitions>
 
     <!-- ============ 中：阅读/修改器 ============ -->
-    <DockPanel Grid.Column="0">
+    <Panel Grid.Column="0">
+      <DockPanel>
       <!-- 顶部工具条 -->
       <Border DockPanel.Dock="Top" Background="{DynamicResource Ariadne.BackgroundSurface}" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" Padding="16,8">
         <Grid ColumnDefinitions="*,Auto">
@@ -195,11 +196,11 @@
                     <TextBlock Grid.Column="0" Text="{Binding QuickEditTitle}" Classes="subtitle" VerticalAlignment="Center" />
                     <Button Grid.Column="1" Classes="secondary" Content="{Binding QuickEditGenerateText}" Command="{Binding QuickAiCommand}" />
                   </Grid>
-                  <TextBox x:Name="QuickEditInstructionBox"
+                  <TextBox x:Name="QuickEditInstructionBox" AutomationProperties.Name="{Binding QuickEditTitle}"
                            Text="{Binding QuickEditInstruction, Mode=TwoWay}"
                            PlaceholderText="{Binding QuickEditPlaceholder}" />
                   <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption" />
-                  <TextBox Text="{Binding QuickEditDiff}"
+                  <TextBox Text="{Binding QuickEditDiff}" AutomationProperties.Name="{Binding QuickEditDiffText}"
                            AcceptsReturn="True"
                            TextWrapping="Wrap"
                            MinHeight="110"
@@ -215,24 +216,29 @@
           </Border>
         </Grid>
       </Grid>
-    </DockPanel>
+      </DockPanel>
+      <ctl:RightPanelTogglePill IsPanelOpen="{Binding IsRightPanelOpen}"
+                                ToggleCommand="{Binding ToggleRightPanelCommand}"
+                                AccessibleName="{Binding ToggleRightPanelText}"
+                                IsVisible="{Binding IsRightPanelToggleVisible}" />
+    </Panel>
 
     <!-- ============ 右：导航树 / 项目 AI（右上标签切换，可收起） ============ -->
     <GridSplitter Grid.Column="1"
                   Width="4"
                   Background="{DynamicResource Ariadne.BorderMuted}"
                   ResizeDirection="Columns"
-                  IsVisible="{Binding IsRightPanelOpen}" />
+                  IsVisible="{Binding IsRightPanelVisible}" />
 
     <Panel Grid.Column="2">
       <Border
           Background="{DynamicResource Ariadne.BackgroundSurface}"
           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
           BorderThickness="1,0,0,0"
-          IsVisible="{Binding IsRightPanelOpen}">
+          IsVisible="{Binding IsRightPanelVisible}">
       <DockPanel>
         <!-- 右上标签切换 + 收起键 -->
-        <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto"
+        <Grid DockPanel.Dock="Top" ColumnDefinitions="*"
               Background="{DynamicResource Ariadne.BackgroundSurface}"
               Margin="12,8,8,0">
           <StackPanel Grid.Column="0" Orientation="Horizontal">
@@ -241,10 +247,6 @@
             <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsProjectAiTab}"
                     Content="{Binding ProjectAiText}" Command="{Binding ShowProjectAiCommand}" />
           </StackPanel>
-          <Button Grid.Column="1" Classes="panel-collapse" VerticalAlignment="Center"
-                  Command="{Binding ToggleRightPanelCommand}" ToolTip.Tip="{Binding ToggleRightPanelText}" AutomationProperties.Name="{Binding ToggleRightPanelText}">
-            <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronRight}" />
-          </Button>
         </Grid>
         <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
 
@@ -583,13 +585,8 @@
           </DockPanel>
 
           <!-- 标签内容 2：项目 AI -->
-          <DockPanel IsVisible="{Binding IsProjectAiTab}">
-            <Border DockPanel.Dock="Bottom" Padding="12,10"
-                    BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,1,0,0">
-              <!-- 与工作区共用 ProjectAiComposer（主题色焦点边仅此一体区） -->
-              <ctl:ProjectAiComposer />
-            </Border>
-            <ScrollViewer Margin="12,8">
+          <Grid IsVisible="{Binding IsProjectAiTab}" RowDefinitions="*,Auto" HorizontalAlignment="Stretch">
+            <ScrollViewer Grid.Row="0" Margin="12,8">
               <StackPanel Spacing="10">
                 <TextBlock Text="{Binding ProjectAiAnswer}"
                            Classes="subtle"
@@ -616,17 +613,17 @@
                 </ItemsControl>
               </StackPanel>
             </ScrollViewer>
-          </DockPanel>
+            <Border Grid.Row="1" Padding="12,10"
+                    HorizontalAlignment="Stretch"
+                    BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,1,0,0">
+              <!-- 与工作区共用 ProjectAiComposer；输入面始终跟随实际对话栏宽度。 -->
+              <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
+            </Border>
+          </Grid>
         </Grid>
       </DockPanel>
       </Border>
 
-      <!-- 收起态：右缘悬浮左向箭头 -->
-      <Button Classes="panel-float" Command="{Binding ToggleRightPanelCommand}"
-              ToolTip.Tip="{Binding ToggleRightPanelText}" AutomationProperties.Name="{Binding ToggleRightPanelText}"
-              IsVisible="{Binding !IsRightPanelOpen}">
-        <Path Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
-      </Button>
     </Panel>
   </Grid>
 </UserControl>

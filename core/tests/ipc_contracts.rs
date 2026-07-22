@@ -51,6 +51,100 @@ fn call_params_parse_json_or_default_to_null() {
 }
 
 #[test]
+fn ipc_project_lifecycle_creates_enters_and_closes_a_complete_project() {
+    let parent = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let project_root = parent.path().join("ipc-project");
+    let state = AriadneAppState::new("", app_state.path(), Arc::new(MemorySecretStore::default()));
+
+    let created = handle_request(
+        &state,
+        IpcRequest {
+            method: "create_project".to_owned(),
+            params: json!({
+                "project_root": project_root.to_string_lossy(),
+                "name": "IPC 作品"
+            }),
+        },
+    );
+    assert!(created.ok, "{:?}", created.error);
+    let report = created.data.unwrap();
+    assert_eq!(report["ready"], true);
+    assert_eq!(report["git_initialized"], true);
+    assert_eq!(report["project_name"], "IPC 作品");
+    assert_eq!(report["created_config_files"].as_array().unwrap().len(), 7);
+    assert!(report["created_dirs"].as_array().unwrap().len() >= 9);
+    assert!(project_root.join(".config/app.yaml").is_file());
+    assert!(project_root.join("skills").is_dir());
+    assert!(project_root.join("exports").is_dir());
+
+    let current = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_current_project".to_owned(),
+            params: Value::Null,
+        },
+    );
+    assert!(current.ok, "{:?}", current.error);
+    assert_eq!(current.data.unwrap()["project_name"], "IPC 作品");
+
+    for method in [
+        "get_app_settings",
+        "get_provider_config",
+        "get_permissions_settings",
+        "get_automation_settings",
+        "list_workflow_graphs",
+    ] {
+        let response = handle_request(
+            &state,
+            IpcRequest {
+                method: method.to_owned(),
+                params: Value::Null,
+            },
+        );
+        assert!(response.ok, "{method}: {:?}", response.error);
+    }
+
+    let project_ai = handle_request(
+        &state,
+        IpcRequest {
+            method: "project_ai_chat".to_owned(),
+            params: json!({
+                "request": {
+                    "message": "检查新项目",
+                    "chat_history": [],
+                    "references": []
+                }
+            }),
+        },
+    );
+    assert!(!project_ai.ok, "new project has no configured LLM provider");
+    let project_ai_error = project_ai.error.unwrap_or_default();
+    assert!(!project_ai_error.contains("not initialized"));
+    assert!(!project_ai_error.contains("No such file"));
+
+    let closed = handle_request(
+        &state,
+        IpcRequest {
+            method: "close_project".to_owned(),
+            params: Value::Null,
+        },
+    );
+    assert!(closed.ok, "{:?}", closed.error);
+    assert!(state.project_root().unwrap().as_os_str().is_empty());
+
+    let status = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_app_status".to_owned(),
+            params: Value::Null,
+        },
+    );
+    assert!(status.ok, "{:?}", status.error);
+    assert_eq!(status.data.unwrap()["current_project"]["project_root"], "");
+}
+
+#[test]
 fn ipc_update_budget_returns_saved_budget_status_instead_of_null() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -920,6 +1014,8 @@ fn ipc_start_workflow_preflight_failure_does_not_return_queued() {
 fn ipc_lists_workflow_tools_for_external_agents() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project_with_app_state(temp.path(), app_state.path(), None)
+        .unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -953,9 +1049,13 @@ fn ipc_lists_workflow_tools_for_external_agents() {
         temp.path(),
         PermissionsSettings {
             policy: PermissionPolicy::default(),
+            scoped_policies: std::collections::BTreeMap::new(),
             tool_controls: std::collections::BTreeMap::from([(
                 "project_ai".to_owned(),
-                std::collections::BTreeMap::from([("project-ai-workflow-tools".to_owned(), true)]),
+                std::collections::BTreeMap::from([(
+                    "project-ai-workflow-tools".to_owned(),
+                    Some(true),
+                )]),
             )]),
         },
     )
@@ -977,8 +1077,8 @@ fn ipc_lists_workflow_tools_for_external_agents() {
     assert!(response.ok, "{:?}", response.error);
     let data = response.data.expect("ipc response should include tools");
     assert_eq!(data[0]["name"], "draft_tool");
-    assert_eq!(data[0]["workflow_id"], "agent-tools");
-    assert_eq!(data[0]["start_node_id"], "start-draft");
+    assert_eq!(data[0]["workflow_id"], "default");
+    assert_eq!(data[0]["start_node_id"], "agent-tools--start-draft");
     assert_eq!(
         data[0]["input_schema"]["properties"]["topic"]["type"],
         "string"
@@ -986,10 +1086,11 @@ fn ipc_lists_workflow_tools_for_external_agents() {
 }
 
 #[test]
-fn ipc_lists_saved_workflow_graphs_for_desktop_selector() {
+fn ipc_lists_the_single_merged_project_canvas() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
-    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    ariadne::frontend::initialize_project_with_app_state(temp.path(), app_state.path(), None)
+        .unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -1053,10 +1154,10 @@ fn ipc_lists_saved_workflow_graphs_for_desktop_selector() {
         .iter()
         .map(|summary| summary["workflow_id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, vec!["draft/main", "review"]);
-    assert_eq!(summaries[0]["name"], "Draft Main");
-    assert_eq!(summaries[0]["path"], "workflows/draft/main.json");
-    assert_eq!(summaries[0]["node_count"], 1);
+    assert_eq!(ids, vec!["default"]);
+    assert_eq!(summaries[0]["name"], "Project Canvas");
+    assert_eq!(summaries[0]["path"], "workflows/default.json");
+    assert_eq!(summaries[0]["node_count"], 2);
     assert_eq!(summaries[0]["edge_count"], 0);
 }
 

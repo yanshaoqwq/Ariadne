@@ -56,6 +56,7 @@ jobs:
           diff -u THIRD_PARTY_NOTICES.md /tmp/THIRD_PARTY_NOTICES.md
 
   package:
+    name: package (${{ matrix.rid }})
     needs: [gate, quality]
     timeout-minutes: 90
     strategy:
@@ -95,10 +96,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
       - name: Install Windows packaging tool
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        run: python3 scripts/run-with-timeout.py --timeout-seconds 600 -- choco install innosetup --no-progress -y
       - name: Import Linux signing key
         if: runner.os == 'Linux'
         shell: bash
@@ -135,8 +140,10 @@ jobs:
           ARIADNE_QDRANT_CACHE_DIR: ${{ runner.temp }}/ariadne-qdrant-cache
           ARIADNE_RELEASE_EVIDENCE_DIR: ${{ github.workspace }}/artifacts/release-evidence
         run: |
-          cargo test --release --locked --package ariadne --test release_acceptance qdrant_runtime_provisioning_installs_then_uses_cache -- --ignored --exact
-          python3 scripts/qdrant-sidecar-smoke.py \
+          python3 scripts/run-with-timeout.py --timeout-seconds 1200 -- \
+            cargo test --release --locked --package ariadne --test release_acceptance qdrant_runtime_provisioning_installs_then_uses_cache -- --ignored --exact
+          python3 scripts/run-with-timeout.py --timeout-seconds 300 -- \
+            python3 scripts/qdrant-sidecar-smoke.py \
             --runtime-cache "$ARIADNE_QDRANT_CACHE_DIR" \
             --rid '${{ matrix.rid }}' \
             --provisioning-evidence "$ARIADNE_RELEASE_EVIDENCE_DIR/qdrant-runtime-provisioning.json" \

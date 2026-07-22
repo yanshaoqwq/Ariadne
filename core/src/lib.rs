@@ -11,6 +11,7 @@ pub mod git;
 pub mod ipc;
 pub mod knowledge;
 pub mod llm;
+pub mod node_capabilities;
 pub mod providers;
 pub mod rag;
 pub mod rest;

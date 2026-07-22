@@ -1,3 +1,4 @@
+using System.Globalization;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -20,9 +21,11 @@ public sealed class WelcomeViewModel : ViewModelBase
     private IReadOnlyList<RecentProjectItemViewModel> _recentProjects = Array.Empty<RecentProjectItemViewModel>();
     private string _statusText = string.Empty;
     private string _recentErrorText = string.Empty;
-    private bool _isLoading;
+    private bool _isRecentProjectsLoading;
+    private bool _isProjectActionRunning;
     private RecentProjectsState _recentState = RecentProjectsState.Loading;
     private Task? _loadTask;
+    private readonly RequestGenerationSession _recentProjectsSession = new();
 
     public WelcomeViewModel(
         DisplayNameService displayNames,
@@ -36,7 +39,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         _pickProjectFolder = pickProjectFolder ?? (_ => Task.FromResult<string?>(null));
         CreateProjectCommand = new RelayCommand(() => _ = CreateProjectAsync(), () => CanStartProjectAction);
         OpenProjectCommand = new RelayCommand(() => _ = OpenProjectAsync(), () => CanStartProjectAction);
-        RetryRecentProjectsCommand = new RelayCommand(() => _ = LoadAsync(), () => !IsLoading);
+        RetryRecentProjectsCommand = new RelayCommand(() => _ = LoadAsync(), () => !_isRecentProjectsLoading);
         TutorialCommand = new RelayCommand(() => _ = ShowTutorialAsync());
         FeedbackCommand = new RelayCommand(() => _ = ShowFeedbackAsync());
         _displayNames.LanguageChanged += (_, _) => RefreshLocalizedText();
@@ -72,7 +75,7 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     public string RetryRecentProjectsText => _displayNames.Text("ui.welcome.retry_recent");
 
-    public bool CanStartProjectAction => !IsLoading;
+    public bool CanStartProjectAction => !_isProjectActionRunning;
 
     public bool HasStatusText => !string.IsNullOrWhiteSpace(StatusText);
 
@@ -139,22 +142,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
     }
 
-    public bool IsLoading
-    {
-        get => _isLoading;
-        private set
-        {
-            if (!SetProperty(ref _isLoading, value))
-            {
-                return;
-            }
-
-            OnPropertyChanged(nameof(CanStartProjectAction));
-            CreateProjectCommand.NotifyCanExecuteChanged();
-            OpenProjectCommand.NotifyCanExecuteChanged();
-            RetryRecentProjectsCommand.NotifyCanExecuteChanged();
-        }
-    }
+    public bool IsLoading => _isRecentProjectsLoading || _isProjectActionRunning;
 
     public IReadOnlyList<RecentProjectItemViewModel> RecentProjects
     {
@@ -164,7 +152,7 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     public Task LoadAsync()
     {
-        if (_loadTask is not null || IsLoading)
+        if (_loadTask is not null)
         {
             return _loadTask ?? Task.CompletedTask;
         }
@@ -175,32 +163,84 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     private async Task LoadRecentProjectsAsync()
     {
-        IsLoading = true;
-        SetRecentState(RecentProjectsState.Loading);
         try
         {
             await RefreshRecentProjectsAsync().ConfigureAwait(true);
         }
-        catch (Exception ex)
-        {
-            _recentErrorText = UserFacingError.Format(ex, _displayNames);
-            SetRecentState(RecentProjectsState.Error);
-            OnPropertyChanged(nameof(RecentErrorText));
-        }
         finally
         {
-            IsLoading = false;
             _loadTask = null;
         }
     }
 
+    private void SetRecentProjectsLoading(bool value)
+    {
+        if (_isRecentProjectsLoading == value)
+        {
+            return;
+        }
+
+        _isRecentProjectsLoading = value;
+        OnPropertyChanged(nameof(IsLoading));
+        RetryRecentProjectsCommand.NotifyCanExecuteChanged();
+    }
+
+    private void SetProjectActionRunning(bool value)
+    {
+        if (_isProjectActionRunning == value)
+        {
+            return;
+        }
+
+        _isProjectActionRunning = value;
+        OnPropertyChanged(nameof(IsLoading));
+        OnPropertyChanged(nameof(CanStartProjectAction));
+        CreateProjectCommand.NotifyCanExecuteChanged();
+        OpenProjectCommand.NotifyCanExecuteChanged();
+    }
+
     private async Task RefreshRecentProjectsAsync()
     {
-        RecentProjects = WrapRecentProjects(await _backend.ListRecentProjectsAsync().ConfigureAwait(true));
-        NotifyRecentProjectsChanged();
-        SetRecentState(RecentProjects.Count == 0
-            ? RecentProjectsState.Empty
-            : RecentProjectsState.Content);
+        var request = _recentProjectsSession.Begin();
+        SetRecentProjectsLoading(true);
+        SetRecentState(RecentProjectsState.Loading);
+        try
+        {
+            var entries = await _backend
+                .ListRecentProjectsAsync(request.CancellationToken)
+                .ConfigureAwait(true);
+            if (!_recentProjectsSession.IsCurrent(request))
+            {
+                return;
+            }
+
+            RecentProjects = WrapRecentProjects(entries);
+            _recentErrorText = string.Empty;
+            OnPropertyChanged(nameof(RecentErrorText));
+            NotifyRecentProjectsChanged();
+            SetRecentState(RecentProjects.Count == 0
+                ? RecentProjectsState.Empty
+                : RecentProjectsState.Content);
+        }
+        catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (_recentProjectsSession.IsCurrent(request))
+            {
+                _recentErrorText = UserFacingError.Format(ex, _displayNames);
+                SetRecentState(RecentProjectsState.Error);
+                OnPropertyChanged(nameof(RecentErrorText));
+            }
+        }
+        finally
+        {
+            if (_recentProjectsSession.IsCurrent(request))
+            {
+                SetRecentProjectsLoading(false);
+            }
+        }
     }
 
     private void SetRecentState(RecentProjectsState state)
@@ -224,14 +264,14 @@ public sealed class WelcomeViewModel : ViewModelBase
         OnPropertyChanged(nameof(RecentCountText));
     }
 
-    private async Task CreateProjectAsync()
+    internal async Task CreateProjectAsync()
     {
-        if (IsLoading)
+        if (_isProjectActionRunning)
         {
             return;
         }
 
-        IsLoading = true;
+        SetProjectActionRunning(true);
         try
         {
             // 1) 先取项目名
@@ -259,23 +299,7 @@ public sealed class WelcomeViewModel : ViewModelBase
                 return;
             }
 
-            var root = ProjectPathHelper.BuildUniqueProjectRoot(parent, projectName);
-            Directory.CreateDirectory(root);
-
-            var report = await _backend.CreateProjectAsync(root, projectName).ConfigureAwait(true);
-            StatusText = _displayNames.Format(
-                "ui.welcome.create_project_done",
-                new Dictionary<string, string>
-                {
-                    ["name"] = projectName,
-                    ["path"] = report.ProjectRoot,
-                });
-            await RefreshRecentProjectsAsync().ConfigureAwait(true);
-            var status = await _backend.GetCurrentProjectAsync().ConfigureAwait(true);
-            if (status is not null && _projectOpened is not null)
-            {
-                await _projectOpened(status).ConfigureAwait(true);
-            }
+            await CreateProjectAtAsync(parent, projectName).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
@@ -283,18 +307,81 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
         finally
         {
-            IsLoading = false;
+            SetProjectActionRunning(false);
         }
     }
 
-    private async Task OpenProjectAsync()
+    internal async Task<CurrentProjectStatus?> CreateProjectAtAsync(
+        string parentDirectory,
+        string projectName,
+        CancellationToken cancellationToken = default)
     {
-        if (IsLoading)
+        var root = ProjectPathHelper.BuildUniqueProjectRoot(parentDirectory, projectName);
+        var report = await _backend
+            .CreateProjectAsync(root, projectName, cancellationToken)
+            .ConfigureAwait(true);
+        if (!ProjectInitializationReportIsComplete(report, root))
+        {
+            StatusText = _displayNames.Text("ui.welcome.create_project_incomplete");
+            return null;
+        }
+
+        var status = new CurrentProjectStatus(report.ProjectRoot, report.ProjectName);
+        await RefreshRecentProjectsAsync().ConfigureAwait(true);
+        if (_projectOpened is not null)
+        {
+            await _projectOpened(status).ConfigureAwait(true);
+        }
+        StatusText = _displayNames.Format(
+            "ui.welcome.create_project_done",
+            new Dictionary<string, string>
+            {
+                ["name"] = report.ProjectName,
+                ["path"] = report.ProjectRoot,
+            });
+        return status;
+    }
+
+    private static bool ProjectInitializationReportIsComplete(
+        ProjectInitReport report,
+        string requestedRoot)
+    {
+        if (!report.Ready
+            || !report.GitInitialized
+            || string.IsNullOrWhiteSpace(report.ProjectRoot)
+            || string.IsNullOrWhiteSpace(report.ProjectName)
+            || report.CreatedDirs is null
+            || report.CreatedDirs.Count == 0
+            || report.CreatedConfigFiles is null
+            || report.CreatedConfigFiles.Count == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            return string.Equals(
+                Path.GetFullPath(report.ProjectRoot),
+                Path.GetFullPath(requestedRoot),
+                comparison);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal async Task OpenProjectAsync()
+    {
+        if (_isProjectActionRunning)
         {
             return;
         }
 
-        IsLoading = true;
+        SetProjectActionRunning(true);
         try
         {
             var root = await _pickProjectFolder(
@@ -302,25 +389,6 @@ public sealed class WelcomeViewModel : ViewModelBase
             if (string.IsNullOrWhiteSpace(root))
             {
                 StatusText = _displayNames.Text("ui.common.cancel");
-                return;
-            }
-
-            // 本地预检：未初始化项目直接友好提示，避免只看到后端英文/技术报错
-            if (!ProjectPathHelper.LooksLikeInitializedProject(root))
-            {
-                await DialogService.Current.ConfirmAsync(new ConfirmDialogViewModel(
-                    _displayNames.Text("ui.dialog.open_project.not_project_title"),
-                    _displayNames.Format(
-                        "ui.dialog.open_project.not_project_message",
-                        new Dictionary<string, string> { ["path"] = root }),
-                    new[]
-                    {
-                        new DialogButton(_displayNames.Text("ui.common.close"), DialogButtonVariant.Primary, 0),
-                    })
-                {
-                    CancelResultIndex = 0,
-                }).ConfigureAwait(true);
-                StatusText = _displayNames.Text("ui.dialog.open_project.not_project_status");
                 return;
             }
 
@@ -332,7 +400,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
         finally
         {
-            IsLoading = false;
+            SetProjectActionRunning(false);
         }
     }
 
@@ -361,12 +429,12 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     private async Task OpenProjectRootAsync(string root)
     {
-        if (IsLoading)
+        if (_isProjectActionRunning)
         {
             return;
         }
 
-        IsLoading = true;
+        SetProjectActionRunning(true);
         try
         {
             await OpenProjectRootCoreAsync(root).ConfigureAwait(true);
@@ -377,19 +445,19 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
         finally
         {
-            IsLoading = false;
+            SetProjectActionRunning(false);
         }
     }
 
     /// <summary>供主窗口标题栏「切换项目」调用。</summary>
     public async Task OpenProjectRootForHostAsync(string root)
     {
-        if (IsLoading)
+        if (_isProjectActionRunning)
         {
             return;
         }
 
-        IsLoading = true;
+        SetProjectActionRunning(true);
         try
         {
             await OpenProjectRootCoreAsync(root).ConfigureAwait(true);
@@ -400,7 +468,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
         finally
         {
-            IsLoading = false;
+            SetProjectActionRunning(false);
         }
     }
 
@@ -433,6 +501,8 @@ public sealed class WelcomeViewModel : ViewModelBase
             await _projectOpened(status).ConfigureAwait(true);
         }
     }
+
+    internal Task RefreshRecentProjectsForTestsAsync() => RefreshRecentProjectsAsync();
 }
 
 public sealed class RecentProjectItemViewModel
@@ -441,7 +511,7 @@ public sealed class RecentProjectItemViewModel
     {
         Name = entry.Name;
         ProjectRoot = entry.ProjectRoot;
-        LastOpenedAt = entry.LastOpenedAt;
+        LastOpenedAt = FormatLastOpened(entry.LastOpenedMs);
         OpenCommand = new RelayCommand(open);
     }
 
@@ -449,4 +519,22 @@ public sealed class RecentProjectItemViewModel
     public string ProjectRoot { get; }
     public string? LastOpenedAt { get; }
     public RelayCommand OpenCommand { get; }
+
+    private static string? FormatLastOpened(ulong lastOpenedMs)
+    {
+        if (lastOpenedMs == 0 || lastOpenedMs > long.MaxValue)
+        {
+            return null;
+        }
+
+        try
+        {
+            var dto = DateTimeOffset.FromUnixTimeMilliseconds((long)lastOpenedMs).ToLocalTime();
+            return dto.ToString("g", CultureInfo.CurrentCulture);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
 }

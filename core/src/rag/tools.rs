@@ -3,6 +3,20 @@ use serde_json::{json, Value};
 
 use crate::contracts::{CoreError, CoreResult};
 use crate::llm::{ToolExecutionContext, ToolExecutionOutput, ToolExecutor};
+pub use crate::node_capabilities::{
+    CRITIC_SEARCH_TOOL as TOOL_CRITIC_SEARCH, CRITIC_WEB_SEARCH_TOOL as TOOL_CRITIC_WEB_SEARCH,
+    DESIGNER_SEARCH_TOOL as TOOL_DESIGNER_SEARCH,
+    DESIGNER_WEB_SEARCH_TOOL as TOOL_DESIGNER_WEB_SEARCH, DETAIL_SEARCH_TOOL as TOOL_DETAIL_SEARCH,
+    DETAIL_WEB_SEARCH_TOOL as TOOL_DETAIL_WEB_SEARCH, OUTLINER_SEARCH_TOOL as TOOL_OUTLINER_SEARCH,
+    OUTLINER_WEB_SEARCH_TOOL as TOOL_OUTLINER_WEB_SEARCH,
+    PLANNER_SEARCH_TOOL as TOOL_PLANNER_SEARCH, PLANNER_WEB_SEARCH_TOOL as TOOL_PLANNER_WEB_SEARCH,
+    POLISHER_SEARCH_TOOL as TOOL_POLISHER_SEARCH,
+    POLISHER_WEB_SEARCH_TOOL as TOOL_POLISHER_WEB_SEARCH,
+    PRUDENT_SEARCH_TOOL as TOOL_PRUDENT_SEARCH, PRUDENT_WEB_SEARCH_TOOL as TOOL_PRUDENT_WEB_SEARCH,
+    SUMMARIZER_SEARCH_TOOL as TOOL_SUMMARIZER_SEARCH,
+    SUMMARIZER_WEB_SEARCH_TOOL as TOOL_SUMMARIZER_WEB_SEARCH,
+    WRITER_SEARCH_TOOL as TOOL_WRITER_SEARCH, WRITER_WEB_SEARCH_TOOL as TOOL_WRITER_WEB_SEARCH,
+};
 use crate::providers::{
     ProviderCallContext, SearchProvider, SearchProviderRequest, SearchProviderResponse, ToolCall,
     ToolDefinition,
@@ -19,43 +33,25 @@ use crate::rag::resources::PromptResources;
 
 pub const TOOL_OUTLINER_REGISTER: &str = "outliner-register";
 pub const TOOL_OUTLINER_FIND: &str = "outliner-find";
-pub const TOOL_OUTLINER_SEARCH: &str = "outliner-search";
-pub const TOOL_OUTLINER_WEB_SEARCH: &str = "outliner-web-search";
 pub const TOOL_OUTLINER_INSERT_LINES: &str = "outliner-insert-lines";
 pub const TOOL_OUTLINER_REPLACE_LINES: &str = "outliner-replace-lines";
 pub const TOOL_DESIGNER_REGISTER: &str = "designer-register";
 pub const TOOL_DESIGNER_FIND: &str = "designer-find";
-pub const TOOL_DESIGNER_SEARCH: &str = "designer-search";
-pub const TOOL_DESIGNER_WEB_SEARCH: &str = "designer-web-search";
 pub const TOOL_DESIGNER_INSERT_LINES: &str = "designer-insert-lines";
 pub const TOOL_DESIGNER_REPLACE_LINES: &str = "designer-replace-lines";
 pub const TOOL_PLANNER_REGISTER: &str = "planner-register";
 pub const TOOL_PLANNER_FIND: &str = "planner-find";
-pub const TOOL_PLANNER_SEARCH: &str = "planner-search";
-pub const TOOL_PLANNER_WEB_SEARCH: &str = "planner-web-search";
 pub const TOOL_PLANNER_INSERT_LINES: &str = "planner-insert-lines";
 pub const TOOL_PLANNER_REPLACE_LINES: &str = "planner-replace-lines";
 pub const TOOL_DETAIL_FIND: &str = "detail-find";
-pub const TOOL_DETAIL_SEARCH: &str = "detail-search";
-pub const TOOL_DETAIL_WEB_SEARCH: &str = "detail-web-search";
 pub const TOOL_WRITER_FIND: &str = "writer-find";
-pub const TOOL_WRITER_SEARCH: &str = "writer-search";
-pub const TOOL_WRITER_WEB_SEARCH: &str = "writer-web-search";
 pub const TOOL_WRITER_INSERT_LINES: &str = "writer-insert-lines";
 pub const TOOL_WRITER_REPLACE_LINES: &str = "writer-replace-lines";
 pub const TOOL_CRITIC_FIND: &str = "critic-find";
-pub const TOOL_CRITIC_SEARCH: &str = "critic-search";
-pub const TOOL_CRITIC_WEB_SEARCH: &str = "critic-web-search";
 pub const TOOL_PRUDENT_FIND: &str = "prudent-find";
-pub const TOOL_PRUDENT_SEARCH: &str = "prudent-search";
-pub const TOOL_PRUDENT_WEB_SEARCH: &str = "prudent-web-search";
 pub const TOOL_POLISHER_FIND: &str = "polisher-find";
-pub const TOOL_POLISHER_SEARCH: &str = "polisher-search";
-pub const TOOL_POLISHER_WEB_SEARCH: &str = "polisher-web-search";
 pub const TOOL_POLISHER_INSERT_LINES: &str = "polisher-insert-lines";
 pub const TOOL_POLISHER_REPLACE_LINES: &str = "polisher-replace-lines";
-pub const TOOL_SUMMARIZER_SEARCH: &str = "summarizer-search";
-pub const TOOL_SUMMARIZER_WEB_SEARCH: &str = "summarizer-web-search";
 
 /// 为指定写作 agent 生成工具定义，描述文本来自 prompt_list.json。
 pub fn tool_definitions_for_agent(

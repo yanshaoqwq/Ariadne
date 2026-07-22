@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Reflection;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
@@ -7,102 +6,61 @@ using Xunit;
 
 namespace Ariadne.Desktop.Tests;
 
+/// <summary>
+/// Product path: single project canvas (LoadProjectCanvasAsync), no multi-workflow selector.
+/// </summary>
 public sealed class WorkspaceWorkflowNavigationTests
 {
     [Fact]
-    public async Task Reload_ExposesAllWorkflows_AndConfirmationSelectionDoesNotSwitchContext()
+    public async Task Reload_LoadsSingleProjectCanvas_AndKeepsForeignConfirmationVisible()
     {
-        var backend = WorkflowBackend.Create();
+        var backend = CanvasBackend.Create();
         var vm = new WorkspacePageViewModel(DisplayNameService.LoadDefault(), backend.Client);
 
         await vm.ReloadProjectDataAsync();
 
-        Assert.Equal(2, vm.WorkflowSummaries.Count);
-        Assert.Equal("default", vm.SelectedWorkflowId);
-        Assert.Equal("默认流程", vm.CurrentWorkflowName);
-        Assert.Equal(new[] { "default" }, backend.LoadedWorkflowIds);
+        Assert.Equal("default", vm.LoadedWorkflowIdForTests);
+        Assert.Equal(1, backend.ProjectCanvasLoadCount);
         Assert.NotNull(vm.SelectedConfirmation);
         Assert.Equal("review", vm.SelectedConfirmation!.WorkflowId);
-        Assert.Equal("来源：工作流 review · 运行 run-review", vm.SelectedConfirmation.SourceText);
+        Assert.Contains("review", vm.SelectedConfirmation.SourceText, StringComparison.Ordinal);
+        // Single project canvas: confirmation from another workflow id does not require a selector switch.
         Assert.Empty(vm.CurrentRunId);
-        Assert.True(vm.CanOpenSelectedConfirmationWorkflow);
-        Assert.True(vm.OpenSelectedConfirmationWorkflowCommand.CanExecute(null));
     }
 
     [Fact]
-    public async Task WorkflowSelector_LoadsSelectedWorkflow_AndUpdatesVisibleIdentity()
+    public async Task ReloadProjectCanvas_UsesBackendProjectCanvas_NotListWorkflowGraphs()
     {
-        var backend = WorkflowBackend.Create();
+        var backend = CanvasBackend.Create();
         var vm = new WorkspacePageViewModel(DisplayNameService.LoadDefault(), backend.Client);
+
+        await vm.ReloadProjectDataAsync();
         await vm.ReloadProjectDataAsync();
 
-        vm.SelectedWorkflowId = "review";
-        await WaitUntilAsync(() => backend.LoadedWorkflowIds.Contains("review"));
-
-        Assert.Equal("review", vm.SelectedWorkflowId);
-        Assert.Equal("审阅流程", vm.CurrentWorkflowName);
-        Assert.False(vm.CanOpenSelectedConfirmationWorkflow);
+        Assert.Equal(2, backend.ProjectCanvasLoadCount);
+        Assert.Equal(0, backend.ListWorkflowGraphsCount);
+        Assert.Equal("default", vm.LoadedWorkflowIdForTests);
     }
 
     [Fact]
-    public async Task ConfirmationSourceSwitch_IsExplicit_AndForeignResolutionDoesNotPolluteCurrentRun()
-    {
-        var backend = WorkflowBackend.Create();
-        var vm = new WorkspacePageViewModel(DisplayNameService.LoadDefault(), backend.Client);
-        await vm.ReloadProjectDataAsync();
-
-        Assert.True(vm.ApproveConfirmationCommand.TryExecute());
-        await WaitUntilAsync(() => vm.Confirmations.Count == 0);
-
-        Assert.Equal("review", backend.ResolvedWorkflowId);
-        Assert.Equal("run-review", backend.ResolvedRunId);
-        Assert.Equal("default", vm.SelectedWorkflowId);
-        Assert.Empty(vm.CurrentRunId);
-
-        backend.RestorePendingConfirmation();
-        await vm.ReloadProjectDataAsync();
-        Assert.True(vm.OpenSelectedConfirmationWorkflowCommand.TryExecute());
-        await WaitUntilAsync(() => backend.LoadedWorkflowIds.LastOrDefault() == "review");
-
-        Assert.Equal("review", vm.SelectedWorkflowId);
-        Assert.Equal("审阅流程", vm.CurrentWorkflowName);
-        Assert.Empty(vm.CurrentRunId);
-    }
-
-    [Fact]
-    public void WorkspaceView_UsesWorkflowSelector_SourceAction_AndHonestReloadLabel()
+    public void WorkspaceView_UsesSingleCanvasWithoutWorkflowSelector()
     {
         var xaml = File.ReadAllText(ResolveDesktopSource("Views", "WorkspacePageView.axaml"));
         var vm = new WorkspacePageViewModel(
             DisplayNameService.LoadDefault(),
-            WorkflowBackend.Create().Client);
+            CanvasBackend.Create().Client);
 
-        Assert.Contains("ItemsSource=\"{Binding WorkflowSummaries}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("SelectedValue=\"{Binding SelectedWorkflowId, Mode=TwoWay}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding CurrentWorkflowName}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding UnsavedChangesBadgeText}\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ItemsSource=\"{Binding WorkflowSummaries}\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("SelectedValue=\"{Binding SelectedWorkflowId, Mode=TwoWay}\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("x:Name=\"WorkflowSelectorHost\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"CanvasToolbarActions\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding SelectedConfirmation.SourceText}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Command=\"{Binding OpenSelectedConfirmationWorkflowCommand}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Command=\"{Binding ReloadDefaultWorkflowCommand}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding ReloadProjectCanvasCommand}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Ariadne.Icon.Refresh", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("{Binding ImportText}", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Ariadne.Icon.Import", xaml, StringComparison.Ordinal);
-        Assert.Equal("重新加载默认工作流", vm.ReloadDefaultWorkflowText);
-        Assert.Equal("打开来源工作流", vm.OpenConfirmationWorkflowText);
-    }
-
-    private static async Task WaitUntilAsync(Func<bool> predicate)
-    {
-        for (var attempt = 0; attempt < 100; attempt++)
-        {
-            if (predicate())
-            {
-                return;
-            }
-            await Task.Delay(10);
-        }
-
-        Assert.Fail("异步工作流状态未在预期时间内收敛。");
+        Assert.False(string.IsNullOrWhiteSpace(vm.ReloadProjectCanvasText));
+        Assert.Equal("default", vm.LoadedWorkflowIdForTests);
     }
 
     private static string ResolveDesktopSource(params string[] parts)
@@ -122,27 +80,18 @@ public sealed class WorkspaceWorkflowNavigationTests
         throw new FileNotFoundException(string.Join('/', parts));
     }
 
-    private class WorkflowBackend : DispatchProxy
+    private class CanvasBackend : DispatchProxy
     {
-        private readonly ConcurrentQueue<string> _loadedWorkflowIds = new();
-        private bool _confirmationPending = true;
-
         public IAriadneBackendClient Client { get; private set; } = null!;
-        public IReadOnlyList<string> LoadedWorkflowIds => _loadedWorkflowIds.ToArray();
-        public string? ResolvedWorkflowId { get; private set; }
-        public string? ResolvedRunId { get; private set; }
+        public int ProjectCanvasLoadCount { get; private set; }
+        public int ListWorkflowGraphsCount { get; private set; }
 
-        public static WorkflowBackend Create()
+        public static CanvasBackend Create()
         {
-            var client = Create<IAriadneBackendClient, WorkflowBackend>();
-            var backend = (WorkflowBackend)(object)client;
+            var client = Create<IAriadneBackendClient, CanvasBackend>();
+            var backend = (CanvasBackend)(object)client;
             backend.Client = client;
             return backend;
-        }
-
-        public void RestorePendingConfirmation()
-        {
-            _confirmationPending = true;
         }
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
@@ -159,15 +108,21 @@ public sealed class WorkspaceWorkflowNavigationTests
 
             object? value = targetMethod.Name switch
             {
-                nameof(IAriadneBackendClient.ListWorkflowGraphsAsync) => WorkflowSummaries(),
-                nameof(IAriadneBackendClient.LoadWorkflowGraphAsync) => LoadWorkflow((string)args![0]!),
-                nameof(IAriadneBackendClient.ListConfirmationsAsync) =>
-                    _confirmationPending ? new[] { ForeignConfirmation() } : Array.Empty<ConfirmationLogEntry>(),
-                nameof(IAriadneBackendClient.ResolveConfirmationAsync) => ResolveConfirmation(args!),
+                nameof(IAriadneBackendClient.LoadProjectCanvasAsync) => LoadCanvas(),
+                nameof(IAriadneBackendClient.ListWorkflowGraphsAsync) => CountList(),
+                nameof(IAriadneBackendClient.SaveProjectCanvasAsync) => args![0]!,
+                nameof(IAriadneBackendClient.SaveWorkflowGraphAsync) => args![0]!,
+                nameof(IAriadneBackendClient.ValidateWorkflowGraphAsync) => null,
+                nameof(IAriadneBackendClient.ListConfirmationsAsync) => new[] { ForeignConfirmation() },
                 nameof(IAriadneBackendClient.GetProviderConfigAsync) => EmptyProviderConfig(),
                 nameof(IAriadneBackendClient.GetWorksTreeAsync) => EmptyWorksTree(),
-                _ => throw new NotSupportedException(targetMethod.Name),
+                _ => UnsupportedDefault(targetMethod),
             };
+
+            if (targetMethod.ReturnType == typeof(Task))
+            {
+                return Task.CompletedTask;
+            }
 
             if (targetMethod.ReturnType.IsGenericType
                 && targetMethod.ReturnType.GetGenericTypeDefinition() == typeof(Task<>))
@@ -178,38 +133,37 @@ public sealed class WorkspaceWorkflowNavigationTests
                     .Invoke(null, new[] { value });
             }
 
-            throw new NotSupportedException(targetMethod.Name);
+            return value;
         }
 
-        private WorkflowGraphData LoadWorkflow(string workflowId)
+        private WorkflowGraphData LoadCanvas()
         {
-            _loadedWorkflowIds.Enqueue(workflowId);
-            var name = workflowId == "review" ? "审阅流程" : "默认流程";
+            ProjectCanvasLoadCount++;
             return new WorkflowGraphData(
-                workflowId,
-                name,
+                "default",
+                "Project Canvas",
                 Array.Empty<CanvasNode>(),
                 Array.Empty<CanvasEdge>(),
-                new Dictionary<string, object?>());
+                new Dictionary<string, object?>(),
+                ContentRevision: "canvas-revision");
         }
 
-        private ResolveConfirmationResult ResolveConfirmation(object?[] args)
+        private IReadOnlyList<WorkflowSummary> CountList()
         {
-            ResolvedWorkflowId = args[0] as string;
-            ResolvedRunId = args[1] as string;
-            _confirmationPending = false;
-            return new ResolveConfirmationResult(
-                new WorkflowActionResult("review", "run-review", "running"),
-                ForeignConfirmation() with { State = "approved" },
-                new SidebarBadgeCounts(0, 0, 0));
+            ListWorkflowGraphsCount++;
+            return Array.Empty<WorkflowSummary>();
         }
 
-        private static IReadOnlyList<WorkflowSummary> WorkflowSummaries() =>
-            new[]
+        private static object? UnsupportedDefault(MethodInfo method)
+        {
+            if (method.ReturnType == typeof(Task) || method.ReturnType.IsGenericType)
             {
-                new WorkflowSummary("default", "默认流程", "workflows/default.json", 0, 0),
-                new WorkflowSummary("review", "审阅流程", "workflows/review.json", 0, 0),
-            };
+                // Prefer explicit fail for unexpected product IPC so tests catch API drift.
+                throw new NotSupportedException(method.Name);
+            }
+
+            return method.ReturnType.IsValueType ? Activator.CreateInstance(method.ReturnType) : null;
+        }
 
         private static ConfirmationLogEntry ForeignConfirmation() => new(
             "confirmation-review",

@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$timeoutRunner = Join-Path $root "scripts\run-with-timeout.py"
 $package = (Resolve-Path $PackageDirectory).Path
 $manifest = Get-Content (Join-Path $package "release-manifest.json") -Raw | ConvertFrom-Json
 if ($manifest.rid -ne "win-x64") { throw "Windows installer requires win-x64, got $($manifest.rid)" }
@@ -42,9 +43,8 @@ if (-not [string]::IsNullOrWhiteSpace($env:ARIADNE_WINDOWS_SIGNTOOL)) {
     $arguments += "/Sariadnesign=$($env:ARIADNE_WINDOWS_SIGNTOOL)"
 }
 $arguments += (Join-Path $PSScriptRoot "Ariadne.iss")
-$compilerOutput = & $iscc $arguments 2>&1
+& python3 $timeoutRunner --timeout-seconds 600 -- $iscc @arguments 2>&1 | ForEach-Object { Write-Host $_ }
 $compilerExitCode = $LASTEXITCODE
-$compilerOutput | ForEach-Object { Write-Host $_ }
 if ($compilerExitCode -ne 0) { throw "Inno Setup failed with exit code $compilerExitCode" }
 
 $installers = @(Get-ChildItem $output -Filter "Ariadne-$($manifest.version)-win-x64-setup.exe")

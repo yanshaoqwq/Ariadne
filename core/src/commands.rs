@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -21,13 +21,14 @@ use crate::config::LocalFileSecretStore;
 use crate::config::SystemKeychainSecretStore;
 use crate::config::{
     default_permission_tool_controls, policies_from_policy_code, policy_code_from_dual_policy,
-    read_confirmation_policy_settings, AppConfig, ApprovalPromptConfig, ConfigStore, GitConfig,
-    ModelConfig, ProjectConfig, ProjectCredentialScope, ProviderConfig, RagConfig, SecretStore,
-    SecretValue, WorkflowConfig,
+    read_confirmation_policy_settings, AppConfig, AppPermissionsStore, AppRuntimeSettings,
+    AppRuntimeSettingsStore, ApprovalPromptConfig, ConfigStore, GitConfig, ModelConfig,
+    PermissionsConfig, ProjectConfig, ProjectCredentialScope, ProviderCatalogStore, ProviderConfig,
+    RagConfig, SecretStore, SecretValue, WorkflowConfig,
 };
 use crate::contracts::{
-    ensure_path_under_root, ApprovalPolicy, ArtifactKind, CoreResult, Edge, EdgeId, NodeId,
-    NodeInstance, PermissionPolicy, PermissionRequest, PortEndpoint, ProviderCapability,
+    ensure_path_under_root, ApprovalPolicy, ArtifactKind, CoreError, CoreResult, Edge, EdgeId,
+    NodeId, NodeInstance, PermissionPolicy, PermissionRequest, PortEndpoint, ProviderCapability,
     ProviderType, RunControl, RunId, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
 };
 use crate::costs::{budget_limits_from_global_budget, CostLedger, CostQuery, SqliteCostLedger};
@@ -41,16 +42,17 @@ use crate::frontend::{
     apply_node_detail_patch as apply_node_detail_patch_to_workflow, build_works_tree,
     confirmation_state_from_runtime, export_chapters_combined,
     export_workflow_selection as export_workflow_selection_from_workflow,
-    extract_project_reference_tokens, import_chapter_document, initialize_project,
+    extract_project_reference_tokens, import_chapter_document,
     pack_workflow_selection as pack_workflow_selection_in_workflow, project_ai_context_window,
-    project_ai_summary_context, project_document_permission, structured_project_memory_context,
+    project_ai_summary_context, project_document_permission, publish_initialized_project,
+    structured_project_memory_context,
     upsert_canvas_annotation as upsert_canvas_annotation_in_workflow, ArtifactReferenceEntry,
     CanvasAnnotation, ChapterExportFormat, ChapterImportRequest, CombinedExportReport,
     ConfirmationLogEntry, FileConfirmationLogStore, NodeDetailPatch, ProjectAiAppendOutcome,
     ProjectAiContextWindow, ProjectAiConversationStore, ProjectAiMemoryEntry,
     ProjectAiStoredMessage, ProjectAiSummaryChunk, ProjectInitReport, ProjectMemoryStore,
-    ProjectReference, ProjectReferenceResolver, ProjectRegistryStore, QuickEditResult,
-    QuickEditService, RecentProjectEntry, SidebarBadgeCounts, TemplateDetail,
+    ProjectReference, ProjectReferenceResolver, ProjectRegistryStore, PublishedProjectCreation,
+    QuickEditResult, QuickEditService, RecentProjectEntry, SidebarBadgeCounts, TemplateDetail,
     TemplateInstallReport, TemplateRepositoryClient, TemplateSummary, UiPreferences,
     UiPreferencesStore, UiRunLogEntry, UiRunLogFilter, UiRunLogKind, UiRunLogLevel, UiRunLogStore,
     WorksTreeNode, OFFICIAL_TEMPLATE_REPOSITORY_URL,
@@ -63,28 +65,37 @@ use crate::llm::{
     tool_result_message, LlmRunRequest, LlmService, LlmServiceConfig, ToolExecutionContext,
     ToolExecutionOutput, ToolExecutor,
 };
+use crate::node_capabilities::{
+    execution_tool_capability, model_tool_node_capabilities, workflow_node_capability,
+    workflow_node_catalog, workflow_node_catalog_entry, WorkflowNodeExecutionKind,
+    EXECUTOR_ADAPTER_TOOL_CAPABILITY, PROJECT_AI_TOOL_CAPABILITY,
+};
 use crate::providers::{
     web_search_tool_definition, ContentPart, HttpWebSearchProvider, LlmMessage, LlmRole,
     OpenAiCompatibleLlmProvider, Provider, ProviderProtocol, SearchProvider, ToolDefinition,
-    WebSearchToolExecutor, EXECUTOR_ADAPTER_WEB_SEARCH_TOOL, GENERIC_LLM_WEB_SEARCH_TOOL,
-    PROJECT_AI_WEB_SEARCH_TOOL, SUMMARIZER_WEB_SEARCH_TOOL,
+    WebSearchToolExecutor, EXECUTOR_ADAPTER_WEB_SEARCH_TOOL, PROJECT_AI_WEB_SEARCH_TOOL,
 };
 use crate::rag::SqliteWritingKnowledgeStore;
 use crate::retrieval::{
     project_search_tool_definition, ProjectRetrievalRuntime, ProjectSearchToolExecutor,
-    RetrievalResult, EXECUTOR_ADAPTER_SEARCH_TOOL, GENERIC_LLM_SEARCH_TOOL, PROJECT_AI_SEARCH_TOOL,
-    SUMMARIZER_SEARCH_TOOL,
+    RetrievalResult, EXECUTOR_ADAPTER_SEARCH_TOOL, PROJECT_AI_SEARCH_TOOL,
 };
-use crate::skills::{SkillLoader, WorkflowManifest, WORKFLOW_MANIFEST_FILE};
+use crate::skills::{
+    ExecutorAdapterExecutionPlan, LoadedSkillManifest, SkillLoader, WorkflowManifest,
+    WORKFLOW_MANIFEST_FILE,
+};
 use crate::workflow::{
     execute_document_read_node_with_root, execute_llm_node_with_defaults,
     execute_llm_node_with_search_tools, execute_project_retrieval_node_for_project,
     execute_summarizer_node, execute_summarizer_node_with_search_tools,
+    merge_workflow_into_project_canvas, normalize_project_canvas_identity,
     validate_workflow_execution_contracts, BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink,
     RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
-    SqliteWorkflowRuntimeStore, WorkflowLlmSearchOptions, WorkflowRunFailure,
-    WorkflowRunnableClaimResult, WorkflowRuntime, WorkflowRuntimeEvent, WorkflowRuntimeEventType,
-    WorkflowRuntimeStore, WorkflowStopRequestResult, WorkflowWorkerLease,
+    SqliteWorkflowRuntimeStore, WorkflowExecutionDependencySet, WorkflowLlmNodeConfig,
+    WorkflowLlmSearchOptions, WorkflowRunFailure, WorkflowRunnableClaimResult, WorkflowRuntime,
+    WorkflowRuntimeEvent, WorkflowRuntimeEventType, WorkflowRuntimeStore,
+    WorkflowStopRequestResult, WorkflowWorkerLease, EXECUTOR_ADAPTER_NODE_PREFIX,
+    PROJECT_CANVAS_WORKFLOW_ID,
 };
 
 const WORKFLOW_WORKER_LEASE_TTL_MS: u64 = 30_000;
@@ -106,6 +117,7 @@ const RECENT_PROJECTS_FILE: &str = "recent_projects.json";
 const BUDGET_CONFIG_FILE: &str = "budget.json";
 const CHAPTER_INDEX_FILE: &str = "chapter_index.json";
 const UI_NODE_PRESETS_FILE: &str = "ui_node_presets.json";
+const APP_NODE_DEFAULTS_FILE: &str = "node_authoring_defaults.json";
 const TEMPLATE_REPOSITORY_SETTINGS_FILE: &str = "template_repository_settings.json";
 const PROVIDER_REFERENCE_GRAPH_LOCK: &str = ".provider-reference-graph";
 const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = OFFICIAL_TEMPLATE_REPOSITORY_URL;
@@ -117,10 +129,66 @@ struct WorkflowSchedulerHandle {
     project_root: PathBuf,
     stop_sender: std::sync::mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
+    start_gate: Option<Arc<WorkflowSchedulerStartGate>>,
+}
+
+struct WorkflowSchedulerStartGate {
+    state: Mutex<WorkflowSchedulerStartState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct WorkflowSchedulerStartState {
+    started: bool,
+    cancelled: bool,
+}
+
+impl WorkflowSchedulerStartGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(WorkflowSchedulerStartState::default()),
+            wake: Condvar::new(),
+        })
+    }
+
+    fn wait(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !state.started && !state.cancelled {
+            state = self
+                .wake
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.started && !state.cancelled
+    }
+
+    fn start(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.started = true;
+        self.wake.notify_all();
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.cancelled = true;
+        self.wake.notify_all();
+    }
 }
 
 impl Drop for WorkflowSchedulerHandle {
     fn drop(&mut self) {
+        if let Some(start_gate) = &self.start_gate {
+            start_gate.cancel();
+        }
         let _ = self.stop_sender.send(());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -128,7 +196,7 @@ impl Drop for WorkflowSchedulerHandle {
     }
 }
 
-/// 桌面前端共享状态。project_root 可由 Avalonia IPC 显式设置，也可用环境变量/当前目录兜底。
+/// 桌面前端共享状态。project_root 只能由显式环境变量或项目生命周期命令设置。
 #[derive(Clone)]
 pub struct AriadneAppState {
     project_root: Arc<Mutex<PathBuf>>,
@@ -136,6 +204,8 @@ pub struct AriadneAppState {
     secret_store: Arc<dyn SecretStore>,
     retrieval_runtime: Arc<Mutex<Option<Arc<ProjectRetrievalRuntime>>>>,
     workflow_scheduler: Arc<Mutex<Option<WorkflowSchedulerHandle>>>,
+    project_activation: Arc<Mutex<()>>,
+    global_settings: Arc<Mutex<()>>,
 }
 
 impl AriadneAppState {
@@ -150,6 +220,8 @@ impl AriadneAppState {
             secret_store,
             retrieval_runtime: Arc::new(Mutex::new(None)),
             workflow_scheduler: Arc::new(Mutex::new(None)),
+            project_activation: Arc::new(Mutex::new(())),
+            global_settings: Arc::new(Mutex::new(())),
         }
     }
 
@@ -172,9 +244,52 @@ impl AriadneAppState {
         &self.app_state_root
     }
 
+    fn lock_project_activation(&self) -> CommandResult<std::sync::MutexGuard<'_, ()>> {
+        self.project_activation
+            .lock()
+            .map_err(|_| CommandError::internal("project activation lock poisoned"))
+    }
+
+    fn lock_global_settings(&self) -> CommandResult<std::sync::MutexGuard<'_, ()>> {
+        self.global_settings
+            .lock()
+            .map_err(|_| CommandError::internal("global settings lock poisoned"))
+    }
+
+    fn prepare_workflow_scheduler(
+        &self,
+        project_root: &Path,
+    ) -> CommandResult<WorkflowSchedulerHandle> {
+        let project_root = project_root.to_path_buf();
+        let retrieval_runtime = Arc::clone(&self.retrieval_runtime);
+        let (stop_sender, stop_receiver) = std::sync::mpsc::channel::<()>();
+        let start_gate = WorkflowSchedulerStartGate::new();
+        let thread_gate = Arc::clone(&start_gate);
+        let scheduler_root = project_root.clone();
+        let secrets = Arc::clone(&self.secret_store);
+        let thread = std::thread::Builder::new()
+            .name("ariadne-workflow-scheduler".to_owned())
+            .spawn(move || {
+                if thread_gate.wait() {
+                    workflow_scheduler_loop(
+                        scheduler_root,
+                        secrets,
+                        retrieval_runtime,
+                        stop_receiver,
+                    );
+                }
+            })
+            .map_err(error_to_string)?;
+        Ok(WorkflowSchedulerHandle {
+            project_root,
+            stop_sender,
+            thread: Some(thread),
+            start_gate: Some(start_gate),
+        })
+    }
+
     fn ensure_workflow_scheduler(&self) -> CommandResult<()> {
         let project_root = canonicalize_initialized_project_root(&self.project_root()?)?;
-        let retrieval_runtime = Arc::clone(&self.retrieval_runtime);
         let mut slot = self
             .workflow_scheduler
             .lock()
@@ -188,21 +303,14 @@ impl AriadneAppState {
         }) {
             return Ok(());
         }
-        drop(slot.take());
-        let (stop_sender, stop_receiver) = std::sync::mpsc::channel::<()>();
-        let scheduler_root = project_root.clone();
-        let secrets = Arc::clone(&self.secret_store);
-        let thread = std::thread::Builder::new()
-            .name("ariadne-workflow-scheduler".to_owned())
-            .spawn(move || {
-                workflow_scheduler_loop(scheduler_root, secrets, retrieval_runtime, stop_receiver);
-            })
-            .map_err(error_to_string)?;
-        *slot = Some(WorkflowSchedulerHandle {
-            project_root,
-            stop_sender,
-            thread: Some(thread),
-        });
+        let scheduler = self.prepare_workflow_scheduler(&project_root)?;
+        let start_gate = scheduler.start_gate.as_ref().map(Arc::clone);
+        let previous = slot.replace(scheduler);
+        drop(slot);
+        drop(previous);
+        if let Some(start_gate) = start_gate {
+            start_gate.start();
+        }
         Ok(())
     }
 
@@ -211,44 +319,109 @@ impl AriadneAppState {
         let project_root = canonicalize_initialized_project_root(&project_root)?;
         crate::config::bind_project_app_state(&project_root, &self.app_state_root)
             .map_err(error_to_string)?;
+        let existing_runtime = self
+            .retrieval_runtime
+            .lock()
+            .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?
+            .as_ref()
+            .filter(|runtime| runtime.project_root() == project_root)
+            .cloned();
+        let runtime = match existing_runtime {
+            Some(runtime) => runtime,
+            None => Arc::new(
+                ProjectRetrievalRuntime::open(&project_root, self.secret_store.as_ref())
+                    .map_err(error_to_string)?,
+            ),
+        };
+        validate_project_activation_recovery(&project_root)?;
+        let scheduler = self.prepare_workflow_scheduler(&project_root)?;
+        self.commit_project_activation(project_root.clone(), runtime, scheduler)?;
+        complete_committed_project_activation(self, &project_root);
+        self.start_committed_workflow_scheduler(&project_root)
+    }
+
+    /// 在同一临界区替换项目 identity 与检索组合根；调用前候选 runtime 必须已就绪。
+    fn commit_project_activation(
+        &self,
+        project_root: PathBuf,
+        runtime: Arc<ProjectRetrievalRuntime>,
+        scheduler: WorkflowSchedulerHandle,
+    ) -> CommandResult<()> {
+        if runtime.project_root() != project_root {
+            return Err(CommandError::conflict(
+                "candidate retrieval runtime belongs to a different project",
+            ));
+        }
+        if scheduler.project_root != project_root {
+            return Err(CommandError::conflict(
+                "candidate workflow scheduler belongs to a different project",
+            ));
+        }
         let mut runtime_slot = self
             .retrieval_runtime
             .lock()
             .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?;
-        if runtime_slot
-            .as_ref()
-            .is_some_and(|runtime| runtime.project_root() == project_root)
-        {
-            let mut locked = self
-                .project_root
-                .lock()
-                .map_err(|_| CommandError::internal("project root lock poisoned"))?;
-            *locked = project_root;
-            drop(locked);
-            drop(runtime_slot);
-            if let Ok(mut scheduler_slot) = self.workflow_scheduler.lock() {
-                drop(scheduler_slot.take());
-            }
-            return Ok(());
-        }
-        let runtime = Arc::new(
-            ProjectRetrievalRuntime::open(&project_root, self.secret_store.as_ref())
-                .map_err(error_to_string)?,
-        );
-        let mut locked = self
+        let mut root_slot = self
             .project_root
             .lock()
             .map_err(|_| CommandError::internal("project root lock poisoned"))?;
-        *locked = project_root;
+        let mut scheduler_slot = self
+            .workflow_scheduler
+            .lock()
+            .map_err(|_| CommandError::internal("workflow scheduler lock poisoned"))?;
+        *root_slot = project_root;
         let previous = runtime_slot.replace(runtime);
-        drop(locked);
+        let previous_scheduler = scheduler_slot.replace(scheduler);
+        drop(root_slot);
         drop(runtime_slot);
-        if let Ok(mut scheduler_slot) = self.workflow_scheduler.lock() {
-            drop(scheduler_slot.take());
-        }
-        // 旧运行时可能仍被已领取的索引任务持有；最后一个 Arc 释放时再停止 sidecar，
-        // 避免项目切换在任务中途杀掉其基础设施。
+        drop(scheduler_slot);
+        drop(previous_scheduler);
         drop(previous);
+        Ok(())
+    }
+
+    fn start_committed_workflow_scheduler(&self, project_root: &Path) -> CommandResult<()> {
+        let project_root = canonicalize_initialized_project_root(project_root)?;
+        let slot = self
+            .workflow_scheduler
+            .lock()
+            .map_err(|_| CommandError::internal("workflow scheduler lock poisoned"))?;
+        let scheduler = slot.as_ref().ok_or_else(|| {
+            CommandError::internal("committed project is missing its workflow scheduler")
+        })?;
+        if scheduler.project_root != project_root {
+            return Err(CommandError::conflict(
+                "committed workflow scheduler belongs to a different project",
+            ));
+        }
+        if let Some(start_gate) = scheduler.start_gate.as_ref() {
+            start_gate.start();
+        }
+        Ok(())
+    }
+
+    /// 清空当前项目及其项目级运行时；桌面“离开项目”必须同步清理后端状态。
+    pub fn clear_project_root(&self) -> CommandResult<()> {
+        let mut runtime_slot = self
+            .retrieval_runtime
+            .lock()
+            .map_err(|_| CommandError::internal("project retrieval runtime lock poisoned"))?;
+        let mut root_slot = self
+            .project_root
+            .lock()
+            .map_err(|_| CommandError::internal("project root lock poisoned"))?;
+        let mut scheduler_slot = self
+            .workflow_scheduler
+            .lock()
+            .map_err(|_| CommandError::internal("workflow scheduler lock poisoned"))?;
+        let runtime = runtime_slot.take();
+        let scheduler = scheduler_slot.take();
+        root_slot.clear();
+        drop(scheduler_slot);
+        drop(root_slot);
+        drop(runtime_slot);
+        drop(scheduler);
+        drop(runtime);
         Ok(())
     }
 
@@ -256,6 +429,8 @@ impl AriadneAppState {
     pub fn retrieval_runtime(&self) -> CommandResult<Arc<ProjectRetrievalRuntime>> {
         let project_root = self.project_root()?;
         let canonical_root = canonicalize_initialized_project_root(&project_root)?;
+        crate::config::bind_project_app_state(&canonical_root, &self.app_state_root)
+            .map_err(error_to_string)?;
         let mut runtime_slot = self
             .retrieval_runtime
             .lock()
@@ -278,10 +453,30 @@ impl AriadneAppState {
 
     /// 配置或凭据变更后原子替换组合根，旧 sidecar 在新运行时就绪后再关闭。
     pub fn reload_retrieval_runtime(&self) -> CommandResult<Arc<ProjectRetrievalRuntime>> {
-        let project_root = canonicalize_initialized_project_root(&self.project_root()?)?;
+        let project_root = self.project_root()?;
+        self.reload_retrieval_runtime_for_project(&project_root)
+    }
+
+    /// 只为调用方固定的项目替换组合根；项目身份漂移时 fail-loud。
+    fn reload_retrieval_runtime_for_project(
+        &self,
+        expected_project_root: &Path,
+    ) -> CommandResult<Arc<ProjectRetrievalRuntime>> {
+        let project_root = canonicalize_initialized_project_root(expected_project_root)?;
+        let current_project_root = canonicalize_initialized_project_root(&self.project_root()?)?;
+        if current_project_root != project_root {
+            return Err(CommandError::conflict(format!(
+                "project activation changed during retrieval reload: expected {}, current {}",
+                project_root.display(),
+                current_project_root.display()
+            )));
+        }
+        crate::config::bind_project_app_state(&project_root, &self.app_state_root)
+            .map_err(error_to_string)?;
         let config = ConfigStore::new(&project_root)
             .load_or_create()
             .map_err(error_to_string)?;
+        let config = effective_retrieval_config(&project_root, config)?;
         let mut runtime_slot = self
             .retrieval_runtime
             .lock()
@@ -358,6 +553,8 @@ impl AriadneAppState {
     ) -> CommandResult<Arc<ProjectRetrievalRuntime>> {
         candidate.validate().map_err(error_to_string)?;
         let project_root = canonicalize_initialized_project_root(&self.project_root()?)?;
+        crate::config::bind_project_app_state(&project_root, &self.app_state_root)
+            .map_err(error_to_string)?;
         let config_store = ConfigStore::new(&project_root);
         let mut runtime_slot = self
             .retrieval_runtime
@@ -370,12 +567,17 @@ impl AriadneAppState {
             ));
         }
 
-        let index_changed =
-            ProjectRetrievalRuntime::index_configuration_changed(expected, &candidate);
+        let expected_runtime = effective_retrieval_config(&project_root, expected.clone())?;
+        let candidate_runtime = effective_retrieval_config(&project_root, candidate.clone())?;
+
+        let index_changed = ProjectRetrievalRuntime::index_configuration_changed(
+            &expected_runtime,
+            &candidate_runtime,
+        );
         let vector_store_requires_exclusive_reopen = runtime_slot.as_ref().is_some_and(|runtime| {
             runtime.vector_enabled()
-                && candidate.rag.vector_store.enabled
-                && !runtime.uses_vector_config(&candidate.rag.vector_store)
+                && candidate_runtime.rag.vector_store.enabled
+                && !runtime.uses_vector_config(&candidate_runtime.rag.vector_store)
         });
         if index_changed
             && runtime_slot
@@ -394,7 +596,7 @@ impl AriadneAppState {
         let runtime = match ProjectRetrievalRuntime::from_config(
             &project_root,
             self.secret_store.as_ref(),
-            &candidate,
+            &candidate_runtime,
             runtime_slot.as_deref(),
         ) {
             Ok(runtime) => Arc::new(runtime),
@@ -403,7 +605,7 @@ impl AriadneAppState {
                     &mut runtime_slot,
                     &project_root,
                     self.secret_store.as_ref(),
-                    expected,
+                    &expected_runtime,
                 )?;
                 return Err(error_to_string(error));
             }
@@ -416,7 +618,7 @@ impl AriadneAppState {
                 &mut runtime_slot,
                 &project_root,
                 self.secret_store.as_ref(),
-                expected,
+                &expected_runtime,
             )?;
             return Err(match rollback_error {
                 Some(rollback_error) => CommandError::io(format!(
@@ -434,7 +636,7 @@ impl AriadneAppState {
                     &mut runtime_slot,
                     &project_root,
                     self.secret_store.as_ref(),
-                    expected,
+                    &expected_runtime,
                 )?;
                 return Err(match rollback_error {
                     Some(rollback_error) => CommandError::io(format!(
@@ -449,6 +651,19 @@ impl AriadneAppState {
         drop(previous);
         Ok(runtime)
     }
+}
+
+fn effective_retrieval_config(
+    project_root: &Path,
+    mut config: ProjectConfig,
+) -> CommandResult<ProjectConfig> {
+    let app_state_root = crate::config::trusted_app_state_for_project(project_root);
+    let settings =
+        AppRuntimeSettingsStore::read_global_or_migrate(app_state_root, Some(project_root))
+            .map_err(error_to_string)?;
+    settings.apply_to_sidecar(&mut config.rag.vector_store.sidecar);
+    config.validate().map_err(error_to_string)?;
+    Ok(config)
 }
 
 fn restore_retrieval_runtime(
@@ -643,13 +858,18 @@ pub struct MiscSectionSettings {
 pub struct PermissionsSettings {
     pub policy: PermissionPolicy,
     #[serde(default)]
-    pub tool_controls: BTreeMap<String, BTreeMap<String, bool>>,
+    pub scoped_policies: BTreeMap<String, Option<PermissionPolicy>>,
+    #[serde(default)]
+    pub tool_controls: BTreeMap<String, BTreeMap<String, Option<bool>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodePresetSettings {
     #[serde(default)]
     pub presets: Vec<NodeTypePreset>,
+    /// 空值只用于兼容旧配置，表示沿用项目默认 LLM Provider。
+    #[serde(default)]
+    pub default_provider_id: String,
     #[serde(default = "default_node_preset_model_id")]
     pub default_model_id: String,
     #[serde(default = "default_node_preset_timeout_ms")]
@@ -662,6 +882,7 @@ impl Default for NodePresetSettings {
     fn default() -> Self {
         Self {
             presets: default_node_type_presets(),
+            default_provider_id: String::new(),
             default_model_id: default_node_preset_model_id(),
             default_timeout_ms: default_node_preset_timeout_ms(),
             default_budget_usd: 1.0,
@@ -673,9 +894,163 @@ impl Default for NodePresetSettings {
 pub struct NodeTypePreset {
     pub node_type: String,
     pub display_name_key: String,
+    /// Provider 与 model_id 共同构成模型身份；空值兼容旧版默认 Provider 语义。
+    #[serde(default)]
+    pub provider_id: String,
     pub model_id: String,
     pub timeout_ms: u64,
     pub budget_usd: f64,
+    /// None 表示继承工作流节点权限默认值。
+    #[serde(default)]
+    pub permission_policy: Option<PermissionPolicy>,
+    /// 工具动作覆盖；None 表示继承权限页的节点类型/全局工具设置。
+    #[serde(default)]
+    pub tool_controls: BTreeMap<String, Option<bool>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AppNodeDefaults {
+    #[serde(default)]
+    presets: Vec<AppNodeTypeDefault>,
+    #[serde(default)]
+    default_provider_id: String,
+    #[serde(default = "default_node_preset_model_id")]
+    default_model_id: String,
+    #[serde(default = "default_node_preset_timeout_ms")]
+    default_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AppNodeTypeDefault {
+    node_type: String,
+    display_name_key: String,
+    #[serde(default)]
+    provider_id: String,
+    model_id: String,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ProjectNodePresetOverrides {
+    #[serde(default)]
+    presets: Vec<ProjectNodeTypeOverride>,
+    #[serde(default)]
+    default_budget_usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ProjectNodeTypeOverride {
+    node_type: String,
+    #[serde(default)]
+    budget_usd: f64,
+    #[serde(default)]
+    permission_policy: Option<PermissionPolicy>,
+    #[serde(default)]
+    tool_controls: BTreeMap<String, Option<bool>>,
+}
+
+impl AppNodeDefaults {
+    fn from_settings(settings: &NodePresetSettings) -> Self {
+        Self {
+            presets: settings
+                .presets
+                .iter()
+                .map(|preset| AppNodeTypeDefault {
+                    node_type: preset.node_type.clone(),
+                    display_name_key: preset.display_name_key.clone(),
+                    provider_id: preset.provider_id.clone(),
+                    model_id: preset.model_id.clone(),
+                    timeout_ms: preset.timeout_ms,
+                })
+                .collect(),
+            default_provider_id: settings.default_provider_id.clone(),
+            default_model_id: settings.default_model_id.clone(),
+            default_timeout_ms: settings.default_timeout_ms,
+        }
+    }
+
+    fn validate(&self) -> CommandResult<()> {
+        if self.default_model_id.trim().is_empty() {
+            return Err(CommandError::validation(
+                "default node model id cannot be empty",
+            ));
+        }
+        if self.default_timeout_ms == 0 {
+            return Err(CommandError::validation(
+                "default node timeout must be positive",
+            ));
+        }
+        let mut node_types = HashSet::new();
+        for preset in &self.presets {
+            if preset.node_type.trim().is_empty()
+                || preset.display_name_key.trim().is_empty()
+                || preset.model_id.trim().is_empty()
+                || preset.timeout_ms == 0
+            {
+                return Err(CommandError::validation(
+                    "global node defaults contain an incomplete preset",
+                ));
+            }
+            if !node_types.insert(preset.node_type.as_str()) {
+                return Err(CommandError::validation(format!(
+                    "duplicate global node default: {}",
+                    preset.node_type
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ProjectNodePresetOverrides {
+    fn from_settings(settings: &NodePresetSettings) -> Self {
+        Self {
+            presets: settings
+                .presets
+                .iter()
+                .map(|preset| ProjectNodeTypeOverride {
+                    node_type: preset.node_type.clone(),
+                    budget_usd: preset.budget_usd,
+                    permission_policy: preset.permission_policy.clone(),
+                    tool_controls: preset.tool_controls.clone(),
+                })
+                .collect(),
+            default_budget_usd: settings.default_budget_usd,
+        }
+    }
+
+    fn merge(self, app: AppNodeDefaults) -> NodePresetSettings {
+        let project = self
+            .presets
+            .into_iter()
+            .map(|preset| (preset.node_type.clone(), preset))
+            .collect::<BTreeMap<_, _>>();
+        NodePresetSettings {
+            presets: app
+                .presets
+                .into_iter()
+                .map(|preset| {
+                    let project = project.get(&preset.node_type);
+                    NodeTypePreset {
+                        node_type: preset.node_type,
+                        display_name_key: preset.display_name_key,
+                        provider_id: preset.provider_id,
+                        model_id: preset.model_id,
+                        timeout_ms: preset.timeout_ms,
+                        budget_usd: project.map_or(0.0, |item| item.budget_usd),
+                        permission_policy: project.and_then(|item| item.permission_policy.clone()),
+                        tool_controls: project
+                            .map(|item| item.tool_controls.clone())
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect(),
+            default_provider_id: app.default_provider_id,
+            default_model_id: app.default_model_id,
+            default_timeout_ms: app.default_timeout_ms,
+            default_budget_usd: self.default_budget_usd,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1075,16 +1450,93 @@ pub fn create_project(
     project_root: String,
     name: Option<String>,
 ) -> CommandResult<ProjectInitReport> {
-    let project_root = PathBuf::from(project_root);
-    std::fs::create_dir_all(&project_root).map_err(error_to_string)?;
-    let _project_mutation = acquire_project_mutation_guard(&project_root, "project_create")?;
-    crate::config::bind_project_app_state(&project_root, state.app_state_root())
-        .map_err(error_to_string)?;
-    let report = initialize_project(&project_root).map_err(error_to_string)?;
-    persist_project_name(&project_root, name.as_deref())?;
-    state.set_project_root(project_root.clone())?;
-    record_recent_project(state.app_state_root(), name, &project_root)?;
+    let _activation = state.lock_project_activation()?;
+    let previous_root = state.project_root()?;
+    let requested_root = absolute_path(Path::new(project_root.trim()));
+    ensure_no_parent_traversal(&requested_root)?;
+    let file_name = requested_root
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CommandError::validation("project root must name a new directory"))?;
+    let parent = requested_root
+        .parent()
+        .ok_or_else(|| CommandError::validation("project root must have a parent directory"))?;
+    validate_existing_project_root(parent)?;
+    let parent = parent.canonicalize().map_err(error_to_string)?;
+    let project_root = parent.join(file_name);
+
+    let _creation_lock =
+        crate::config::store::PathWriteLock::acquire(&project_root).map_err(error_to_string)?;
+    if project_root.exists() {
+        return Err(CommandError::conflict(format!(
+            "project root already exists: {}",
+            project_root.display()
+        )));
+    }
+
+    let published =
+        publish_initialized_project(&project_root, state.app_state_root(), name.as_deref())
+            .map_err(error_to_string)?;
+    let current = match complete_created_project_activation(state, &project_root) {
+        Ok(current) => current,
+        Err(error) => {
+            return Err(rollback_created_project(
+                state,
+                &previous_root,
+                &project_root,
+                published,
+                error,
+            ))
+        }
+    };
+    let mut report = published.commit();
+    report.project_name = current.project_name;
+    report.ready = true;
     Ok(report)
+}
+
+fn complete_created_project_activation(
+    state: &AriadneAppState,
+    project_root: &Path,
+) -> CommandResult<CurrentProjectStatus> {
+    let _project_mutation = acquire_project_mutation_guard(project_root, "project_create")?;
+    activate_initialized_project(state, project_root, None)
+}
+
+fn rollback_created_project(
+    state: &AriadneAppState,
+    previous_root: &Path,
+    project_root: &Path,
+    published: PublishedProjectCreation,
+    mut error: CommandError,
+) -> CommandError {
+    let mut rollback_errors = Vec::new();
+    let cleared = match state.clear_project_root() {
+        Ok(()) => true,
+        Err(rollback_error) => {
+            rollback_errors.push(format!("clear new project state: {rollback_error}"));
+            false
+        }
+    };
+    if cleared {
+        if let Err(rollback_error) = published.rollback() {
+            rollback_errors.push(format!("remove incomplete project: {rollback_error}"));
+        }
+        if !previous_root.as_os_str().is_empty() && previous_root != project_root {
+            if let Err(rollback_error) = activate_initialized_project(state, previous_root, None) {
+                rollback_errors.push(format!("restore previous project: {rollback_error}"));
+            }
+        }
+    }
+    if !rollback_errors.is_empty() {
+        let diagnostic = format!(
+            "{}; project creation rollback also failed: {}",
+            error.diagnostic_text(),
+            rollback_errors.join("; ")
+        );
+        error.diagnostic = Some(diagnostic);
+    }
+    error
 }
 
 pub fn open_project(
@@ -1092,27 +1544,27 @@ pub fn open_project(
     project_root: String,
     name: Option<String>,
 ) -> CommandResult<CurrentProjectStatus> {
-    let project_root = PathBuf::from(project_root);
-    validate_initialized_project_root(&project_root)?;
+    let _activation = state.lock_project_activation()?;
+    let previous_root = state.project_root()?;
+    let project_root = canonicalize_initialized_project_root(Path::new(&project_root))?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "project_open")?;
-    crate::config::bind_project_app_state(&project_root, state.app_state_root())
-        .map_err(error_to_string)?;
-    ensure_project_config(&project_root)?;
-    persist_project_name(&project_root, name.as_deref())?;
-    state.set_project_root(project_root.clone())?;
-    record_recent_project(state.app_state_root(), name, &project_root)?;
-    recover_confirmation_resolution_sagas(&project_root)?;
-    // F2-a：打开时检测空索引并幂等入队 full rebuild，再 resume worker。
-    ensure_index_bootstrap_on_open(&project_root)?;
-    resume_indexing_worker_for_state(state)?;
-    // F10-d：create/lease/spawn 崩溃窗口留下的 Queued/Running 孤儿，打开项目时 claim 并续跑。
-    recover_orphaned_workflow_workers(
-        &project_root,
-        Arc::clone(&state.secret_store),
-        Some(state.retrieval_runtime()?),
-    )?;
-    state.ensure_workflow_scheduler()?;
-    current_project_status(&project_root)
+    let current = match activate_initialized_project(state, &project_root, name.as_deref()) {
+        Ok(current) => current,
+        Err(error) => {
+            return Err(rollback_existing_project_activation(
+                state,
+                &previous_root,
+                &project_root,
+                error,
+            ))
+        }
+    };
+    Ok(current)
+}
+
+pub fn close_project(state: &AriadneAppState) -> CommandResult<()> {
+    let _activation = state.lock_project_activation()?;
+    state.clear_project_root()
 }
 
 pub fn get_current_project(state: &AriadneAppState) -> CommandResult<CurrentProjectStatus> {
@@ -1206,24 +1658,231 @@ pub fn requeue_index_dead_letter(state: &AriadneAppState, event_id: String) -> C
 }
 
 pub fn set_project_root(state: &AriadneAppState, project_root: String) -> CommandResult<()> {
-    let project_root = PathBuf::from(project_root);
-    validate_initialized_project_root(&project_root)?;
+    let _activation = state.lock_project_activation()?;
+    let previous_root = state.project_root()?;
+    let project_root = canonicalize_initialized_project_root(Path::new(&project_root))?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "project_open")?;
+    if let Err(error) = activate_initialized_project(state, &project_root, None) {
+        return Err(rollback_existing_project_activation(
+            state,
+            &previous_root,
+            &project_root,
+            error,
+        ));
+    }
+    Ok(())
+}
+
+fn rollback_existing_project_activation(
+    state: &AriadneAppState,
+    previous_root: &Path,
+    attempted_root: &Path,
+    mut error: CommandError,
+) -> CommandError {
+    if previous_root == attempted_root {
+        return error;
+    }
+
+    let active_root = match state.project_root() {
+        Ok(root) => root,
+        Err(rollback_error) => {
+            error.diagnostic = Some(format!(
+                "{}; project activation rollback could not inspect active root: {rollback_error}",
+                error.diagnostic_text()
+            ));
+            return error;
+        }
+    };
+    if active_root != attempted_root {
+        return error;
+    }
+
+    let mut rollback_errors = Vec::new();
+    if let Err(rollback_error) = state.clear_project_root() {
+        rollback_errors.push(format!("clear attempted project: {rollback_error}"));
+    } else if !previous_root.as_os_str().is_empty() {
+        if let Err(rollback_error) = activate_initialized_project(state, previous_root, None) {
+            rollback_errors.push(format!("restore previous project: {rollback_error}"));
+        }
+    }
+
+    if !rollback_errors.is_empty() {
+        error.diagnostic = Some(format!(
+            "{}; project activation rollback also failed: {}",
+            error.diagnostic_text(),
+            rollback_errors.join("; ")
+        ));
+    }
+    error
+}
+
+fn activate_initialized_project(
+    state: &AriadneAppState,
+    project_root: &Path,
+    name: Option<&str>,
+) -> CommandResult<CurrentProjectStatus> {
+    let project_root = canonicalize_initialized_project_root(project_root)?;
     crate::config::bind_project_app_state(&project_root, state.app_state_root())
         .map_err(error_to_string)?;
-    ensure_project_config(&project_root)?;
-    state.set_project_root(project_root.clone())?;
-    recover_confirmation_resolution_sagas(&project_root)?;
-    ensure_index_bootstrap_on_open(&project_root)?;
-    resume_indexing_worker_for_state(state)?;
-    // F10-d：切换/绑定项目根时同样恢复孤儿 Queued/Running。
-    recover_orphaned_workflow_workers(
-        &project_root,
+    let config_store = ConfigStore::new(&project_root);
+    let original_config = config_store.load_or_create().map_err(error_to_string)?;
+    let mut candidate_config = original_config.clone();
+    if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
+        candidate_config.app.project_name = name.to_owned();
+    }
+    candidate_config.validate().map_err(error_to_string)?;
+
+    let existing_runtime = state
+        .retrieval_runtime
+        .lock()
+        .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?
+        .as_ref()
+        .filter(|runtime| runtime.project_root() == project_root)
+        .cloned();
+    let runtime = match existing_runtime {
+        Some(runtime)
+            if runtime
+                .matches_project_config(&candidate_config)
+                .map_err(error_to_string)? =>
+        {
+            runtime
+        }
+        previous => Arc::new(
+            ProjectRetrievalRuntime::from_config(
+                &project_root,
+                state.secret_store.as_ref(),
+                &candidate_config,
+                previous.as_deref(),
+            )
+            .map_err(error_to_string)?,
+        ),
+    };
+    validate_project_activation_recovery(&project_root)?;
+    let scheduler = state.prepare_workflow_scheduler(&project_root)?;
+
+    // 最近项目和显示名称在切换前完成；失败时只恢复候选文件，不触碰当前 A。
+    let recent_store = recent_project_store(state.app_state_root());
+    let recent_before = recent_store.read_all().map_err(error_to_string)?;
+    let config_changed = candidate_config != original_config;
+    if config_changed {
+        if let Err(error) = config_store.save(&candidate_config) {
+            drop(scheduler);
+            return Err(error_to_string(error));
+        }
+    }
+    let current = CurrentProjectStatus {
+        project_root: project_root.clone(),
+        project_name: if candidate_config.app.project_name.trim().is_empty() {
+            project_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("Ariadne Project")
+                .to_owned()
+        } else {
+            candidate_config.app.project_name.clone()
+        },
+    };
+    if let Err(error) = record_current_project(state.app_state_root(), &current) {
+        let mut diagnostic = error_to_string(error).diagnostic_text().to_owned();
+        if config_changed {
+            if let Err(rollback_error) = config_store.save(&original_config) {
+                diagnostic = format!(
+                    "{diagnostic}; project name rollback failed: {}",
+                    error_to_string(rollback_error).diagnostic_text()
+                );
+            }
+        }
+        drop(scheduler);
+        return Err(CommandError::internal(diagnostic));
+    }
+
+    if let Err(error) =
+        state.commit_project_activation(current.project_root.clone(), runtime, scheduler)
+    {
+        let mut diagnostic = error.diagnostic_text().to_owned();
+        if let Err(rollback_error) = recent_store.write_all(&recent_before) {
+            diagnostic = format!(
+                "{diagnostic}; recent project rollback failed: {}",
+                error_to_string(rollback_error).diagnostic_text()
+            );
+        }
+        if config_changed {
+            if let Err(rollback_error) = config_store.save(&original_config) {
+                diagnostic = format!(
+                    "{diagnostic}; project name rollback failed: {}",
+                    error_to_string(rollback_error).diagnostic_text()
+                );
+            }
+        }
+        return Err(CommandError::internal(diagnostic));
+    }
+
+    complete_committed_project_activation(state, &current.project_root);
+    state.start_committed_workflow_scheduler(&current.project_root)?;
+    Ok(current)
+}
+
+/// 只验证候选恢复存储可读，不领取 lease、不改 saga/outbox 状态。
+fn validate_project_activation_recovery(project_root: &Path) -> CommandResult<()> {
+    let runtime_path = project_root.join(crate::workflow::RUNTIME_DB_FILE);
+    if runtime_path.exists() {
+        let store = SqliteWorkflowRuntimeStore::open(project_root).map_err(error_to_string)?;
+        store
+            .list_recoverable_confirmation_resolutions()
+            .map_err(error_to_string)?;
+        store
+            .list_orphaned_runnable_states(workflow_lease_now_ms()?)
+            .map_err(error_to_string)?;
+    }
+    document_service(project_root)
+        .invalidation_outbox()
+        .pending()
+        .map(|_| ())
+        .map_err(error_to_string)
+}
+
+/// 提交项目身份后启动可重试的恢复动作；恢复失败不再触发跨项目补偿切换。
+fn complete_committed_project_activation(state: &AriadneAppState, project_root: &Path) {
+    let runtime = match state.retrieval_runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[ariadne] project activation runtime recovery deferred: {error}");
+            return;
+        }
+    };
+    let recovery_steps: [(&str, CommandResult<()>); 3] = [
+        (
+            "confirmation saga recovery",
+            recover_confirmation_resolution_sagas(project_root).map(|_| ()),
+        ),
+        (
+            "index bootstrap",
+            ensure_index_bootstrap_on_open(project_root).map(|_| ()),
+        ),
+        (
+            "index worker recovery",
+            resume_indexing_worker_for_project(project_root, Arc::clone(&runtime)),
+        ),
+    ];
+    for (stage, result) in recovery_steps {
+        if let Err(error) = result {
+            eprintln!(
+                "[ariadne] project activation {stage} deferred for {}: {error}",
+                project_root.display()
+            );
+        }
+    }
+    if let Err(error) = recover_orphaned_workflow_workers(
+        project_root,
         Arc::clone(&state.secret_store),
-        Some(state.retrieval_runtime()?),
-    )?;
-    state.ensure_workflow_scheduler()?;
-    Ok(())
+        Some(runtime),
+    ) {
+        eprintln!(
+            "[ariadne] project activation workflow recovery deferred for {}: {error}",
+            project_root.display()
+        );
+    }
 }
 
 pub fn get_works_tree(state: &AriadneAppState) -> CommandResult<WorksTreeNode> {
@@ -1341,7 +2000,7 @@ pub fn export_chapters(
 ) -> CommandResult<CombinedExportReport> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "chapter_export")?;
-    let documents = document_service(&project_root);
+    let documents = configured_document_service(&project_root)?;
     let index = load_chapter_index(&project_root)?;
     export_chapters_combined(
         &documents,
@@ -1361,6 +2020,11 @@ pub fn load_workflow_graph(
     load_workflow_graph_impl(&project_root, workflow_id)
 }
 
+pub fn load_project_canvas(state: &AriadneAppState) -> CommandResult<WorkflowGraphData> {
+    let project_root = project_root_from_state(state, None)?;
+    load_project_canvas_impl(&project_root)
+}
+
 pub fn list_workflow_graphs(state: &AriadneAppState) -> CommandResult<Vec<WorkflowSummary>> {
     let project_root = project_root_from_state(state, None)?;
     list_workflow_graphs_impl(&project_root)
@@ -1377,6 +2041,14 @@ pub fn save_workflow_graph(
 ) -> CommandResult<WorkflowGraphData> {
     let project_root = project_root_from_state(state, None)?;
     save_workflow_graph_impl(&project_root, graph_data)
+}
+
+pub fn save_project_canvas(
+    state: &AriadneAppState,
+    graph_data: WorkflowGraphData,
+) -> CommandResult<WorkflowGraphData> {
+    let project_root = project_root_from_state(state, None)?;
+    save_project_canvas_impl(&project_root, graph_data)
 }
 
 fn load_modify_save_workflow(
@@ -2015,6 +2687,62 @@ pub fn get_app_settings(state: &AriadneAppState) -> CommandResult<AppSettings> {
     get_app_settings_impl(&project_root)
 }
 
+pub fn get_app_runtime_settings(state: &AriadneAppState) -> CommandResult<AppRuntimeSettings> {
+    let _global_settings = state.lock_global_settings()?;
+    let project_root = state.project_root()?;
+    let project_root = (!project_root.as_os_str().is_empty()).then_some(project_root);
+    AppRuntimeSettingsStore::read_global_or_migrate(state.app_state_root(), project_root.as_deref())
+        .map_err(error_to_string)
+}
+
+pub fn save_app_runtime_settings(
+    state: &AriadneAppState,
+    settings: AppRuntimeSettings,
+) -> CommandResult<AppRuntimeSettings> {
+    settings.validate().map_err(error_to_string)?;
+    let _global_settings = state.lock_global_settings()?;
+    let project_root = state.project_root()?;
+    let active_project = if project_root.as_os_str().is_empty() {
+        None
+    } else {
+        let root = canonicalize_initialized_project_root(&project_root)?;
+        crate::config::bind_project_app_state(&root, state.app_state_root())
+            .map_err(error_to_string)?;
+        Some(root)
+    };
+    let _project_mutation = active_project
+        .as_deref()
+        .map(|root| acquire_project_mutation_guard(root, "app_runtime_settings_update"))
+        .transpose()?;
+    let store = AppRuntimeSettingsStore::default_for_app(state.app_state_root());
+    let previous = AppRuntimeSettingsStore::read_global_or_migrate(
+        state.app_state_root(),
+        active_project.as_deref(),
+    )
+    .map_err(error_to_string)?;
+    store.write(&settings).map_err(error_to_string)?;
+
+    if active_project.is_some() {
+        if let Err(error) = state.reload_retrieval_runtime() {
+            let rollback = store.write(&previous).map_err(error_to_string);
+            let runtime_rollback = rollback
+                .as_ref()
+                .map(|_| state.reload_retrieval_runtime())
+                .unwrap_or_else(|rollback_error| Err(rollback_error.clone()));
+            return Err(match (rollback, runtime_rollback) {
+                (Ok(()), Ok(_)) => error,
+                (settings_rollback, runtime_rollback) => CommandError::internal(format!(
+                    "failed to apply app runtime settings: {error}; settings rollback: {}; runtime rollback: {}",
+                    rollback_result_text(settings_rollback),
+                    rollback_result_text(runtime_rollback.map(|_| ()))
+                )),
+            });
+        }
+    }
+
+    Ok(settings)
+}
+
 pub fn save_app_settings(
     state: &AriadneAppState,
     settings: AppSettings,
@@ -2038,6 +2766,9 @@ pub fn save_general_section_settings(
     let config_store = ConfigStore::with_app_state(&project_root, state.app_state_root());
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     apply_app_settings(&mut config, settings.app.app)?;
+    crate::config::ProjectLayout::from_app(&project_root, &config.app)
+        .and_then(|layout| layout.create_configured_directories())
+        .map_err(error_to_string)?;
     commit_general_settings_files(
         &project_root,
         state.app_state_root(),
@@ -2119,6 +2850,11 @@ pub fn save_misc_section_settings(
     let mut candidate = expected.clone();
     candidate.rag = settings.rag.rag;
     candidate.git = settings.git.git;
+    candidate
+        .git
+        .normalize_ignored_paths()
+        .map_err(error_to_string)?;
+    candidate.validate().map_err(error_to_string)?;
     let saved = MiscSectionSettings {
         rag: RagSettings {
             rag: candidate.rag.clone(),
@@ -2195,24 +2931,57 @@ pub fn save_automation_section_settings(
 }
 
 pub fn get_permissions_settings(state: &AriadneAppState) -> CommandResult<PermissionsSettings> {
-    let project_root = project_root_from_state(state, None)?;
-    get_permissions_settings_impl(&project_root)
+    let _global_settings = state.lock_global_settings()?;
+    let active_project = active_project_for_global_settings(state)?;
+    let _project_mutation = active_project
+        .as_deref()
+        .map(|root| acquire_project_mutation_guard(root, "permissions_settings_read"))
+        .transpose()?;
+    let permissions = AppPermissionsStore::read_global_or_migrate(
+        state.app_state_root(),
+        active_project.as_deref(),
+    )
+    .map_err(error_to_string)?;
+    Ok(permissions_settings_from_config(permissions))
 }
 
 pub fn save_permissions_settings(
     state: &AriadneAppState,
     settings: PermissionsSettings,
 ) -> CommandResult<PermissionsSettings> {
-    let project_root = project_root_from_state(state, None)?;
-    let _project_mutation =
-        acquire_project_mutation_guard(&project_root, "permissions_settings_update")?;
-    save_permissions_settings_impl(&project_root, settings)?;
-    get_permissions_settings_impl(&project_root)
+    let _global_settings = state.lock_global_settings()?;
+    let active_project = active_project_for_global_settings(state)?;
+    let _project_mutation = active_project
+        .as_deref()
+        .map(|root| acquire_project_mutation_guard(root, "permissions_settings_update"))
+        .transpose()?;
+    let _provider_references = active_project
+        .as_deref()
+        .map(acquire_provider_reference_graph_guard)
+        .transpose()?;
+    let permissions = permissions_config_from_settings(settings)?;
+    AppPermissionsStore::default_for_app(state.app_state_root())
+        .write(&permissions)
+        .map_err(error_to_string)?;
+    Ok(permissions_settings_from_config(permissions))
+}
+
+fn active_project_for_global_settings(state: &AriadneAppState) -> CommandResult<Option<PathBuf>> {
+    let project_root = state.project_root()?;
+    if project_root.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let project_root = canonicalize_initialized_project_root(&project_root)?;
+    crate::config::bind_project_app_state(&project_root, state.app_state_root())
+        .map_err(error_to_string)?;
+    Ok(Some(project_root))
 }
 
 pub fn get_node_preset_settings(state: &AriadneAppState) -> CommandResult<NodePresetSettings> {
     let project_root = project_root_from_state(state, None)?;
-    get_node_preset_settings_impl(&project_root)
+    crate::config::bind_project_app_state(&project_root, state.app_state_root())
+        .map_err(error_to_string)?;
+    read_node_preset_settings_with_app_state(&project_root, state.app_state_root())
 }
 
 pub fn save_node_preset_settings(
@@ -2220,7 +2989,10 @@ pub fn save_node_preset_settings(
     settings: NodePresetSettings,
 ) -> CommandResult<NodePresetSettings> {
     let project_root = project_root_from_state(state, None)?;
-    save_node_preset_settings_impl(&project_root, settings)
+    crate::config::bind_project_app_state(&project_root, state.app_state_root())
+        .map_err(error_to_string)?;
+    let _global_settings = state.lock_global_settings()?;
+    save_node_preset_settings_with_app_state(&project_root, state.app_state_root(), settings)
 }
 
 pub fn get_node_preset_settings_impl(project_root: &Path) -> CommandResult<NodePresetSettings> {
@@ -2231,9 +3003,18 @@ pub fn save_node_preset_settings_impl(
     project_root: &Path,
     settings: NodePresetSettings,
 ) -> CommandResult<NodePresetSettings> {
+    let app_state_root = crate::config::trusted_app_state_for_project(project_root);
+    save_node_preset_settings_with_app_state(project_root, &app_state_root, settings)
+}
+
+fn save_node_preset_settings_with_app_state(
+    project_root: &Path,
+    app_state_root: &Path,
+    settings: NodePresetSettings,
+) -> CommandResult<NodePresetSettings> {
     let _project_mutation = acquire_project_mutation_guard(project_root, "node_preset_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
-    write_node_preset_settings(project_root, &settings)?;
+    write_node_preset_settings(project_root, app_state_root, &settings)?;
     Ok(settings)
 }
 
@@ -2775,6 +3556,7 @@ pub fn restore_to_new_branch_with_cancellation(
     new_branch: String,
     cancellation: &crate::contracts::ExecutionCancellation,
 ) -> CommandResult<RestoreReport> {
+    let _activation = state.lock_project_activation()?;
     let project_root = project_root_from_state(state, None)?;
     cancellation.check().map_err(CommandError::from)?;
     let documents = document_service(&project_root);
@@ -2791,7 +3573,7 @@ pub fn restore_to_new_branch_with_cancellation(
         let config = ConfigStore::new(&project_root)
             .load_or_create()
             .map_err(error_to_string)?;
-        let policy = git_stage_policy_from_config(&config.git);
+        let policy = git_stage_policy_from_config(&config);
         let mut report = git_service_with_cancellation(&project_root, cancellation)
             .restore_to_new_branch_with_policy(&commit_id, &new_branch, &policy)
             .map_err(error_to_string)?;
@@ -2808,7 +3590,7 @@ pub fn restore_to_new_branch_with_cancellation(
             )
             .map_err(error_to_string)?;
         state
-            .reload_retrieval_runtime()?
+            .reload_retrieval_runtime_for_project(&project_root)?
             .process_outbox_with_cancellation(cancellation)
             .map_err(error_to_string)?;
         report.index_rebuild_required = false;
@@ -2832,7 +3614,13 @@ pub fn restore_to_new_branch_with_cancellation(
 
 pub fn get_provider_config(state: &AriadneAppState) -> CommandResult<ProviderConfigStatus> {
     let project_root = project_root_from_state(state, None)?;
-    get_provider_config_impl(&project_root, state.secret_store.as_ref())
+    crate::config::bind_project_app_state(&project_root, state.app_state_root())
+        .map_err(error_to_string)?;
+    get_provider_config_impl_with_app_state(
+        &project_root,
+        state.app_state_root(),
+        state.secret_store.as_ref(),
+    )
 }
 
 pub fn save_provider_key(
@@ -2868,10 +3656,11 @@ pub fn save_provider_key(
     credentials
         .set_provider_secret(&provider, SecretValue::new(key))
         .map_err(error_to_string)?;
-    let status = match provider_config_status_from_config(
+    let status = match provider_config_status_from_config_with_app_state(
         &project_root,
         config,
         state.secret_store.as_ref(),
+        state.app_state_root(),
     ) {
         Ok(status) => status,
         Err(error) => {
@@ -2932,19 +3721,8 @@ pub fn save_provider_settings(
     let _project_mutation =
         acquire_project_mutation_guard(&project_root, "provider_settings_update")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
-    let expected = ConfigStore::new(&project_root)
-        .load_or_create()
-        .map_err(error_to_string)?;
-    let mut candidate = expected.clone();
-    apply_provider_settings_update(&mut candidate, update)?;
-    let status = provider_config_status_from_config(
-        &project_root,
-        candidate.clone(),
-        state.secret_store.as_ref(),
-    )?;
-    state.commit_retrieval_config(&expected, candidate)?;
-    spawn_indexing_worker_for_state(state)?;
-    Ok(status)
+    let _global_settings = state.lock_global_settings()?;
+    save_global_provider_settings_under_guards(state, &project_root, update)
 }
 
 pub fn save_provider_section_settings(
@@ -2955,12 +3733,8 @@ pub fn save_provider_section_settings(
     let _project_mutation =
         acquire_project_mutation_guard(&project_root, "provider_section_update")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    let _global_settings = state.lock_global_settings()?;
     let provider_id = normalize_provider(&settings.provider.provider_id)?;
-    let expected = ConfigStore::new(&project_root)
-        .load_or_create()
-        .map_err(error_to_string)?;
-    let mut candidate = expected.clone();
-    apply_provider_settings_update(&mut candidate, settings.provider)?;
 
     let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
         .map_err(error_to_string)?;
@@ -2979,10 +3753,10 @@ pub fn save_provider_section_settings(
         None
     };
 
-    let status = match provider_config_status_from_config(
+    let status = match save_global_provider_settings_under_guards(
+        state,
         &project_root,
-        candidate.clone(),
-        state.secret_store.as_ref(),
+        settings.provider,
     ) {
         Ok(status) => status,
         Err(error) => {
@@ -2998,24 +3772,64 @@ pub fn save_provider_section_settings(
             return Err(error);
         }
     };
-
-    if let Err(error) = state.commit_retrieval_config(&expected, candidate) {
-        if let Some(previous) = previous_secret {
-            restore_provider_secret(&credentials, &provider_id, previous).map_err(|rollback| {
-                CommandError::internal(format!(
-                    "provider section commit failed: {error}; key rollback failed: {rollback}"
-                ))
-            })?;
-            state.reload_retrieval_runtime().map_err(|rollback| {
-                CommandError::internal(format!(
-                    "provider section commit failed: {error}; runtime rollback failed: {rollback}"
-                ))
-            })?;
-        }
-        return Err(error);
-    }
-    spawn_indexing_worker_for_state(state)?;
     Ok(status)
+}
+
+fn save_global_provider_settings_under_guards(
+    state: &AriadneAppState,
+    project_root: &Path,
+    update: ProviderSettingsUpdate,
+) -> CommandResult<ProviderConfigStatus> {
+    crate::config::bind_project_app_state(project_root, state.app_state_root())
+        .map_err(error_to_string)?;
+    let global_profile = provider_config_from_update(&update)?;
+    let catalog_store = ProviderCatalogStore::default_for_app(state.app_state_root());
+    // 全局目录读改写、项目提交与失败回滚共享同一把跨进程锁，避免多实例丢更新。
+    let _catalog_lock = catalog_store.lock_exclusive().map_err(error_to_string)?;
+    let previous_catalog = catalog_store.read_unlocked().map_err(error_to_string)?;
+    let mut next_catalog = previous_catalog.clone();
+    next_catalog
+        .upsert(global_profile)
+        .map_err(error_to_string)?;
+    catalog_store
+        .write_unlocked(&next_catalog)
+        .map_err(error_to_string)?;
+
+    let result = (|| -> CommandResult<ProviderConfigStatus> {
+        // 全局目录已切换后重新读取 expected，避免把目录更新误判为项目并发修改。
+        let expected = ConfigStore::with_app_state(project_root, state.app_state_root())
+            .load_or_create()
+            .map_err(error_to_string)?;
+        let mut candidate = expected.clone();
+        apply_provider_settings_update(&mut candidate, update)?;
+        let status = provider_config_status_from_config_with_app_state(
+            project_root,
+            candidate.clone(),
+            state.secret_store.as_ref(),
+            state.app_state_root(),
+        )?;
+        state.commit_retrieval_config(&expected, candidate)?;
+        spawn_indexing_worker_for_state(state)?;
+        Ok(status)
+    })();
+
+    match result {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            let catalog_rollback = catalog_store
+                .write_unlocked(&previous_catalog)
+                .map_err(error_to_string);
+            let runtime_rollback = state.reload_retrieval_runtime().map(|_| ());
+            match (catalog_rollback, runtime_rollback) {
+                (Ok(()), Ok(())) => Err(error),
+                (catalog_result, runtime_result) => Err(CommandError::internal(format!(
+                    "global provider update failed: {error}; catalog rollback: {}; runtime rollback: {}",
+                    rollback_result_text(catalog_result),
+                    rollback_result_text(runtime_result)
+                ))),
+            }
+        }
+    }
 }
 
 pub fn preview_provider_removal(
@@ -3072,6 +3886,10 @@ pub fn remove_provider(
         .providers
         .providers
         .retain(|configured| configured.provider_id != provider);
+    candidate
+        .providers
+        .authorized_provider_ids
+        .remove(&provider);
     clear_provider_defaults(&mut candidate, &provider);
 
     let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
@@ -3079,10 +3897,11 @@ pub fn remove_provider(
     let previous_secret = credentials
         .get_provider_secret(&provider)
         .map_err(error_to_string)?;
-    let mut status = provider_config_status_from_config(
+    let mut status = provider_config_status_from_config_with_app_state(
         &project_root,
         candidate.clone(),
         state.secret_store.as_ref(),
+        state.app_state_root(),
     )?;
     clear_removed_provider_key_status(&mut status, &provider);
 
@@ -3360,19 +4179,80 @@ pub fn install_template_with_cancellation(
     id: String,
     cancellation: &crate::contracts::ExecutionCancellation,
 ) -> CommandResult<TemplateInstallReport> {
-    let project_root = project_root_from_state(state, None)?;
+    let expected_project_root =
+        canonicalize_initialized_project_root(&project_root_from_state(state, None)?)?;
+    install_template_for_active_project(state, request, id, &expected_project_root, cancellation)
+}
+
+pub fn install_template_for_project_with_cancellation(
+    state: &AriadneAppState,
+    request: TemplateRepositoryRequest,
+    id: String,
+    expected_project_root: String,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<TemplateInstallReport> {
+    let expected_project_root =
+        canonicalize_initialized_project_root(Path::new(expected_project_root.trim()))?;
+    install_template_for_active_project(state, request, id, &expected_project_root, cancellation)
+}
+
+fn install_template_for_active_project(
+    state: &AriadneAppState,
+    request: TemplateRepositoryRequest,
+    id: String,
+    expected_project_root: &Path,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<TemplateInstallReport> {
+    ensure_active_project_identity(state, expected_project_root, "before template download")?;
     let manifest = template_client(request, cancellation)?
         .download(&id)
         .map_err(error_to_string)?;
     cancellation.check().map_err(CommandError::from)?;
-    let _project_mutation = acquire_project_mutation_guard(&project_root, "template_install")?;
-    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
-    crate::frontend::install_workflow_template_manifest(
-        manifest,
-        project_root.join("workflows"),
-        false,
-    )
-    .map_err(error_to_string)
+
+    // 项目切换也持有此锁。下载只产生候选 manifest；从身份重验到画布提交完成，
+    // 当前项目不能切换，避免把迟到下载写回已经离开的项目。
+    let _activation = state.lock_project_activation()?;
+    cancellation.check().map_err(CommandError::from)?;
+    ensure_active_project_identity(state, expected_project_root, "at template commit")?;
+    let _project_mutation =
+        acquire_project_mutation_guard(expected_project_root, "template_install")?;
+    let _provider_references = acquire_provider_reference_graph_guard(expected_project_root)?;
+    let layout = project_layout(expected_project_root)?;
+    let report =
+        crate::frontend::install_workflow_template_manifest(manifest, layout.workflows, false)
+            .map_err(error_to_string)?;
+
+    let raw = std::fs::read(&report.manifest_path).map_err(error_to_string)?;
+    let content = std::str::from_utf8(&raw).map_err(|error| {
+        CommandError::serialization(format!("template workflow is not valid UTF-8: {error}"))
+    })?;
+    let source = parse_workflow_file(content)?;
+    source.validate_topology().map_err(error_to_string)?;
+    let (mut canvas, canvas_revision) =
+        load_workflow_definition_with_revision(expected_project_root, None)?;
+    normalize_project_canvas_identity(&mut canvas);
+    if merge_workflow_into_project_canvas(&mut canvas, source, content_revision_hash(&raw)) {
+        validate_workflow_execution_contracts(&canvas).map_err(error_to_string)?;
+        let mut graph = workflow_to_graph(canvas);
+        graph.expected_revision = (!canvas_revision.is_empty()).then_some(canvas_revision);
+        save_workflow_graph_locked(expected_project_root, graph)?;
+    }
+    Ok(report)
+}
+
+fn ensure_active_project_identity(
+    state: &AriadneAppState,
+    expected_project_root: &Path,
+    boundary: &str,
+) -> CommandResult<()> {
+    let active_project_root =
+        canonicalize_initialized_project_root(&project_root_from_state(state, None)?)?;
+    if active_project_root == expected_project_root {
+        return Ok(());
+    }
+    Err(CommandError::conflict(format!(
+        "active project changed {boundary}"
+    )))
 }
 
 pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<BackendDiagnosticsReport> {
@@ -3527,8 +4407,7 @@ fn provider_capability_config_diagnostic_item(
 pub fn default_project_root() -> PathBuf {
     std::env::var_os(DEFAULT_PROJECT_ENV)
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_default()
 }
 
 pub fn default_app_state_root() -> PathBuf {
@@ -3549,10 +4428,11 @@ pub fn default_secret_store() -> Arc<dyn SecretStore> {
 
 pub fn get_document_tree_impl(project_root: &Path) -> CommandResult<DocumentTreeNode> {
     validate_project_root(project_root)?;
+    let layout = project_layout(project_root)?;
     let roots = [
         project_root.join("planning"),
-        project_root.join("documents"),
-        project_root.join("workflows"),
+        layout.documents,
+        layout.workflows,
     ];
     let mut children = Vec::new();
     for root in roots {
@@ -3821,16 +4701,15 @@ fn spawn_indexing_worker_for_state(state: &AriadneAppState) -> CommandResult<()>
     Ok(())
 }
 
-/// 项目打开/切换后的产品恢复入口，确保向量链使用 state 中的可信凭据。
-fn resume_indexing_worker_for_state(state: &AriadneAppState) -> CommandResult<()> {
-    let project_root = state.project_root()?;
-    let runtime = state.retrieval_runtime()?;
-    let Some(worker_key) = register_indexing_worker(&project_root) else {
+fn resume_indexing_worker_for_project(
+    project_root: &Path,
+    runtime: Arc<ProjectRetrievalRuntime>,
+) -> CommandResult<()> {
+    let Some(worker_key) = register_indexing_worker(project_root) else {
         return Ok(());
     };
-    let documents = document_service(&project_root);
-    let project_mutation = match acquire_project_mutation_guard(&project_root, "indexing_recovery")
-    {
+    let documents = document_service(project_root);
+    let project_mutation = match acquire_project_mutation_guard(project_root, "indexing_recovery") {
         Ok(project_mutation) => project_mutation,
         Err(error) => {
             unregister_indexing_worker(&worker_key);
@@ -3842,7 +4721,7 @@ fn resume_indexing_worker_for_state(state: &AriadneAppState) -> CommandResult<()
         return Err(error_to_string(error));
     }
     drop(project_mutation);
-    spawn_registered_indexing_worker_with_runtime(project_root, worker_key, runtime);
+    spawn_registered_indexing_worker_with_runtime(project_root.to_path_buf(), worker_key, runtime);
     Ok(())
 }
 
@@ -3924,46 +4803,82 @@ pub fn load_workflow_graph_impl(
     Ok(graph)
 }
 
-pub fn list_workflow_graphs_impl(project_root: &Path) -> CommandResult<Vec<WorkflowSummary>> {
+/// 桌面工作区的唯一画布入口。旧工作流文件和模板 manifest 只在这里被并入规范画布，
+/// 因而加载、保存、运行不再各自维护“当前工作流”选择状态。
+pub fn load_project_canvas_impl(project_root: &Path) -> CommandResult<WorkflowGraphData> {
     validate_project_root(project_root)?;
-    let workflows_root = absolute_path(&project_root.join("workflows"));
+    let _project_mutation = acquire_project_mutation_guard(project_root, "project_canvas_load")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
+    load_project_canvas_locked(project_root)
+}
+
+fn load_project_canvas_locked(project_root: &Path) -> CommandResult<WorkflowGraphData> {
+    let (mut canvas, canvas_revision) = load_workflow_definition_with_revision(project_root, None)?;
+    let previous_id = canvas.id.as_str().to_owned();
+    let previous_name = canvas.name.clone();
+    normalize_project_canvas_identity(&mut canvas);
+    let mut changed = previous_id != canvas.id.as_str() || previous_name != canvas.name;
+
+    let workflows_root = absolute_path(&project_layout(project_root)?.workflows);
     reject_symlink_root(&workflows_root)?;
-    if !workflows_root.exists() {
-        return Ok(vec![WorkflowSummary {
-            workflow_id: "default".to_owned(),
-            name: "Default Workflow".to_owned(),
-            path: "workflows/default.json".to_owned(),
-            node_count: 0,
-            edge_count: 0,
-        }]);
+    if workflows_root.exists() {
+        let canonical_path =
+            workflow_path(project_root, Some(PROJECT_CANVAS_WORKFLOW_ID.to_owned()))?;
+        let mut paths = workflow_json_paths(&workflows_root)?;
+        paths.sort();
+        for path in paths {
+            ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
+            if path == canonical_path {
+                continue;
+            }
+            let raw = std::fs::read(&path).map_err(error_to_string)?;
+            let content = std::str::from_utf8(&raw).map_err(|error| {
+                CommandError::serialization(format!(
+                    "workflow file '{}' is not valid UTF-8: {error}",
+                    path.display()
+                ))
+            })?;
+            let source = parse_workflow_file(content)?;
+            source.validate_topology().map_err(error_to_string)?;
+            changed |= merge_workflow_into_project_canvas(
+                &mut canvas,
+                source,
+                content_revision_hash(&raw),
+            );
+        }
     }
 
-    let mut paths = workflow_json_paths(&workflows_root)?;
-    paths.sort();
-    let mut summaries = Vec::new();
-    for path in paths {
-        ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
-        let content = std::fs::read_to_string(&path).map_err(error_to_string)?;
-        let workflow = parse_workflow_file(&content)?;
-        let workflow_id = workflow.id.as_str().to_owned();
-        summaries.push(WorkflowSummary {
-            workflow_id,
-            name: workflow.name,
-            path: relative_id(project_root, &path)?,
-            node_count: workflow.nodes.len(),
-            edge_count: workflow.edges.len(),
-        });
+    if changed {
+        validate_workflow_execution_contracts(&canvas).map_err(error_to_string)?;
+        let mut graph = workflow_to_graph(canvas);
+        graph.expected_revision = (!canvas_revision.is_empty()).then_some(canvas_revision);
+        return save_workflow_graph_locked(project_root, graph);
     }
-    if summaries.is_empty() {
-        summaries.push(WorkflowSummary {
-            workflow_id: "default".to_owned(),
-            name: "Default Workflow".to_owned(),
-            path: "workflows/default.json".to_owned(),
-            node_count: 0,
-            edge_count: 0,
-        });
-    }
-    Ok(summaries)
+
+    let mut graph = workflow_to_graph(canvas);
+    graph.content_revision = Some(canvas_revision);
+    Ok(graph)
+}
+
+pub fn save_project_canvas_impl(
+    project_root: &Path,
+    mut graph_data: WorkflowGraphData,
+) -> CommandResult<WorkflowGraphData> {
+    graph_data.workflow_id = PROJECT_CANVAS_WORKFLOW_ID.to_owned();
+    save_workflow_graph_impl(project_root, graph_data)
+}
+
+pub fn list_workflow_graphs_impl(project_root: &Path) -> CommandResult<Vec<WorkflowSummary>> {
+    validate_project_root(project_root)?;
+    let canvas = load_project_canvas_impl(project_root)?;
+    let path = workflow_path(project_root, Some(PROJECT_CANVAS_WORKFLOW_ID.to_owned()))?;
+    Ok(vec![WorkflowSummary {
+        workflow_id: canvas.workflow_id,
+        name: canvas.name,
+        path: relative_id(project_root, &path)?,
+        node_count: canvas.nodes.len(),
+        edge_count: canvas.edges.len(),
+    }])
 }
 
 pub fn save_workflow_graph_impl(
@@ -3973,6 +4888,13 @@ pub fn save_workflow_graph_impl(
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "workflow_graph_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
+    save_workflow_graph_locked(project_root, graph_data)
+}
+
+fn save_workflow_graph_locked(
+    project_root: &Path,
+    graph_data: WorkflowGraphData,
+) -> CommandResult<WorkflowGraphData> {
     let expected_revision = graph_data.expected_revision.clone();
     let workflow = graph_to_workflow(graph_data)?;
     validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
@@ -4055,6 +4977,406 @@ struct PreparedWorkflowRun {
     workflow: WorkflowDefinition,
     document_root: PathBuf,
     retrieval_runtime: Option<Arc<ProjectRetrievalRuntime>>,
+    dependency_plan: WorkflowRuntimeDependencyPlan,
+}
+
+struct WorkflowRuntimeDependencyPlan {
+    workflow: WorkflowExecutionDependencySet,
+    project_config: ProjectConfig,
+    node_presets: NodePresetSettings,
+    llm_execution: WorkflowLlmExecutionPlan,
+    executor_adapters: ExecutorAdapterExecutionPlan,
+    executor_adapter_llm_providers: BTreeMap<String, OpenAiCompatibleLlmProvider>,
+    credential_generations: BTreeMap<String, String>,
+    requires_project_retrieval: bool,
+    requires_web_search: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkflowLlmRoute {
+    provider_id: String,
+    model_id: String,
+}
+
+const FROZEN_WORKFLOW_DEPENDENCY_PLAN_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct FrozenWorkflowRuntimeDependencyPlan {
+    version: u32,
+    workflow: WorkflowExecutionDependencySet,
+    project_config: ProjectConfig,
+    node_presets: NodePresetSettings,
+    llm_node_routes: BTreeMap<String, WorkflowLlmRoute>,
+    executor_adapter_manifests: Vec<LoadedSkillManifest>,
+    credential_generations: BTreeMap<String, String>,
+    requires_project_retrieval: bool,
+    requires_web_search: bool,
+}
+
+struct WorkflowLlmExecutionPlan {
+    node_routes: BTreeMap<String, WorkflowLlmRoute>,
+    providers: BTreeMap<String, OpenAiCompatibleLlmProvider>,
+}
+
+fn compile_workflow_runtime_dependency_plan(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    workflow: &WorkflowDefinition,
+) -> CommandResult<WorkflowRuntimeDependencyPlan> {
+    let dependencies =
+        WorkflowExecutionDependencySet::compile(workflow).map_err(error_to_string)?;
+    let adapter_discovery_guard = if dependencies.uses_executor_adapters() {
+        Some(acquire_project_mutation_guard(
+            project_root,
+            "executor_adapter_discovery",
+        )?)
+    } else {
+        None
+    };
+    let project_config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let executor_adapters = compile_executor_adapter_execution_plan(
+        project_root,
+        &project_config,
+        dependencies.executor_adapter_skill_ids(),
+    )?;
+    let executor_adapter_llm_providers = resolve_executor_adapter_llm_providers(
+        project_root,
+        &project_config,
+        &executor_adapters,
+        &ExecutorAdapterLlmProviderSource::ProjectSecrets(secrets),
+    )?;
+    drop(adapter_discovery_guard);
+
+    let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls.clone());
+    let node_presets = read_node_preset_settings(project_root)?;
+    let llm_execution = compile_workflow_llm_execution_plan(
+        project_root,
+        secrets,
+        workflow,
+        &project_config,
+        &node_presets,
+    )?;
+    let requires_project_retrieval = workflow_requires_project_retrieval(
+        &dependencies,
+        &tool_controls,
+        &node_presets,
+        executor_adapters.uses_llm(),
+    );
+    let requires_web_search = workflow_requires_web_search(
+        &dependencies,
+        &tool_controls,
+        &project_config.permissions,
+        &node_presets,
+        executor_adapters.uses_llm(),
+    );
+    let credential_generations = workflow_dependency_credential_generations(
+        project_root,
+        secrets,
+        &project_config,
+        &llm_execution,
+        &executor_adapters,
+        requires_project_retrieval,
+        requires_web_search,
+    )?;
+    Ok(WorkflowRuntimeDependencyPlan {
+        workflow: dependencies,
+        project_config,
+        node_presets,
+        llm_execution,
+        executor_adapters,
+        executor_adapter_llm_providers,
+        credential_generations,
+        requires_project_retrieval,
+        requires_web_search,
+    })
+}
+
+fn freeze_workflow_runtime_dependency_plan(
+    plan: &WorkflowRuntimeDependencyPlan,
+) -> FrozenWorkflowRuntimeDependencyPlan {
+    let mut project_config = plan.project_config.clone();
+    for provider in &mut project_config.providers.providers {
+        provider.api_key = None;
+    }
+    FrozenWorkflowRuntimeDependencyPlan {
+        version: FROZEN_WORKFLOW_DEPENDENCY_PLAN_VERSION,
+        workflow: plan.workflow.clone(),
+        project_config,
+        node_presets: plan.node_presets.clone(),
+        llm_node_routes: plan.llm_execution.node_routes.clone(),
+        executor_adapter_manifests: plan.executor_adapters.manifests().to_vec(),
+        credential_generations: plan.credential_generations.clone(),
+        requires_project_retrieval: plan.requires_project_retrieval,
+        requires_web_search: plan.requires_web_search,
+    }
+}
+
+fn materialize_frozen_workflow_runtime_dependency_plan(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    workflow: &WorkflowDefinition,
+    value: &Value,
+) -> CommandResult<WorkflowRuntimeDependencyPlan> {
+    let frozen = serde_json::from_value::<FrozenWorkflowRuntimeDependencyPlan>(value.clone())
+        .map_err(error_to_string)?;
+    if frozen.version != FROZEN_WORKFLOW_DEPENDENCY_PLAN_VERSION {
+        return Err(CommandError::legacy_run(format!(
+            "unsupported frozen workflow dependency plan version: {}",
+            frozen.version
+        )));
+    }
+    frozen.project_config.validate().map_err(error_to_string)?;
+    if frozen
+        .project_config
+        .providers
+        .providers
+        .iter()
+        .any(|provider| provider.api_key.is_some())
+    {
+        return Err(CommandError::permission(
+            "frozen workflow dependency plan must not contain project SecretRef values",
+        ));
+    }
+    let dependencies =
+        WorkflowExecutionDependencySet::compile(workflow).map_err(error_to_string)?;
+    if dependencies != frozen.workflow {
+        return Err(CommandError::conflict(
+            "frozen workflow dependency set does not match the prepared workflow",
+        ));
+    }
+
+    let credential_scope =
+        ProjectCredentialScope::new(project_root, secrets).map_err(error_to_string)?;
+    for (provider_id, expected_generation) in &frozen.credential_generations {
+        let actual_generation = credential_scope
+            .provider_secret_generation(provider_id)
+            .map_err(error_to_string)?;
+        if &actual_generation != expected_generation {
+            return Err(CommandError::conflict(format!(
+                "provider credential generation changed after workflow preparation: {provider_id}"
+            )));
+        }
+    }
+
+    let executor_adapters =
+        ExecutorAdapterExecutionPlan::from_frozen_manifests(frozen.executor_adapter_manifests)
+            .map_err(error_to_string)?;
+    let frozen_skill_ids = executor_adapters
+        .manifests()
+        .iter()
+        .map(|loaded| loaded.manifest.skill_id.clone())
+        .collect::<BTreeSet<_>>();
+    if &frozen_skill_ids != dependencies.executor_adapter_skill_ids() {
+        return Err(CommandError::conflict(
+            "frozen ExecutorAdapter manifests do not match workflow dependencies",
+        ));
+    }
+    let executor_adapter_llm_providers = resolve_executor_adapter_llm_providers(
+        project_root,
+        &frozen.project_config,
+        &executor_adapters,
+        &ExecutorAdapterLlmProviderSource::ProjectSecrets(secrets),
+    )?;
+    let llm_execution = materialize_frozen_workflow_llm_execution_plan(
+        project_root,
+        secrets,
+        workflow,
+        &frozen.project_config,
+        frozen.llm_node_routes,
+    )?;
+
+    let tool_controls =
+        normalize_tool_controls(frozen.project_config.permissions.tool_controls.clone());
+    let requires_project_retrieval = workflow_requires_project_retrieval(
+        &dependencies,
+        &tool_controls,
+        &frozen.node_presets,
+        executor_adapters.uses_llm(),
+    );
+    let requires_web_search = workflow_requires_web_search(
+        &dependencies,
+        &tool_controls,
+        &frozen.project_config.permissions,
+        &frozen.node_presets,
+        executor_adapters.uses_llm(),
+    );
+    if requires_project_retrieval != frozen.requires_project_retrieval
+        || requires_web_search != frozen.requires_web_search
+    {
+        return Err(CommandError::conflict(
+            "frozen workflow dependency flags do not match the frozen configuration",
+        ));
+    }
+
+    Ok(WorkflowRuntimeDependencyPlan {
+        workflow: dependencies,
+        project_config: frozen.project_config,
+        node_presets: frozen.node_presets,
+        llm_execution,
+        executor_adapters,
+        executor_adapter_llm_providers,
+        credential_generations: frozen.credential_generations,
+        requires_project_retrieval,
+        requires_web_search,
+    })
+}
+
+fn materialize_frozen_workflow_llm_execution_plan(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    workflow: &WorkflowDefinition,
+    project_config: &ProjectConfig,
+    node_routes: BTreeMap<String, WorkflowLlmRoute>,
+) -> CommandResult<WorkflowLlmExecutionPlan> {
+    let expected_node_ids = workflow
+        .nodes
+        .iter()
+        .filter(|node| is_llm_workflow_node_type(&node.type_name))
+        .map(|node| node.id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let actual_node_ids = node_routes.keys().cloned().collect::<BTreeSet<_>>();
+    if expected_node_ids != actual_node_ids {
+        return Err(CommandError::conflict(
+            "frozen LLM node routes do not match the prepared workflow",
+        ));
+    }
+
+    let mut providers = BTreeMap::new();
+    for route in node_routes.values() {
+        let provider_config = project_config
+            .providers
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == route.provider_id)
+            .ok_or_else(|| {
+                CommandError::not_found(format!(
+                    "frozen LLM route references an unconfigured provider: {}",
+                    route.provider_id
+                ))
+            })?;
+        if !provider_config.enabled {
+            return Err(CommandError::validation(format!(
+                "frozen LLM route references a disabled provider: {}",
+                route.provider_id
+            )));
+        }
+        let model = provider_config
+            .models
+            .iter()
+            .find(|model| model.model_id == route.model_id)
+            .ok_or_else(|| {
+                CommandError::not_found(format!(
+                    "frozen LLM route references an unconfigured model: {}/{}",
+                    route.provider_id, route.model_id
+                ))
+            })?;
+        if !matches!(
+            model.capability,
+            ProviderCapability::Llm | ProviderCapability::ToolUse
+        ) {
+            return Err(CommandError::validation(format!(
+                "frozen LLM route model is not LLM-capable: {}/{}",
+                route.provider_id, route.model_id
+            )));
+        }
+        if !providers.contains_key(&route.provider_id) {
+            let api_key = provider_api_key(project_root, secrets, provider_config)?;
+            providers.insert(
+                route.provider_id.clone(),
+                OpenAiCompatibleLlmProvider::new(provider_config.clone(), api_key)
+                    .map_err(error_to_string)?,
+            );
+        }
+    }
+    Ok(WorkflowLlmExecutionPlan {
+        node_routes,
+        providers,
+    })
+}
+
+fn workflow_dependency_credential_generations(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    project_config: &ProjectConfig,
+    llm_execution: &WorkflowLlmExecutionPlan,
+    executor_adapters: &ExecutorAdapterExecutionPlan,
+    requires_project_retrieval: bool,
+    requires_web_search: bool,
+) -> CommandResult<BTreeMap<String, String>> {
+    let mut provider_ids = llm_execution
+        .providers
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    provider_ids.extend(executor_adapters.llm_provider_models().keys().cloned());
+    if requires_web_search {
+        provider_ids.insert(select_web_search_provider(&project_config.providers)?.provider_id);
+    }
+    if requires_project_retrieval && project_config.rag.vector_store.enabled {
+        provider_ids.insert(provider_id_for_capability(
+            project_config,
+            project_config
+                .providers
+                .default_embedding_provider_id
+                .as_deref(),
+            ProviderCapability::Embedding,
+            "embedding",
+        )?);
+    }
+    if requires_project_retrieval && project_config.rag.reranker_enabled {
+        provider_ids.insert(provider_id_for_capability(
+            project_config,
+            project_config
+                .providers
+                .default_reranker_provider_id
+                .as_deref(),
+            ProviderCapability::Reranker,
+            "reranker",
+        )?);
+    }
+    let scope = ProjectCredentialScope::new(project_root, secrets).map_err(error_to_string)?;
+    provider_ids
+        .into_iter()
+        .map(|provider_id| {
+            let generation = scope
+                .provider_secret_generation(&provider_id)
+                .map_err(error_to_string)?;
+            Ok((provider_id, generation))
+        })
+        .collect()
+}
+
+fn provider_id_for_capability(
+    project_config: &ProjectConfig,
+    default_provider_id: Option<&str>,
+    capability: ProviderCapability,
+    role: &str,
+) -> CommandResult<String> {
+    let provider = default_provider_id
+        .and_then(|provider_id| {
+            project_config
+                .providers
+                .providers
+                .iter()
+                .find(|provider| provider.provider_id == provider_id)
+        })
+        .or_else(|| {
+            project_config.providers.providers.iter().find(|provider| {
+                provider.enabled
+                    && provider
+                        .models
+                        .iter()
+                        .any(|model| model.capability == capability)
+            })
+        })
+        .ok_or_else(|| {
+            CommandError::not_found(format!(
+                "no enabled {role} provider is configured for frozen workflow dependencies"
+            ))
+        })?;
+    Ok(provider.provider_id.clone())
 }
 
 fn prepare_workflow_run_state(
@@ -4086,12 +5408,28 @@ fn prepare_workflow_run_state(
     }
     validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
-    let needs_retrieval = workflow_requires_project_retrieval(project_root, &workflow)?;
-    let retrieval_runtime = if needs_retrieval {
+    let dependency_plan =
+        compile_workflow_runtime_dependency_plan(project_root, secrets, &workflow)?;
+    let retrieval_runtime = if dependency_plan.requires_project_retrieval {
         Some(match retrieval_runtime {
-            Some(runtime) => runtime,
+            Some(runtime)
+                if runtime
+                    .matches_project_config(&dependency_plan.project_config)
+                    .map_err(error_to_string)? =>
+            {
+                runtime
+            }
+            Some(_) => return Err(CommandError::conflict(
+                "shared project retrieval runtime does not match workflow preflight configuration",
+            )),
             None => Arc::new(
-                ProjectRetrievalRuntime::open(project_root, secrets).map_err(error_to_string)?,
+                ProjectRetrievalRuntime::from_config(
+                    project_root,
+                    secrets,
+                    &dependency_plan.project_config,
+                    None,
+                )
+                .map_err(error_to_string)?,
             ),
         })
     } else {
@@ -4099,12 +5437,16 @@ fn prepare_workflow_run_state(
     };
     let mut runtime = WorkflowRuntime::new(&workflow, run_id).map_err(error_to_string)?;
     runtime.state.prepared_workflow = Some(workflow.clone());
+    runtime.state.prepared_dependency_plan = Some(
+        serde_json::to_value(freeze_workflow_runtime_dependency_plan(&dependency_plan))
+            .map_err(error_to_string)?,
+    );
     runtime.state.start_node_id = start_node_id.as_deref().map(NodeId::from);
     preflight_workflow_runtime_dependencies(
         project_root,
         &document_root,
         secrets,
-        &workflow,
+        &dependency_plan,
         retrieval_runtime.as_deref(),
     )?;
     runtime.state.structured_events.push(WorkflowRuntimeEvent {
@@ -4120,6 +5462,7 @@ fn prepare_workflow_run_state(
         workflow,
         document_root,
         retrieval_runtime,
+        dependency_plan,
     })
 }
 
@@ -4127,19 +5470,21 @@ fn preflight_workflow_runtime_dependencies(
     project_root: &Path,
     document_root: &Path,
     secrets: &dyn SecretStore,
-    workflow: &WorkflowDefinition,
+    dependency_plan: &WorkflowRuntimeDependencyPlan,
     retrieval_runtime: Option<&ProjectRetrievalRuntime>,
 ) -> CommandResult<()> {
-    std::fs::create_dir_all(document_root.join("documents")).map_err(error_to_string)?;
+    crate::config::ProjectLayout::from_app(project_root, &dependency_plan.project_config.app)
+        .and_then(|layout| layout.create_configured_directories())
+        .map_err(error_to_string)?;
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
     SqliteCostLedger::open(project_root).map_err(error_to_string)?;
-    if workflow_requires_default_llm_provider(workflow) {
-        llm_runtime(project_root, secrets)?;
-    }
-    if workflow_requires_project_retrieval(project_root, workflow)? {
+    if dependency_plan.requires_project_retrieval {
         retrieval_runtime.ok_or_else(|| {
             CommandError::internal("search-capable workflow preflight is missing retrieval runtime")
         })?;
+    }
+    if dependency_plan.requires_web_search {
+        web_search_runtime_for_config(project_root, secrets, &dependency_plan.project_config)?;
     }
     Ok(())
 }
@@ -4154,16 +5499,23 @@ fn run_workflow_impl_with_run_id(
     let _project_mutation = acquire_project_mutation_guard(project_root, "workflow_execution")?;
     let prepared =
         prepare_workflow_run_state(project_root, secrets, None, &request, run_id.clone())?;
-    let retrieval_runtime = prepared.retrieval_runtime.clone();
-    let mut runtime = WorkflowRuntime::from_state(prepared.state);
+    let PreparedWorkflowRun {
+        state,
+        workflow,
+        document_root,
+        retrieval_runtime,
+        dependency_plan,
+    } = prepared;
+    let mut runtime = WorkflowRuntime::from_state(state);
     let status = execute_workflow_runtime(
         WorkflowExecutionContext {
             project_root,
-            document_root: &prepared.document_root,
+            document_root: &document_root,
             secrets,
             retrieval_runtime,
+            dependency_plan: Some(dependency_plan),
         },
-        &prepared.workflow,
+        &workflow,
         &mut runtime,
         None,
         crate::contracts::ExecutionCancellation::new(),
@@ -4207,6 +5559,17 @@ fn continue_workflow_run_impl(
         &workflow,
         start_node_id.as_ref().map(NodeId::as_str),
     )?;
+    let dependency_value = state.prepared_dependency_plan.as_ref().ok_or_else(|| {
+        CommandError::legacy_run(format!(
+            "legacy run snapshot lacks prepared_dependency_plan for {workflow_id}/{run_id}; cannot safely resume from mutable project configuration"
+        ))
+    })?;
+    let dependency_plan = materialize_frozen_workflow_runtime_dependency_plan(
+        project_root,
+        secrets,
+        &workflow,
+        dependency_value,
+    )?;
     let mut runtime = WorkflowRuntime::from_state(state);
     let status = execute_workflow_runtime(
         WorkflowExecutionContext {
@@ -4214,6 +5577,7 @@ fn continue_workflow_run_impl(
             document_root: &document_root,
             secrets,
             retrieval_runtime,
+            dependency_plan: Some(dependency_plan),
         },
         &workflow,
         &mut runtime,
@@ -4258,13 +5622,28 @@ fn workflow_for_run_state(
 pub fn register_executor_adapters_for_project(
     external: &mut RoutedExternalNodeExecutor,
     project_root: &Path,
+    required_skill_ids: &BTreeSet<String>,
     provider: OpenAiCompatibleLlmProvider,
     ledger: Arc<SqliteCostLedger>,
 ) -> CommandResult<Vec<String>> {
+    let _project_mutation =
+        acquire_project_mutation_guard(project_root, "executor_adapter_discovery")?;
+    let project_config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let plan =
+        compile_executor_adapter_execution_plan(project_root, &project_config, required_skill_ids)?;
+    let llm_providers = resolve_executor_adapter_llm_providers(
+        project_root,
+        &project_config,
+        &plan,
+        &ExecutorAdapterLlmProviderSource::Single(provider),
+    )?;
     register_executor_adapters_for_project_with_search(
         external,
-        project_root,
-        ExecutorAdapterLlmProviderSource::Single(provider),
+        &project_config,
+        plan,
+        llm_providers,
         ledger,
         None,
         None,
@@ -4279,11 +5658,11 @@ enum ExecutorAdapterLlmProviderSource<'a> {
 fn resolve_executor_adapter_llm_providers(
     project_root: &Path,
     project_config: &ProjectConfig,
-    manifests: &[crate::skills::LoadedSkillManifest],
+    plan: &ExecutorAdapterExecutionPlan,
     source: &ExecutorAdapterLlmProviderSource<'_>,
 ) -> CommandResult<BTreeMap<String, OpenAiCompatibleLlmProvider>> {
     let mut resolved = BTreeMap::new();
-    for loaded in manifests {
+    for loaded in plan.manifests() {
         let crate::skills::SkillExecutorConfig::Llm(config) = &loaded.manifest.executor else {
             continue;
         };
@@ -4359,10 +5738,25 @@ fn resolve_executor_adapter_llm_providers(
     Ok(resolved)
 }
 
+fn compile_executor_adapter_execution_plan(
+    project_root: &Path,
+    project_config: &ProjectConfig,
+    required_skill_ids: &BTreeSet<String>,
+) -> CommandResult<ExecutorAdapterExecutionPlan> {
+    if required_skill_ids.is_empty() {
+        return Ok(ExecutorAdapterExecutionPlan::empty());
+    }
+    let layout = crate::config::ProjectLayout::from_app(project_root, &project_config.app)
+        .map_err(error_to_string)?;
+    let loader = SkillLoader::new().with_project_root(layout.skills);
+    ExecutorAdapterExecutionPlan::compile(&loader, required_skill_ids).map_err(error_to_string)
+}
+
 fn register_executor_adapters_for_project_with_search(
     external: &mut RoutedExternalNodeExecutor,
-    project_root: &Path,
-    provider_source: ExecutorAdapterLlmProviderSource<'_>,
+    project_config: &ProjectConfig,
+    plan: ExecutorAdapterExecutionPlan,
+    llm_providers: BTreeMap<String, OpenAiCompatibleLlmProvider>,
     ledger: Arc<SqliteCostLedger>,
     retrieval: Option<Arc<ProjectRetrievalRuntime>>,
     web_search_provider: Option<Arc<HttpWebSearchProvider>>,
@@ -4373,30 +5767,6 @@ fn register_executor_adapters_for_project_with_search(
         NativeHttpSkillBackend, NativeWasmSkillBackend, SkillExecutionContext, SkillExecutor,
     };
 
-    let _project_mutation =
-        acquire_project_mutation_guard(project_root, "executor_adapter_discovery")?;
-    let project_config = ConfigStore::new(project_root)
-        .load_or_create()
-        .map_err(error_to_string)?;
-    let skills_dir = project_config.app.skills_dir.trim();
-    // Empty skills_dir means adapters disabled — not an error.
-    if skills_dir.is_empty() {
-        return Ok(Vec::new());
-    }
-    let global = project_root.join(skills_dir);
-    let project_skills = project_root.join("skills");
-    let loader = SkillLoader::new()
-        .with_global_root(&global)
-        .with_project_root(&project_skills);
-    let manifests = loader.load_manifests().map_err(error_to_string)?;
-    // LLM Skill 的 provider/model 是可执行清单的一部分，必须在注册前精确解析。
-    // 禁止用项目默认 provider 发请求、再把清单 provider_id 写进账本形成身份漂移。
-    let llm_providers = resolve_executor_adapter_llm_providers(
-        project_root,
-        &project_config,
-        &manifests,
-        &provider_source,
-    )?;
     let auto_mode_config = project_config.auto_mode.clone();
     let execution_policy = ExecutionPolicy {
         auto_mode: AutoModeState {
@@ -4406,18 +5776,17 @@ fn register_executor_adapters_for_project_with_search(
         // ExecutorAdapter 与普通工作流节点必须消费同一份项目硬权限。
         // 这里若重置为默认拒绝，会让已注入的 Web Search/HTTP/WASM 能力
         // 在真实执行边界永久不可达，并与设置页保存的权限产生第二状态源。
-        permissions: project_config.permissions.policy.clone(),
+        permissions: permission_policy_for_scope(&project_config.permissions, "workflow_nodes"),
     };
     let max_tool_rounds = project_config.workflow.max_tool_rounds;
-    let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls);
+    let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls.clone());
     let project_search_enabled = tool_control_enabled(
         &tool_controls,
         "executor_adapter",
         EXECUTOR_ADAPTER_SEARCH_TOOL,
     );
-    let web_search_enabled = project_config
+    let web_search_enabled = execution_policy
         .permissions
-        .policy
         .evaluate(&PermissionRequest::WebSearch)
         .allowed
         && tool_control_enabled(
@@ -4426,7 +5795,7 @@ fn register_executor_adapters_for_project_with_search(
             EXECUTOR_ADAPTER_WEB_SEARCH_TOOL,
         );
     let mut registered = Vec::new();
-    for loaded in manifests {
+    for loaded in plan.into_manifests() {
         let skill_id = loaded.manifest.skill_id.clone();
         let manifest = loaded.manifest.clone();
         let llm_provider = match &manifest.executor {
@@ -4480,9 +5849,9 @@ fn register_executor_adapters_for_project_with_search(
                         auto_mode_config: &auto_mode_config,
                         budget_limits: Default::default(),
                         ledger: ledger.as_ref(),
-                        llm_provider: llm_provider.as_ref().map(|provider| {
-                            provider as &dyn crate::providers::LlmProvider
-                        }),
+                        llm_provider: llm_provider
+                            .as_ref()
+                            .map(|provider| provider as &dyn crate::providers::LlmProvider),
                         http_backend: Some(&http_backend),
                         wasm_backend: Some(&wasm_backend),
                     };
@@ -4491,8 +5860,12 @@ fn register_executor_adapters_for_project_with_search(
                         Some(retrieval) => executor.with_project_search(
                             retrieval,
                             project_search_tool_definition(
-                                EXECUTOR_ADAPTER_SEARCH_TOOL,
-                                "检索当前项目文档与已确认知识，为 LLM ExecutorAdapter 补充项目上下文。",
+                                EXECUTOR_ADAPTER_TOOL_CAPABILITY
+                                    .project_search_tool
+                                    .unwrap(),
+                                EXECUTOR_ADAPTER_TOOL_CAPABILITY
+                                    .project_search_description
+                                    .unwrap(),
                             ),
                             max_tool_rounds,
                         ),
@@ -4502,8 +5875,10 @@ fn register_executor_adapters_for_project_with_search(
                         Some(search_provider) => executor.with_web_search(
                             search_provider.as_ref(),
                             web_search_tool_definition(
-                                EXECUTOR_ADAPTER_WEB_SEARCH_TOOL,
-                                "搜索公开互联网，为 LLM ExecutorAdapter 补充外部资料。",
+                                EXECUTOR_ADAPTER_TOOL_CAPABILITY.web_search_tool.unwrap(),
+                                EXECUTOR_ADAPTER_TOOL_CAPABILITY
+                                    .web_search_description
+                                    .unwrap(),
                             ),
                             max_tool_rounds,
                         ),
@@ -4523,6 +5898,56 @@ struct WorkflowExecutionContext<'a> {
     document_root: &'a Path,
     secrets: &'a dyn SecretStore,
     retrieval_runtime: Option<Arc<ProjectRetrievalRuntime>>,
+    dependency_plan: Option<WorkflowRuntimeDependencyPlan>,
+}
+
+struct WorkflowNodeSearchBindings {
+    project_search: Option<(Arc<ProjectRetrievalRuntime>, ToolDefinition)>,
+    web_search: Option<(Arc<HttpWebSearchProvider>, ToolDefinition)>,
+    permission_policy: PermissionPolicy,
+}
+
+fn workflow_node_search_bindings(
+    type_name: &str,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
+    presets: &NodePresetSettings,
+    permissions: &crate::config::PermissionsConfig,
+    retrieval_runtime: Option<&Arc<ProjectRetrievalRuntime>>,
+    web_search_runtime: Option<&Arc<HttpWebSearchProvider>>,
+) -> WorkflowNodeSearchBindings {
+    let permission_policy = permission_policy_for_node(permissions, presets, type_name);
+    let project_search = workflow_search_tool_for_node(type_name)
+        .filter(|(scope, tool, _)| {
+            node_tool_control_enabled(controls, presets, type_name, scope, tool)
+        })
+        .and_then(|(_, tool, description)| {
+            retrieval_runtime.map(|retrieval| {
+                (
+                    Arc::clone(retrieval),
+                    project_search_tool_definition(tool, description),
+                )
+            })
+        });
+    let web_search = workflow_web_search_tool_for_node(type_name)
+        .filter(|(scope, tool, _)| {
+            permission_policy
+                .evaluate(&PermissionRequest::WebSearch)
+                .allowed
+                && node_tool_control_enabled(controls, presets, type_name, scope, tool)
+        })
+        .and_then(|(_, tool, description)| {
+            web_search_runtime.map(|provider| {
+                (
+                    Arc::clone(provider),
+                    web_search_tool_definition(tool, description),
+                )
+            })
+        });
+    WorkflowNodeSearchBindings {
+        project_search,
+        web_search,
+        permission_policy,
+    }
 }
 
 fn execute_workflow_runtime(
@@ -4537,115 +5962,127 @@ fn execute_workflow_runtime(
         document_root,
         secrets,
         retrieval_runtime,
+        dependency_plan,
     } = context;
     runtime.set_cancellation(cancellation);
+    let WorkflowRuntimeDependencyPlan {
+        workflow: dependencies,
+        project_config,
+        node_presets,
+        llm_execution,
+        executor_adapters: adapter_plan,
+        executor_adapter_llm_providers,
+        credential_generations: _,
+        requires_project_retrieval,
+        requires_web_search,
+    } = match dependency_plan {
+        Some(plan) => plan,
+        None => {
+            return Err(CommandError::legacy_run(
+                "workflow execution requires a frozen dependency plan",
+            ))
+        }
+    };
+    let layout = crate::config::ProjectLayout::from_app(project_root, &project_config.app)
+        .map_err(error_to_string)?;
     let documents = document_service_with_artifacts(
         document_root,
         project_root.join(".runtime").join("artifacts"),
+        Some(layout.exports.clone()),
     );
-    std::fs::create_dir_all(document_root.join("documents")).map_err(error_to_string)?;
+    layout
+        .create_configured_directories()
+        .map_err(error_to_string)?;
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
     let ledger = Arc::new(SqliteCostLedger::open(project_root).map_err(error_to_string)?);
-    let project_config = ConfigStore::new(project_root)
-        .load_or_create()
-        .map_err(error_to_string)?;
     let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls.clone());
-    let permission_policy = project_config.permissions.policy.clone();
     let max_tool_rounds = project_config.workflow.max_tool_rounds;
-    let retrieval_runtime = if workflow_requires_project_retrieval(project_root, workflow)? {
+    let retrieval_runtime = if requires_project_retrieval {
         Some(match retrieval_runtime {
             Some(runtime) => runtime,
-            None => Arc::new(
-                ProjectRetrievalRuntime::open(project_root, secrets).map_err(error_to_string)?,
-            ),
+            None => {
+                return Err(CommandError::internal(
+                    "workflow dependency plan requires the shared project retrieval runtime",
+                ))
+            }
         })
     } else {
         retrieval_runtime
     };
-    let llm_runtime = if workflow_requires_default_llm_provider(workflow) {
-        Some(llm_runtime(project_root, secrets)?)
-    } else {
-        None
-    };
-    let web_search_runtime = if workflow.nodes.iter().any(|node| {
-        workflow_web_search_tool_enabled(&tool_controls, &permission_policy, &node.type_name)
-    }) {
-        Some(Arc::new(web_search_runtime(project_root, secrets)?))
+    let web_search_runtime = if requires_web_search {
+        Some(Arc::new(web_search_runtime_for_config(
+            project_root,
+            secrets,
+            &project_config,
+        )?))
     } else {
         None
     };
     let mut external = RoutedExternalNodeExecutor::new();
-    if let Some(ref llm_runtime) = llm_runtime {
-        let provider = llm_runtime.provider.clone();
-        let default_provider_id = llm_runtime.config.provider_id.clone();
-        let default_model_id = llm_runtime.config.model_id.clone();
+    if !llm_execution.node_routes.is_empty() {
+        let llm_routes = Arc::new(llm_execution.node_routes);
+        let llm_providers = Arc::new(llm_execution.providers);
         // 普通 LLM 语义节点走 execute_llm_node。summarizer 例外：它是四步总结
         // 生产链（故事段划分并概括 → 事件 → 章节 → 阶段），走专用 handler 落库建索引。
-        for type_name in [
-            "llm", "writer", "outliner", "designer", "planner", "detail", "critic", "prudent",
-            "polisher",
-        ] {
-            let provider = provider.clone();
+        for capability in model_tool_node_capabilities()
+            .filter(|capability| capability.execution_kind == WorkflowNodeExecutionKind::Model)
+            .filter(|capability| dependencies.uses_node_type(capability.node_type))
+        {
+            let type_name = capability.node_type;
+            let llm_routes = Arc::clone(&llm_routes);
+            let llm_providers = Arc::clone(&llm_providers);
             let ledger = Arc::clone(&ledger);
-            let default_provider_id = default_provider_id.clone();
-            let default_model_id = default_model_id.clone();
-            let project_search = workflow_search_tool_for_node(type_name)
-                .filter(|(scope, tool, _)| tool_control_enabled(&tool_controls, scope, tool))
-                .and_then(|(_, tool, description)| {
-                    retrieval_runtime.as_ref().map(|retrieval| {
-                        (
-                            Arc::clone(retrieval),
-                            project_search_tool_definition(tool, description),
-                        )
-                    })
-                });
-            let web_search = workflow_web_search_tool_for_node(type_name)
-                .filter(|(scope, tool, _)| {
-                    permission_policy
-                        .evaluate(&PermissionRequest::WebSearch)
-                        .allowed
-                        && tool_control_enabled(&tool_controls, scope, tool)
-                })
-                .and_then(|(_, tool, description)| {
-                    web_search_runtime.as_ref().map(|provider| {
-                        (
-                            Arc::clone(provider),
-                            web_search_tool_definition(tool, description),
-                        )
-                    })
-                });
-            let permission_policy = permission_policy.clone();
+            let node_preset = node_type_preset(&node_presets, type_name).cloned();
+            let search_bindings = workflow_node_search_bindings(
+                type_name,
+                &tool_controls,
+                &node_presets,
+                &project_config.permissions,
+                retrieval_runtime.as_ref(),
+                web_search_runtime.as_ref(),
+            );
             external
                 .register_handler_with_policy(
                     type_name,
                     crate::workflow::WorkflowOperationPolicy::at_most_once(),
                     Box::new(move |request| {
-                        if project_search.is_none() && web_search.is_none() {
+                        let request = apply_node_type_preset(request, node_preset.as_ref());
+                        let (request, provider, route) = route_workflow_llm_request(
+                            request,
+                            llm_routes.as_ref(),
+                            llm_providers.as_ref(),
+                        )?;
+                        if search_bindings.project_search.is_none()
+                            && search_bindings.web_search.is_none()
+                        {
                             return execute_llm_node_with_defaults(
                                 request,
-                                &provider,
+                                provider,
                                 ledger.as_ref(),
-                                Some(&default_provider_id),
-                                Some(&default_model_id),
+                                Some(&route.provider_id),
+                                Some(&route.model_id),
                             );
                         }
                         execute_llm_node_with_search_tools(
                             request,
-                            &provider,
+                            provider,
                             ledger.as_ref(),
                             WorkflowLlmSearchOptions {
-                                default_provider_id: Some(&default_provider_id),
-                                default_model_id: Some(&default_model_id),
-                                project_search: project_search
+                                default_provider_id: Some(&route.provider_id),
+                                default_model_id: Some(&route.model_id),
+                                project_search: search_bindings
+                                    .project_search
                                     .as_ref()
                                     .map(|(retrieval, tool)| (retrieval.as_ref(), tool.clone())),
-                                web_search: web_search.as_ref().map(|(search_provider, tool)| {
-                                    (
-                                        search_provider.as_ref() as &dyn SearchProvider,
-                                        &permission_policy,
-                                        tool.clone(),
-                                    )
-                                }),
+                                web_search: search_bindings.web_search.as_ref().map(
+                                    |(search_provider, tool)| {
+                                        (
+                                            search_provider.as_ref() as &dyn SearchProvider,
+                                            &search_bindings.permission_policy,
+                                            tool.clone(),
+                                        )
+                                    },
+                                ),
                                 max_tool_rounds,
                             },
                         )
@@ -4655,64 +6092,60 @@ fn execute_workflow_runtime(
         }
 
         // Summarizer 专用节点：加载写作知识库、四步总结、落库、生成四层确认项。
-        {
-            let provider = provider.clone();
+        if dependencies.uses_node_type("summarizer") {
+            let llm_routes = Arc::clone(&llm_routes);
+            let llm_providers = Arc::clone(&llm_providers);
             let ledger = Arc::clone(&ledger);
             let summarizer_root = project_root.to_path_buf();
-            let project_search = workflow_search_tool_for_node("summarizer")
-                .filter(|(scope, tool, _)| tool_control_enabled(&tool_controls, scope, tool))
-                .and_then(|(_, tool, description)| {
-                    retrieval_runtime.as_ref().map(|retrieval| {
-                        (
-                            Arc::clone(retrieval),
-                            project_search_tool_definition(tool, description),
-                        )
-                    })
-                });
-            let web_search = workflow_web_search_tool_for_node("summarizer")
-                .filter(|(scope, tool, _)| {
-                    permission_policy
-                        .evaluate(&PermissionRequest::WebSearch)
-                        .allowed
-                        && tool_control_enabled(&tool_controls, scope, tool)
-                })
-                .and_then(|(_, tool, description)| {
-                    web_search_runtime.as_ref().map(|provider| {
-                        (
-                            Arc::clone(provider),
-                            web_search_tool_definition(tool, description),
-                        )
-                    })
-                });
-            let permission_policy = permission_policy.clone();
+            let node_preset = node_type_preset(&node_presets, "summarizer").cloned();
+            let search_bindings = workflow_node_search_bindings(
+                "summarizer",
+                &tool_controls,
+                &node_presets,
+                &project_config.permissions,
+                retrieval_runtime.as_ref(),
+                web_search_runtime.as_ref(),
+            );
             external
                 .register_handler_with_policy(
                     "summarizer",
                     crate::workflow::WorkflowOperationPolicy::replayable_receipt(),
                     Box::new(move |request| {
-                        if project_search.is_none() && web_search.is_none() {
+                        let request = apply_node_type_preset(request, node_preset.as_ref());
+                        let (request, provider, _) = route_workflow_llm_request(
+                            request,
+                            llm_routes.as_ref(),
+                            llm_providers.as_ref(),
+                        )?;
+                        if search_bindings.project_search.is_none()
+                            && search_bindings.web_search.is_none()
+                        {
                             return execute_summarizer_node(
                                 request,
-                                &provider,
+                                provider,
                                 ledger.as_ref(),
                                 &summarizer_root,
                             );
                         }
                         execute_summarizer_node_with_search_tools(
                             request,
-                            &provider,
+                            provider,
                             ledger.as_ref(),
                             &summarizer_root,
-                            project_search
+                            search_bindings
+                                .project_search
                                 .as_ref()
                                 .map(|(retrieval, tool)| (retrieval.as_ref(), tool.clone())),
-                            web_search.as_ref().map(|(search_provider, tool)| {
-                                (
-                                    search_provider.as_ref() as &dyn SearchProvider,
-                                    &permission_policy,
-                                    tool.clone(),
-                                )
-                            }),
+                            search_bindings
+                                .web_search
+                                .as_ref()
+                                .map(|(search_provider, tool)| {
+                                    (
+                                        search_provider.as_ref() as &dyn SearchProvider,
+                                        &search_bindings.permission_policy,
+                                        tool.clone(),
+                                    )
+                                }),
                             max_tool_rounds,
                         )
                     }),
@@ -4720,53 +6153,73 @@ fn execute_workflow_runtime(
                 .map_err(error_to_string)?;
         }
     }
-    for type_name in ["document", "document_read"] {
-        let documents = documents.clone();
-        let document_root = document_root.to_path_buf();
-        external
-            .register_handler(
-                type_name,
-                Box::new(move |request| {
-                    execute_document_read_node_with_root(request, &documents, Some(&document_root))
-                }),
-            )
-            .map_err(error_to_string)?;
+    if let Some(entry) = workflow_node_catalog_entry("document_read") {
+        for type_name in std::iter::once(entry.node_type.as_str())
+            .chain(entry.aliases.iter().map(String::as_str))
+            .filter(|type_name| dependencies.uses_node_type(type_name))
+        {
+            let documents = documents.clone();
+            let document_root = document_root.to_path_buf();
+            external
+                .register_handler(
+                    type_name,
+                    Box::new(move |request| {
+                        execute_document_read_node_with_root(
+                            request,
+                            &documents,
+                            Some(&document_root),
+                        )
+                    }),
+                )
+                .map_err(error_to_string)?;
+        }
     }
 
     // F11：生产组合根注册 ExecutorAdapter（失败 fail-loud，不得静默丢弃）。
     // Skill 自己声明 provider/model；HTTP/WASM Skill 不得被默认 LLM 配置绑架。
-    if workflow
-        .nodes
-        .iter()
-        .any(|node| node.type_name.starts_with("executor_adapter:"))
-    {
+    if dependencies.uses_executor_adapters() {
         register_executor_adapters_for_project_with_search(
             &mut external,
-            project_root,
-            ExecutorAdapterLlmProviderSource::ProjectSecrets(secrets),
+            &project_config,
+            adapter_plan,
+            executor_adapter_llm_providers,
             Arc::clone(&ledger),
             retrieval_runtime.clone(),
             web_search_runtime.clone(),
         )?;
     }
-    if workflow.nodes.iter().any(|node| node.type_name == "search") {
-        let retrieval = match retrieval_runtime.clone() {
-            Some(retrieval) => retrieval,
-            None => Arc::new(
-                ProjectRetrievalRuntime::open(project_root, secrets).map_err(error_to_string)?,
-            ),
-        };
-        let search_root = project_root.to_path_buf();
-        external
-            .register_handler_with_policy(
-                "search",
-                crate::workflow::WorkflowOperationPolicy::replayable_remote(),
-                Box::new(move |request| {
-                    // F2-b：工作流 Search 节点与 IPC 搜索共用新鲜度门禁。
-                    execute_project_retrieval_node_for_project(&search_root, request, &retrieval)
-                }),
-            )
-            .map_err(error_to_string)?;
+    if let Some(entry) = workflow_node_catalog_entry("search") {
+        let search_types = std::iter::once(entry.node_type.as_str())
+            .chain(entry.aliases.iter().map(String::as_str))
+            .filter(|type_name| dependencies.uses_node_type(type_name))
+            .collect::<Vec<_>>();
+        if !search_types.is_empty() {
+            let retrieval = match retrieval_runtime.clone() {
+                Some(retrieval) => retrieval,
+                None => Arc::new(
+                    ProjectRetrievalRuntime::open(project_root, secrets)
+                        .map_err(error_to_string)?,
+                ),
+            };
+            for type_name in search_types {
+                let retrieval = Arc::clone(&retrieval);
+                let search_root = project_root.to_path_buf();
+                external
+                    .register_handler_with_policy(
+                        type_name,
+                        crate::workflow::WorkflowOperationPolicy::replayable_remote(),
+                        Box::new(move |request| {
+                            // F2-b：工作流 Search 节点与 IPC 搜索共用新鲜度门禁。
+                            execute_project_retrieval_node_for_project(
+                                &search_root,
+                                request,
+                                &retrieval,
+                            )
+                        }),
+                    )
+                    .map_err(error_to_string)?;
+            }
+        }
     }
     let mut export_sink = DocumentWorkflowExportSink::new(&documents);
     let mut executor =
@@ -4889,188 +6342,272 @@ fn json_value_matches_schema_type(value: &Value, expected: &str) -> bool {
     }
 }
 
-fn workflow_requires_default_llm_provider(workflow: &WorkflowDefinition) -> bool {
-    workflow
-        .nodes
-        .iter()
-        .any(|node| is_llm_workflow_node_type(&node.type_name))
+fn is_llm_workflow_node_type(type_name: &str) -> bool {
+    workflow_node_capability(type_name).is_some_and(|capability| capability.supports_model_tools())
 }
 
-fn is_llm_workflow_node_type(type_name: &str) -> bool {
-    matches!(
-        type_name,
-        "llm"
-            | "writer"
-            | "outliner"
-            | "designer"
-            | "planner"
-            | "detail"
-            | "critic"
-            | "prudent"
-            | "polisher"
-            | "summarizer"
-    )
+fn compile_workflow_llm_execution_plan(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    workflow: &WorkflowDefinition,
+    project_config: &ProjectConfig,
+    node_presets: &NodePresetSettings,
+) -> CommandResult<WorkflowLlmExecutionPlan> {
+    let mut node_routes = BTreeMap::new();
+    let mut providers = BTreeMap::new();
+
+    for node in workflow
+        .nodes
+        .iter()
+        .filter(|node| is_llm_workflow_node_type(&node.type_name))
+    {
+        let config = serde_json::from_value::<WorkflowLlmNodeConfig>(node.config.clone()).map_err(
+            |error| {
+                CommandError::validation(format!(
+                    "{} node {} has invalid LLM configuration: {error}",
+                    node.type_name,
+                    node.id.as_str()
+                ))
+            },
+        )?;
+        let configured_provider_id = config
+            .provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let configured_model_id = config
+            .model_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let preset = node_type_preset(node_presets, &node.type_name);
+        let preset_provider_id = preset
+            .map(|preset| preset.provider_id.trim())
+            .filter(|value| !value.is_empty());
+        let default_provider_id = (!node_presets.default_provider_id.trim().is_empty())
+            .then(|| node_presets.default_provider_id.trim());
+        // 任一节点级字段出现即进入显式覆盖层；缺失的另一半只从项目默认补齐，
+        // 不能再拼入可能属于其它 Provider 的节点类型预设。
+        let preferred_provider_id = configured_provider_id.or_else(|| {
+            if configured_model_id.is_some() {
+                default_provider_id
+            } else {
+                preset_provider_id.or(default_provider_id)
+            }
+        });
+        let provider_config = match preferred_provider_id {
+            Some(provider_id) => project_config
+                .providers
+                .providers
+                .iter()
+                .find(|provider| provider.provider_id == provider_id)
+                .ok_or_else(|| {
+                    CommandError::not_found(format!(
+                        "{} node {} references an unconfigured provider: {provider_id}",
+                        node.type_name,
+                        node.id.as_str()
+                    ))
+                })?
+                .clone(),
+            None => select_llm_provider(&project_config.providers).map_err(|error| {
+                    CommandError::validation(format!(
+                        "{} node {} has no provider_id and the project default cannot be resolved: {error}",
+                        node.type_name,
+                        node.id.as_str()
+                    ))
+                })?,
+        };
+        if !provider_config.enabled {
+            return Err(CommandError::validation(format!(
+                "{} node {} references a disabled provider: {}",
+                node.type_name,
+                node.id.as_str(),
+                provider_config.provider_id
+            )));
+        }
+
+        let preset_model_id = preset
+            .map(|preset| preset.model_id.trim())
+            .filter(|value| !value.is_empty());
+        let default_model_id = (!node_presets.default_model_id.trim().is_empty())
+            .then(|| node_presets.default_model_id.trim());
+        let preferred_model_id = configured_model_id.or_else(|| {
+            if configured_provider_id.is_some() {
+                None
+            } else {
+                preset_model_id.or(default_model_id)
+            }
+        });
+        let model_config = if let Some(model_id) = preferred_model_id {
+            provider_config
+                .models
+                .iter()
+                .find(|model| model.model_id == model_id)
+                .ok_or_else(|| {
+                    CommandError::not_found(format!(
+                        "{} node {} references an unconfigured model: {}/{}",
+                        node.type_name,
+                        node.id.as_str(),
+                        provider_config.provider_id,
+                        model_id
+                    ))
+                })?
+                .clone()
+        } else {
+            select_llm_model(&provider_config)?
+        };
+        if !matches!(
+            model_config.capability,
+            ProviderCapability::Llm | ProviderCapability::ToolUse
+        ) {
+            return Err(CommandError::validation(format!(
+                "{} node {} model is not LLM-capable: {}/{}",
+                node.type_name,
+                node.id.as_str(),
+                provider_config.provider_id,
+                model_config.model_id
+            )));
+        }
+
+        if !providers.contains_key(&provider_config.provider_id) {
+            let api_key = provider_api_key(project_root, secrets, &provider_config)?;
+            let provider = OpenAiCompatibleLlmProvider::new(provider_config.clone(), api_key)
+                .map_err(error_to_string)?;
+            providers.insert(provider_config.provider_id.clone(), provider);
+        }
+        node_routes.insert(
+            node.id.as_str().to_owned(),
+            WorkflowLlmRoute {
+                provider_id: provider_config.provider_id.clone(),
+                model_id: model_config.model_id,
+            },
+        );
+    }
+
+    Ok(WorkflowLlmExecutionPlan {
+        node_routes,
+        providers,
+    })
+}
+
+fn route_workflow_llm_request<'a>(
+    mut request: crate::workflow::WorkflowNodeExecutionRequest,
+    routes: &'a BTreeMap<String, WorkflowLlmRoute>,
+    providers: &'a BTreeMap<String, OpenAiCompatibleLlmProvider>,
+) -> CoreResult<(
+    crate::workflow::WorkflowNodeExecutionRequest,
+    &'a OpenAiCompatibleLlmProvider,
+    &'a WorkflowLlmRoute,
+)> {
+    let route = routes.get(request.node_id.as_str()).ok_or_else(|| {
+        CoreError::validation(format!(
+            "frozen LLM route is missing for workflow node {}",
+            request.node_id.as_str()
+        ))
+    })?;
+    let provider = providers.get(&route.provider_id).ok_or_else(|| {
+        CoreError::validation(format!(
+            "frozen LLM provider is missing for workflow node {}: {}",
+            request.node_id.as_str(),
+            route.provider_id
+        ))
+    })?;
+    let config = request.config.as_object_mut().ok_or_else(|| {
+        CoreError::validation(format!(
+            "workflow node {} LLM config must be an object",
+            request.node_id.as_str()
+        ))
+    })?;
+    config.insert("provider_id".to_owned(), json!(route.provider_id));
+    config.insert("model_id".to_owned(), json!(route.model_id));
+    Ok((request, provider, route))
 }
 
 fn workflow_search_tool_for_node(
     type_name: &str,
 ) -> Option<(&'static str, &'static str, &'static str)> {
-    match type_name {
-        "llm" => Some((
-            "llm",
-            GENERIC_LLM_SEARCH_TOOL,
-            "检索当前项目文档与已确认知识，为回答补充可追溯的项目事实。",
-        )),
-        "outliner" => Some((
-            "outliner",
-            "outliner-search",
-            "检索当前项目的正文、规划与已确认知识，为全局总纲补充项目事实。",
-        )),
-        "designer" => Some((
-            "designer",
-            "designer-search",
-            "检索当前项目的正文、规划与已确认知识，为阶段设计补充项目事实。",
-        )),
-        "planner" => Some((
-            "planner",
-            "planner-search",
-            "检索当前项目的正文、规划与已确认知识，为章节规划补充项目事实。",
-        )),
-        "detail" => Some((
-            "detail",
-            "detail-search",
-            "检索当前项目的正文、规划与已确认知识，为细节生成补充上下文。",
-        )),
-        "writer" => Some((
-            "writer",
-            "writer-search",
-            "检索当前项目的前文、规划与已确认知识，保持正文连续性和设定一致性。",
-        )),
-        "critic" => Some((
-            "critic",
-            "critic-search",
-            "检索当前项目的正文、规划与已确认知识，为审稿判断提供依据。",
-        )),
-        "prudent" => Some((
-            "prudent",
-            "prudent-search",
-            "检索当前项目的正文、规划与已确认知识，为审慎判断提供依据。",
-        )),
-        "polisher" => Some((
-            "polisher",
-            "polisher-search",
-            "检索当前项目的前文、规划与已确认知识，为有限返修提供上下文。",
-        )),
-        "summarizer" => Some((
-            "summarizer",
-            SUMMARIZER_SEARCH_TOOL,
-            "检索当前项目的正文与已确认知识，为四层总结补充跨章节上下文。",
-        )),
-        type_name if type_name.starts_with("executor_adapter:") => Some((
-            "executor_adapter",
-            EXECUTOR_ADAPTER_SEARCH_TOOL,
-            "检索当前项目文档与已确认知识，为 LLM ExecutorAdapter 补充项目上下文。",
-        )),
-        _ => None,
-    }
+    let capability = execution_tool_capability(type_name)?;
+    Some((
+        capability.tool_scope,
+        capability.project_search_tool?,
+        capability.project_search_description?,
+    ))
 }
 
 fn workflow_search_tool_enabled(
-    controls: &BTreeMap<String, BTreeMap<String, bool>>,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
+    presets: &NodePresetSettings,
     type_name: &str,
 ) -> bool {
-    workflow_search_tool_for_node(type_name)
-        .is_some_and(|(scope, tool, _)| tool_control_enabled(controls, scope, tool))
+    workflow_search_tool_for_node(type_name).is_some_and(|(scope, tool, _)| {
+        node_tool_control_enabled(controls, presets, type_name, scope, tool)
+    })
 }
 
 fn workflow_web_search_tool_for_node(
     type_name: &str,
 ) -> Option<(&'static str, &'static str, &'static str)> {
-    match type_name {
-        "llm" => Some((
-            "llm",
-            GENERIC_LLM_WEB_SEARCH_TOOL,
-            "搜索公开互联网，为回答补充时效性资料；返回标题、URL 与摘要，不自动写入项目知识库。",
-        )),
-        "outliner" => Some((
-            "outliner",
-            "outliner-web-search",
-            "搜索公开互联网，为全局规划进行现实资料考据。",
-        )),
-        "designer" => Some((
-            "designer",
-            "designer-web-search",
-            "搜索公开互联网，为阶段设计进行现实资料考据。",
-        )),
-        "planner" => Some((
-            "planner",
-            "planner-web-search",
-            "搜索公开互联网，为章节规划进行现实资料考据。",
-        )),
-        "detail" => Some((
-            "detail",
-            "detail-web-search",
-            "搜索公开互联网，为环境、心理或设定细节补充现实资料。",
-        )),
-        "writer" => Some((
-            "writer",
-            "writer-web-search",
-            "搜索公开互联网，核对当前写作位置涉及的现实情况。",
-        )),
-        "critic" => Some((
-            "critic",
-            "critic-web-search",
-            "搜索公开互联网，为合理性与事实性审稿提供外部依据。",
-        )),
-        "prudent" => Some((
-            "prudent",
-            "prudent-web-search",
-            "搜索公开互联网，复核意见者引用的现实事实。",
-        )),
-        "polisher" => Some((
-            "polisher",
-            "polisher-web-search",
-            "搜索公开互联网，为有限返修核对现实资料。",
-        )),
-        "summarizer" => Some((
-            "summarizer",
-            SUMMARIZER_WEB_SEARCH_TOOL,
-            "搜索公开互联网，为总结中涉及的现实事实提供外部核对。",
-        )),
-        type_name if type_name.starts_with("executor_adapter:") => Some((
-            "executor_adapter",
-            EXECUTOR_ADAPTER_WEB_SEARCH_TOOL,
-            "搜索公开互联网，为 LLM ExecutorAdapter 补充外部资料。",
-        )),
-        _ => None,
-    }
+    let capability = execution_tool_capability(type_name)?;
+    Some((
+        capability.tool_scope,
+        capability.web_search_tool?,
+        capability.web_search_description?,
+    ))
 }
 
 fn workflow_web_search_tool_enabled(
-    controls: &BTreeMap<String, BTreeMap<String, bool>>,
-    policy: &PermissionPolicy,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
+    permissions: &crate::config::PermissionsConfig,
+    presets: &NodePresetSettings,
     type_name: &str,
 ) -> bool {
+    let policy = permission_policy_for_node(permissions, presets, type_name);
     policy.evaluate(&PermissionRequest::WebSearch).allowed
-        && workflow_web_search_tool_for_node(type_name)
-            .is_some_and(|(scope, tool, _)| tool_control_enabled(controls, scope, tool))
+        && workflow_web_search_tool_for_node(type_name).is_some_and(|(scope, tool, _)| {
+            node_tool_control_enabled(controls, presets, type_name, scope, tool)
+        })
 }
 
 fn workflow_requires_project_retrieval(
-    project_root: &Path,
-    workflow: &WorkflowDefinition,
-) -> CommandResult<bool> {
-    if workflow.nodes.iter().any(|node| node.type_name == "search") {
-        return Ok(true);
-    }
-    let config = ConfigStore::new(project_root)
-        .load_or_create()
-        .map_err(error_to_string)?;
-    let controls = normalize_tool_controls(config.permissions.tool_controls);
-    Ok(workflow
-        .nodes
+    dependencies: &WorkflowExecutionDependencySet,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
+    presets: &NodePresetSettings,
+    adapter_uses_llm: bool,
+) -> bool {
+    dependencies.node_types().iter().any(|type_name| {
+        workflow_node_catalog_entry(type_name).is_some_and(|entry| entry.config_kind == "search")
+    }) || dependencies
+        .node_types()
         .iter()
-        .any(|node| workflow_search_tool_enabled(&controls, &node.type_name)))
+        .filter(|type_name| !type_name.starts_with(EXECUTOR_ADAPTER_NODE_PREFIX))
+        .any(|type_name| workflow_search_tool_enabled(controls, presets, type_name))
+        || (adapter_uses_llm
+            && tool_control_enabled(controls, "executor_adapter", EXECUTOR_ADAPTER_SEARCH_TOOL))
+}
+
+fn workflow_requires_web_search(
+    dependencies: &WorkflowExecutionDependencySet,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
+    permissions: &crate::config::PermissionsConfig,
+    presets: &NodePresetSettings,
+    adapter_uses_llm: bool,
+) -> bool {
+    dependencies
+        .node_types()
+        .iter()
+        .filter(|type_name| !type_name.starts_with(EXECUTOR_ADAPTER_NODE_PREFIX))
+        .any(|type_name| {
+            workflow_web_search_tool_enabled(controls, permissions, presets, type_name)
+        })
+        || (adapter_uses_llm
+            && permission_policy_for_scope(permissions, "workflow_nodes")
+                .evaluate(&PermissionRequest::WebSearch)
+                .allowed
+            && tool_control_enabled(
+                controls,
+                "executor_adapter",
+                EXECUTOR_ADAPTER_WEB_SEARCH_TOOL,
+            ))
 }
 
 pub fn get_budget_status_impl(project_root: &Path) -> CommandResult<BudgetStatus> {
@@ -5093,6 +6630,8 @@ pub fn get_budget_status_impl(project_root: &Path) -> CommandResult<BudgetStatus
 
 pub fn get_app_settings_impl(project_root: &Path) -> CommandResult<AppSettings> {
     validate_project_root(project_root)?;
+    ensure_project_not_in_maintenance(project_root)?;
+    validate_initialized_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "app_settings_read")?;
     let config = ConfigStore::new(project_root)
         .load_or_create()
@@ -5107,6 +6646,9 @@ pub fn save_app_settings_impl(project_root: &Path, settings: AppSettings) -> Com
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     apply_app_settings(&mut config, settings.app)?;
+    crate::config::ProjectLayout::from_app(project_root, &config.app)
+        .and_then(|layout| layout.create_configured_directories())
+        .map_err(error_to_string)?;
     config_store.save(&config).map_err(error_to_string)
 }
 
@@ -5128,7 +6670,11 @@ fn apply_app_settings(
     config.app.skills_dir = non_empty_or("skills_dir", std::mem::take(&mut config.app.skills_dir))?;
     config.app.exports_dir =
         non_empty_or("exports_dir", std::mem::take(&mut config.app.exports_dir))?;
-    Ok(())
+    config
+        .app
+        .normalize_directories()
+        .map_err(error_to_string)?;
+    config.app.validate().map_err(error_to_string)
 }
 
 pub fn commit_general_settings_files(
@@ -5159,6 +6705,10 @@ pub fn commit_general_settings_files_with_fail_after(
             .map_err(error_to_string)?
             .into_bytes())
     }
+    let project_providers = ProviderCatalogStore::default_for_app(app_state_root)
+        .read()
+        .map_err(error_to_string)?
+        .project_projection(&config.providers);
     let files = vec![
         (
             crate::config::AtomicCommitTarget::App,
@@ -5166,11 +6716,11 @@ pub fn commit_general_settings_files_with_fail_after(
         ),
         (
             crate::config::AtomicCommitTarget::Providers,
-            yaml_bytes(&config.providers)?,
+            yaml_bytes(&project_providers)?,
         ),
         (
             crate::config::AtomicCommitTarget::Permissions,
-            yaml_bytes(&config.permissions)?,
+            yaml_bytes(&PermissionsConfig::default())?,
         ),
         (
             crate::config::AtomicCommitTarget::Rag,
@@ -5264,6 +6814,11 @@ pub fn save_git_settings_impl(project_root: &Path, settings: GitSettings) -> Com
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     config.git = settings.git;
+    config
+        .git
+        .normalize_ignored_paths()
+        .map_err(error_to_string)?;
+    config.git.validate().map_err(error_to_string)?;
     config_store.save(&config).map_err(error_to_string)
 }
 
@@ -5442,7 +6997,7 @@ pub fn get_automation_settings_impl(project_root: &Path) -> CommandResult<Automa
     let policies = merge_confirmation_policy_settings(
         stored.as_deref(),
         &config.auto_mode.available_approval_prompts,
-    );
+    )?;
     Ok(AutomationSettings {
         budget,
         confirmation_policies: policies,
@@ -5502,8 +7057,17 @@ fn save_automation_settings_impl_with_app_state_and_workflow(
 
     let mut normalized_settings = Vec::new();
     let allowed = confirmation_policy_keys();
-    for setting in settings.confirmation_policies {
+    for mut setting in settings.confirmation_policies {
         if allowed.contains(&setting.confirmation_kind.as_str()) {
+            setting.approval_prompt = setting.approval_prompt.trim().to_owned();
+            if setting.auto_mode_policy == ConfirmationAutoModePolicy::AutoApproval
+                && setting.approval_prompt.is_empty()
+            {
+                return Err(CommandError::validation(format!(
+                    "auto approval prompt cannot be empty: {}",
+                    setting.confirmation_kind
+                )));
+            }
             let policy = approval_policy_from_ui(&policy_code_from_dual_policy(
                 setting.normal_policy,
                 setting.auto_mode_policy,
@@ -5513,6 +7077,9 @@ fn save_automation_settings_impl_with_app_state_and_workflow(
                 &setting.confirmation_kind,
             );
             prompt.default_policy = policy;
+            if !setting.approval_prompt.is_empty() {
+                prompt.prompt = setting.approval_prompt.clone();
+            }
         }
         normalized_settings.push(setting);
     }
@@ -5567,6 +7134,10 @@ pub fn commit_automation_settings_files_with_fail_after(
         let s = yaml_serde::to_string(&v).map_err(error_to_string)?;
         Ok(s.into_bytes())
     }
+    let project_providers = ProviderCatalogStore::default_for_app(app_state_root)
+        .read()
+        .map_err(error_to_string)?
+        .project_projection(&config.providers);
     let files: Vec<(crate::config::AtomicCommitTarget, Vec<u8>)> = vec![
         (
             crate::config::AtomicCommitTarget::App,
@@ -5574,11 +7145,11 @@ pub fn commit_automation_settings_files_with_fail_after(
         ),
         (
             crate::config::AtomicCommitTarget::Providers,
-            yaml_bytes(&config.providers)?,
+            yaml_bytes(&project_providers)?,
         ),
         (
             crate::config::AtomicCommitTarget::Permissions,
-            yaml_bytes(&config.permissions)?,
+            yaml_bytes(&PermissionsConfig::default())?,
         ),
         (
             crate::config::AtomicCommitTarget::Rag,
@@ -5616,36 +7187,70 @@ pub fn commit_automation_settings_files_with_fail_after(
 }
 
 pub fn get_permissions_settings_impl(project_root: &Path) -> CommandResult<PermissionsSettings> {
+    let app_state_root = crate::config::trusted_app_state_for_project(project_root);
+    get_permissions_settings_impl_with_app_state(project_root, &app_state_root)
+}
+
+fn get_permissions_settings_impl_with_app_state(
+    project_root: &Path,
+    app_state_root: &Path,
+) -> CommandResult<PermissionsSettings> {
     validate_project_root(project_root)?;
     let _project_mutation =
         acquire_project_mutation_guard(project_root, "permissions_settings_read")?;
-    let config = ConfigStore::new(project_root)
-        .load_or_create()
-        .map_err(error_to_string)?;
-    Ok(PermissionsSettings {
-        policy: config.permissions.policy,
-        tool_controls: normalize_tool_controls(config.permissions.tool_controls),
-    })
+    let permissions =
+        AppPermissionsStore::read_global_or_migrate(app_state_root, Some(project_root))
+            .map_err(error_to_string)?;
+    Ok(permissions_settings_from_config(permissions))
 }
 
 pub fn save_permissions_settings_impl(
     project_root: &Path,
     settings: PermissionsSettings,
 ) -> CommandResult<()> {
+    let app_state_root = crate::config::trusted_app_state_for_project(project_root);
+    save_permissions_settings_impl_with_app_state(project_root, &app_state_root, settings)
+}
+
+fn save_permissions_settings_impl_with_app_state(
+    project_root: &Path,
+    app_state_root: &Path,
+    settings: PermissionsSettings,
+) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation =
         acquire_project_mutation_guard(project_root, "permissions_settings_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
-    let config_store = ConfigStore::new(project_root);
-    let mut config = config_store.load_or_create().map_err(error_to_string)?;
-    config.permissions.policy = settings.policy;
-    config.permissions.tool_controls = normalize_tool_controls(settings.tool_controls);
-    config_store.save(&config).map_err(error_to_string)
+    let permissions = permissions_config_from_settings(settings)?;
+    AppPermissionsStore::default_for_app(app_state_root)
+        .write(&permissions)
+        .map_err(error_to_string)
+}
+
+fn permissions_config_from_settings(
+    settings: PermissionsSettings,
+) -> CommandResult<PermissionsConfig> {
+    let permissions = PermissionsConfig {
+        schema_version: crate::config::current_schema_version(),
+        policy: settings.policy,
+        scoped_policies: normalize_scoped_permission_policies(settings.scoped_policies),
+        tool_controls: normalize_tool_controls(settings.tool_controls),
+    };
+    permissions.validate().map_err(error_to_string)?;
+    Ok(permissions)
+}
+
+fn permissions_settings_from_config(permissions: PermissionsConfig) -> PermissionsSettings {
+    PermissionsSettings {
+        policy: permissions.policy,
+        scoped_policies: normalize_scoped_permission_policies(permissions.scoped_policies),
+        tool_controls: normalize_tool_controls(permissions.tool_controls),
+    }
 }
 
 fn normalize_tool_controls(
-    mut controls: BTreeMap<String, BTreeMap<String, bool>>,
-) -> BTreeMap<String, BTreeMap<String, bool>> {
+    mut controls: BTreeMap<String, BTreeMap<String, Option<bool>>>,
+) -> BTreeMap<String, BTreeMap<String, Option<bool>>> {
     for (scope, defaults) in default_permission_tool_controls() {
         let scope_controls = controls.entry(scope).or_default();
         for (tool, enabled) in defaults {
@@ -5653,6 +7258,96 @@ fn normalize_tool_controls(
         }
     }
     controls
+}
+
+fn normalize_scoped_permission_policies(
+    mut policies: BTreeMap<String, Option<PermissionPolicy>>,
+) -> BTreeMap<String, Option<PermissionPolicy>> {
+    for scope in ["workflow_nodes", "project_ai"] {
+        policies.entry(scope.to_owned()).or_insert(None);
+    }
+    policies
+}
+
+fn permission_policy_for_scope(
+    permissions: &crate::config::PermissionsConfig,
+    scope: &str,
+) -> PermissionPolicy {
+    permissions
+        .scoped_policies
+        .get(scope)
+        .and_then(Clone::clone)
+        .unwrap_or_else(|| permissions.policy.clone())
+}
+
+fn node_type_preset<'a>(
+    settings: &'a NodePresetSettings,
+    type_name: &str,
+) -> Option<&'a NodeTypePreset> {
+    let canonical_type = workflow_node_catalog_entry(type_name)
+        .map(|entry| entry.preset_type.as_str())
+        .unwrap_or(type_name);
+    settings
+        .presets
+        .iter()
+        .find(|preset| preset.node_type == canonical_type)
+}
+
+fn permission_policy_for_node(
+    permissions: &crate::config::PermissionsConfig,
+    presets: &NodePresetSettings,
+    type_name: &str,
+) -> PermissionPolicy {
+    node_type_preset(presets, type_name)
+        .and_then(|preset| preset.permission_policy.clone())
+        .unwrap_or_else(|| permission_policy_for_scope(permissions, "workflow_nodes"))
+}
+
+fn apply_node_type_preset(
+    mut request: crate::workflow::WorkflowNodeExecutionRequest,
+    preset: Option<&NodeTypePreset>,
+) -> crate::workflow::WorkflowNodeExecutionRequest {
+    let Some(preset) = preset else {
+        return request;
+    };
+    let Some(config) = request.config.as_object_mut() else {
+        return request;
+    };
+
+    let provider_is_missing = config
+        .get("provider_id")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty());
+    let model_is_missing = config
+        .get("model_id")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty());
+    if provider_is_missing && model_is_missing && !preset.provider_id.trim().is_empty() {
+        config.insert("provider_id".to_owned(), json!(preset.provider_id));
+    }
+    if provider_is_missing && model_is_missing && !preset.model_id.trim().is_empty() {
+        config.insert("model_id".to_owned(), json!(preset.model_id));
+    }
+
+    let timeout_is_missing = config
+        .get("timeout_ms")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse::<u64>().ok())
+        })
+        .is_none_or(|value| value == 0);
+    if timeout_is_missing {
+        config.insert("timeout_ms".to_owned(), json!(preset.timeout_ms));
+    }
+
+    let budget_is_missing = ["budget_usd", "single_call_budget_usd"]
+        .iter()
+        .all(|field| config.get(*field).is_none_or(Value::is_null));
+    if budget_is_missing {
+        config.insert("budget_usd".to_owned(), json!(preset.budget_usd));
+    }
+    request
 }
 
 pub fn resolve_confirmation_impl(
@@ -6016,7 +7711,7 @@ fn get_git_repository_status_impl_with_cancellation(
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
-    let policy = git_stage_policy_from_config(&config.git);
+    let policy = git_stage_policy_from_config(&config);
     let (health, status) = service
         .health_check_with_policy(&policy)
         .map_err(error_to_string)?;
@@ -6057,7 +7752,7 @@ fn create_checkpoint_impl_with_cancellation(
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
-    let policy = git_stage_policy_from_config(&config.git);
+    let policy = git_stage_policy_from_config(&config);
     git_service_with_cancellation(project_root, cancellation)
         .create_archive_point_with_policy(&name, Some(&name), &policy)
         .map_err(error_to_string)
@@ -6104,24 +7799,24 @@ fn record_git_restore_log(project_root: &Path, report: &RestoreReport) {
     }
 }
 
-fn git_stage_policy_from_config(config: &GitConfig) -> GitStagePolicy {
-    let mut ignored_paths = config.ignored_paths.clone();
+fn git_stage_policy_from_config(config: &ProjectConfig) -> GitStagePolicy {
+    let mut ignored_paths = config.git.ignored_paths.clone();
     ignored_paths.extend([
         "runtime.db-wal".to_owned(),
         "runtime.db-shm".to_owned(),
         "costs.db-wal".to_owned(),
         "costs.db-shm".to_owned(),
     ]);
-    if !config.track_documents {
-        ignored_paths.push("documents".to_owned());
+    if !config.git.track_documents {
+        ignored_paths.push(config.app.documents_dir.clone());
     }
-    if !config.track_workflows {
-        ignored_paths.push("workflows".to_owned());
+    if !config.git.track_workflows {
+        ignored_paths.push(config.app.workflows_dir.clone());
     }
-    if !config.track_skills {
-        ignored_paths.push("skills".to_owned());
+    if !config.git.track_skills {
+        ignored_paths.push(config.app.skills_dir.clone());
     }
-    if !config.track_non_sensitive_config {
+    if !config.git.track_non_sensitive_config {
         ignored_paths.push(".config".to_owned());
     }
     GitStagePolicy::default().with_ignored_paths(ignored_paths)
@@ -6131,18 +7826,28 @@ pub fn get_provider_config_impl(
     project_root: &Path,
     secrets: &dyn SecretStore,
 ) -> CommandResult<ProviderConfigStatus> {
-    validate_project_root(project_root)?;
-    let _project_mutation = acquire_project_mutation_guard(project_root, "provider_settings_read")?;
-    let config = ConfigStore::new(project_root)
-        .load_or_create()
-        .map_err(error_to_string)?;
-    provider_config_status_from_config(project_root, config, secrets)
+    let app_state_root = crate::config::trusted_app_state_for_project(project_root);
+    get_provider_config_impl_with_app_state(project_root, &app_state_root, secrets)
 }
 
-fn provider_config_status_from_config(
+fn get_provider_config_impl_with_app_state(
+    project_root: &Path,
+    app_state_root: &Path,
+    secrets: &dyn SecretStore,
+) -> CommandResult<ProviderConfigStatus> {
+    validate_project_root(project_root)?;
+    let _project_mutation = acquire_project_mutation_guard(project_root, "provider_settings_read")?;
+    let config = ConfigStore::with_app_state(project_root, app_state_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    provider_config_status_from_config_with_app_state(project_root, config, secrets, app_state_root)
+}
+
+fn provider_config_status_from_config_with_app_state(
     project_root: &Path,
     config: ProjectConfig,
     secrets: &dyn SecretStore,
+    app_state_root: &Path,
 ) -> CommandResult<ProviderConfigStatus> {
     let credentials =
         ProjectCredentialScope::new(project_root, secrets).map_err(error_to_string)?;
@@ -6152,7 +7857,19 @@ fn provider_config_status_from_config(
         .iter()
         .map(|provider| provider.provider_id.as_str())
         .collect::<HashSet<_>>();
-    let providers = provider_status_list(project_root, &config.providers.providers)
+    let mut available_providers = config.providers.providers.clone();
+    let catalog = ProviderCatalogStore::default_for_app(app_state_root)
+        .read()
+        .map_err(error_to_string)?;
+    for provider in catalog.providers {
+        if !available_providers
+            .iter()
+            .any(|existing| existing.provider_id == provider.provider_id)
+        {
+            available_providers.push(provider);
+        }
+    }
+    let providers = provider_status_list(project_root, &available_providers)
         .into_iter()
         .map(|provider| {
             let configured = configured_ids.contains(provider.provider_id.as_str());
@@ -6274,9 +7991,6 @@ fn provider_preset_references(
     config: &ProjectConfig,
     provider_id: &str,
 ) -> CommandResult<Vec<ProviderRemovalReference>> {
-    if !node_preset_settings_path(project_root).exists() {
-        return Ok(Vec::new());
-    }
     let removed_model_ids = config
         .providers
         .providers
@@ -6294,13 +8008,14 @@ fn provider_preset_references(
         .flat_map(|provider| provider.models.iter())
         .map(|model| model.model_id.as_str())
         .collect::<HashSet<_>>();
-    if remaining_model_ids.is_empty() {
-        return Ok(Vec::new());
-    }
     let settings = read_node_preset_settings(project_root)?;
     let mut references = Vec::new();
-    let mut add_reference = |owner_id: String, model_id: &str| {
-        if removed_model_ids.contains(model_id) && !remaining_model_ids.contains(model_id) {
+    let mut add_reference = |owner_id: String, configured_provider: &str, model_id: &str| {
+        let exact_provider = configured_provider.trim() == provider_id;
+        let legacy_unique_model = configured_provider.trim().is_empty()
+            && removed_model_ids.contains(model_id)
+            && !remaining_model_ids.contains(model_id);
+        if exact_provider || legacy_unique_model {
             references.push(ProviderRemovalReference {
                 reference_type: "node_preset".to_owned(),
                 owner_id,
@@ -6309,9 +8024,13 @@ fn provider_preset_references(
             });
         }
     };
-    add_reference("default_model_id".to_owned(), &settings.default_model_id);
+    add_reference(
+        "default_model_id".to_owned(),
+        &settings.default_provider_id,
+        &settings.default_model_id,
+    );
     for preset in settings.presets {
-        add_reference(preset.node_type, &preset.model_id);
+        add_reference(preset.node_type, &preset.provider_id, &preset.model_id);
     }
     Ok(references)
 }
@@ -6322,7 +8041,11 @@ fn provider_workflow_references(
     provider_id: &str,
 ) -> CommandResult<Vec<ProviderRemovalReference>> {
     let mut references = Vec::new();
-    let workflows_root = absolute_path(&project_root.join("workflows"));
+    let workflows_root = absolute_path(
+        &crate::config::ProjectLayout::from_app(project_root, &config.app)
+            .map_err(error_to_string)?
+            .workflows,
+    );
     reject_symlink_root(&workflows_root)?;
     if workflows_root.exists() {
         let mut paths = workflow_json_paths(&workflows_root)?;
@@ -6511,6 +8234,10 @@ fn apply_provider_key_config(config: &mut ProjectConfig, provider: &str) {
     if config.providers.default_llm_provider_id.is_none() {
         config.providers.default_llm_provider_id = Some(provider.to_owned());
     }
+    config
+        .providers
+        .authorized_provider_ids
+        .insert(provider.to_owned());
 }
 
 fn restore_provider_secret(
@@ -6532,17 +8259,8 @@ fn apply_provider_settings_update(
     config: &mut ProjectConfig,
     update: ProviderSettingsUpdate,
 ) -> CommandResult<()> {
-    let provider_id = normalize_provider(&update.provider_id)?;
-    let provider_config = ProviderConfig {
-        provider_id: provider_id.clone(),
-        provider_type: update.provider_type,
-        display_name: non_empty_or("provider display_name", update.display_name)?,
-        enabled: update.enabled,
-        base_url: update.base_url,
-        api_key: None,
-        models: update.models,
-    };
-    provider_config.validate().map_err(error_to_string)?;
+    let provider_config = provider_config_from_update(&update)?;
+    let provider_id = provider_config.provider_id.clone();
     if let Some(index) = config
         .providers
         .providers
@@ -6553,19 +8271,62 @@ fn apply_provider_settings_update(
     } else {
         config.providers.providers.push(provider_config);
     }
-    if update.make_default_llm {
-        config.providers.default_llm_provider_id = Some(provider_id.clone());
-    }
-    if update.make_default_embedding {
-        config.providers.default_embedding_provider_id = Some(provider_id.clone());
-    }
-    if update.make_default_reranker {
-        config.providers.default_reranker_provider_id = Some(provider_id.clone());
-    }
-    if update.make_default_search {
-        config.providers.default_search_provider_id = Some(provider_id);
-    }
+    config
+        .providers
+        .authorized_provider_ids
+        .insert(provider_id.clone());
+    apply_provider_default_choice(
+        &mut config.providers.default_llm_provider_id,
+        &provider_id,
+        update.make_default_llm,
+    );
+    apply_provider_default_choice(
+        &mut config.providers.default_embedding_provider_id,
+        &provider_id,
+        update.make_default_embedding,
+    );
+    apply_provider_default_choice(
+        &mut config.providers.default_reranker_provider_id,
+        &provider_id,
+        update.make_default_reranker,
+    );
+    apply_provider_default_choice(
+        &mut config.providers.default_search_provider_id,
+        &provider_id,
+        update.make_default_search,
+    );
     config.validate().map_err(error_to_string)
+}
+
+fn apply_provider_default_choice(
+    configured: &mut Option<String>,
+    provider_id: &str,
+    selected: bool,
+) {
+    if selected {
+        *configured = Some(provider_id.to_owned());
+    } else if configured.as_deref() == Some(provider_id) {
+        *configured = None;
+    }
+}
+
+fn provider_config_from_update(update: &ProviderSettingsUpdate) -> CommandResult<ProviderConfig> {
+    let provider_config = ProviderConfig {
+        provider_id: normalize_provider(&update.provider_id)?,
+        provider_type: update.provider_type.clone(),
+        display_name: non_empty_or("provider display_name", update.display_name.clone())?,
+        enabled: update.enabled,
+        base_url: update.base_url.clone(),
+        api_key: None,
+        models: update.models.clone(),
+    };
+    provider_config.validate().map_err(error_to_string)?;
+    for model in &provider_config.models {
+        model
+            .validate_provider_model_role()
+            .map_err(error_to_string)?;
+    }
+    Ok(provider_config)
 }
 
 pub fn quick_edit_impl(
@@ -7074,12 +8835,12 @@ fn project_ai_answer(
     let project_config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
+    let project_ai_permission_policy =
+        permission_policy_for_scope(&project_config.permissions, "project_ai");
     let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls);
     let project_search_enabled =
         tool_control_enabled(&tool_controls, "project_ai", PROJECT_AI_SEARCH_TOOL);
-    let web_search_enabled = project_config
-        .permissions
-        .policy
+    let web_search_enabled = project_ai_permission_policy
         .evaluate(&PermissionRequest::WebSearch)
         .allowed
         && tool_control_enabled(&tool_controls, "project_ai", PROJECT_AI_WEB_SEARCH_TOOL);
@@ -7148,7 +8909,7 @@ fn project_ai_answer(
                 retrieval,
                 project_search_enabled,
                 web_search_provider: web_search_provider.as_ref(),
-                permission_policy: &project_config.permissions.policy,
+                permission_policy: &project_ai_permission_policy,
                 ledger: &ledger,
                 web_search_enabled,
                 cancellation,
@@ -7352,7 +9113,7 @@ struct ProjectAiStartNodeInfo {
 fn project_ai_start_node_catalog(
     project_root: &Path,
 ) -> CommandResult<Vec<ProjectAiStartNodeInfo>> {
-    let workflows_root = absolute_path(&project_root.join("workflows"));
+    let workflows_root = absolute_path(&project_layout(project_root)?.workflows);
     reject_symlink_root(&workflows_root)?;
     if !workflows_root.exists() {
         return Ok(Vec::new());
@@ -7446,6 +9207,7 @@ Do not start a workflow without querying start nodes first."),
 fn project_ai_workflow_tools(project_root: &Path) -> CommandResult<Vec<ProjectWorkflowTool>> {
     let _project_mutation =
         acquire_project_mutation_guard(project_root, "workflow_tool_discovery")?;
+    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     let project_config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
@@ -7454,81 +9216,117 @@ fn project_ai_workflow_tools(project_root: &Path) -> CommandResult<Vec<ProjectWo
         return Ok(Vec::new());
     }
 
-    let workflows_root = absolute_path(&project_root.join("workflows"));
-    reject_symlink_root(&workflows_root)?;
-    if !workflows_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut paths = workflow_json_paths(&workflows_root)?;
-    paths.sort();
-
+    let canvas = graph_to_workflow(load_project_canvas_locked(project_root)?)?;
     let mut tools = Vec::new();
-    for path in paths {
-        ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
-        let content = std::fs::read_to_string(&path).map_err(error_to_string)?;
-        let workflow: WorkflowDefinition =
-            serde_json::from_str(&content).map_err(error_to_string)?;
-        for start_node in workflow
-            .nodes
-            .iter()
-            .filter(|node| node.type_name == "start" && start_node_exposes_tool(node))
-        {
-            let display_name = start_node_tool_display_name(start_node);
-            let base_name = sanitize_tool_name(&display_name);
-            let mut tool_name = if base_name.is_empty() {
-                sanitize_tool_name(start_node.id.as_str())
-            } else {
-                base_name
-            };
-            if tool_name.is_empty() {
-                tool_name = "workflow".to_owned();
-            }
-            if tools
-                .iter()
-                .any(|tool: &ProjectWorkflowTool| tool.tool_name == tool_name)
-            {
-                tool_name = format!(
-                    "{}_{}_{}",
-                    tool_name,
-                    sanitize_tool_name(workflow.id.as_str()),
-                    sanitize_tool_name(start_node.id.as_str())
-                )
-                .trim_matches('_')
-                .to_owned();
-            }
-            if !project_ai_workflow_tool_enabled(&tool_controls, &tool_name) {
-                continue;
-            }
-            tools.push(ProjectWorkflowTool {
-                tool_name,
-                display_name,
-                workflow_id: workflow.id.as_str().to_owned(),
-                start_node_id: start_node.id.as_str().to_owned(),
-                input_schema: start_node_tool_input_schema(start_node),
-            });
+    for start_node in canvas
+        .nodes
+        .iter()
+        .filter(|node| node.type_name == "start" && start_node_exposes_tool(node))
+    {
+        let display_name = start_node_tool_display_name(start_node);
+        let base_name = sanitize_tool_name(&display_name);
+        let mut tool_name = if base_name.is_empty() {
+            sanitize_tool_name(start_node.id.as_str())
+        } else {
+            base_name
+        };
+        if tool_name.is_empty() {
+            tool_name = "workflow".to_owned();
         }
+        if tools
+            .iter()
+            .any(|tool: &ProjectWorkflowTool| tool.tool_name == tool_name)
+        {
+            tool_name = format!(
+                "{}_{}_{}",
+                tool_name,
+                sanitize_tool_name(canvas.id.as_str()),
+                sanitize_tool_name(start_node.id.as_str())
+            )
+            .trim_matches('_')
+            .to_owned();
+        }
+        if !project_ai_workflow_tool_enabled(&tool_controls, &tool_name) {
+            continue;
+        }
+        tools.push(ProjectWorkflowTool {
+            tool_name,
+            display_name,
+            workflow_id: canvas.id.as_str().to_owned(),
+            start_node_id: start_node.id.as_str().to_owned(),
+            input_schema: start_node_tool_input_schema(start_node),
+        });
     }
     Ok(tools)
 }
 
 fn tool_control_enabled(
-    controls: &BTreeMap<String, BTreeMap<String, bool>>,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
     scope: &str,
     tool: &str,
 ) -> bool {
-    controls
+    if let Some(value) = controls
         .get(scope)
-        .and_then(|scope_controls| scope_controls.get(tool).copied())
-        .unwrap_or(false) // 未显式配置的工具默认禁用，需在 default_permission_tool_controls 中注册
+        .and_then(|scope_controls| scope_controls.get(tool))
+        .and_then(|value| *value)
+    {
+        return value;
+    }
+
+    let default_key = tool_default_action(tool);
+    controls
+        .get("global")
+        .and_then(|defaults| defaults.get(default_key))
+        .and_then(|value| *value)
+        .unwrap_or(false)
+}
+
+fn node_tool_control_enabled(
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
+    presets: &NodePresetSettings,
+    type_name: &str,
+    scope: &str,
+    tool: &str,
+) -> bool {
+    let preset_override = node_type_preset(presets, type_name).and_then(|preset| {
+        preset
+            .tool_controls
+            .get(tool)
+            .or_else(|| preset.tool_controls.get(tool_default_action(tool)))
+            .and_then(|value| *value)
+    });
+    preset_override.unwrap_or_else(|| tool_control_enabled(controls, scope, tool))
+}
+
+fn tool_default_action(tool: &str) -> &'static str {
+    if tool == "project-ai-workflow-tools" {
+        "workflow-tools"
+    } else if tool.ends_with("-web-search") {
+        "web-search"
+    } else if tool.ends_with("-search") {
+        "search"
+    } else if tool.ends_with("-find") {
+        "find"
+    } else if tool.ends_with("-register") {
+        "register"
+    } else if tool.ends_with("-insert-lines")
+        || tool.ends_with("-replace-lines")
+        || tool.ends_with("-rewrite-file")
+    {
+        "write"
+    } else {
+        "unknown"
+    }
 }
 
 fn project_ai_workflow_tool_enabled(
-    controls: &BTreeMap<String, BTreeMap<String, bool>>,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
     tool_name: &str,
 ) -> bool {
     controls
         .get("project_ai")
-        .and_then(|scope_controls| scope_controls.get(tool_name).copied())
+        .and_then(|scope_controls| scope_controls.get(tool_name))
+        .and_then(|value| *value)
         .unwrap_or_else(|| {
             tool_control_enabled(controls, "project_ai", "project-ai-workflow-tools")
         })
@@ -7646,14 +9444,16 @@ fn project_ai_tool_definitions(
     let mut tools = Vec::new();
     if project_search_enabled {
         tools.push(project_search_tool_definition(
-            PROJECT_AI_SEARCH_TOOL,
-            "检索当前项目文档、规划与已确认知识。回答项目事实前应优先使用本工具核对。",
+            PROJECT_AI_TOOL_CAPABILITY.project_search_tool.unwrap(),
+            PROJECT_AI_TOOL_CAPABILITY
+                .project_search_description
+                .unwrap(),
         ));
     }
     if web_search_enabled {
         tools.push(web_search_tool_definition(
-            PROJECT_AI_WEB_SEARCH_TOOL,
-            "搜索公开互联网，返回标题、URL 与摘要；结果不自动写入项目知识库。",
+            PROJECT_AI_TOOL_CAPABILITY.web_search_tool.unwrap(),
+            PROJECT_AI_TOOL_CAPABILITY.web_search_description.unwrap(),
         ));
     }
     if workflow_tools.is_empty() {
@@ -7807,27 +9607,39 @@ pub fn recent_project_store(app_state_root: &Path) -> ProjectRegistryStore {
     ProjectRegistryStore::new(app_state_root.join(RECENT_PROJECTS_FILE))
 }
 
-fn record_recent_project(
+fn record_current_project(
     app_state_root: &Path,
-    name: Option<String>,
-    project_root: &Path,
+    current: &CurrentProjectStatus,
 ) -> CommandResult<Vec<RecentProjectEntry>> {
-    let explicit_name = name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned);
-    let name = match explicit_name {
-        Some(name) => name,
-        None => project_display_name(project_root)?,
-    };
     recent_project_store(app_state_root)
-        .record_opened(name, project_root)
+        .record_opened(current.project_name.clone(), current.project_root.clone())
         .map_err(error_to_string)
 }
 
 pub fn current_project_status(project_root: &Path) -> CommandResult<CurrentProjectStatus> {
-    validate_initialized_project_root(project_root)?;
+    validate_project_root(project_root)?;
+    let app_config = project_root.join(".config").join("app.yaml");
+    if !app_config.is_file() {
+        // Git restore/重建维护期间，app.yaml 可能暂时不存在；状态栏仍需保持只读可见，
+        // 但普通未初始化目录不能借此被当成有效项目。仅在已有维护 outbox 且状态仍在
+        // active/failed 阶段时放行，避免为了读取状态创建新的 runtime 数据库。
+        let outbox_path = project_root.join(".runtime").join("index_invalidation.db");
+        let maintenance = if outbox_path.is_file() {
+            document_service(project_root)
+                .invalidation_outbox()
+                .maintenance_state()
+                .map_err(error_to_string)?
+        } else {
+            None
+        };
+        let maintenance_readable = maintenance
+            .as_ref()
+            .map(|state| state.status == "active" || state.status == "failed")
+            .unwrap_or(false);
+        if !maintenance_readable {
+            validate_initialized_project_root(project_root)?;
+        }
+    }
     Ok(CurrentProjectStatus {
         project_root: project_root.to_path_buf(),
         project_name: project_display_name(project_root)?,
@@ -7850,24 +9662,6 @@ fn project_display_name(project_root: &Path) -> CommandResult<String> {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("Ariadne Project")
         .to_owned())
-}
-
-fn ensure_project_config(project_root: &Path) -> CommandResult<()> {
-    ConfigStore::new(project_root)
-        .load_or_create()
-        .map(|_| ())
-        .map_err(error_to_string)
-}
-
-fn persist_project_name(project_root: &Path, name: Option<&str>) -> CommandResult<()> {
-    let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
-        return Ok(());
-    };
-    let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
-    let config_store = ConfigStore::new(project_root);
-    let mut config = config_store.load_or_create().map_err(error_to_string)?;
-    config.app.project_name = name.to_owned();
-    config_store.save(&config).map_err(error_to_string)
 }
 
 pub fn get_sidebar_badges_impl(project_root: &Path) -> CommandResult<SidebarBadgeCounts> {
@@ -7999,13 +9793,58 @@ fn node_preset_settings_path(project_root: &Path) -> PathBuf {
     project_root.join(".runtime").join(UI_NODE_PRESETS_FILE)
 }
 
+fn app_node_defaults_path(app_state_root: &Path) -> PathBuf {
+    app_state_root.join(APP_NODE_DEFAULTS_FILE)
+}
+
 fn read_node_preset_settings(project_root: &Path) -> CommandResult<NodePresetSettings> {
+    let app_state_root = crate::config::trusted_app_state_for_project(project_root);
+    read_node_preset_settings_with_app_state(project_root, &app_state_root)
+}
+
+fn read_node_preset_settings_with_app_state(
+    project_root: &Path,
+    app_state_root: &Path,
+) -> CommandResult<NodePresetSettings> {
     validate_project_root(project_root)?;
     let path = node_preset_settings_path(project_root);
-    match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(error_to_string),
+    let legacy = match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<NodePresetSettings>(&content).ok(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error_to_string(error)),
+    };
+    let app = read_app_node_defaults(app_state_root, legacy.as_ref())?;
+    let project = match std::fs::read_to_string(path) {
+        Ok(content) => {
+            serde_json::from_str::<ProjectNodePresetOverrides>(&content).map_err(error_to_string)?
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(NodePresetSettings::default())
+            ProjectNodePresetOverrides::from_settings(&NodePresetSettings::default())
+        }
+        Err(error) => return Err(error_to_string(error)),
+    };
+    Ok(project.merge(app))
+}
+
+fn read_app_node_defaults(
+    app_state_root: &Path,
+    legacy: Option<&NodePresetSettings>,
+) -> CommandResult<AppNodeDefaults> {
+    let path = app_node_defaults_path(app_state_root);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let settings: AppNodeDefaults =
+                serde_json::from_str(&content).map_err(error_to_string)?;
+            settings.validate()?;
+            Ok(settings)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let default_settings = NodePresetSettings::default();
+            let settings = AppNodeDefaults::from_settings(legacy.unwrap_or(&default_settings));
+            settings.validate()?;
+            let body = serde_json::to_vec_pretty(&settings).map_err(error_to_string)?;
+            crate::config::store::atomic_write(&path, &body).map_err(error_to_string)?;
+            Ok(settings)
         }
         Err(error) => Err(error_to_string(error)),
     }
@@ -8013,10 +9852,11 @@ fn read_node_preset_settings(project_root: &Path) -> CommandResult<NodePresetSet
 
 fn write_node_preset_settings(
     project_root: &Path,
+    app_state_root: &Path,
     settings: &NodePresetSettings,
 ) -> CommandResult<()> {
     validate_project_root(project_root)?;
-    let configured_model_ids = configured_model_ids_for_presets(project_root)?;
+    let configured_models = configured_models_for_presets(project_root)?;
     for preset in &settings.presets {
         if preset.node_type.trim().is_empty() {
             return Err(CommandError::validation("node_type cannot be empty"));
@@ -8035,7 +9875,8 @@ fn write_node_preset_settings(
         }
         validate_money("budget_usd", preset.budget_usd)?;
         ensure_preset_model_is_configured(
-            &configured_model_ids,
+            &configured_models,
+            &preset.provider_id,
             &preset.model_id,
             &format!("preset {}", preset.node_type),
         )?;
@@ -8044,7 +9885,8 @@ fn write_node_preset_settings(
         return Err(CommandError::validation("default_model_id cannot be empty"));
     }
     ensure_preset_model_is_configured(
-        &configured_model_ids,
+        &configured_models,
+        &settings.default_provider_id,
         &settings.default_model_id,
         "default_model_id",
     )?;
@@ -8054,12 +9896,41 @@ fn write_node_preset_settings(
         ));
     }
     validate_money("default_budget_usd", settings.default_budget_usd)?;
-    let path = node_preset_settings_path(project_root);
-    let body = serde_json::to_string_pretty(settings).map_err(error_to_string)?;
-    crate::config::store::atomic_write(&path, body.as_bytes()).map_err(error_to_string)
+    let app_path = app_node_defaults_path(app_state_root);
+    let project_path = node_preset_settings_path(project_root);
+    let previous_app = std::fs::read(&app_path).ok();
+    let app_body = serde_json::to_vec_pretty(&AppNodeDefaults::from_settings(settings))
+        .map_err(error_to_string)?;
+    let project_body =
+        serde_json::to_vec_pretty(&ProjectNodePresetOverrides::from_settings(settings))
+            .map_err(error_to_string)?;
+    crate::config::store::atomic_write(&app_path, &app_body).map_err(error_to_string)?;
+    if let Err(error) = crate::config::store::atomic_write(&project_path, &project_body) {
+        let rollback = restore_optional_file(&app_path, previous_app.as_deref());
+        return Err(match rollback {
+            Ok(()) => error_to_string(error),
+            Err(rollback) => CommandError::internal(format!(
+                "failed to save project node preset overrides: {error}; global defaults rollback failed: {rollback}"
+            )),
+        });
+    }
+    Ok(())
 }
 
-fn configured_model_ids_for_presets(project_root: &Path) -> CommandResult<HashSet<String>> {
+fn restore_optional_file(path: &Path, previous: Option<&[u8]>) -> CommandResult<()> {
+    match previous {
+        Some(bytes) => crate::config::store::atomic_write(path, bytes).map_err(error_to_string),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error_to_string(error)),
+        },
+    }
+}
+
+fn configured_models_for_presets(
+    project_root: &Path,
+) -> CommandResult<BTreeMap<String, HashSet<String>>> {
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
@@ -8067,18 +9938,56 @@ fn configured_model_ids_for_presets(project_root: &Path) -> CommandResult<HashSe
         .providers
         .providers
         .into_iter()
-        .flat_map(|provider| provider.models.into_iter())
-        .map(|model| model.model_id)
+        .map(|provider| {
+            (
+                provider.provider_id,
+                provider
+                    .models
+                    .into_iter()
+                    .map(|model| model.model_id)
+                    .collect(),
+            )
+        })
         .collect())
 }
 
 fn ensure_preset_model_is_configured(
-    configured_model_ids: &HashSet<String>,
+    configured_models: &BTreeMap<String, HashSet<String>>,
+    provider_id: &str,
     model_id: &str,
     field: &str,
 ) -> CommandResult<()> {
-    if configured_model_ids.is_empty() || configured_model_ids.contains(model_id) {
+    if configured_models.is_empty() {
         return Ok(());
+    }
+    let provider_id = provider_id.trim();
+    let model_id = model_id.trim();
+    if !provider_id.is_empty() {
+        let models = configured_models.get(provider_id).ok_or_else(|| {
+            CommandError::validation(format!(
+                "{field} references a Provider that is not configured: {provider_id}"
+            ))
+        })?;
+        if models.contains(model_id) {
+            return Ok(());
+        }
+        return Err(CommandError::validation(format!(
+            "{field} references a model that is not configured for Provider {provider_id}: {model_id}"
+        )));
+    }
+
+    let matches = configured_models
+        .iter()
+        .filter(|(_, models)| models.contains(model_id))
+        .map(|(provider, _)| provider.as_str())
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        return Ok(());
+    }
+    if matches.len() > 1 {
+        return Err(CommandError::validation(format!(
+            "{field} model id is ambiguous across Providers; select a Provider explicitly: {model_id}"
+        )));
     }
     Err(CommandError::validation(format!(
         "{field} references a model that is not configured in model settings: {model_id}"
@@ -8094,38 +10003,19 @@ fn default_node_preset_timeout_ms() -> u64 {
 }
 
 fn default_node_type_presets() -> Vec<NodeTypePreset> {
-    // 非推理节点（start/document/search/condition/loop/approval/export）无需 LLM 预算；
-    // 推理节点（llm/writer/outliner 等）设 1.0 USD 单次上限，防止失控调用。
-    let llm_budget = 1.0;
-    let no_budget = 0.0;
-    [
-        ("start", "ui.workspace.start_node.title", no_budget),
-        ("llm", "ui.node.llm", llm_budget),
-        ("document", "ui.node.document", no_budget),
-        ("search", "ui.node.search", no_budget),
-        ("condition", "ui.node.condition", no_budget),
-        ("loop", "ui.node.loop", no_budget),
-        ("approval", "ui.node.approval", no_budget),
-        ("export", "ui.node.export", no_budget),
-        ("outliner", "agent.outliner", llm_budget),
-        ("designer", "agent.designer", llm_budget),
-        ("planner", "agent.planner", llm_budget),
-        ("detail", "agent.detail", llm_budget),
-        ("writer", "agent.writer", llm_budget),
-        ("critic", "agent.critic", llm_budget),
-        ("prudent", "agent.prudent", llm_budget),
-        ("polisher", "agent.polisher", llm_budget),
-        ("summarizer", "agent.summarizer", llm_budget),
-    ]
-    .into_iter()
-    .map(|(node_type, display_name_key, budget_usd)| NodeTypePreset {
-        node_type: node_type.to_owned(),
-        display_name_key: display_name_key.to_owned(),
-        model_id: default_node_preset_model_id(),
-        timeout_ms: default_node_preset_timeout_ms(),
-        budget_usd,
-    })
-    .collect()
+    workflow_node_catalog()
+        .iter()
+        .map(|entry| NodeTypePreset {
+            node_type: entry.preset_type.clone(),
+            display_name_key: entry.display_name_key.clone(),
+            provider_id: String::new(),
+            model_id: default_node_preset_model_id(),
+            timeout_ms: default_node_preset_timeout_ms(),
+            budget_usd: entry.default_budget_usd,
+            permission_policy: None,
+            tool_controls: BTreeMap::new(),
+        })
+        .collect()
 }
 
 /// 设置页可配置确认项全集。
@@ -8250,7 +10140,9 @@ fn confirmation_kind_policy_key(kind: crate::rag::models::ConfirmationKind) -> &
 fn merge_confirmation_policy_settings(
     existing: Option<&[ConfirmationPolicySetting]>,
     prompts: &[ApprovalPromptConfig],
-) -> Vec<ConfirmationPolicySetting> {
+) -> CommandResult<Vec<ConfirmationPolicySetting>> {
+    let prompt_resources =
+        crate::rag::resources::load_prompt_resources().map_err(error_to_string)?;
     let mut map = std::collections::BTreeMap::<String, ConfirmationPolicySetting>::new();
     if let Some(items) = existing {
         for item in items {
@@ -8267,6 +10159,7 @@ fn merge_confirmation_policy_settings(
                     confirmation_kind: register_policy_key(agent, func).to_owned(),
                     normal_policy: agg.normal_policy,
                     auto_mode_policy: agg.auto_mode_policy,
+                    approval_prompt: agg.approval_prompt.clone(),
                 });
             }
         }
@@ -8280,8 +10173,15 @@ fn merge_confirmation_policy_settings(
                 confirmation_kind: kind.to_owned(),
                 normal_policy,
                 auto_mode_policy,
+                approval_prompt: approval_prompt_for_kind(prompts, &prompt_resources, kind),
             }
         });
+    }
+    for item in map.values_mut() {
+        if item.approval_prompt.trim().is_empty() {
+            item.approval_prompt =
+                approval_prompt_for_kind(prompts, &prompt_resources, &item.confirmation_kind);
+        }
     }
     // 先结束对 map 的逐项可变借用，再消费剩余扩展项。
     let mut ordered = confirmation_policy_keys()
@@ -8289,7 +10189,45 @@ fn merge_confirmation_policy_settings(
         .filter_map(|k| map.remove(k))
         .collect::<Vec<_>>();
     ordered.extend(map.into_values());
-    ordered
+    Ok(ordered)
+}
+
+fn approval_prompt_for_kind(
+    prompts: &[ApprovalPromptConfig],
+    resources: &crate::rag::resources::PromptResources,
+    kind: &str,
+) -> String {
+    prompts
+        .iter()
+        .find(|prompt| prompt.prompt_id == kind && !prompt.prompt.trim().is_empty())
+        .map(|prompt| prompt.prompt.trim().to_owned())
+        .or_else(|| {
+            resources
+                .get(approval_prompt_resource_key(kind))
+                .map(|resource| resource.prompt.trim().to_owned())
+        })
+        .unwrap_or_else(|| {
+            "Review the proposed action and return an approval decision with reasons.".to_owned()
+        })
+}
+
+fn approval_prompt_resource_key(kind: &str) -> &'static str {
+    match kind {
+        "chapter_write" => "auto_audit.chapter_write",
+        "summary_write" => "auto_audit.summary_write",
+        "high_risk_permission" => "auto_audit.high_risk_permission",
+        "budget_exceeded" => "auto_audit.budget_exceeded",
+        "outliner_output" | "designer_output" | "planner_output" => "auto_audit.planning_output",
+        "critic_review" | "prudent_review" => "auto_audit.review",
+        "segment_summary" | "event_summary" | "chapter_summary" | "stage_summary" => {
+            "auto_audit.summary"
+        }
+        "writer_correction_patch" | "polisher_correction_patch" => "auto_audit.correction_patch",
+        value if value == "planner_register" || value.contains("_register_") => {
+            "auto_audit.register"
+        }
+        _ => "auto_audit.generic",
+    }
 }
 
 fn policy_for_kind(prompts: &[ApprovalPromptConfig], kind: &str) -> String {
@@ -8637,12 +10575,49 @@ fn workflow_scheduler_tick(
             )?;
             continue;
         };
-        let loaded_retrieval_runtime = scheduled_workflow_retrieval_runtime(
-            project_root,
-            secrets.as_ref(),
-            retrieval_runtime,
-            prepared_workflow,
-        )?;
+        let Some(prepared_dependency_plan) = state.prepared_dependency_plan.as_ref() else {
+            mark_workflow_run_failed_with_lease_impl(
+                project_root,
+                state.workflow_id.as_str(),
+                state.run_id.as_str(),
+                "workflow_legacy_dependency_snapshot_unrecoverable",
+                "workflow_scheduler",
+                "error.workflow.legacy_snapshot_unrecoverable",
+                "error.workflow.legacy_snapshot_unrecoverable.recovery",
+                &lease,
+            )?;
+            continue;
+        };
+        let prepared_runtime = (|| -> CommandResult<_> {
+            let dependency_plan = materialize_frozen_workflow_runtime_dependency_plan(
+                project_root,
+                secrets.as_ref(),
+                prepared_workflow,
+                prepared_dependency_plan,
+            )?;
+            scheduled_workflow_retrieval_runtime(
+                project_root,
+                secrets.as_ref(),
+                retrieval_runtime,
+                &dependency_plan,
+            )
+        })();
+        let loaded_retrieval_runtime = match prepared_runtime {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                mark_workflow_run_failed_with_lease_impl(
+                    project_root,
+                    state.workflow_id.as_str(),
+                    state.run_id.as_str(),
+                    "workflow_scheduler_initialization_failed",
+                    "workflow_scheduler_initialization",
+                    error.diagnostic_text(),
+                    "error.workflow.worker_failed.recovery",
+                    &lease,
+                )?;
+                continue;
+            }
+        };
         if let Err(error) = spawn_continue_workflow_worker_with_lease(
             project_root.to_path_buf(),
             Arc::clone(secrets),
@@ -8674,25 +10649,40 @@ fn scheduled_workflow_retrieval_runtime(
     project_root: &Path,
     secrets: &dyn SecretStore,
     retrieval_runtime: &Arc<Mutex<Option<Arc<ProjectRetrievalRuntime>>>>,
-    workflow: &WorkflowDefinition,
+    dependency_plan: &WorkflowRuntimeDependencyPlan,
 ) -> CommandResult<Option<Arc<ProjectRetrievalRuntime>>> {
-    if !workflow.nodes.iter().any(|node| node.type_name == "search") {
+    if !dependency_plan.requires_project_retrieval {
         return Ok(None);
     }
     let mut runtime_slot = retrieval_runtime
         .lock()
         .map_err(|_| CommandError::internal("retrieval runtime lock poisoned"))?;
-    if let Some(runtime) = runtime_slot
-        .as_ref()
-        .filter(|runtime| runtime.project_root() == project_root)
-    {
+    if let Some(runtime) = runtime_slot.as_ref() {
+        if runtime.project_root() != project_root {
+            return Err(CommandError::conflict(
+                "shared retrieval runtime belongs to a different project",
+            ));
+        }
+        if !runtime
+            .matches_project_config(&dependency_plan.project_config)
+            .map_err(error_to_string)?
+        {
+            return Err(CommandError::conflict(
+                "shared retrieval runtime configuration changed after workflow preparation",
+            ));
+        }
         return Ok(Some(Arc::clone(runtime)));
     }
-    let runtime =
-        Arc::new(ProjectRetrievalRuntime::open(project_root, secrets).map_err(error_to_string)?);
-    let previous = runtime_slot.replace(Arc::clone(&runtime));
-    drop(runtime_slot);
-    drop(previous);
+    let runtime = Arc::new(
+        ProjectRetrievalRuntime::from_config(
+            project_root,
+            secrets,
+            &dependency_plan.project_config,
+            None,
+        )
+        .map_err(error_to_string)?,
+    );
+    runtime_slot.replace(Arc::clone(&runtime));
     Ok(Some(runtime))
 }
 
@@ -9085,6 +11075,14 @@ fn web_search_runtime(
     let project_config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
+    web_search_runtime_for_config(project_root, secrets, &project_config)
+}
+
+fn web_search_runtime_for_config(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    project_config: &ProjectConfig,
+) -> CommandResult<HttpWebSearchProvider> {
     let provider_config = select_web_search_provider(&project_config.providers)?;
     if provider_config.api_key.is_some() {
         return Err(CommandError::permission(format!(
@@ -9160,7 +11158,7 @@ fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<
     let mut config =
         LlmServiceConfig::new(provider_config.provider_id, model_config.model_id.clone())
             .with_model_config(&model_config);
-    // 用户配置的全局预算写入执行侧日限额，供 LlmService::evaluate_budget 使用。
+    // 用户配置的日预算写入执行侧 daily_usd，供 LlmService::evaluate_budget 使用。
     config.budget_limits = budget_limits_from_global_budget(budget_config.budget_usd);
     // auto_mode 已含 preauthorized_budget_usd（update_budget_config 写入）。
     Ok(CommandLlmRuntime {
@@ -9205,7 +11203,12 @@ fn select_llm_model(provider: &ProviderConfig) -> CommandResult<ModelConfig> {
         .models
         .iter()
         .find(|model| model.capability == ProviderCapability::Llm)
-        .or_else(|| provider.models.first())
+        .or_else(|| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.capability == ProviderCapability::ToolUse)
+        })
         .cloned()
         .ok_or_else(|| {
             CommandError::not_found(format!(
@@ -9252,21 +11255,50 @@ fn project_root_from_state(
     }
 }
 
+fn project_layout(project_root: &Path) -> CommandResult<crate::config::ProjectLayout> {
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    crate::config::ProjectLayout::from_app(project_root, &config.app).map_err(error_to_string)
+}
+
 fn document_service(project_root: &Path) -> FileDocumentService {
     document_service_with_artifacts(
         project_root,
         project_root.join(".runtime").join("artifacts"),
+        None,
     )
+}
+
+fn configured_document_service(project_root: &Path) -> CommandResult<FileDocumentService> {
+    let layout = project_layout(project_root)?;
+    layout
+        .create_configured_directories()
+        .map_err(error_to_string)?;
+    Ok(document_service_with_artifacts(
+        project_root,
+        project_root.join(".runtime").join("artifacts"),
+        Some(layout.exports),
+    ))
 }
 
 fn document_service_with_artifacts(
     document_root: &Path,
     artifact_root: PathBuf,
+    export_root: Option<PathBuf>,
 ) -> FileDocumentService {
     let mut permissions = project_document_permission(document_root);
     permissions.readable_file_roots.push(artifact_root.clone());
     permissions.writable_file_roots.push(artifact_root.clone());
-    FileDocumentService::new(permissions, artifact_root)
+    if let Some(export_root) = &export_root {
+        permissions.readable_file_roots.push(export_root.clone());
+        permissions.writable_file_roots.push(export_root.clone());
+    }
+    let service = FileDocumentService::new(permissions, artifact_root);
+    match export_root {
+        Some(export_root) => service.with_export_root(export_root),
+        None => service,
+    }
 }
 
 fn workflow_document_root(
@@ -9347,7 +11379,7 @@ fn scan_tree(project_root: &Path, root: &Path) -> CommandResult<DocumentTreeNode
 }
 
 fn workflow_path(project_root: &Path, workflow_id: Option<String>) -> CommandResult<PathBuf> {
-    let workflows_root = absolute_path(&project_root.join("workflows"));
+    let workflows_root = absolute_path(&project_layout(project_root)?.workflows);
     reject_symlink_root(&workflows_root)?;
     match workflow_id {
         Some(workflow_id) if !workflow_id.trim().is_empty() => {
@@ -9363,7 +11395,7 @@ fn workflow_path(project_root: &Path, workflow_id: Option<String>) -> CommandRes
 }
 
 fn workflow_manifest_path(project_root: &Path, workflow_id: &str) -> CommandResult<PathBuf> {
-    let workflows_root = absolute_path(&project_root.join("workflows"));
+    let workflows_root = absolute_path(&project_layout(project_root)?.workflows);
     reject_symlink_root(&workflows_root)?;
     let path = project_path(&workflows_root, workflow_id)?.join(WORKFLOW_MANIFEST_FILE);
     ensure_path_under_root(&workflows_root, &path).map_err(error_to_string)?;
@@ -10064,10 +12096,10 @@ fn validate_existing_project_root(project_root: &Path) -> CommandResult<()> {
 
 fn validate_initialized_project_root(project_root: &Path) -> CommandResult<()> {
     validate_existing_project_root(project_root)?;
-    let config_dir = project_root.join(".config");
-    if !config_dir.is_dir() {
+    let app_config = project_root.join(".config").join("app.yaml");
+    if !app_config.is_file() {
         return Err(CommandError::validation(format!(
-            "project root is not initialized: {}",
+            "project root is not initialized (missing .config/app.yaml): {}",
             project_root.display()
         )));
     }
@@ -10279,5 +12311,474 @@ fn simple_random_u16() -> u16 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u16)
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod permission_and_preset_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn tool_resolution_uses_global_then_scope_then_node_preset() {
+        let mut controls = normalize_tool_controls(BTreeMap::new());
+        controls
+            .get_mut("global")
+            .unwrap()
+            .insert("search".to_owned(), Some(false));
+        let mut presets = NodePresetSettings::default();
+
+        assert!(!node_tool_control_enabled(
+            &controls,
+            &presets,
+            "writer",
+            "writer",
+            "writer-search"
+        ));
+
+        controls
+            .get_mut("writer")
+            .unwrap()
+            .insert("writer-search".to_owned(), Some(true));
+        assert!(node_tool_control_enabled(
+            &controls,
+            &presets,
+            "writer",
+            "writer",
+            "writer-search"
+        ));
+
+        presets
+            .presets
+            .iter_mut()
+            .find(|preset| preset.node_type == "writer")
+            .unwrap()
+            .tool_controls
+            .insert("search".to_owned(), Some(false));
+        assert!(!node_tool_control_enabled(
+            &controls,
+            &presets,
+            "writer",
+            "writer",
+            "writer-search"
+        ));
+    }
+
+    #[test]
+    fn permission_resolution_separates_project_ai_workflow_and_node_preset() {
+        let mut permissions = crate::config::PermissionsConfig::default();
+        permissions.policy.allow_web_search = false;
+        let mut workflow_policy = permissions.policy.clone();
+        workflow_policy.allow_network = true;
+        workflow_policy.allow_web_search = true;
+        permissions
+            .scoped_policies
+            .insert("workflow_nodes".to_owned(), Some(workflow_policy));
+
+        let mut presets = NodePresetSettings::default();
+        assert!(
+            permission_policy_for_node(&permissions, &presets, "writer")
+                .evaluate(&PermissionRequest::WebSearch)
+                .allowed
+        );
+        assert!(
+            !permission_policy_for_scope(&permissions, "project_ai")
+                .evaluate(&PermissionRequest::WebSearch)
+                .allowed
+        );
+
+        presets
+            .presets
+            .iter_mut()
+            .find(|preset| preset.node_type == "writer")
+            .unwrap()
+            .permission_policy = Some(PermissionPolicy::default());
+        assert!(
+            !permission_policy_for_node(&permissions, &presets, "writer")
+                .evaluate(&PermissionRequest::WebSearch)
+                .allowed
+        );
+    }
+
+    #[test]
+    fn node_preset_fills_only_missing_runtime_values() {
+        let preset = NodeTypePreset {
+            node_type: "writer".to_owned(),
+            display_name_key: "agent.writer".to_owned(),
+            provider_id: "preset-provider".to_owned(),
+            model_id: "preset-model".to_owned(),
+            timeout_ms: 456_000,
+            budget_usd: 0.4,
+            permission_policy: None,
+            tool_controls: BTreeMap::new(),
+        };
+        let request = crate::workflow::WorkflowNodeExecutionRequest {
+            workflow_id: WorkflowId::from("flow"),
+            run_id: RunId::from("run"),
+            node_id: NodeId::from("writer"),
+            operation_id: "operation".to_owned(),
+            operation_attempt: 1,
+            request_hash: "hash".to_owned(),
+            type_name: "writer".to_owned(),
+            config: json!({"prompt_template":"write"}),
+            inputs: Default::default(),
+            communication_messages: Vec::new(),
+            metadata: Value::Null,
+            cancellation: Default::default(),
+            dispatch_authorization: Default::default(),
+        };
+
+        let applied = apply_node_type_preset(request, Some(&preset));
+        assert_eq!(applied.config["provider_id"], "preset-provider");
+        assert_eq!(applied.config["model_id"], "preset-model");
+        assert_eq!(applied.config["timeout_ms"], 456_000);
+        assert_eq!(applied.config["budget_usd"], 0.4);
+
+        let explicit = crate::workflow::WorkflowNodeExecutionRequest {
+            config: json!({
+                "provider_id":"node-provider",
+                "model_id":"node-model",
+                "timeout_ms":12_000,
+                "budget_usd":0.2
+            }),
+            ..applied
+        };
+        let explicit = apply_node_type_preset(explicit, Some(&preset));
+        assert_eq!(explicit.config["provider_id"], "node-provider");
+        assert_eq!(explicit.config["model_id"], "node-model");
+        assert_eq!(explicit.config["timeout_ms"], 12_000);
+        assert_eq!(explicit.config["budget_usd"], 0.2);
+    }
+
+    #[test]
+    fn scheduler_reuses_shared_runtime_for_implicit_writer_search() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(temp.path()).unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(crate::config::MemorySecretStore::default());
+        let state = AriadneAppState::new(temp.path(), app_state.path(), secrets.clone());
+        let status = save_provider_settings(
+            &state,
+            ProviderSettingsUpdate {
+                provider_id: "writer-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Writer Provider".to_owned(),
+                enabled: true,
+                base_url: Some("http://127.0.0.1:41003".to_owned()),
+                models: vec![ModelConfig {
+                    model_id: "writer-model".to_owned(),
+                    capability: ProviderCapability::Llm,
+                    max_context_tokens: None,
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                }],
+                make_default_llm: true,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+        )
+        .unwrap();
+        let provider_id = status
+            .providers
+            .iter()
+            .find(|provider| provider.configured)
+            .map(|provider| provider.provider.clone())
+            .expect("saved provider must be returned with its canonical identity");
+        assert_eq!(provider_id, "writer_provider");
+        let credentials = ProjectCredentialScope::new(temp.path(), secrets.as_ref()).unwrap();
+        credentials
+            .set_provider_secret(&provider_id, SecretValue::new("writer-secret"))
+            .unwrap();
+
+        let workflow = WorkflowDefinition {
+            id: WorkflowId::from("implicit-writer-search"),
+            name: "Implicit Writer Search".to_owned(),
+            nodes: vec![NodeInstance {
+                id: NodeId::from("writer"),
+                type_name: "writer".to_owned(),
+                label: None,
+                config: json!({
+                    "provider_id": provider_id,
+                    "model_id": "writer-model",
+                    "prompt_template": "write with project context"
+                }),
+                position: None,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        };
+        let plan =
+            compile_workflow_runtime_dependency_plan(temp.path(), secrets.as_ref(), &workflow)
+                .unwrap();
+        assert!(plan.requires_project_retrieval);
+        assert!(!plan.workflow.uses_node_type("search"));
+
+        let shared = Arc::clone(&state.retrieval_runtime);
+        let configured_runtime = shared
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .expect("provider save must retain the project shared runtime");
+        let first =
+            scheduled_workflow_retrieval_runtime(temp.path(), secrets.as_ref(), &shared, &plan)
+                .unwrap()
+                .expect("implicit writer search must open the shared runtime");
+        let second =
+            scheduled_workflow_retrieval_runtime(temp.path(), secrets.as_ref(), &shared, &plan)
+                .unwrap()
+                .expect("second recovery must reuse the shared runtime");
+        assert!(Arc::ptr_eq(&configured_runtime, &first));
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let worker_key = temp.path().canonicalize().unwrap();
+        for _ in 0..200 {
+            let worker_finished = !active_indexing_workers()
+                .lock()
+                .unwrap()
+                .contains(&worker_key);
+            if worker_finished {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!active_indexing_workers()
+            .lock()
+            .unwrap()
+            .contains(&worker_key));
+    }
+
+    #[test]
+    fn frozen_workflow_dependencies_ignore_later_provider_config_and_reject_credential_rotation() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(temp.path()).unwrap();
+        let secrets = crate::config::MemorySecretStore::default();
+        save_provider_settings_impl(
+            temp.path(),
+            ProviderSettingsUpdate {
+                provider_id: "declared".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Declared".to_owned(),
+                enabled: true,
+                base_url: Some("http://127.0.0.1:41001".to_owned()),
+                models: vec![ModelConfig {
+                    model_id: "frozen-model".to_owned(),
+                    capability: ProviderCapability::Llm,
+                    max_context_tokens: None,
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                }],
+                make_default_llm: false,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+        )
+        .unwrap();
+        let credentials = ProjectCredentialScope::new(temp.path(), &secrets).unwrap();
+        credentials
+            .set_provider_secret("declared", SecretValue::new("first-secret"))
+            .unwrap();
+        let workflow = WorkflowDefinition {
+            id: WorkflowId::from("frozen-dependencies"),
+            name: "Frozen Dependencies".to_owned(),
+            nodes: vec![NodeInstance {
+                id: NodeId::from("ask"),
+                type_name: "llm".to_owned(),
+                label: None,
+                config: json!({
+                    "provider_id": "declared",
+                    "model_id": "frozen-model",
+                    "prompt_template": "test"
+                }),
+                position: None,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        };
+        let plan =
+            compile_workflow_runtime_dependency_plan(temp.path(), &secrets, &workflow).unwrap();
+        let frozen = freeze_workflow_runtime_dependency_plan(&plan);
+        let frozen_value = serde_json::to_value(&frozen).unwrap();
+        assert!(!frozen_value.to_string().contains("first-secret"));
+
+        save_provider_settings_impl(
+            temp.path(),
+            ProviderSettingsUpdate {
+                provider_id: "declared".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Declared Changed".to_owned(),
+                enabled: true,
+                base_url: Some("http://127.0.0.1:41002".to_owned()),
+                models: vec![ModelConfig {
+                    model_id: "changed-model".to_owned(),
+                    capability: ProviderCapability::Llm,
+                    max_context_tokens: None,
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                }],
+                make_default_llm: false,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+        )
+        .unwrap();
+
+        let recovered = materialize_frozen_workflow_runtime_dependency_plan(
+            temp.path(),
+            &secrets,
+            &workflow,
+            &frozen_value,
+        )
+        .unwrap();
+        let provider = recovered
+            .project_config
+            .providers
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "declared")
+            .unwrap();
+        assert_eq!(provider.base_url.as_deref(), Some("http://127.0.0.1:41001"));
+        assert_eq!(
+            recovered.llm_execution.node_routes["ask"].model_id,
+            "frozen-model"
+        );
+
+        credentials
+            .set_provider_secret("declared", SecretValue::new("rotated-secret"))
+            .unwrap();
+        let error = materialize_frozen_workflow_runtime_dependency_plan(
+            temp.path(),
+            &secrets,
+            &workflow,
+            &frozen_value,
+        )
+        .err()
+        .expect("credential rotation must invalidate the frozen run");
+        assert!(error
+            .diagnostic_text()
+            .contains("credential generation changed"));
+    }
+
+    #[test]
+    fn scheduler_initialization_failure_marks_claimed_run_failed() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(temp.path()).unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(crate::config::MemorySecretStore::default());
+        save_provider_settings_impl(
+            temp.path(),
+            ProviderSettingsUpdate {
+                provider_id: "scheduled".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Scheduled".to_owned(),
+                enabled: true,
+                base_url: Some("http://127.0.0.1:41004".to_owned()),
+                models: vec![ModelConfig {
+                    model_id: "scheduled-model".to_owned(),
+                    capability: ProviderCapability::Llm,
+                    max_context_tokens: None,
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                }],
+                make_default_llm: false,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+        )
+        .unwrap();
+        let credentials = ProjectCredentialScope::new(temp.path(), secrets.as_ref()).unwrap();
+        credentials
+            .set_provider_secret("scheduled", SecretValue::new("initial-secret"))
+            .unwrap();
+        let workflow = WorkflowDefinition {
+            id: WorkflowId::from("scheduler-initialization-failure"),
+            name: "Scheduler Initialization Failure".to_owned(),
+            nodes: vec![NodeInstance {
+                id: NodeId::from("ask"),
+                type_name: "llm".to_owned(),
+                label: None,
+                config: json!({
+                    "provider_id": "scheduled",
+                    "model_id": "scheduled-model",
+                    "prompt_template": "test"
+                }),
+                position: None,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        };
+        let dependency_plan =
+            compile_workflow_runtime_dependency_plan(temp.path(), secrets.as_ref(), &workflow)
+                .unwrap();
+        let run_id = RunId::from("scheduler-initialization-run");
+        let mut state = WorkflowRuntime::new(&workflow, run_id.clone())
+            .unwrap()
+            .state;
+        state.prepared_workflow = Some(workflow.clone());
+        state.prepared_dependency_plan = Some(
+            serde_json::to_value(freeze_workflow_runtime_dependency_plan(&dependency_plan))
+                .unwrap(),
+        );
+        let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+        store.create_state(&state).unwrap();
+
+        credentials
+            .set_provider_secret("scheduled", SecretValue::new("rotated-secret"))
+            .unwrap();
+        workflow_scheduler_tick(
+            temp.path(),
+            &secrets,
+            &Arc::new(Mutex::new(None)),
+            "scheduler-initialization-test",
+        )
+        .unwrap();
+
+        let failed = store
+            .load_state(&workflow.id, &run_id)
+            .unwrap()
+            .expect("scheduler must retain a terminal run snapshot");
+        assert_eq!(failed.status, crate::contracts::RunStatus::Failed);
+        let failure = failed
+            .failure
+            .expect("scheduler failure must be structured");
+        assert_eq!(failure.code, "workflow_scheduler_initialization_failed");
+        assert_eq!(failure.stage, "workflow_scheduler_initialization");
+        assert!(failure.message.contains("credential generation changed"));
+    }
+
+    #[test]
+    fn provider_updates_reject_feature_flags_as_model_roles_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(temp.path()).unwrap();
+        let baseline = ConfigStore::new(temp.path()).load().unwrap();
+
+        for capability in [ProviderCapability::Streaming, ProviderCapability::ToolUse] {
+            let error = save_provider_settings_impl(
+                temp.path(),
+                ProviderSettingsUpdate {
+                    provider_id: "invalid-role".to_owned(),
+                    provider_type: ProviderType::OpenAiCompatible,
+                    display_name: "Invalid Role".to_owned(),
+                    enabled: true,
+                    base_url: Some("https://example.invalid/v1".to_owned()),
+                    models: vec![ModelConfig {
+                        model_id: "feature-model".to_owned(),
+                        capability,
+                        max_context_tokens: None,
+                        input_cost_per_million_tokens: None,
+                        output_cost_per_million_tokens: None,
+                    }],
+                    make_default_llm: false,
+                    make_default_embedding: false,
+                    make_default_reranker: false,
+                    make_default_search: false,
+                },
+            )
+            .expect_err("feature flags must not be persisted as singular model roles");
+            assert!(error.diagnostic_text().contains("executable provider role"));
+            assert_eq!(ConfigStore::new(temp.path()).load().unwrap(), baseline);
+        }
     }
 }

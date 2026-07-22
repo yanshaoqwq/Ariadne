@@ -7,8 +7,10 @@
 ## CI 执行模式
 
 - Pull Request 与 `main` push 只运行 60 分钟上限的 `quality`：发布工程合同、Rust fmt/Clippy/全量测试、cargo-deny、Desktop Release 测试和第三方声明一致性。相同分支的新提交会取消旧运行，避免排队任务持续占用 runner。
-- 五 RID 原生安装、Qdrant E2E、300 秒调度 soak、UI/WCAG 证据只在手动触发 `CI` 且设置 `full_release_matrix=true` 时运行。原生包、性能和最终证据 job 都有显式超时；普通 PR 不重复执行整套发布验收。
+- 五 RID 原生安装、Qdrant E2E、300 秒调度 soak、UI/WCAG 证据只在手动触发 `CI` 时运行；`full_release_matrix` 默认开启，也可由操作者显式关闭。原生包、性能和最终证据 job 都有显式超时；普通 PR 不重复执行整套发布验收。
 - `v*` tag 使用独立 `Release` workflow：先校验唯一静态 blocker 与 tag，再运行质量、强制签名/公证的五 RID 原生打包、动态证据门禁，最后只创建 draft release。活动 tag 发布不会被后续运行自动取消。
+
+所有可能长期占用 runner 的外部进程统一通过 `scripts/run-with-timeout.py` 监管。该入口直接执行参数数组，不经过 shell；Unix 终止整个进程组，Windows 创建新进程组并用 `taskkill /T /F` 回收子进程树，超时稳定返回 124。Cargo、dotnet restore/publish、Inno Setup、codesign/pkgbuild/notarytool、安装/升级/卸载探针以及 Qdrant 供给/E2E 均有阶段级硬超时，避免 job 只依赖最外层 `timeout-minutes` 后长期无日志占用 runner。Windows runner 在 Rust 构建前显式初始化 x64 MSVC 环境。
 
 ## 统一发布目录
 
@@ -22,9 +24,9 @@ scripts/build-release.sh linux-arm64
 - `Backend/ariadne-ipc` sidecar；
 - `Tools/ariadne` CLI；正式产物不包含远程/REST server；
 - `Resources/`、许可文件、第三方声明和平台图标；
-- `release-manifest.json` 文件大小与 SHA-256 清单。
+- `release-manifest.json` schema 2 文件大小与 SHA-256 清单；macOS 仅把主 `Ariadne.Desktop` 标为外层 app bundle 封印会改写的精确平台路径。
 
-`verify-package` 会拒绝 PDB、target/obj/bin、密钥/数据库、`ariadne-server`、构建仓库绝对路径、缺失资源和 hash 漂移，并从包内桌面入口启动包内 sidecar。
+默认 `verify-package` 对包括 macOS 主入口在内的每个文件校验大小和 SHA-256，并拒绝 PDB、target/obj/bin、密钥/数据库、`ariadne-server`、构建仓库绝对路径、缺失资源和 hash 漂移，再从包内桌面入口启动包内 sidecar。只有 macOS 外层 bundle 已通过严格 `codesign` 验证后，安装器脚本才可显式使用 `--allow-platform-sealed-mutation`；该模式仍校验完整文件集及其它所有文件，只把清单声明的唯一主 apphost 交给平台签名、公证和 Gatekeeper 证明。
 
 ## 本机发布证据
 
@@ -50,8 +52,8 @@ xvfb-run -a -s "-screen 0 1600x900x24" \
 ## 安装产物
 
 - Linux：`packaging/linux/build-deb.sh <staging>`，随后运行 `smoke-deb.sh`；正式发布的 `.asc` 在生成后和 smoke 时都必须由 GPG 重新验证。
-- Windows：安装 Inno Setup 后运行 `build-installer.ps1`，随后运行 `smoke-installer.ps1`。正式发布先在组装 manifest 前签名并验证 Ariadne Desktop/CLI/IPC 第一方二进制，再验证带时间戳的安装器和卸载器 Authenticode 签名。
-- macOS：`packaging/macos/build-installer.sh <staging>` 生成 `.app`、`.pkg` 和 `.dmg`；smoke 会只读挂载 DMG 并从镜像内启动应用，再执行 pkg 首次安装、覆盖升级和数据保留。正式发布还要求 codesign/pkg 签名、stapler ticket 与 Gatekeeper assessment 全部通过。
+- Windows：安装 Inno Setup 后运行 `build-installer.ps1`，随后运行 `smoke-installer.ps1`。smoke 对首次安装、包内布局探针、覆盖升级、升级后再次布局探针和卸载分别设置硬超时，并验证用户数据保留。正式发布先在组装 manifest 前签名并验证 Ariadne Desktop/CLI/IPC 第一方二进制，再验证带时间戳的安装器和卸载器 Authenticode 签名。
+- macOS：`build-release.sh` 先逐个签名并验证 Desktop、Rust sidecar/CLI 和 .NET runtime 中的全部 Mach-O，再由 ReleaseTool 把签名后字节写入 manifest，并以默认严格模式校验全部 size/SHA-256；`packaging/macos/build-installer.sh <staging>` 在安装器边界先重新严格验证 staging，之后才封装外层 `.app`，不得用 `codesign --deep` 重写已入 manifest 的嵌套文件。外层严格验签后，脚本使用显式 post-seal 模式再次验证文件集和全部非平台封印文件；唯一被外层封印改写的主 apphost 由 codesign、公证和 Gatekeeper 负责完整性。随后生成 `.pkg` 和 `.dmg`；smoke 会只读挂载 DMG 并从镜像内启动应用，再执行 pkg 首次安装、覆盖升级和数据保留。正式发布还要求 codesign/pkg 签名、stapler ticket 与 Gatekeeper assessment 全部通过。
 
 手动 `full_release_matrix` 可以使用无证书或 macOS ad-hoc 签名完成原生结构烟测；tag 发布设置 `ARIADNE_REQUIRE_SIGNED_RELEASE=1` 后必须提供正式签名输入，否则立即失败：Linux `ARIADNE_LINUX_SIGNING_KEY`、Windows `ARIADNE_WINDOWS_SIGNTOOL`、macOS `ARIADNE_MACOS_SIGNING_IDENTITY` / `ARIADNE_MACOS_INSTALLER_IDENTITY`。对应私钥必须由 CI secret 导入临时 runner，仓库不保存证书、私钥或口令。
 

@@ -1132,17 +1132,39 @@ fn require_incoming_data_alias(
 fn load_summarizer_confirmation_policy(
     project_root: &Path,
     auto_mode: bool,
-) -> CoreResult<crate::rag::models::WritingConfirmationPolicy> {
+) -> CoreResult<(
+    crate::rag::models::WritingConfirmationPolicy,
+    BTreeMap<crate::rag::models::ConfirmationKind, String>,
+)> {
     use crate::config::{ConfirmationAutoModePolicy, ConfirmationNormalPolicy};
-    use crate::rag::models::{ConfirmationKind, ConfirmationMode, WritingConfirmationPolicy};
+    use crate::rag::models::{
+        confirmation_prompt_key, ConfirmationKind, ConfirmationMode, WritingConfirmationPolicy,
+    };
 
     let mut policy = if auto_mode {
         WritingConfirmationPolicy::auto_audit_default()
     } else {
         WritingConfirmationPolicy::normal_default()
     };
+    let resources = crate::rag::resources::load_prompt_resources()?;
+    let mut approval_prompts = BTreeMap::new();
+    for kind in [
+        ConfirmationKind::SegmentSummary,
+        ConfirmationKind::EventSummary,
+        ConfirmationKind::ChapterSummary,
+        ConfirmationKind::StageSummary,
+    ] {
+        let key = confirmation_prompt_key(kind);
+        let prompt = resources
+            .get(key)
+            .ok_or_else(|| CoreError::validation(format!("missing prompt resource: {key}")))?
+            .prompt
+            .trim()
+            .to_owned();
+        approval_prompts.insert(kind, prompt);
+    }
     let Some(settings) = crate::config::read_confirmation_policy_settings(project_root)? else {
-        return Ok(policy);
+        return Ok((policy, approval_prompts));
     };
     for setting in settings {
         let kind = match setting.confirmation_kind.as_str() {
@@ -1152,6 +1174,9 @@ fn load_summarizer_confirmation_policy(
             "stage_summary" => ConfirmationKind::StageSummary,
             _ => continue,
         };
+        if !setting.approval_prompt.trim().is_empty() {
+            approval_prompts.insert(kind, setting.approval_prompt.trim().to_owned());
+        }
         let mode = if auto_mode {
             match setting.auto_mode_policy {
                 ConfirmationAutoModePolicy::AllowByDefault => ConfirmationMode::Skip,
@@ -1165,7 +1190,7 @@ fn load_summarizer_confirmation_policy(
         };
         policy.set_mode(kind, mode);
     }
-    Ok(policy)
+    Ok((policy, approval_prompts))
 }
 
 /// 执行 Summarizer 节点：加载写作知识库 → 四步总结 → 落库建索引 → 生成四层确认项。
@@ -1260,7 +1285,8 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
     // 不能静默创建空知识库后覆盖已有作品事实。
     let generation_context = store.load_summary_generation_context(&config.chapter_id)?;
     store.load_summary_working_set(&config.chapter_id, None)?;
-    let policy = load_summarizer_confirmation_policy(project_root, config.auto_mode)?;
+    let (policy, approval_prompts) =
+        load_summarizer_confirmation_policy(project_root, config.auto_mode)?;
 
     // 四步总结 → 组装 draft。
     let author_prompt = config
@@ -1317,6 +1343,30 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
         None => summarizer,
     };
     let draft = summarizer.summarize_chapter(&config.chapter_id, &chapter_text)?;
+    let mut audit_decisions = BTreeMap::new();
+    if config.auto_mode {
+        use crate::rag::models::{ConfirmationKind, ConfirmationMode};
+
+        for kind in [
+            ConfirmationKind::SegmentSummary,
+            ConfirmationKind::EventSummary,
+            ConfirmationKind::ChapterSummary,
+            ConfirmationKind::StageSummary,
+        ] {
+            if policy.mode_for(kind) != ConfirmationMode::AutoAudit {
+                continue;
+            }
+            let approval_prompt = approval_prompts.get(&kind).ok_or_else(|| {
+                CoreError::validation(format!(
+                    "missing Auto Mode approval prompt for confirmation kind {kind:?}"
+                ))
+            })?;
+            audit_decisions.insert(
+                kind,
+                summarizer.audit_confirmation(kind, approval_prompt, &chapter_text, &draft)?,
+            );
+        }
+    }
 
     // 外部计算不占写锁；提交前在统一写护栏内重放检查并重新读取最新快照，
     // 避免并发确认决策被长耗时总结器的旧快照覆盖。
@@ -1342,7 +1392,8 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
         policy,
         auto_mode,
         request.cancellation.clone(),
-    );
+    )
+    .with_auto_audit_decisions(audit_decisions);
     let report = pipeline.apply_draft(draft)?;
 
     // 把知识库确认项映射成 runtime 确认项，使工作流按需暂停。

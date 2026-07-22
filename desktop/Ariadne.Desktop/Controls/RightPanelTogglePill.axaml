@@ -1,0 +1,36 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Ariadne.Desktop.Controls.RightPanelTogglePill"
+             x:Name="Root"
+             x:CompileBindings="False"
+             Width="22"
+             Height="52"
+             HorizontalAlignment="Right"
+             VerticalAlignment="Top"
+             Focusable="True"
+             Cursor="Hand"
+             AutomationProperties.Name="{Binding AccessibleName, ElementName=Root}"
+             ToolTip.Tip="{Binding AccessibleName, ElementName=Root}">
+  <Border Background="{DynamicResource Ariadne.BackgroundSurface}"
+          BorderBrush="{DynamicResource Ariadne.BorderDefault}"
+          BorderThickness="1"
+          CornerRadius="8,0,0,8"
+          BoxShadow="-2 0 6 0 #10000000">
+    <Panel>
+      <Path Classes="icon"
+            Width="14"
+            Height="14"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            IsVisible="{Binding IsPanelOpen, ElementName=Root}"
+            Data="{StaticResource Ariadne.Icon.ChevronRight}" />
+      <Path Classes="icon"
+            Width="14"
+            Height="14"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            IsVisible="{Binding !IsPanelOpen, ElementName=Root}"
+            Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
+    </Panel>
+  </Border>
+</UserControl>

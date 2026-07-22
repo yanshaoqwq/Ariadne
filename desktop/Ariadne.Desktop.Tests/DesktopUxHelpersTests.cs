@@ -4,6 +4,7 @@ using Ariadne.Desktop;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 using Ariadne.Desktop.ViewModels;
+using Ariadne.Desktop.Views;
 using Xunit;
 
 namespace Ariadne.Desktop.Tests;
@@ -291,12 +292,14 @@ public sealed class DesktopUxHelpersTests
     }
 
     [Fact]
-    public void EnJaLocaleStubs_AreNotProductLanguages()
+    public void EnJaLocalePacks_AreProductLanguagesWithRealChrome()
     {
+        // Product packs ship partial primary chrome (not out_of_scope stubs).
         var names = Names();
-        Assert.DoesNotContain(names.AvailableLanguages, code =>
-            string.Equals(code, "en", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(code, "ja", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(names.AvailableLanguages, code =>
+            string.Equals(code, "en", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(names.AvailableLanguages, code =>
+            string.Equals(code, "ja", StringComparison.OrdinalIgnoreCase));
 
         var resources = Path.Combine(
             Path.GetDirectoryName(typeof(DisplayNameService).Assembly.Location)!,
@@ -308,8 +311,10 @@ public sealed class DesktopUxHelpersTests
         }
 
         Assert.True(File.Exists(en));
-        Assert.False(DisplayNameService.IsProductLanguagePack(en));
-        Assert.Contains("out_of_scope_for_v1", File.ReadAllText(en), StringComparison.Ordinal);
+        Assert.True(DisplayNameService.IsProductLanguagePack(en));
+        var enText = File.ReadAllText(en);
+        Assert.DoesNotContain("out_of_scope_for_v1", enText, StringComparison.Ordinal);
+        Assert.DoesNotContain("zh-only", enText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -740,6 +745,100 @@ public sealed class DesktopUxHelpersTests
     }
 
     [Fact]
+    public void MainWindow_SettingsEntry_IsLabeledSecondaryNavItem_NotWindowControl()
+    {
+        // Product path: Settings lives in SecondaryNavigationItems (sidebar), shared nav DataTemplate.
+        var main = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "MainWindow.axaml"));
+        var app = File.ReadAllText(Path.Combine(ResolveDesktopSource("App.axaml")));
+        var vm = File.ReadAllText(Path.Combine(ResolveDesktopSource("ViewModels"), "MainWindowViewModel.cs"));
+
+        Assert.Contains("ItemsSource=\"{Binding SecondaryNavigationItems}\"", main, StringComparison.Ordinal);
+        Assert.Contains("CreateNav(\"settings\", \"ui.nav.settings\"", vm, StringComparison.Ordinal);
+        Assert.Contains("SecondaryNavigationItems", vm, StringComparison.Ordinal);
+        Assert.Contains("DataType=\"{x:Type vm:NavigationItemViewModel}\"", app, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding Title}\"", app, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding SelectCommand}\"", app, StringComparison.Ordinal);
+        // Settings must not be a bare window-control chrome button.
+        Assert.DoesNotContain("SettingsNavigationItem", main, StringComparison.Ordinal);
+        Assert.DoesNotContain("Classes=\"subtle top-settings\"", main, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CompactSidebar_AutoCollapsesOnlyWhenEnteringCompactLayout()
+    {
+        Assert.True(MainWindow.ShouldAutoCollapseSidebar(null, isCompact: true));
+        Assert.True(MainWindow.ShouldAutoCollapseSidebar(false, isCompact: true));
+        Assert.False(MainWindow.ShouldAutoCollapseSidebar(true, isCompact: true));
+        Assert.False(MainWindow.ShouldAutoCollapseSidebar(true, isCompact: false));
+    }
+
+    [Fact]
+    public void ChromePolish_MenusSearchShellAndWindowControls_AreOnShippedThemeAndViews()
+    {
+        // Structural guards for high-impact UI polish (menus, search shell, window chrome).
+        // Drives real shipped axaml/theme strings — a revert of polish fails this contract.
+        var theme = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("Resources", "Styles"),
+            "AriadneTheme.axaml"));
+        var main = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "MainWindow.axaml"));
+        var template = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "TemplateMarketPageView.axaml"));
+        var runLog = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "RunLogPageView.axaml"));
+        var mainCode = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "MainWindow.axaml.cs"));
+
+        // Menus: compact min-width (below legacy 208–220 fat-panel band).
+        Assert.Contains("Selector=\"ContextMenu\"", theme, StringComparison.Ordinal);
+        Assert.Contains("Selector=\"MenuFlyoutPresenter\"", theme, StringComparison.Ordinal);
+        var contextMin = Regex.Match(
+            theme,
+            @"Selector=""ContextMenu""[\s\S]*?MinWidth""\s+Value=""(\d+)""",
+            RegexOptions.CultureInvariant);
+        var flyoutMin = Regex.Match(
+            theme,
+            @"Selector=""MenuFlyoutPresenter""[\s\S]*?MinWidth""\s+Value=""(\d+)""",
+            RegexOptions.CultureInvariant);
+        Assert.True(contextMin.Success, "ContextMenu MinWidth missing");
+        Assert.True(flyoutMin.Success, "MenuFlyoutPresenter MinWidth missing");
+        Assert.True(int.Parse(contextMin.Groups[1].Value) <= 160, "ContextMenu MinWidth still fat: " + contextMin.Groups[1].Value);
+        Assert.True(int.Parse(flyoutMin.Groups[1].Value) <= 170, "MenuFlyout MinWidth still fat: " + flyoutMin.Groups[1].Value);
+
+        // Window chrome: fine-line icons + restore geometry + control path styling.
+        Assert.Contains("x:Key=\"Ariadne.Icon.Minimize\"", theme, StringComparison.Ordinal);
+        Assert.Contains("x:Key=\"Ariadne.Icon.Maximize\"", theme, StringComparison.Ordinal);
+        Assert.Contains("x:Key=\"Ariadne.Icon.Restore\"", theme, StringComparison.Ordinal);
+        Assert.Contains("x:Key=\"Ariadne.Icon.Close\"", theme, StringComparison.Ordinal);
+        Assert.Contains("Button.window-control Path.icon", theme, StringComparison.Ordinal);
+        Assert.Contains("Ariadne.AccentPrimary", theme, StringComparison.Ordinal);
+        Assert.Contains("scale(1.08)", theme, StringComparison.Ordinal);
+        Assert.Contains("Path.icon.minimize", theme, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"window-control\"", main, StringComparison.Ordinal);
+        Assert.Contains("icon minimize", main, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"MaximizeRestoreIcon\"", main, StringComparison.Ordinal);
+        Assert.Contains("Ariadne.Icon.Restore", mainCode, StringComparison.Ordinal);
+        // Git default detail rail is intentionally narrower than the old 340px panel.
+        var git = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "GitPageView.axaml"));
+        Assert.Contains("Width=\"288\"", git, StringComparison.Ordinal);
+        Assert.DoesNotContain("Width=\"340\"", git, StringComparison.Ordinal);
+
+        // Integrated search shell on Template + RunLog (not bare TextBox + fat primary block).
+        Assert.Contains("Selector=\"Border.search-shell\"", theme, StringComparison.Ordinal);
+        Assert.Contains("Selector=\"Button.search-submit\"", theme, StringComparison.Ordinal);
+        Assert.Contains("Selector=\"TextBox.search-input\"", theme, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"search-shell\"", template, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"search-input\"", template, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"search-submit\"", template, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"search-shell\"", runLog, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"search-submit\"", runLog, StringComparison.Ordinal);
+        Assert.Contains("btn-compact", template, StringComparison.Ordinal);
+        Assert.Contains("btn-compact", runLog, StringComparison.Ordinal);
+        Assert.Contains("Selector=\"Button.btn-compact\"", theme, StringComparison.Ordinal);
+        // Regression: RunLog must not ship detached primary square search next to filters.
+        Assert.DoesNotContain(
+            "Classes=\"primary\"\n                  Width=\"36\"",
+            runLog,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ProviderModelRefresh_IsReadOnlyAndRejectsDraftProviders()
     {
         var settings = File.ReadAllText(Path.Combine(
@@ -756,6 +855,9 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("RefreshModelsCommand = new RelayCommand(() => _ = FetchModelsAsync(), CanUsePersistedProvider)", settings, StringComparison.Ordinal);
         Assert.Contains("SaveProviderKeyCommand = new RelayCommand(() => _ = SaveProviderKeyAsync(), CanUsePersistedProvider)", settings, StringComparison.Ordinal);
         Assert.Contains("!selected.IsDraft", settings, StringComparison.Ordinal);
+        Assert.Contains("markDraft: !fromConfig.Configured", settings, StringComparison.Ordinal);
+        var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "SettingsPageView.axaml"));
+        Assert.Contains("Text=\"{Binding ProviderScopeHelpText}\"", view, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -776,7 +878,7 @@ public sealed class DesktopUxHelpersTests
     }
 
     [Fact]
-    public void SettingsNavigation_UsesOneVerticalCategoryModelWithVisibleSectionTitles()
+    public void SettingsNavigation_UsesStandardSingleSelectionForTabsAndSections()
     {
         var settings = File.ReadAllText(Path.Combine(
             ResolveDesktopSource("ViewModels"),
@@ -791,14 +893,27 @@ public sealed class DesktopUxHelpersTests
         Assert.Single(Regex.Matches(view, "ItemsSource=\\\"\\{Binding Tabs\\}\\\""));
         Assert.Contains("<ListBox ItemsSource=\"{Binding Tabs}\"", view, StringComparison.Ordinal);
         Assert.Contains("SelectedItem=\"{Binding NavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
-        Assert.Equal(22, Regex.Matches(
+        Assert.Contains("ItemsSource=\"{Binding SectionIndexItems}\"", view, StringComparison.Ordinal);
+        Assert.Contains("SelectedItem=\"{Binding SectionNavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
+        // Section anchors keep subtitle class; attributes may wrap across lines after layout polish.
+        // Includes AppRuntime section added for global Qdrant runtime settings.
+        Assert.Equal(23, Regex.Matches(
             view,
-            "Text=\\\"\\{Binding [A-Za-z]+SectionTitle\\}\\\" Classes=\\\"subtitle\\\"").Count);
-        Assert.DoesNotContain("SectionIndexItems", settings, StringComparison.Ordinal);
-        Assert.DoesNotContain("IsSectionSelected", settings, StringComparison.Ordinal);
-        Assert.DoesNotContain("RequestScrollToSection", settings, StringComparison.Ordinal);
-        Assert.DoesNotContain("ScrollToSection", codeBehind, StringComparison.Ordinal);
-        Assert.DoesNotContain("SettingsScrollPad", codeBehind, StringComparison.Ordinal);
+            "Binding [A-Za-z]+SectionTitle",
+            RegexOptions.CultureInvariant).Count);
+        Assert.True(Regex.IsMatch(
+            view,
+            "ConfirmationsSectionTitle[\\s\\S]{0,120}?Classes=\\\"subtitle\\\"",
+            RegexOptions.CultureInvariant));
+        Assert.Contains("SectionIndexItems", settings, StringComparison.Ordinal);
+        Assert.Contains("ScrollToSectionRequested", settings, StringComparison.Ordinal);
+        Assert.Contains("OnScrollToSectionRequested", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("SettingsContentScroll.Offset = new Vector", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("BringIntoView", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("OnAttachedToVisualTree", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("OnDetachedFromVisualTree", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("DetachBehaviors();", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("ClearFolderPicker(_folderPicker)", codeBehind, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -874,6 +989,22 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("ProjectAiChatAsync(\n                message,\n                workflowIdToRun", workspace, StringComparison.Ordinal);
         Assert.DoesNotContain("ProjectAiBubbles.Clear()", works, StringComparison.Ordinal);
         Assert.DoesNotContain("ProjectAiBubbles.Clear()", workspace, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProjectAiComposer_StretchesToConversationPanelWidth()
+    {
+        var composer = File.ReadAllText(Path.Combine(ResolveDesktopSource("Controls"), "ProjectAiComposer.axaml"));
+        var workspace = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var works = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorksPageView.axaml"));
+
+        Assert.Contains("HorizontalContentAlignment=\"Stretch\"", composer, StringComparison.Ordinal);
+        Assert.Contains("HorizontalAlignment=\"Stretch\"", composer, StringComparison.Ordinal);
+        Assert.Contains("<TextBox Grid.Column=\"0\"", composer, StringComparison.Ordinal);
+        Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", works, StringComparison.Ordinal);
+        Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", workspace, StringComparison.Ordinal);
+        Assert.Contains("HorizontalAlignment=\"Stretch\" />", works, StringComparison.Ordinal);
+        Assert.Contains("HorizontalAlignment=\"Stretch\" />", workspace, StringComparison.Ordinal);
     }
 
 

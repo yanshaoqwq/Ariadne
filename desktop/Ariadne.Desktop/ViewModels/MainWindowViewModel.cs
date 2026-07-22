@@ -14,7 +14,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             .InformationalVersion
         ?? typeof(MainWindowViewModel).Assembly.GetName().Version?.ToString(3)
         ?? "0.0.0";
-    private static readonly string[] ProjectScopedPageIds = { "workspace", "works", "git", "run_logs", "settings" };
+    private static readonly string[] ProjectSessionPageIds = { "workspace", "works", "git", "run_logs", "settings" };
+    private static readonly HashSet<string> RetainedGlobalPageIds = new(StringComparer.Ordinal)
+    {
+        "settings",
+    };
     private static readonly string[] PreloadedProjectPageIds = { "workspace", "works", "git" };
     /// <summary>无项目时也可进入的页面（侧栏跳过开始页）。</summary>
     private static readonly HashSet<string> AlwaysAvailablePageIds = new(StringComparer.Ordinal)
@@ -24,6 +28,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
+    private readonly Func<string, object?>? _pageFactory;
+    private readonly Action<string> _saveLastNavigationId;
+    private readonly ProjectAutomationState _projectAutomation;
+    private readonly SemaphoreSlim _uiPreferencesSaveGate = new(1, 1);
+    private readonly object _uiPreferencesSync = new();
+    private UiPreferences? _globalPreferences;
     private object _currentPage;
     private string _projectTitle;
     private string _backendStatus;
@@ -45,11 +55,25 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
     private readonly Dictionary<string, Task> _pageLoadTasks = new(StringComparer.Ordinal);
     private CancellationTokenSource _projectPageSessionCts = new();
     private long _projectPageSessionGeneration;
+    private readonly RequestGenerationSession _navigationSession = new();
+    private bool _isProjectTransitionRunning;
 
     public MainWindowViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
+        : this(displayNames, backend, null, SessionNavStore.SaveLastNavId)
+    {
+    }
+
+    internal MainWindowViewModel(
+        DisplayNameService displayNames,
+        IAriadneBackendClient backend,
+        Func<string, object?>? pageFactory,
+        Action<string>? saveLastNavigationId = null)
     {
         _displayNames = displayNames;
         _backend = backend;
+        _projectAutomation = new ProjectAutomationState(displayNames, backend);
+        _pageFactory = pageFactory;
+        _saveLastNavigationId = saveLastNavigationId ?? SessionNavStore.SaveLastNavId;
         Welcome = new WelcomeViewModel(displayNames, backend, EnterProjectAsync);
         _currentPage = Welcome;
         _projectTitle = displayNames.Text("ui.window.no_project_title");
@@ -59,9 +83,20 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         ToggleSidebarCommand = new RelayCommand(() => SidebarExpanded = !SidebarExpanded);
         ToggleDiagnosticCommand = new RelayCommand(() => IsDiagnosticExpanded = !IsDiagnosticExpanded);
         ClearDiagnosticCommand = new RelayCommand(ClearDiagnostic);
+        OpenVersionCommand = new RelayCommand(() => _ = ShowVersionAsync());
+        OpenFeedbackCommand = new RelayCommand(() => _ = ShowFeedbackAsync());
+        CreateProjectCommand = new RelayCommand(
+            () => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.CreateProjectAsync),
+            CanStartProjectTransition);
+        OpenProjectCommand = new RelayCommand(
+            () => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectAsync),
+            CanStartProjectTransition);
+        LeaveProjectCommand = new RelayCommand(() => _ = LeaveProjectAsync());
         UserFacingError.RegisterObserver(this);
         // 标题栏：始终可打开/切换项目
-        SwitchProjectCommand = new RelayCommand(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectCommand));
+        SwitchProjectCommand = new RelayCommand(
+            () => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectAsync),
+            CanStartProjectTransition);
 
         // 上组：创作主流程
         PrimaryNavigationItems = new ObservableCollection<NavigationItemViewModel>
@@ -72,7 +107,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             CreateNav("run_logs", "ui.nav.run_logs", IconGeometries.RunLog),
         };
 
-        // 下组：扩展与配置（与上组之间留大间隔）
+        // 下组：项目扩展与应用配置入口。设置与其它页面共用同一导航状态源。
         SecondaryNavigationItems = new ObservableCollection<NavigationItemViewModel>
         {
             CreateNav("templates", "ui.nav.templates", IconGeometries.Templates),
@@ -312,18 +347,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     public RelayCommand ClearDiagnosticCommand { get; }
 
-    public RelayCommand OpenVersionCommand => new(() => _ = ShowVersionAsync());
+    public RelayCommand OpenVersionCommand { get; }
 
-    public RelayCommand OpenFeedbackCommand => new(() => _ = ShowFeedbackAsync());
+    public RelayCommand OpenFeedbackCommand { get; }
 
-    public RelayCommand CreateProjectCommand => new(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.CreateProjectCommand));
+    public RelayCommand CreateProjectCommand { get; }
 
-    public RelayCommand OpenProjectCommand => new(() => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectCommand));
+    public RelayCommand OpenProjectCommand { get; }
 
     /// <summary>已进入工作台时打开/切换项目（与 Open 同源）。</summary>
     public RelayCommand SwitchProjectCommand { get; }
 
-    public RelayCommand LeaveProjectCommand => new(() => _ = LeaveProjectAsync());
+    public RelayCommand LeaveProjectCommand { get; }
 
     public void Observe(UserFailure failure)
     {
@@ -357,10 +392,33 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     public async Task InitializeAsync()
     {
-        await Welcome.LoadAsync().ConfigureAwait(true);
-        RefreshProjectMenuItems();
+        try
+        {
+            await InitializeCoreAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            HasOpenProject = false;
+            BackendStatus = _displayNames.Text("ui.status.unavailable");
+            // 初始化边界直接提交到当前窗口；UserFacingError 的普通调用按异步上下文隔离观察者。
+            var failure = UserFacingError.FromException(ex);
+            Observe(failure);
+            NotificationText = failure.PrimaryText(_displayNames);
+            ResetProjectPageSession();
+            CurrentPage = Welcome;
+        }
+    }
+
+    private async Task InitializeCoreAsync()
+    {
         _lastNavId = SessionNavStore.LoadLastNavId();
         var status = await _backend.GetAppStatusAsync().ConfigureAwait(true);
+        if (status is not null)
+        {
+            ApplyGlobalPreferences(status.Preferences);
+        }
+        await Welcome.LoadAsync().ConfigureAwait(true);
+        RefreshProjectMenuItems();
         if (status is null)
         {
             BackendStatus = _displayNames.Text("ui.status.unavailable");
@@ -369,16 +427,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             return;
         }
 
-        ThemeApplication.Apply(
-                status.Preferences.Theme,
-                status.Preferences.ThemeMainColor,
-                status.Preferences.ThemeSurfaceColor,
-                status.Preferences.ThemeBrandColor,
-                status.Preferences.ThemeMainColorDark,
-                status.Preferences.ThemeSurfaceColorDark,
-                status.Preferences.ThemeBrandColorDark,
-                status.Preferences.ThemeFollowSystemColors);
-        MotionPreferences.Apply(status.Preferences.ReduceMotion);
         if (status.CurrentProject is not null
             && !string.IsNullOrWhiteSpace(status.CurrentProject.ProjectRoot))
         {
@@ -399,17 +447,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         // 同步桌面侧项目根，避免页面误判「无项目」而只显示空态
         if (!string.IsNullOrWhiteSpace(project.ProjectRoot) && !_backend.HasProjectRoot)
         {
-            try
-            {
-                await _backend.SetProjectRootAsync(project.ProjectRoot).ConfigureAwait(true);
-            }
-            catch
-            {
-                // 后端已认可的当前项目时，尽力同步；失败仍进入 UI
-            }
+            await _backend.SetProjectRootAsync(project.ProjectRoot).ConfigureAwait(true);
         }
 
-        await ApplySavedLanguageAsync().ConfigureAwait(true);
         await Welcome.LoadAsync().ConfigureAwait(true);
         RefreshProjectMenuItems();
         HasOpenProject = true;
@@ -438,19 +478,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         await LoadProjectDataPagesAsync(pageSessionGeneration).ConfigureAwait(true);
     }
 
-    private async Task ApplySavedLanguageAsync()
-    {
-        try
-        {
-            var appSettings = await _backend.GetAppSettingsAsync().ConfigureAwait(true);
-            _displayNames.SwitchLanguage(appSettings.App.Locale);
-        }
-        catch
-        {
-            // 项目尚未完全可用时保留当前语言；后续进入设置页仍会按配置刷新。
-        }
-    }
-
     private async Task LeaveProjectAsync()
     {
         if (!await ConfirmCachedProjectPagesLeaveAsync().ConfigureAwait(true))
@@ -458,7 +485,15 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             return;
         }
 
-        _backend.ClearProjectRoot();
+        try
+        {
+            await _backend.CloseProjectAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            NotificationText = UserFacingError.Format(ex, _displayNames);
+            return;
+        }
         HasOpenProject = false;
         foreach (var nav in AllNavigationItems())
         {
@@ -477,14 +512,42 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         RefreshProjectMenuItems();
     }
 
-    private async Task RunWelcomeCommandAfterLeaveGuardAsync(RelayCommand command)
+    private async Task RunWelcomeCommandAfterLeaveGuardAsync(Func<Task> action)
     {
-        if (!await ConfirmCachedProjectPagesLeaveAsync().ConfigureAwait(true))
+        if (!CanStartProjectTransition())
         {
             return;
         }
 
-        command.Execute(null);
+        SetProjectTransitionRunning(true);
+        try
+        {
+            if (!await ConfirmCachedProjectPagesLeaveAsync().ConfigureAwait(true))
+            {
+                return;
+            }
+
+            await action().ConfigureAwait(true);
+        }
+        finally
+        {
+            SetProjectTransitionRunning(false);
+        }
+    }
+
+    private bool CanStartProjectTransition() => !_isProjectTransitionRunning;
+
+    private void SetProjectTransitionRunning(bool value)
+    {
+        if (_isProjectTransitionRunning == value)
+        {
+            return;
+        }
+
+        _isProjectTransitionRunning = value;
+        CreateProjectCommand.NotifyCanExecuteChanged();
+        OpenProjectCommand.NotifyCanExecuteChanged();
+        SwitchProjectCommand.NotifyCanExecuteChanged();
     }
 
     private async Task ShowVersionAsync()
@@ -559,18 +622,163 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         {
             return cached;
         }
-        object page = id switch
+        object page = _pageFactory?.Invoke(id) ?? id switch
         {
-            "workspace" => new WorkspacePageViewModel(_displayNames, _backend),
-            "works" => new WorksPageViewModel(_displayNames, _backend),
-            "git" => new GitPageViewModel(_displayNames, _backend, ConfirmCachedProjectPagesLeaveAsync, ReloadCachedProjectPagesAsync),
+            "workspace" => new WorkspacePageViewModel(
+                _displayNames,
+                _backend,
+                PersistPanelStateAsync,
+                _projectAutomation),
+            "works" => new WorksPageViewModel(
+                _displayNames,
+                _backend,
+                PersistPanelStateAsync,
+                _projectAutomation),
+            "git" => new GitPageViewModel(
+                _displayNames,
+                _backend,
+                ConfirmCachedProjectPagesLeaveAsync,
+                ReloadCachedProjectPagesAsync,
+                PersistPanelStateAsync),
             "run_logs" => new RunLogPageViewModel(_displayNames, _backend),
             "templates" => new TemplateMarketPageViewModel(_displayNames, _backend),
-            "settings" => new SettingsPageViewModel(_displayNames, _backend, () => OpenNavigationItemByIdAsync("templates")),
+            "settings" => new SettingsPageViewModel(
+                _displayNames,
+                _backend,
+                () => OpenNavigationItemByIdAsync("templates"),
+                SaveGlobalPreferencesAsync,
+                _projectAutomation),
             _ => Welcome,
         };
+        if (page is IUiPreferencesAware preferencesAware && _globalPreferences is not null)
+        {
+            preferencesAware.ApplyUiPreferences(_globalPreferences);
+        }
         _pageCache[id] = page;
         return page;
+    }
+
+    private void ApplyGlobalPreferences(UiPreferences preferences)
+    {
+        lock (_uiPreferencesSync)
+        {
+            _globalPreferences = preferences;
+        }
+        ProjectGlobalPreferences(preferences);
+    }
+
+    private void ProjectGlobalPreferences(UiPreferences preferences)
+    {
+        var language = _displayNames.NormalizeAvailableLanguage(preferences.Locale);
+        if (!string.Equals(_displayNames.CurrentLanguage, language, StringComparison.OrdinalIgnoreCase))
+        {
+            _displayNames.SwitchLanguage(language);
+        }
+        ThemeApplication.Apply(
+            preferences.Theme,
+            preferences.ThemeMainColor,
+            preferences.ThemeSurfaceColor,
+            preferences.ThemeBrandColor,
+            preferences.ThemeMainColorDark,
+            preferences.ThemeSurfaceColorDark,
+            preferences.ThemeBrandColorDark,
+            preferences.ThemeFollowSystemColors);
+        MotionPreferences.Apply(preferences.ReduceMotion);
+        foreach (var page in _pageCache.Values.OfType<IUiPreferencesAware>())
+        {
+            page.ApplyUiPreferences(preferences);
+        }
+    }
+
+    private async Task SaveGlobalPreferencesAsync(UiPreferences preferences)
+    {
+        await _uiPreferencesSaveGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            UiPreferences? current;
+            lock (_uiPreferencesSync)
+            {
+                current = _globalPreferences;
+            }
+            current ??= await _backend.GetUiPreferencesAsync().ConfigureAwait(true);
+            // 设置页不拥有这些运行中元数据。整对象保存时保留协调器中的最新值，
+            // 防止在途面板切换或新手引导状态被较早构造的表单快照覆盖。
+            var merged = preferences with
+            {
+                ProjectPanelPosition = current.ProjectPanelPosition,
+                PanelStates = new Dictionary<string, bool>(
+                    current.PanelStates ?? new Dictionary<string, bool>(),
+                    StringComparer.Ordinal),
+                OnboardingSeen = current.OnboardingSeen,
+            };
+            await _backend.SaveUiPreferencesAsync(merged).ConfigureAwait(true);
+            // 保存期间页面仍可产生 panel patch。成功提交只合并设置页拥有的字段，
+            // 运行元数据继续采用当前内存权威值，再统一投影一次。
+            UiPreferences committed;
+            lock (_uiPreferencesSync)
+            {
+                var latest = _globalPreferences ?? current;
+                committed = merged with
+                {
+                    ProjectPanelPosition = latest.ProjectPanelPosition,
+                    PanelStates = new Dictionary<string, bool>(
+                        latest.PanelStates ?? new Dictionary<string, bool>(),
+                        StringComparer.Ordinal),
+                    OnboardingSeen = latest.OnboardingSeen,
+                };
+                _globalPreferences = committed;
+            }
+            ProjectGlobalPreferences(committed);
+        }
+        finally
+        {
+            _uiPreferencesSaveGate.Release();
+        }
+    }
+
+    private async Task PersistPanelStateAsync(string key, bool isOpen)
+    {
+        UiPreferences? current;
+        lock (_uiPreferencesSync)
+        {
+            current = _globalPreferences;
+        }
+        if (current is null)
+        {
+            current = await _backend.GetUiPreferencesAsync().ConfigureAwait(true);
+            ApplyGlobalPreferences(current);
+        }
+
+        UiPreferences intended;
+        lock (_uiPreferencesSync)
+        {
+            current = _globalPreferences ?? current;
+            var panelStates = new Dictionary<string, bool>(
+                current.PanelStates ?? new Dictionary<string, bool>(),
+                StringComparer.Ordinal)
+            {
+                [key] = isOpen,
+            };
+            intended = current with { PanelStates = panelStates };
+            // 用户意图先成为内存权威事实；旧 I/O 完成不得再回写旧快照。
+            _globalPreferences = intended;
+        }
+        ProjectGlobalPreferences(intended);
+
+        await _uiPreferencesSaveGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            UiPreferences latest;
+            lock (_uiPreferencesSync)
+            {
+                latest = _globalPreferences ?? intended;
+            }
+            await _backend.SaveUiPreferencesAsync(latest).ConfigureAwait(true);
+        }
+        finally
+        {
+            _uiPreferencesSaveGate.Release();
+        }
     }
 
     internal async Task OpenNavigationItemByIdAsync(string id)
@@ -590,32 +798,39 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             return;
         }
 
+        var request = _navigationSession.Begin(_projectPageSessionGeneration);
+
         if (!await ConfirmCurrentPageLeaveAsync().ConfigureAwait(true))
         {
             return;
         }
 
-        if (!AlwaysAvailablePageIds.Contains(item.Id))
+        if (!AlwaysAvailablePageIds.Contains(item.Id)
+            || !_navigationSession.IsCurrent(request, _projectPageSessionGeneration))
         {
             return;
-        }
-
-        foreach (var nav in AllNavigationItems())
-        {
-            nav.IsSelected = nav == item;
         }
 
         // 从开始页点侧栏 = 进入工作台页（可无项目，显示空态）；记住导航以便下次恢复
         try
         {
             var page = GetOrCreatePage(item.Id);
-            CurrentPage = page;
             await EnsurePageLoadedAsync(item.Id, page).ConfigureAwait(true);
+            if (!_navigationSession.IsCurrent(request, _projectPageSessionGeneration))
+            {
+                return;
+            }
+
+            CommitNavigation(item, page, persist: true);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // 构造失败不抛工程师信息；回到开始页并清选中
-            NotificationText = string.Empty;
+            if (!_navigationSession.IsCurrent(request, _projectPageSessionGeneration))
+            {
+                return;
+            }
+            // 回到开始页，但保留资源化错误摘要；工程诊断只进入统一诊断面板。
+            NotificationText = UserFacingError.Format(ex, _displayNames);
             CurrentPage = Welcome;
             foreach (var nav in AllNavigationItems())
             {
@@ -623,9 +838,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             }
             return;
         }
-
-        _lastNavId = item.Id;
-        SessionNavStore.SaveLastNavId(item.Id);
 
         // 无项目时标题保持「未打开项目」，状态保持健康/连接文案，不要空白无反应
         if (!HasOpenProject && string.IsNullOrWhiteSpace(ProjectTitle))
@@ -646,6 +858,20 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         OnPropertyChanged(nameof(HeaderStatusText));
     }
 
+    private void CommitNavigation(NavigationItemViewModel item, object page, bool persist)
+    {
+        foreach (var nav in AllNavigationItems())
+        {
+            nav.IsSelected = nav == item;
+        }
+        CurrentPage = page;
+        _lastNavId = item.Id;
+        if (persist)
+        {
+            _saveLastNavigationId(item.Id);
+        }
+    }
+
     /// <summary>无打开项目时恢复上次侧栏页（跳过开始页的暂存）。</summary>
     private async Task TryRestoreLastNavWithoutProjectAsync()
     {
@@ -660,19 +886,22 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             return;
         }
 
-        foreach (var nav in AllNavigationItems())
-        {
-            nav.IsSelected = nav == item;
-        }
-
+        var request = _navigationSession.Begin(_projectPageSessionGeneration);
         try
         {
             var page = GetOrCreatePage(item.Id);
-            CurrentPage = page;
             await EnsurePageLoadedAsync(item.Id, page).ConfigureAwait(true);
+            if (_navigationSession.IsCurrent(request, _projectPageSessionGeneration))
+            {
+                CommitNavigation(item, page, persist: false);
+            }
         }
         catch
         {
+            if (!_navigationSession.IsCurrent(request, _projectPageSessionGeneration))
+            {
+                return;
+            }
             CurrentPage = Welcome;
             foreach (var nav in AllNavigationItems())
             {
@@ -861,38 +1090,59 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     private void ResetProjectPageSession()
     {
+        _projectAutomation.BeginProjectSession();
+        _navigationSession.Invalidate();
         _projectPageSessionGeneration++;
         _projectPageSessionCts.Cancel();
         _projectPageSessionCts.Dispose();
         _projectPageSessionCts = new CancellationTokenSource();
         _loadedPageIds.Clear();
         _pageLoadTasks.Clear();
-        foreach (var id in ProjectScopedPageIds)
+        foreach (var id in ProjectSessionPageIds)
         {
             if (_pageCache.TryGetValue(id, out var page)
                 && page is IProjectDataReloadable reloadable)
             {
                 reloadable.DeactivateProjectData();
             }
-            _pageCache.Remove(id);
+            // 设置页承载全局偏好和应用级目录。保留实例避免切换项目时重置全局交互状态，
+            // 但仍清空其项目草稿，由下一次项目会话重新加载项目部分。
+            if (!RetainedGlobalPageIds.Contains(id))
+            {
+                _pageCache.Remove(id);
+            }
         }
     }
 
     internal object GetPageForTests(string id) => GetOrCreatePage(id);
 
+    internal void ApplyGlobalPreferencesForTests(UiPreferences preferences) =>
+        ApplyGlobalPreferences(preferences);
+
+    internal Task SaveGlobalPreferencesForTestsAsync(UiPreferences preferences) =>
+        SaveGlobalPreferencesAsync(preferences);
+
+    internal Task PersistPanelStateForTestsAsync(string key, bool isOpen) =>
+        PersistPanelStateAsync(key, isOpen);
+
     internal Task PreloadProjectPagesForTestsAsync() => LoadProjectDataPagesAsync();
 
     internal void ResetProjectPageSessionForTests() => ResetProjectPageSession();
 
+    internal string? LastNavigationIdForTests => _lastNavId;
+
+    internal string? SelectedNavigationIdForTests =>
+        AllNavigationItems().FirstOrDefault(item => item.IsSelected)?.Id;
+
     private async Task SelectNavigationItemForProjectAsync(NavigationItemViewModel item)
     {
-        foreach (var nav in AllNavigationItems())
-        {
-            nav.IsSelected = nav == item;
-        }
+        var request = _navigationSession.Begin(_projectPageSessionGeneration);
         var page = GetOrCreatePage(item.Id);
-        CurrentPage = page;
         await EnsurePageLoadedAsync(item.Id, page).ConfigureAwait(true);
+        if (_navigationSession.IsCurrent(request, _projectPageSessionGeneration))
+        {
+            CommitNavigation(item, page, persist: false);
+        }
     }
 
     private void RefreshProjectMenuItems()

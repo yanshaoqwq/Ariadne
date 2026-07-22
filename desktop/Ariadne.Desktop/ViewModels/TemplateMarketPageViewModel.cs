@@ -46,7 +46,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             CreateTag("ui.template.tag.review"),
             CreateTag("ui.template.tag.summary"),
         };
-        SearchCommand = new RelayCommand(() => _ = SearchAsync());
+        SearchCommand = new RelayCommand(() => _ = SearchAsync(), () => !IsBusy);
         InstallFirstCommand = new RelayCommand(() => _ = InstallFirstAsync(), () => Templates.Count > 0 && !IsBusy);
         LoadMoreCommand = new RelayCommand(() => _ = LoadMoreAsync(), () => CanLoadMore);
     }
@@ -131,9 +131,11 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         }, () => !IsBusy);
     }
 
-    private async Task<string> LoadRepositoryAsync(CancellationToken cancellationToken)
+    private async Task<string> LoadRepositoryAsync(
+        CancellationToken cancellationToken,
+        bool refresh)
     {
-        if (!string.IsNullOrWhiteSpace(_repositoryBaseUrl))
+        if (!refresh && !string.IsNullOrWhiteSpace(_repositoryBaseUrl))
         {
             return _repositoryBaseUrl;
         }
@@ -161,7 +163,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         var (requestGeneration, cancellationToken) = BeginRequest();
         try
         {
-            var baseUrl = await LoadRepositoryAsync(cancellationToken).ConfigureAwait(true);
+            var baseUrl = await LoadRepositoryAsync(cancellationToken, refresh: true).ConfigureAwait(true);
             var results = await _backend
                 .SearchTemplatesAsync(baseUrl, query, 0, cancellationToken)
                 .ConfigureAwait(true);
@@ -170,7 +172,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
                 return;
             }
 
-            AppendResults(results);
+            AppendResults(results, baseUrl);
             _page = 0;
             _hasMore = results.Count >= PageSize;
             SetState(results.Count == 0
@@ -211,7 +213,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         var (requestGeneration, cancellationToken) = BeginRequest();
         try
         {
-            var baseUrl = await LoadRepositoryAsync(cancellationToken).ConfigureAwait(true);
+            var baseUrl = await LoadRepositoryAsync(cancellationToken, refresh: false).ConfigureAwait(true);
             var results = await _backend
                 .SearchTemplatesAsync(baseUrl, query, targetPage, cancellationToken)
                 .ConfigureAwait(true);
@@ -220,7 +222,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
                 return;
             }
 
-            AppendResults(results);
+            AppendResults(results, baseUrl);
             _page = targetPage;
             _hasMore = results.Count >= PageSize;
             SetState(_hasMore ? SearchState.Results : SearchState.EndOfList);
@@ -247,16 +249,17 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         }
     }
 
-    private void AppendResults(IReadOnlyList<TemplateSummary> results)
+    private void AppendResults(IReadOnlyList<TemplateSummary> results, string repositoryBaseUrl)
     {
         foreach (var item in results)
         {
             Templates.Add(new TemplateCardViewModel(
                 item,
+                repositoryBaseUrl,
                 ResolveDisplayText(item.Name),
                 string.Join(", ", item.Tags.Select(ResolveDisplayText)),
-                () => _ = ShowDetailsAsync(item),
-                () => _ = InstallTemplateAsync(item)));
+                () => _ = ShowDetailsAsync(repositoryBaseUrl, item),
+                () => _ = InstallTemplateAsync(repositoryBaseUrl, item)));
         }
         NotifyTemplateCollectionChanged();
     }
@@ -269,6 +272,11 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         _isBusy = true;
         OnPropertyChanged(nameof(IsBusy));
         OnPropertyChanged(nameof(CanInteract));
+        SearchCommand.NotifyCanExecuteChanged();
+        foreach (var tag in Tags)
+        {
+            tag.SelectCommand.NotifyCanExecuteChanged();
+        }
         LoadMoreCommand.NotifyCanExecuteChanged();
         InstallFirstCommand.NotifyCanExecuteChanged();
         return (++_requestGeneration, _requestCts.Token);
@@ -290,6 +298,11 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
         _isBusy = false;
         OnPropertyChanged(nameof(IsBusy));
         OnPropertyChanged(nameof(CanInteract));
+        SearchCommand.NotifyCanExecuteChanged();
+        foreach (var tag in Tags)
+        {
+            tag.SelectCommand.NotifyCanExecuteChanged();
+        }
         LoadMoreCommand.NotifyCanExecuteChanged();
         InstallFirstCommand.NotifyCanExecuteChanged();
         _requestCts?.Dispose();
@@ -327,14 +340,21 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             StatusText = EmptyText;
             return;
         }
-        await InstallTemplateAsync(template.Summary).ConfigureAwait(true);
+        await InstallTemplateAsync(template.RepositoryBaseUrl, template.Summary).ConfigureAwait(true);
     }
 
-    private async Task ShowDetailsAsync(TemplateSummary template)
+    private async Task ShowDetailsAsync(string repositoryBaseUrl, TemplateSummary template)
     {
+        var (requestGeneration, cancellationToken) = BeginRequest();
         try
         {
-            var detail = await _backend.GetTemplateDetailAsync(_repositoryBaseUrl, template.Id).ConfigureAwait(true);
+            var detail = await _backend
+                .GetTemplateDetailAsync(repositoryBaseUrl, template.Id, cancellationToken)
+                .ConfigureAwait(true);
+            if (requestGeneration != _requestGeneration)
+            {
+                return;
+            }
             StatusText = _displayNames.Format("ui.template.detail.version", new Dictionary<string, string>
             {
                 ["version"] = detail.Version,
@@ -362,37 +382,81 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
             };
             await DialogService.Current.ConfirmAsync(dialog).ConfigureAwait(true);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            if (requestGeneration == _requestGeneration)
+            {
+                StatusText = UserFacingError.Format(ex, _displayNames);
+            }
+        }
+        finally
+        {
+            FinishRequest(requestGeneration);
         }
     }
 
-    private async Task InstallTemplateAsync(TemplateSummary template)
+    private async Task InstallTemplateAsync(string repositoryBaseUrl, TemplateSummary template)
     {
+        var (requestGeneration, cancellationToken) = BeginRequest();
         try
         {
-            if (template.RequiresPermissions && !await ConfirmTemplatePermissionsAsync(template).ConfigureAwait(true))
+            var project = await _backend.GetCurrentProjectAsync(cancellationToken).ConfigureAwait(true);
+            if (project is null || string.IsNullOrWhiteSpace(project.ProjectRoot))
+            {
+                throw new InvalidOperationException(_displayNames.Text("ui.empty.need_project.title"));
+            }
+            var expectedProjectRoot = project.ProjectRoot;
+            if (template.RequiresPermissions
+                && !await ConfirmTemplatePermissionsAsync(
+                    repositoryBaseUrl,
+                    template,
+                    cancellationToken).ConfigureAwait(true))
             {
                 StatusText = _displayNames.Text("ui.common.cancel");
                 return;
             }
 
-            var report = await _backend.InstallTemplateAsync(_repositoryBaseUrl, template.Id).ConfigureAwait(true);
+            await _backend.InstallTemplateAsync(
+                repositoryBaseUrl,
+                template.Id,
+                expectedProjectRoot,
+                cancellationToken).ConfigureAwait(true);
+            if (requestGeneration != _requestGeneration)
+            {
+                return;
+            }
             StatusText = _displayNames.Format("ui.template.imported", new Dictionary<string, string>
             {
                 ["name"] = ResolveDisplayText(template.Name),
             });
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            if (requestGeneration == _requestGeneration)
+            {
+                StatusText = UserFacingError.Format(ex, _displayNames);
+            }
+        }
+        finally
+        {
+            FinishRequest(requestGeneration);
         }
     }
 
-    private async Task<bool> ConfirmTemplatePermissionsAsync(TemplateSummary template)
+    private async Task<bool> ConfirmTemplatePermissionsAsync(
+        string repositoryBaseUrl,
+        TemplateSummary template,
+        CancellationToken cancellationToken)
     {
-        var detail = await _backend.GetTemplateDetailAsync(_repositoryBaseUrl, template.Id).ConfigureAwait(true);
+        var detail = await _backend
+            .GetTemplateDetailAsync(repositoryBaseUrl, template.Id, cancellationToken)
+            .ConfigureAwait(true);
         var permissionSummary = TemplatePermissionSummary(detail);
         var message = _displayNames.Text("ui.template.permission_dialog.desc")
                       + Environment.NewLine
@@ -470,6 +534,9 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
 
     internal Task LoadMoreForTestsAsync() => LoadMoreAsync();
 
+    internal Task InstallForTestsAsync(TemplateCardViewModel template) =>
+        InstallTemplateAsync(template.RepositoryBaseUrl, template.Summary);
+
     internal async Task EnsureInitialCatalogLoadedAsync()
     {
         if (_initialCatalogLoadStarted)
@@ -489,12 +556,14 @@ public sealed class TemplateCardViewModel
 {
     public TemplateCardViewModel(
         TemplateSummary summary,
+        string repositoryBaseUrl,
         string displayName,
         string tagsText,
         Action showDetails,
         Action install)
     {
         Summary = summary;
+        RepositoryBaseUrl = repositoryBaseUrl;
         Id = summary.Id;
         Name = displayName;
         RequiresPermissions = summary.RequiresPermissions;
@@ -504,6 +573,7 @@ public sealed class TemplateCardViewModel
     }
 
     public TemplateSummary Summary { get; }
+    public string RepositoryBaseUrl { get; }
     public string Id { get; }
     public string Name { get; }
     public bool RequiresPermissions { get; }

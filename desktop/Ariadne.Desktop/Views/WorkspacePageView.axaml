@@ -128,8 +128,7 @@
                 PointerMoved="OnCanvasBackgroundPointerMoved"
                 PointerReleased="OnCanvasBackgroundPointerReleased"
                 PointerCaptureLost="OnCanvasBackgroundCaptureLost"
-                PointerWheelChanged="OnCanvasPointerWheel"
-                ToolTip.Tip="{Binding CanvasNavigationHintText}">
+                PointerWheelChanged="OnCanvasPointerWheel">
         <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
           <ItemsControl.RenderTransform>
             <TransformGroup>
@@ -158,16 +157,6 @@
                       Fill="Transparent"
                       StrokeLineCap="Round"
                       Data="{Binding EdgePath}"
-                      IsHitTestVisible="False" />
-                <!-- W10：有向边终点箭头；通信边另有起点箭头，形成明确双向语法。 -->
-                <Path Fill="{Binding StrokeBrush}"
-                      Opacity="{Binding StrokeOpacity}"
-                      Data="{Binding EndArrowPath}"
-                      IsHitTestVisible="False" />
-                <Path Fill="{Binding StrokeBrush}"
-                      Opacity="{Binding StrokeOpacity}"
-                      Data="{Binding StartArrowPath}"
-                      IsVisible="{Binding IsCommunication}"
                       IsHitTestVisible="False" />
                 <Panel x:Name="EdgeLabelPlacementHost"
                        Canvas.Left="{Binding LabelX}"
@@ -328,8 +317,10 @@
                                    FontWeight="SemiBold" FontSize="12"
                                    Foreground="{DynamicResource Ariadne.AccentPrimary}"
                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                        <Panel Grid.Column="3"
-                               IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                        <StackPanel Grid.Column="3"
+                                    Orientation="Horizontal"
+                                    Spacing="3"
+                                    IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
                           <Button Width="22" Height="20" Padding="0"
                                   HorizontalContentAlignment="Center"
                                   VerticalContentAlignment="Center"
@@ -345,7 +336,7 @@
                                   Fill="{DynamicResource Ariadne.AccentPrimary}"
                                   Data="M9,6 L18,12 L9,18 Z" />
                           </Button>
-                        </Panel>
+                        </StackPanel>
                         <Border Grid.Column="4"
                                 Width="16" Height="16"
                                 VerticalAlignment="Center"
@@ -375,10 +366,11 @@
                     <!-- 内容栏：数据入顶对齐 + Spacing=8（14+8=22=DataPortSpacing），与 LocalCenter 一致 -->
                     <Border Padding="6,8" MinHeight="44">
                       <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6">
-                        <ItemsControl Grid.Column="0"
-                                      VerticalAlignment="Top"
-                                      ItemsSource="{Binding DataInPins}"
-                                      IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                        <StackPanel Grid.Column="0"
+                                    VerticalAlignment="Top"
+                                    Spacing="3"
+                                    IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                        <ItemsControl ItemsSource="{Binding DataInPins}">
                           <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
                               <!-- 间距 8：与 NodePortSpec.DataPortSpacing(22)=14+8 对齐 -->
@@ -408,6 +400,23 @@
                             </DataTemplate>
                           </ItemsControl.ItemTemplate>
                         </ItemsControl>
+                        <!-- 添加入口属于数据输入列表，不属于标题栏；透明无描边，一次点击即提交。 -->
+                        <Button Width="14"
+                                Height="16"
+                                Padding="0"
+                                HorizontalAlignment="Center"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                IsVisible="{Binding ShowDataInPinEditor}"
+                                ToolTip.Tip="{Binding $parent[UserControl].DataContext.AddDataInPinText}"
+                                AutomationProperties.Name="{Binding $parent[UserControl].DataContext.AddDataInPinText}"
+                                Command="{Binding AddDataInPinCommand}">
+                          <Path Classes="icon" Width="10" Height="10"
+                                Data="{StaticResource Ariadne.Icon.Add}" />
+                        </Button>
+                        </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Top" Margin="0,0,0,0">
                           <TextBlock Text="{Binding Name}" Classes="caption" TextTrimming="CharacterEllipsis" />
                           <Panel IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasDetails}">
@@ -480,48 +489,14 @@
           </StackPanel>
         </Border>
 
-        <!-- W3：工作流选择器与画布操作同处顶部；切换前统一经过未保存更改门禁。 -->
+        <!-- 所有起点与分支共享同一画布；顶部只保留画布操作。 -->
         <Grid x:Name="TopToolbar"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Top"
               Margin="16,12"
-              ColumnDefinitions="Auto,*,Auto"
+              ColumnDefinitions="*,Auto"
               ColumnSpacing="12">
-          <Border x:Name="WorkflowSelectorHost" Grid.Column="0" Classes="soft-panel" Padding="10,6" MaxWidth="430">
-            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
-              <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                <TextBlock Text="{Binding WorkflowSelectorText}" Classes="caption" />
-                <StackPanel Orientation="Horizontal" Spacing="6">
-                  <TextBlock Text="{Binding CurrentWorkflowName}"
-                             FontWeight="SemiBold"
-                             TextTrimming="CharacterEllipsis"
-                             MaxWidth="150" />
-                  <Border Classes="chip"
-                          Padding="6,1"
-                          IsVisible="{Binding HasUnsavedChanges}">
-                    <TextBlock Text="{Binding UnsavedChangesBadgeText}" Classes="caption" />
-                  </Border>
-                </StackPanel>
-              </StackPanel>
-              <ComboBox Grid.Column="1"
-                        Width="220"
-                        ItemsSource="{Binding WorkflowSummaries}"
-                        SelectedValue="{Binding SelectedWorkflowId, Mode=TwoWay}"
-                        SelectedValueBinding="{Binding WorkflowId}"
-                        HorizontalAlignment="Stretch">
-                <ComboBox.ItemTemplate>
-                  <DataTemplate DataType="{x:Type backend:WorkflowSummary}">
-                    <StackPanel Spacing="1">
-                      <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                      <TextBlock Text="{Binding WorkflowId}" Classes="caption mono" TextTrimming="CharacterEllipsis" />
-                    </StackPanel>
-                  </DataTemplate>
-                </ComboBox.ItemTemplate>
-              </ComboBox>
-            </Grid>
-          </Border>
-
-          <StackPanel x:Name="CanvasToolbarActions" Grid.Column="2" Orientation="Horizontal" Spacing="6">
+          <StackPanel x:Name="CanvasToolbarActions" Grid.Column="1" Orientation="Horizontal" Spacing="6">
             <Border Classes="soft-panel" Padding="3">
               <StackPanel x:Name="CanvasEditActions" Orientation="Horizontal" Spacing="2">
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding UndoText}" AutomationProperties.Name="{Binding UndoText}" Command="{Binding UndoCommand}">
@@ -534,7 +509,7 @@
             </Border>
             <Border Classes="soft-panel" Padding="3">
               <StackPanel x:Name="CanvasFileActions" Orientation="Horizontal" Spacing="2">
-                <Button Classes="icon-btn" ToolTip.Tip="{Binding ReloadDefaultWorkflowText}" AutomationProperties.Name="{Binding ReloadDefaultWorkflowText}" Command="{Binding ReloadDefaultWorkflowCommand}">
+                <Button Classes="icon-btn" ToolTip.Tip="{Binding ReloadProjectCanvasText}" AutomationProperties.Name="{Binding ReloadProjectCanvasText}" Command="{Binding ReloadProjectCanvasCommand}">
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Refresh}" />
                 </Button>
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}" AutomationProperties.Name="{Binding ExportText}" Command="{Binding ExportCommand}">
@@ -565,7 +540,7 @@
                   <TextBlock Text="{Binding CanvasZoomText}" Classes="caption" VerticalAlignment="Center" />
                 </Button>
                 <Button Classes="icon-btn"
-                        ToolTip.Tip="{Binding CanvasNavigationHintText}"
+                        ToolTip.Tip="{Binding CtxFitViewText}"
                         AutomationProperties.Name="{Binding CtxFitViewText}"
                         Command="{Binding FitViewCommand}">
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.FitView}" />
@@ -688,34 +663,11 @@
             </Panel>
           </Border>
 
-          <Border x:Name="WorkspaceRightPill"
-                  Canvas.Right="0"
-                  Width="22"
-                  Height="52"
-                  Background="{DynamicResource Ariadne.BackgroundSurface}"
-                  BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                  BorderThickness="1"
-                  CornerRadius="8,0,0,8"
-                  Focusable="True"
-                  Classes="keyboard-target"
-                  AutomationProperties.Name="{Binding ToggleRightPanelText}"
-                  Cursor="Hand"
-                  ToolTip.Tip="{Binding ToggleRightPanelText}"
-                  KeyDown="OnRightPillKeyDown"
-                  PointerPressed="OnRightPillPointerPressed"
-                  PointerMoved="OnRightPillPointerMoved"
-                  PointerReleased="OnRightPillPointerReleased">
-            <Panel>
-              <Path Classes="icon" Width="14" Height="14"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    IsVisible="{Binding IsRightPanelOpen}"
-                    Data="{StaticResource Ariadne.Icon.ChevronRight}" />
-              <Path Classes="icon" Width="14" Height="14"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    IsVisible="{Binding !IsRightPanelOpen}"
-                    Data="{StaticResource Ariadne.Icon.ChevronLeft}" />
-            </Panel>
-          </Border>
+          <ctl:RightPanelTogglePill x:Name="WorkspaceRightPill"
+                                    Canvas.Right="0"
+                                    IsPanelOpen="{Binding IsRightPanelOpen}"
+                                    ToggleCommand="{Binding ToggleRightPanelCommand}"
+                                    AccessibleName="{Binding ToggleRightPanelText}" />
         </Canvas>
       </Grid>
 
@@ -750,13 +702,8 @@
                             Margin="0,0,8,8"
                             Padding="12,8"
                             Cursor="Hand"
-                            ToolTip.Tip="{Binding Title}"
                             AutomationProperties.Name="{Binding Title}"
-                            Command="{Binding AddCommand}"
-                            PointerPressed="OnNodeLibraryItemPointerPressed"
-                            PointerMoved="OnNodeLibraryItemPointerMoved"
-                            PointerReleased="OnNodeLibraryItemPointerReleased"
-                            PointerCaptureLost="OnNodeLibraryItemCaptureLost">
+                            Command="{Binding AddCommand}">
                       <StackPanel Orientation="Horizontal" Spacing="8" IsHitTestVisible="False">
                         <Path Classes="icon-fill" Width="11" Height="11"
                               Fill="{DynamicResource Ariadne.AccentPrimary}" Data="M8,5 L19,12 L8,19 Z" VerticalAlignment="Center" />
@@ -778,13 +725,8 @@
                             Margin="0,0,8,8"
                             Padding="12,8"
                             Cursor="Hand"
-                            ToolTip.Tip="{Binding Title}"
                             AutomationProperties.Name="{Binding Title}"
-                            Command="{Binding AddCommand}"
-                            PointerPressed="OnNodeLibraryItemPointerPressed"
-                            PointerMoved="OnNodeLibraryItemPointerMoved"
-                            PointerReleased="OnNodeLibraryItemPointerReleased"
-                            PointerCaptureLost="OnNodeLibraryItemCaptureLost">
+                            Command="{Binding AddCommand}">
                       <StackPanel Orientation="Horizontal" Spacing="8" IsHitTestVisible="False">
                         <Ellipse Width="7" Height="7" Fill="{DynamicResource Ariadne.AccentPrimary}" VerticalAlignment="Center" />
                         <TextBlock Text="{Binding Title}" FontSize="12" VerticalAlignment="Center" />
@@ -804,13 +746,8 @@
                             Margin="0,0,8,8"
                             Padding="12,8"
                             Cursor="Hand"
-                            ToolTip.Tip="{Binding Title}"
                             AutomationProperties.Name="{Binding Title}"
-                            Command="{Binding AddCommand}"
-                            PointerPressed="OnNodeLibraryItemPointerPressed"
-                            PointerMoved="OnNodeLibraryItemPointerMoved"
-                            PointerReleased="OnNodeLibraryItemPointerReleased"
-                            PointerCaptureLost="OnNodeLibraryItemCaptureLost">
+                            Command="{Binding AddCommand}">
                       <TextBlock Text="{Binding Title}" FontSize="12" IsHitTestVisible="False" />
                     </Button>
                   </DataTemplate>
@@ -904,11 +841,11 @@
                     </ComboBox>
                     <TextBlock Text="{Binding SelectedInDoubtOperationSummary}" Classes="caption" TextWrapping="Wrap" />
                     <TextBlock Text="{Binding InDoubtResponseText}" Classes="caption" />
-                    <TextBox Text="{Binding InDoubtResponseJson, Mode=TwoWay}"
+                    <TextBox Text="{Binding InDoubtResponseJson, Mode=TwoWay}" AutomationProperties.Name="{Binding InDoubtResponseText}"
                              PlaceholderText="{Binding InDoubtResponsePlaceholder}"
                              AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72" />
                     <TextBlock Text="{Binding InDoubtReasonText}" Classes="caption" />
-                    <TextBox Text="{Binding InDoubtStopReason, Mode=TwoWay}" />
+                    <TextBox Text="{Binding InDoubtStopReason, Mode=TwoWay}"  AutomationProperties.Name="{Binding InDoubtReasonText}" />
                     <Button Classes="secondary" HorizontalAlignment="Stretch"
                             Content="{Binding RetryInDoubtText}" Command="{Binding RetryInDoubtOperationCommand}" />
                     <Button Classes="primary" HorizontalAlignment="Stretch"
@@ -1014,14 +951,10 @@
                              Classes="mono"
                              HorizontalAlignment="Right"
                              TextWrapping="Wrap" />
-                  <Button Classes="secondary"
-                          Content="{Binding OpenConfirmationWorkflowText}"
-                          Command="{Binding OpenSelectedConfirmationWorkflowCommand}"
-                          IsVisible="{Binding CanOpenSelectedConfirmationWorkflow}" />
                 </StackPanel>
               </Grid>
 
-              <TextBox Grid.Row="1"
+              <TextBox Grid.Row="1" AutomationProperties.Name="{Binding SelectedConfirmation.ConfirmationId}"
                        Text="{Binding SelectedConfirmation.Diff}"
                        AcceptsReturn="True"
                        TextWrapping="Wrap"
@@ -1033,7 +966,7 @@
               <Grid Grid.Row="2" RowDefinitions="Auto,Auto" RowSpacing="8">
                 <TextBlock Grid.Row="0" Text="{Binding ConfirmationReasonText}" Classes="caption" />
                 <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                  <TextBox Grid.Column="0"
+                  <TextBox Grid.Column="0" AutomationProperties.Name="{Binding ConfirmationReasonText}"
                            Text="{Binding ConfirmationReason, Mode=TwoWay}"
                            PlaceholderText="{Binding ConfirmationReasonPlaceholder}"
                            VerticalAlignment="Center" />
@@ -1071,10 +1004,8 @@
           <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" Margin="0,6,0,0" />
 
           <Grid>
-            <DockPanel IsVisible="{Binding IsProjectAiTab}">
-              <!-- 与作品页共用 ProjectAiComposer（主题色焦点边仅此一体区） -->
-              <ctl:ProjectAiComposer DockPanel.Dock="Bottom" Margin="12,8,12,12" />
-              <ScrollViewer Margin="12,10">
+            <Grid IsVisible="{Binding IsProjectAiTab}" RowDefinitions="*,Auto" HorizontalAlignment="Stretch">
+              <ScrollViewer Grid.Row="0" Margin="12,10">
                 <StackPanel Spacing="10">
                   <Border Classes="empty-state" Padding="8,16" IsVisible="{Binding !HasProjectAiBubbles}">
                     <StackPanel Spacing="6">
@@ -1105,7 +1036,15 @@
                   </ItemsControl>
                 </StackPanel>
               </ScrollViewer>
-            </DockPanel>
+              <Border Grid.Row="1"
+                      Padding="12,10"
+                      HorizontalAlignment="Stretch"
+                      BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                      BorderThickness="0,1,0,0">
+                <!-- 与作品页共用 ProjectAiComposer；输入面始终跟随实际对话栏宽度。 -->
+                <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
+              </Border>
+            </Grid>
 
             <ScrollViewer IsVisible="{Binding IsNodeDetailsTab}" Margin="16,14">
               <StackPanel Spacing="18">
@@ -1125,18 +1064,18 @@
                   <Border Classes="panel-section" Padding="0,0,0,16">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding NodeNameLabel}" Classes="subtitle" />
-                      <TextBox Text="{Binding SelectedNode.Name, Mode=TwoWay}" />
+                      <TextBox Text="{Binding SelectedNode.Name, Mode=TwoWay}"  AutomationProperties.Name="{Binding NodeNameLabel}" />
                       <StackPanel Spacing="4" IsVisible="{Binding IsSelectedStartNode}">
                         <TextBlock Text="{Binding WorkDirLabel}" Classes="caption" />
                         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                          <TextBox Grid.Column="0" Text="{Binding SelectedNode.WorkDir, Mode=TwoWay}" Classes="mono"
+                          <TextBox Grid.Column="0" Text="{Binding SelectedNode.WorkDir, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding WorkDirLabel}"
                                    PlaceholderText="{Binding WorkDirPlaceholder}" />
                           <Button Grid.Column="1" Classes="secondary"
                                   Content="{Binding BrowseWorkDirText}"
                                   Command="{Binding BrowseWorkDirCommand}" />
                         </Grid>
                         <TextBlock Text="{Binding UserNoteLabel}" Classes="caption" />
-                        <TextBox Text="{Binding SelectedNode.UserNote, Mode=TwoWay}"
+                        <TextBox Text="{Binding SelectedNode.UserNote, Mode=TwoWay}" AutomationProperties.Name="{Binding UserNoteLabel}"
                                  AcceptsReturn="True"
                                  TextWrapping="Wrap"
                                  MinHeight="56"
@@ -1163,7 +1102,7 @@
                       <TextBlock Text="{Binding ImportFileLabel}" Classes="subtitle" />
                       <TextBlock Text="{Binding ImportFileHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <TextBox Grid.Column="0" Text="{Binding SelectedNode.ImportPath, Mode=TwoWay}" Classes="mono"
+                        <TextBox Grid.Column="0" Text="{Binding SelectedNode.ImportPath, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding ImportFileHint}"
                                  PlaceholderText="{Binding ImportNoFileText}" />
                         <Button Grid.Column="1" Classes="secondary" Content="{Binding BrowseImportFileText}"
                                 Command="{Binding BrowseImportFileCommand}" />
@@ -1179,10 +1118,10 @@
                       <TextBlock Text="{Binding SearchNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding SearchNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <TextBlock Text="{Binding QueryAliasLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.QueryAlias, Mode=TwoWay}" Classes="mono"
+                      <TextBox Text="{Binding SelectedNode.QueryAlias, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding QueryAliasLabel}"
                                PlaceholderText="{Binding SearchQueryPlaceholder}" />
                       <TextBlock Text="{Binding SearchLimitLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.SearchLimit, Mode=TwoWay}" Width="100" HorizontalAlignment="Left" />
+                      <TextBox Text="{Binding SelectedNode.SearchLimit, Mode=TwoWay}" Width="100" HorizontalAlignment="Left"  AutomationProperties.Name="{Binding SearchLimitLabel}" />
                     </StackPanel>
                   </Border>
 
@@ -1192,13 +1131,13 @@
                       <TextBlock Text="{Binding ConditionNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ConditionNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <TextBlock Text="{Binding ConditionInputAliasLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ConditionInputAlias, Mode=TwoWay}" Classes="mono" />
+                      <TextBox Text="{Binding SelectedNode.ConditionInputAlias, Mode=TwoWay}" Classes="mono"  AutomationProperties.Name="{Binding ConditionInputAliasLabel}" />
                       <TextBlock Text="{Binding ConditionOperatorLabel}" Classes="caption" />
                       <ComboBox ItemsSource="{x:Static vm:WorkflowNodeViewModel.ConditionOperators}"
                                 SelectedItem="{Binding SelectedNode.ConditionOperator, Mode=TwoWay}"
                                 HorizontalAlignment="Left" MinWidth="140" />
                       <TextBlock Text="{Binding ConditionExpectedLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ConditionExpected, Mode=TwoWay}"
+                      <TextBox Text="{Binding SelectedNode.ConditionExpected, Mode=TwoWay}" AutomationProperties.Name="{Binding ConditionExpectedLabel}"
                                PlaceholderText="{Binding ConditionExpectedPlaceholder}" />
                     </StackPanel>
                   </Border>
@@ -1209,16 +1148,16 @@
                       <TextBlock Text="{Binding LoopNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding LoopNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <TextBlock Text="{Binding MaxIterationsLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.MaxIterations, Mode=TwoWay}" Width="100" HorizontalAlignment="Left" />
+                      <TextBox Text="{Binding SelectedNode.MaxIterations, Mode=TwoWay}" Width="100" HorizontalAlignment="Left"  AutomationProperties.Name="{Binding MaxIterationsLabel}" />
                       <TextBlock Text="{Binding NodeTimeoutText}" Classes="caption" />
                       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                        <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}" />
+                        <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}"  AutomationProperties.Name="{Binding NodeTimeoutText}" />
                         <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
                       </Grid>
                       <TextBlock Text="{Binding StopInputAliasLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.StopInputAlias, Mode=TwoWay}" Classes="mono" />
+                      <TextBox Text="{Binding SelectedNode.StopInputAlias, Mode=TwoWay}" Classes="mono"  AutomationProperties.Name="{Binding StopInputAliasLabel}" />
                       <TextBlock Text="{Binding StopExpectedLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.StopExpected, Mode=TwoWay}" />
+                      <TextBox Text="{Binding SelectedNode.StopExpected, Mode=TwoWay}"  AutomationProperties.Name="{Binding StopExpectedLabel}" />
                     </StackPanel>
                   </Border>
 
@@ -1228,7 +1167,7 @@
                       <TextBlock Text="{Binding ApprovalNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ApprovalNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <TextBlock Text="{Binding ApprovalIdLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ApprovalId, Mode=TwoWay}" Classes="mono" />
+                      <TextBox Text="{Binding SelectedNode.ApprovalId, Mode=TwoWay}" Classes="mono"  AutomationProperties.Name="{Binding ApprovalIdLabel}" />
                       <CheckBox IsChecked="{Binding SelectedNode.AutoApprove, Mode=TwoWay}"
                                 Content="{Binding AutoApproveText}" />
                     </StackPanel>
@@ -1240,13 +1179,13 @@
                       <TextBlock Text="{Binding ExportNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ExportNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <TextBlock Text="{Binding ExportArtifactIdLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ExportArtifactId, Mode=TwoWay}" Classes="mono" />
+                      <TextBox Text="{Binding SelectedNode.ExportArtifactId, Mode=TwoWay}" Classes="mono"  AutomationProperties.Name="{Binding ExportArtifactIdLabel}" />
                       <TextBlock Text="{Binding ExportFormatLabel}" Classes="caption" />
                       <ComboBox ItemsSource="{x:Static vm:WorkflowNodeViewModel.ExportFormats}"
                                 SelectedItem="{Binding SelectedNode.ExportFormat, Mode=TwoWay}"
                                 HorizontalAlignment="Left" MinWidth="140" />
                       <TextBlock Text="{Binding ExportTitleLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ExportTitle, Mode=TwoWay}" />
+                      <TextBox Text="{Binding SelectedNode.ExportTitle, Mode=TwoWay}"  AutomationProperties.Name="{Binding ExportTitleLabel}" />
                     </StackPanel>
                   </Border>
 
@@ -1255,12 +1194,6 @@
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding SummarizerNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding SummarizerNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
-                      <TextBlock Text="{Binding SummarizerProviderIdLabel}" Classes="caption" />
-                      <ComboBox ItemsSource="{Binding AvailableProviderIds}"
-                                IsEditable="True"
-                                Text="{Binding SelectedNode.SummarizerProviderId, Mode=TwoWay}"
-                                PlaceholderText="{Binding SummarizerProviderIdPlaceholder}"
-                                HorizontalAlignment="Stretch" />
                       <TextBlock Text="{Binding SummarizerChapterSelectorLabel}" Classes="caption"
                                  IsVisible="{Binding HasSummarizerChapterChoices}" />
                       <ComboBox ItemsSource="{Binding SummarizerChapterOptions}"
@@ -1275,15 +1208,15 @@
                         </ComboBox.ItemTemplate>
                       </ComboBox>
                       <TextBlock Text="{Binding SummarizerChapterIdLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.SummarizerChapterId, Mode=TwoWay}"
+                      <TextBox Text="{Binding SelectedNode.SummarizerChapterId, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterIdLabel}"
                                Classes="mono"
                                PlaceholderText="{Binding SummarizerChapterIdPlaceholder}" />
                       <TextBlock Text="{Binding SummarizerChapterDocumentIdLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.SummarizerChapterDocumentId, Mode=TwoWay}"
+                      <TextBox Text="{Binding SelectedNode.SummarizerChapterDocumentId, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterDocumentIdLabel}"
                                Classes="mono"
                                PlaceholderText="{Binding SummarizerChapterDocumentIdPlaceholder}" />
                       <TextBlock Text="{Binding SummarizerChapterTextAliasLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.SummarizerChapterTextAlias, Mode=TwoWay}"
+                      <TextBox Text="{Binding SelectedNode.SummarizerChapterTextAlias, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterTextAliasLabel}"
                                Classes="mono" />
                       <TextBlock Text="{Binding SummarizerChapterTextAliasHint}"
                                  Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1310,8 +1243,12 @@
                           <DataTemplate DataType="{x:Type vm:NodeDataInPinViewModel}">
                             <Grid ColumnDefinitions="*,Auto" Margin="0,2" ColumnSpacing="8">
                               <TextBlock Grid.Column="0" Text="{Binding Handle}" Classes="caption mono" VerticalAlignment="Center" />
-                              <Button Grid.Column="1" Classes="subtle" Padding="6,2" Content="×"
-                                      Command="{Binding RemoveCommand}" />
+                              <Button Grid.Column="1" Classes="icon-btn"
+                                      ToolTip.Tip="{Binding $parent[UserControl].DataContext.RemoveDataInPinText}"
+                                      AutomationProperties.Name="{Binding $parent[UserControl].DataContext.RemoveDataInPinText}"
+                                      Command="{Binding RemoveCommand}">
+                                <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Close}" />
+                              </Button>
                             </Grid>
                           </DataTemplate>
                         </ItemsControl.ItemTemplate>
@@ -1322,7 +1259,7 @@
                   <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.ShowPromptEditor}">
                     <StackPanel Spacing="10">
                       <TextBlock Text="{Binding PromptTemplateText}" Classes="subtitle" />
-                      <TextBox Text="{Binding SelectedNode.PromptTemplate, Mode=TwoWay}"
+                      <TextBox Text="{Binding SelectedNode.PromptTemplate, Mode=TwoWay}" AutomationProperties.Name="{Binding PromptTemplateText}"
                                AcceptsReturn="True"
                                TextWrapping="Wrap"
                                MinHeight="128"
@@ -1330,16 +1267,22 @@
                       <Grid ColumnDefinitions="1.2*,0.8*" ColumnSpacing="10">
                         <StackPanel Grid.Column="0" Spacing="4">
                           <TextBlock Text="{Binding ModelIdText}" Classes="caption" />
-                          <ComboBox ItemsSource="{Binding AvailableModelIds}"
-                                    IsEditable="True"
-                                    Text="{Binding SelectedNode.ModelId, Mode=TwoWay}"
-                                    HorizontalAlignment="Stretch" />
+                          <ComboBox ItemsSource="{Binding AvailableModelOptions}"
+                                    SelectedItem="{Binding SelectedNodeModelOption, Mode=TwoWay}"
+                                    PlaceholderText="{Binding ModelSelectorPlaceholder}"
+                                    HorizontalAlignment="Stretch">
+                            <ComboBox.ItemTemplate>
+                              <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
+                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                              </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                          </ComboBox>
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="4">
                           <TextBlock Text="{Binding NodeBudgetText}" Classes="caption" />
                           <Grid ColumnDefinitions="Auto,*" ColumnSpacing="4">
                             <TextBlock Grid.Column="0" Text="$" Classes="caption" VerticalAlignment="Center" />
-                            <TextBox Grid.Column="1" Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}"
+                            <TextBox Grid.Column="1" Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeBudgetText}"
                                      PlaceholderText="{Binding OptionalPlaceholder}" />
                           </Grid>
                         </StackPanel>
@@ -1348,7 +1291,7 @@
                         <StackPanel Grid.Column="0" Spacing="4">
                           <TextBlock Text="{Binding NodeTimeoutText}" Classes="caption" />
                           <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                            <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}" />
+                            <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}"  AutomationProperties.Name="{Binding NodeTimeoutText}" />
                             <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
                           </Grid>
                         </StackPanel>
@@ -1389,35 +1332,35 @@
                           <Grid ColumnDefinitions="*,*" ColumnSpacing="8" IsVisible="{Binding SelectedEdge.ShowHandleFields}">
                             <StackPanel Grid.Column="0" Spacing="4">
                               <TextBlock Text="{Binding SourceAliasText}" Classes="caption" />
-                              <TextBox Text="{Binding SelectedEdge.SourceHandle, Mode=TwoWay}" />
+                              <TextBox Text="{Binding SelectedEdge.SourceHandle, Mode=TwoWay}"  AutomationProperties.Name="{Binding SourceAliasText}" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Spacing="4">
                               <TextBlock Text="{Binding TargetAliasText}" Classes="caption" />
-                              <TextBox Text="{Binding SelectedEdge.TargetHandle, Mode=TwoWay}" />
+                              <TextBox Text="{Binding SelectedEdge.TargetHandle, Mode=TwoWay}"  AutomationProperties.Name="{Binding TargetAliasText}" />
                             </StackPanel>
                           </Grid>
                           <!-- 通用标签（执行/数据/通信均可） -->
                           <StackPanel Spacing="4" IsVisible="{Binding SelectedEdge.ShowLabelField}">
                             <TextBlock Text="{Binding EdgeLabelText}" Classes="caption" />
-                            <TextBox Text="{Binding SelectedEdge.Label, Mode=TwoWay}" />
+                            <TextBox Text="{Binding SelectedEdge.Label, Mode=TwoWay}"  AutomationProperties.Name="{Binding EdgeLabelText}" />
                           </StackPanel>
                           <!-- 仅通信边：双向 alias / 模板 / 次数 -->
                           <StackPanel IsVisible="{Binding SelectedEdge.ShowCommunicationFields}" Spacing="8">
                             <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
                               <StackPanel Grid.Column="0" Spacing="4">
                                 <TextBlock Text="{Binding ForwardAliasText}" Classes="caption" />
-                                <TextBox Text="{Binding SelectedEdge.ForwardAlias, Mode=TwoWay}" />
+                                <TextBox Text="{Binding SelectedEdge.ForwardAlias, Mode=TwoWay}"  AutomationProperties.Name="{Binding ForwardAliasText}" />
                               </StackPanel>
                               <StackPanel Grid.Column="1" Spacing="4">
                                 <TextBlock Text="{Binding ReverseAliasText}" Classes="caption" />
-                                <TextBox Text="{Binding SelectedEdge.ReverseAlias, Mode=TwoWay}" />
+                                <TextBox Text="{Binding SelectedEdge.ReverseAlias, Mode=TwoWay}"  AutomationProperties.Name="{Binding ReverseAliasText}" />
                               </StackPanel>
                             </Grid>
                             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                               <TextBlock Grid.Column="0" Text="{Binding ForwardTemplateText}" Classes="caption" VerticalAlignment="Center" />
                               <Button Grid.Column="1" Classes="secondary" Padding="8,3" Content="{Binding InsertForwardVariableText}" Command="{Binding InsertForwardTemplateVariableCommand}" />
                             </Grid>
-                            <TextBox Text="{Binding SelectedEdge.ForwardTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76" />
+                            <TextBox Text="{Binding SelectedEdge.ForwardTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76"  AutomationProperties.Name="{Binding ForwardTemplateText}" />
                             <Border Classes="layer" Padding="10,7">
                               <StackPanel Spacing="3">
                                 <TextBlock Text="{Binding TemplatePreviewText}" Classes="caption" />
@@ -1428,7 +1371,7 @@
                               <TextBlock Grid.Column="0" Text="{Binding ReverseTemplateText}" Classes="caption" VerticalAlignment="Center" />
                               <Button Grid.Column="1" Classes="secondary" Padding="8,3" Content="{Binding InsertReverseVariableText}" Command="{Binding InsertReverseTemplateVariableCommand}" />
                             </Grid>
-                            <TextBox Text="{Binding SelectedEdge.ReverseTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76" />
+                            <TextBox Text="{Binding SelectedEdge.ReverseTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76"  AutomationProperties.Name="{Binding ReverseTemplateText}" />
                             <Border Classes="layer" Padding="10,7">
                               <StackPanel Spacing="3">
                                 <TextBlock Text="{Binding TemplatePreviewText}" Classes="caption" />
@@ -1436,7 +1379,7 @@
                               </StackPanel>
                             </Border>
                             <TextBlock Text="{Binding MaxCommunicationCountText}" Classes="caption" />
-                            <TextBox Text="{Binding SelectedEdge.MaxCommunicationCount, Mode=TwoWay}" />
+                            <TextBox Text="{Binding SelectedEdge.MaxCommunicationCount, Mode=TwoWay}"  AutomationProperties.Name="{Binding MaxCommunicationCountText}" />
                           </StackPanel>
                           <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding ApplyEdgeConfigText}" Command="{Binding SaveEdgeConfigCommand}" />
                         </StackPanel>
@@ -1450,7 +1393,7 @@
                       <Button Grid.Column="1" Classes="secondary" Content="{Binding SubworkflowText}" Command="{Binding PackSelectionCommand}" />
                     </Grid>
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                      <TextBox Grid.Column="0" Text="{Binding AnnotationTitle, Mode=TwoWay}" PlaceholderText="{Binding AnnotationTitlePlaceholder}" />
+                      <TextBox Grid.Column="0" Text="{Binding AnnotationTitle, Mode=TwoWay}" PlaceholderText="{Binding AnnotationTitlePlaceholder}"  AutomationProperties.Name="{Binding AnnotationTitlePlaceholder}" />
                       <Button Grid.Column="1" Classes="secondary" Content="{Binding AddAnnotationText}" Command="{Binding AddAnnotationCommand}" />
                     </Grid>
                     <Button Classes="danger" Content="{Binding DeleteText}" HorizontalAlignment="Stretch" Command="{Binding DeleteSelectedNodeCommand}" />

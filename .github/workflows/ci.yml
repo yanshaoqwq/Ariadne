@@ -9,7 +9,7 @@ on:
       full_release_matrix:
         description: Run five-RID packaging, Qdrant E2E, and release performance evidence
         required: true
-        default: false
+        default: true
         type: boolean
 
 concurrency:
@@ -58,6 +58,7 @@ jobs:
           diff -u THIRD_PARTY_NOTICES.md /tmp/THIRD_PARTY_NOTICES.md
 
   native-package:
+    name: native-package (${{ matrix.rid }})
     needs: quality
     if: github.event_name == 'workflow_dispatch' && inputs.full_release_matrix
     timeout-minutes: 90
@@ -89,13 +90,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.rid }}
       - name: Install Windows packaging tool
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        run: python3 scripts/run-with-timeout.py --timeout-seconds 600 -- choco install innosetup --no-progress -y
       - name: Build and verify native release layout
         shell: bash
         run: bash scripts/build-release.sh '${{ matrix.rid }}'
@@ -106,8 +111,10 @@ jobs:
           ARIADNE_QDRANT_CACHE_DIR: ${{ runner.temp }}/ariadne-qdrant-cache
           ARIADNE_RELEASE_EVIDENCE_DIR: ${{ github.workspace }}/artifacts/release-evidence
         run: |
-          cargo test --release --locked --package ariadne --test release_acceptance qdrant_runtime_provisioning_installs_then_uses_cache -- --ignored --exact
-          python3 scripts/qdrant-sidecar-smoke.py \
+          python3 scripts/run-with-timeout.py --timeout-seconds 1200 -- \
+            cargo test --release --locked --package ariadne --test release_acceptance qdrant_runtime_provisioning_installs_then_uses_cache -- --ignored --exact
+          python3 scripts/run-with-timeout.py --timeout-seconds 300 -- \
+            python3 scripts/qdrant-sidecar-smoke.py \
             --runtime-cache "$ARIADNE_QDRANT_CACHE_DIR" \
             --rid '${{ matrix.rid }}' \
             --provisioning-evidence "$ARIADNE_RELEASE_EVIDENCE_DIR/qdrant-runtime-provisioning.json" \

@@ -14,6 +14,7 @@ public static class NodeConfigData
         "user_note",
         "expose_as_tool",
         "prompt_template",
+        "provider_id",
         "model_id",
         "budget_usd",
         "timeout_ms",
@@ -85,7 +86,8 @@ public static class NodeConfigData
         bool breakpointEnabled,
         string? importPath = null,
         IReadOnlyList<string>? dataInHandles = null,
-        IReadOnlyDictionary<string, object?>? utilityFields = null)
+        IReadOnlyDictionary<string, object?>? utilityFields = null,
+        string providerId = "")
     {
         var data = new Dictionary<string, object?>(StringComparer.Ordinal);
         if (extra is not null)
@@ -130,6 +132,11 @@ public static class NodeConfigData
         if (!string.IsNullOrWhiteSpace(modelId))
         {
             data["model_id"] = modelId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(providerId))
+        {
+            data["provider_id"] = providerId.Trim();
         }
 
         // F13：后端 WorkflowLlmNodeConfig 期望 f64/u64；UI 绑定仍是 string，这里解析为数值再落盘。

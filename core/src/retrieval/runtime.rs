@@ -309,8 +309,10 @@ fn collect_project_full_text_records(
     cancellation: &ExecutionCancellation,
 ) -> CoreResult<Vec<FullTextRecord>> {
     let mut paths = Vec::new();
-    for directory in ["documents", "planning"] {
-        collect_text_paths(&project_root.join(directory), &mut paths)?;
+    let config = crate::config::ConfigStore::new(project_root).load_or_create()?;
+    let layout = crate::config::ProjectLayout::from_app(project_root, &config.app)?;
+    for directory in [layout.documents, project_root.join("planning")] {
+        collect_text_paths(&directory, &mut paths)?;
     }
     paths.sort();
     let mut records = Vec::new();

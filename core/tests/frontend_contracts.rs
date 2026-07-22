@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+use ariadne::config::ConfigStore;
 use ariadne::contracts::{
     ArtifactKind, Edge, EdgeId, ExecutionCancellation, NodeId, NodeInstance, PatchHunk,
     PermissionPolicy, PortEndpoint, PortValue, ProviderCapability, ProviderDefinition,
@@ -17,16 +18,16 @@ use ariadne::documents::{
 use ariadne::frontend::{
     apply_node_detail_patch, apply_quick_edit_patch, build_works_tree, export_chapters_combined,
     export_chapters_markdown, export_workflow_selection, extract_project_reference_tokens,
-    import_chapter_document, initialize_project, install_workflow_template_manifest,
-    node_has_breakpoint, now_timestamp_ms, pack_workflow_selection, project_ai_context_window,
-    project_document_permission, quick_edit_to_patch, set_node_breakpoint,
-    upsert_canvas_annotation, ArtifactReferenceEntry, CanvasAnnotation, ChapterExportFormat,
-    ChapterImportRequest, ConfirmationLogEntry, ConfirmationLogState, ConfirmationLogStore,
-    FileConfirmationLogStore, NodeDetailPatch, ProjectAiAppendOutcome, ProjectAiChatMessage,
-    ProjectAiChatRole, ProjectAiConversationStore, ProjectMemoryStore, ProjectReferenceKind,
-    ProjectReferenceResolver, ProjectRegistryStore, QuickEditService, TemplateRepositoryClient,
-    UiPreferences, UiPreferencesStore, UiRunLogEntry, UiRunLogFilter, UiRunLogKind, UiRunLogLevel,
-    UiRunLogStore, OFFICIAL_TEMPLATE_REPOSITORY_URL,
+    import_chapter_document, initialize_project, initialize_project_with_app_state,
+    install_workflow_template_manifest, node_has_breakpoint, now_timestamp_ms,
+    pack_workflow_selection, project_ai_context_window, project_document_permission,
+    quick_edit_to_patch, set_node_breakpoint, upsert_canvas_annotation, ArtifactReferenceEntry,
+    CanvasAnnotation, ChapterExportFormat, ChapterImportRequest, ConfirmationLogEntry,
+    ConfirmationLogState, ConfirmationLogStore, FileConfirmationLogStore, NodeDetailPatch,
+    ProjectAiAppendOutcome, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiConversationStore,
+    ProjectMemoryStore, ProjectReferenceKind, ProjectReferenceResolver, ProjectRegistryStore,
+    QuickEditService, TemplateRepositoryClient, UiPreferences, UiPreferencesStore, UiRunLogEntry,
+    UiRunLogFilter, UiRunLogKind, UiRunLogLevel, UiRunLogStore, OFFICIAL_TEMPLATE_REPOSITORY_URL,
 };
 use ariadne::llm::{LlmService, LlmServiceConfig};
 use ariadne::providers::{
@@ -659,7 +660,38 @@ fn project_registry_initializes_project_and_tracks_recent_projects() {
     let registry = ProjectRegistryStore::default_for_project(&project);
     let recent = registry.record_opened("Novel", &project).unwrap();
 
+    assert!(report.ready);
     assert!(report.git_initialized);
+    assert_eq!(report.project_root, project);
+    assert_eq!(report.project_name, "Untitled Literature Project");
+    assert_eq!(report.created_config_files.len(), 7);
+    for file_name in [
+        "app.yaml",
+        "providers.yaml",
+        "permissions.yaml",
+        "rag.yaml",
+        "workflow.yaml",
+        "git.yaml",
+        "auto_mode.yaml",
+    ] {
+        assert!(report
+            .created_config_files
+            .contains(&project.join(".config").join(file_name)));
+    }
+    for directory in [
+        ".config",
+        ".runtime",
+        "planning",
+        "planning/stages",
+        "planning/chapters",
+        "documents",
+        "workflows",
+        "skills",
+        "exports",
+    ] {
+        assert!(report.created_dirs.contains(&project.join(directory)));
+        assert!(project.join(directory).is_dir());
+    }
     assert!(project.join(".config").is_dir());
     assert!(project.join(".config/app.yaml").exists());
     assert!(project.join(".config/providers.yaml").exists());
@@ -668,6 +700,20 @@ fn project_registry_initializes_project_and_tracks_recent_projects() {
     assert!(project.join(".git").is_dir());
     assert_eq!(recent[0].name, "Novel");
     assert_eq!(registry.read_all().unwrap()[0].path, project);
+}
+
+#[test]
+fn project_initialization_binds_the_explicit_app_state_authority() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+
+    initialize_project_with_app_state(project.path(), app_state.path(), None).unwrap();
+
+    assert_eq!(
+        ariadne::config::trusted_app_state_for_project(project.path()),
+        app_state.path().canonicalize().unwrap()
+    );
+    ConfigStore::new(project.path()).load().unwrap();
 }
 
 #[test]
@@ -1432,6 +1478,57 @@ fn node_detail_patch_annotations_and_preferences_are_persisted() {
     assert!(workflow.metadata["canvas_annotations"].is_array());
     assert_eq!(prefs_store.read().unwrap().theme, "dark");
     assert!(!prefs_store.read().unwrap().panel_states["workspace.right_panel"]);
+}
+
+#[test]
+fn ui_preferences_locale_migrates_to_app_scope_and_stays_global() {
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    initialize_project(project_a.path()).unwrap();
+    initialize_project(project_b.path()).unwrap();
+
+    let store_a = ConfigStore::with_app_state(project_a.path(), app_state.path());
+    let mut config_a = store_a.load().unwrap();
+    config_a.app.locale = "fr".to_owned();
+    store_a.save(&config_a).unwrap();
+
+    let migrated =
+        UiPreferencesStore::read_global_or_migrate(app_state.path(), Some(project_a.path()))
+            .unwrap();
+    assert_eq!(migrated.locale, "fr");
+    assert!(app_state.path().join("ui_preferences.json").is_file());
+
+    let store_b = ConfigStore::with_app_state(project_b.path(), app_state.path());
+    let mut config_b = store_b.load().unwrap();
+    config_b.app.locale = "ja".to_owned();
+    store_b.save(&config_b).unwrap();
+
+    let from_other_project =
+        UiPreferencesStore::read_global_or_migrate(app_state.path(), Some(project_b.path()))
+            .unwrap();
+    assert_eq!(from_other_project.locale, "fr");
+    assert!(!project_a
+        .path()
+        .join(".runtime/ui_preferences.json")
+        .exists());
+    assert!(!project_b
+        .path()
+        .join(".runtime/ui_preferences.json")
+        .exists());
+}
+
+#[test]
+fn ui_preferences_reject_invalid_global_locale() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = UiPreferencesStore::new(temp.path().join("ui_preferences.json"));
+    let error = store
+        .write(&UiPreferences {
+            locale: "../../project".to_owned(),
+            ..UiPreferences::default()
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("locale must be"));
 }
 
 fn node(id: &str) -> NodeInstance {

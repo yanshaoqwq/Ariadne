@@ -19,7 +19,7 @@ internal static class ReleaseTool
                 Console.WriteLine("Usage:");
                 Console.WriteLine("  Ariadne.ReleaseTool licenses [--root <repo>] [--output <file>]");
                 Console.WriteLine("  Ariadne.ReleaseTool assemble --rid <rid> --desktop-publish <dir> --rust-bin-dir <dir> --output <dir> [--root <repo>]");
-                Console.WriteLine("  Ariadne.ReleaseTool verify-package --package <dir> [--root <repo>]");
+                Console.WriteLine("  Ariadne.ReleaseTool verify-package --package <dir> [--root <repo>] [--allow-platform-sealed-mutation]");
                 return args.Length == 0 ? 2 : 0;
             }
 
@@ -42,7 +42,10 @@ internal static class ReleaseTool
                     AssemblePackage(root, args);
                     return 0;
                 case "verify-package":
-                    VerifyPackage(root, RequiredOption(args, "--package"));
+                    VerifyPackage(
+                        root,
+                        RequiredOption(args, "--package"),
+                        HasFlag(args, "--allow-platform-sealed-mutation"));
                     return 0;
                 default:
                     throw new ArgumentException($"Unknown command: {args[0]}");
@@ -75,6 +78,17 @@ internal static class ReleaseTool
 
     private static string RequiredOption(string[] args, string name) =>
         ReadOption(args, name) ?? throw new ArgumentException($"{name} is required");
+
+    private static bool HasFlag(string[] args, string name)
+    {
+        var count = args.Skip(1).Count(argument => string.Equals(argument, name, StringComparison.Ordinal));
+        if (count > 1)
+        {
+            throw new ArgumentException($"{name} may only be specified once");
+        }
+
+        return count == 1;
+    }
 
     private static string ResolveRoot(string? explicitRoot)
     {
@@ -148,21 +162,30 @@ internal static class ReleaseTool
             throw new InvalidDataException($"Desktop version {version} does not match Cargo workspace version {workspaceVersion}.");
         }
         var manifest = new PackageManifest(
+            2,
             version,
             rid,
-            EnumerateManifestFiles(output));
+            EnumerateManifestFiles(output, rid));
         WriteJson(Path.Combine(output, "release-manifest.json"), manifest);
         Console.WriteLine($"Assembled {output} ({manifest.Files.Count} files, version {version}, {rid}).");
     }
 
-    private static void VerifyPackage(string root, string packageArgument)
+    private static void VerifyPackage(string root, string packageArgument, bool allowPlatformSealedMutation)
     {
         var package = Path.GetFullPath(packageArgument, root);
         var manifestPath = Path.Combine(package, "release-manifest.json");
         var manifest = JsonSerializer.Deserialize<PackageManifest>(
             File.ReadAllText(manifestPath),
             JsonOptions()) ?? throw new InvalidDataException("Release manifest is invalid.");
+        if (manifest.SchemaVersion != 2)
+        {
+            throw new InvalidDataException("Release manifest schema is unsupported.");
+        }
         ValidateReleaseRid(root, manifest.Rid);
+        if (allowPlatformSealedMutation && !manifest.Rid.StartsWith("osx-", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Platform-sealed mutation is only valid for a macOS package after app bundle sealing.");
+        }
 
         var actualFiles = Directory.EnumerateFiles(package, "*", SearchOption.AllDirectories)
             .Where(path => !string.Equals(path, manifestPath, StringComparison.Ordinal))
@@ -173,6 +196,18 @@ internal static class ReleaseTool
         if (!actualFiles.SequenceEqual(expectedFiles, StringComparer.Ordinal))
         {
             throw new InvalidDataException("Package file set does not match release-manifest.json.");
+        }
+        var expectedPlatformSealed = manifest.Rid.StartsWith("osx-", StringComparison.Ordinal)
+            ? new[] { "Ariadne.Desktop" }
+            : Array.Empty<string>();
+        var actualPlatformSealed = manifest.Files
+            .Where(file => file.PlatformSealed)
+            .Select(file => file.Path)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        if (!actualPlatformSealed.SequenceEqual(expectedPlatformSealed, StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("Release manifest platform-sealed paths do not match the RID contract.");
         }
 
         var forbiddenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -190,8 +225,13 @@ internal static class ReleaseTool
             }
 
             var fullPath = Path.Combine(package, entry.Path.Replace('/', Path.DirectorySeparatorChar));
-            var hash = ComputeSha256(fullPath);
-            if (!string.Equals(hash, entry.Sha256, StringComparison.OrdinalIgnoreCase))
+            var verifyManifestBytes = !allowPlatformSealedMutation || !entry.PlatformSealed;
+            if (verifyManifestBytes && new FileInfo(fullPath).Length != entry.Size)
+            {
+                throw new InvalidDataException($"Package size mismatch: {entry.Path}");
+            }
+            if (verifyManifestBytes
+                && !string.Equals(ComputeSha256(fullPath), entry.Sha256, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException($"Package hash mismatch: {entry.Path}");
             }
@@ -319,14 +359,21 @@ internal static class ReleaseTool
         File.WriteAllText(path, content + "\n", new UTF8Encoding(false));
     }
 
-    private static IReadOnlyList<ManifestFile> EnumerateManifestFiles(string package)
+    private static IReadOnlyList<ManifestFile> EnumerateManifestFiles(string package, string rid)
     {
         return Directory.EnumerateFiles(package, "*", SearchOption.AllDirectories)
             .Where(path => !string.Equals(Path.GetFileName(path), "release-manifest.json", StringComparison.Ordinal))
-            .Select(path => new ManifestFile(
-                NormalizeRelativePath(package, path),
-                new FileInfo(path).Length,
-                ComputeSha256(path)))
+            .Select(path =>
+            {
+                var relativePath = NormalizeRelativePath(package, path);
+                var platformSealed = rid.StartsWith("osx-", StringComparison.Ordinal)
+                                     && string.Equals(relativePath, "Ariadne.Desktop", StringComparison.Ordinal);
+                return new ManifestFile(
+                    relativePath,
+                    new FileInfo(path).Length,
+                    ComputeSha256(path),
+                    platformSealed);
+            })
             .OrderBy(file => file.Path, StringComparer.Ordinal)
             .ToArray();
     }
@@ -648,9 +695,9 @@ internal static class ReleaseTool
 
     private static string Escape(string value) => value.Replace("|", "\\|", StringComparison.Ordinal);
 
-    private sealed record PackageManifest(string Version, string Rid, IReadOnlyList<ManifestFile> Files);
+    private sealed record PackageManifest(int SchemaVersion, string Version, string Rid, IReadOnlyList<ManifestFile> Files);
 
-    private sealed record ManifestFile(string Path, long Size, string Sha256);
+    private sealed record ManifestFile(string Path, long Size, string Sha256, bool PlatformSealed = false);
 
     private sealed record PackageLicense(string Name, string Version, string License, string Source);
 }

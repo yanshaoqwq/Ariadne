@@ -100,10 +100,15 @@ pub fn validate_prompt_resources(resources: &PromptResources) -> crate::contract
         "auto_audit.review",           // 审稿节点输出自动审计提示词
         "auto_audit.summary",          // summary 自动审计提示词
         "auto_audit.correction_patch", // 自动修正 patch 审计提示词
-        "summarizer.segments",         // 故事段总结提示词
-        "summarizer.events",           // 事件总结提示词
-        "summarizer.chapter_summary",  // 章节总结提示词
-        "summarizer.stage_summary",    // 阶段总结提示词
+        "auto_audit.chapter_write",
+        "auto_audit.summary_write",
+        "auto_audit.high_risk_permission",
+        "auto_audit.budget_exceeded",
+        "auto_audit.generic",
+        "summarizer.segments",        // 故事段总结提示词
+        "summarizer.events",          // 事件总结提示词
+        "summarizer.chapter_summary", // 章节总结提示词
+        "summarizer.stage_summary",   // 阶段总结提示词
     ] {
         let Some(resource) = resources.get(key) else {
             return Err(crate::contracts::CoreError::validation(format!(

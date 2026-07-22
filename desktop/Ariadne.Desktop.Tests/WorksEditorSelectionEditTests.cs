@@ -85,7 +85,10 @@ public sealed class WorksEditorSelectionEditTests
     [Fact]
     public void FormatSelectionUserBubble_IncludesInstructionAndSnippet()
     {
-        var text = WorksEditorSelectionEdit.FormatSelectionUserBubble("改紧凑一点", "很长的选中正文内容");
+        var text = WorksEditorSelectionEdit.FormatSelectionUserBubble(
+            "改紧凑一点",
+            "很长的选中正文内容",
+            "选中");
         Assert.Contains("改紧凑一点", text, StringComparison.Ordinal);
         Assert.Contains("选中", text, StringComparison.Ordinal);
     }

@@ -33,6 +33,7 @@ struct ArtifactOperationReceipt {
 pub struct FileDocumentService {
     permissions: PermissionPolicy,
     artifact_root: PathBuf,
+    export_root: Option<PathBuf>,
     invalidation_outbox: IndexInvalidationOutbox,
 }
 
@@ -47,10 +48,17 @@ impl FileDocumentService {
         Self {
             permissions,
             artifact_root,
+            export_root: None,
             invalidation_outbox: IndexInvalidationOutbox::new(
                 runtime_root.join("index_invalidation.db"),
             ),
         }
+    }
+
+    /// 将 `exports/...` artifact id 映射到项目配置的导出目录。
+    pub fn with_export_root(mut self, export_root: impl Into<PathBuf>) -> Self {
+        self.export_root = Some(export_root.into());
+        self
     }
 
     pub fn invalidation_outbox(&self) -> &IndexInvalidationOutbox {
@@ -220,7 +228,7 @@ impl FileDocumentService {
             metadata,
         } = request;
         validate_artifact_id(&artifact_id)?;
-        let path = self.artifact_root.join(&artifact_id);
+        let path = self.artifact_path(&artifact_id);
         self.ensure_write(&path)?;
         let checksum = content_version(&bytes);
         let metadata_checksum = content_version(&serde_json::to_vec(&metadata)?);
@@ -314,6 +322,15 @@ impl FileDocumentService {
         };
 
         Ok(ArtifactWriteReport { descriptor })
+    }
+
+    fn artifact_path(&self, artifact_id: &str) -> PathBuf {
+        if let Some(relative) = artifact_id.strip_prefix("exports/") {
+            if let Some(export_root) = &self.export_root {
+                return export_root.join(relative);
+            }
+        }
+        self.artifact_root.join(artifact_id)
     }
 
     /// 读取文件并在实际打开前执行路径权限检查。

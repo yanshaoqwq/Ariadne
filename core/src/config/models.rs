@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::migration::current_schema_version;
 use crate::config::secrets::SecretRef;
 use crate::contracts::{
-    ApprovalPolicy, CoreError, CoreResult, PermissionPolicy, ProviderCapability, ProviderType,
+    ensure_path_under_root, ApprovalPolicy, CoreError, CoreResult, PermissionPolicy,
+    ProviderCapability, ProviderType,
 };
+use crate::node_capabilities::permission_tool_capabilities;
 
 pub const CONFIG_DIR_NAME: &str = ".config";
 pub const APP_CONFIG_FILE: &str = "app.yaml";
@@ -47,9 +50,12 @@ impl Default for ProjectConfig {
 impl ProjectConfig {
     /// 校验所有子配置。
     pub fn validate(&self) -> CoreResult<()> {
+        self.app.validate()?;
         self.providers.validate()?;
+        self.permissions.validate()?;
         self.workflow.validate()?;
         self.rag.validate()?;
+        self.git.validate()?;
         Ok(())
     }
 }
@@ -88,6 +94,155 @@ impl Default for AppConfig {
     }
 }
 
+impl AppConfig {
+    /// 校验项目目录均为可移植的项目相对路径。
+    pub fn validate(&self) -> CoreResult<()> {
+        if self.project_name.trim().is_empty() {
+            return Err(CoreError::validation("project_name cannot be empty"));
+        }
+        let mut directories = Vec::new();
+        for (field, value) in [
+            ("documents_dir", self.documents_dir.as_str()),
+            ("workflows_dir", self.workflows_dir.as_str()),
+            ("skills_dir", self.skills_dir.as_str()),
+            ("exports_dir", self.exports_dir.as_str()),
+        ] {
+            let normalized = normalize_project_relative_directory(field, value)?;
+            let first = normalized.split('/').next().unwrap_or_default();
+            if matches!(first, CONFIG_DIR_NAME | ".runtime" | ".git") {
+                return Err(CoreError::validation(format!(
+                    "{field} cannot use reserved project directory: {first}"
+                )));
+            }
+            directories.push((field, normalized));
+        }
+
+        for left in 0..directories.len() {
+            for right in (left + 1)..directories.len() {
+                let (left_field, left_path) = &directories[left];
+                let (right_field, right_path) = &directories[right];
+                if project_directories_overlap(left_path, right_path) {
+                    return Err(CoreError::validation(format!(
+                        "{left_field} and {right_field} must not overlap"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 将目录字段规范为跨平台稳定的 `/` 分隔项目相对路径。
+    pub fn normalize_directories(&mut self) -> CoreResult<()> {
+        self.documents_dir =
+            normalize_project_relative_directory("documents_dir", &self.documents_dir)?;
+        self.workflows_dir =
+            normalize_project_relative_directory("workflows_dir", &self.workflows_dir)?;
+        self.skills_dir = normalize_project_relative_directory("skills_dir", &self.skills_dir)?;
+        self.exports_dir = normalize_project_relative_directory("exports_dir", &self.exports_dir)?;
+        Ok(())
+    }
+}
+
+/// 项目配置目录的唯一运行时解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectLayout {
+    pub project_root: PathBuf,
+    pub documents: PathBuf,
+    pub workflows: PathBuf,
+    pub skills: PathBuf,
+    pub exports: PathBuf,
+}
+
+impl ProjectLayout {
+    pub fn from_app(project_root: impl AsRef<Path>, app: &AppConfig) -> CoreResult<Self> {
+        app.validate()?;
+        let project_root = project_root.as_ref();
+        if !project_root.is_absolute() {
+            return Err(CoreError::validation("project_root must be absolute"));
+        }
+        let layout = Self {
+            project_root: project_root.to_path_buf(),
+            documents: project_root.join(normalize_project_relative_directory(
+                "documents_dir",
+                &app.documents_dir,
+            )?),
+            workflows: project_root.join(normalize_project_relative_directory(
+                "workflows_dir",
+                &app.workflows_dir,
+            )?),
+            skills: project_root.join(normalize_project_relative_directory(
+                "skills_dir",
+                &app.skills_dir,
+            )?),
+            exports: project_root.join(normalize_project_relative_directory(
+                "exports_dir",
+                &app.exports_dir,
+            )?),
+        };
+        layout.ensure_contained()?;
+        Ok(layout)
+    }
+
+    pub fn create_configured_directories(&self) -> CoreResult<()> {
+        self.ensure_contained()?;
+        for directory in [
+            &self.documents,
+            &self.workflows,
+            &self.skills,
+            &self.exports,
+        ] {
+            std::fs::create_dir_all(directory)?;
+        }
+        self.ensure_contained()?;
+        Ok(())
+    }
+
+    fn ensure_contained(&self) -> CoreResult<()> {
+        for directory in [
+            &self.documents,
+            &self.workflows,
+            &self.skills,
+            &self.exports,
+        ] {
+            ensure_path_under_root(&self.project_root, directory)?;
+        }
+        Ok(())
+    }
+}
+
+fn project_directories_overlap(left: &str, right: &str) -> bool {
+    let left = left.split('/').collect::<Vec<_>>();
+    let right = right.split('/').collect::<Vec<_>>();
+    left.starts_with(&right) || right.starts_with(&left)
+}
+
+pub fn normalize_project_relative_directory(field: &str, value: &str) -> CoreResult<String> {
+    let normalized = value.trim().replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.ends_with('/')
+        || normalized.contains(':')
+    {
+        return Err(CoreError::validation(format!(
+            "{field} must be a non-empty project-relative directory"
+        )));
+    }
+    let path = Path::new(&normalized);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(CoreError::validation(format!(
+            "{field} must be a non-empty project-relative directory"
+        )));
+    }
+    Ok(normalized)
+}
+
 /// Provider 配置集合。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProvidersConfig {
@@ -95,6 +250,9 @@ pub struct ProvidersConfig {
     pub schema_version: u32,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// 当前项目明确允许使用的应用级 Provider。凭据仍绑定到项目身份。
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub authorized_provider_ids: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_llm_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,6 +269,7 @@ impl Default for ProvidersConfig {
         Self {
             schema_version: current_schema_version(),
             providers: Vec::new(),
+            authorized_provider_ids: BTreeSet::new(),
             default_llm_provider_id: None,
             default_embedding_provider_id: None,
             default_reranker_provider_id: None,
@@ -133,22 +292,70 @@ impl ProvidersConfig {
             }
         }
 
-        for id in [
-            &self.default_llm_provider_id,
-            &self.default_embedding_provider_id,
-            &self.default_reranker_provider_id,
-            &self.default_search_provider_id,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if !provider_ids.contains(id.as_str()) {
-                return Err(CoreError::validation(format!(
-                    "default provider id references missing provider: {id}"
-                )));
+        for provider_id in &self.authorized_provider_ids {
+            if provider_id.trim().is_empty() {
+                return Err(CoreError::validation(
+                    "authorized provider id cannot be empty",
+                ));
             }
         }
 
+        self.validate_default_provider(
+            "llm",
+            self.default_llm_provider_id.as_deref(),
+            ProviderCapability::Llm,
+        )?;
+        self.validate_default_provider(
+            "embedding",
+            self.default_embedding_provider_id.as_deref(),
+            ProviderCapability::Embedding,
+        )?;
+        self.validate_default_provider(
+            "reranker",
+            self.default_reranker_provider_id.as_deref(),
+            ProviderCapability::Reranker,
+        )?;
+        self.validate_default_provider(
+            "search",
+            self.default_search_provider_id.as_deref(),
+            ProviderCapability::Search,
+        )?;
+
+        Ok(())
+    }
+
+    fn validate_default_provider(
+        &self,
+        role: &str,
+        provider_id: Option<&str>,
+        required_capability: ProviderCapability,
+    ) -> CoreResult<()> {
+        let Some(provider_id) = provider_id else {
+            return Ok(());
+        };
+        let provider = self
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == provider_id)
+            .ok_or_else(|| {
+                CoreError::validation(format!(
+                    "default provider id references missing provider: {provider_id}"
+                ))
+            })?;
+        if !provider.enabled {
+            return Err(CoreError::validation(format!(
+                "default {role} provider must be enabled: {provider_id}"
+            )));
+        }
+        if !provider
+            .models
+            .iter()
+            .any(|model| model.capability == required_capability)
+        {
+            return Err(CoreError::validation(format!(
+                "default {role} provider lacks required model capability: {provider_id}"
+            )));
+        }
         Ok(())
     }
 }
@@ -174,6 +381,12 @@ impl ProviderConfig {
     pub fn validate(&self) -> CoreResult<()> {
         if self.provider_id.trim().is_empty() {
             return Err(CoreError::validation("provider_id cannot be empty"));
+        }
+
+        if self.enabled && matches!(self.provider_type, ProviderType::Other) {
+            return Err(CoreError::validation(
+                "enabled provider must use an executable provider type",
+            ));
         }
 
         if matches!(
@@ -265,6 +478,25 @@ impl ModelConfig {
 
         Ok(())
     }
+
+    /// Provider 模型清单中的 capability 是可路由角色，不承载流式或工具调用特性。
+    /// 该校验仅用于新写入边界，旧配置仍可读取并由用户显式迁移。
+    pub fn validate_provider_model_role(&self) -> CoreResult<()> {
+        if matches!(
+            self.capability,
+            ProviderCapability::Llm
+                | ProviderCapability::Embedding
+                | ProviderCapability::Reranker
+                | ProviderCapability::Search
+        ) {
+            Ok(())
+        } else {
+            Err(CoreError::validation(format!(
+                "model capability must be an executable provider role: {}",
+                self.model_id
+            )))
+        }
+    }
 }
 
 /// 权限配置文件。
@@ -274,8 +506,11 @@ pub struct PermissionsConfig {
     pub schema_version: u32,
     #[serde(default)]
     pub policy: PermissionPolicy,
+    /// 工作流节点与项目空间 AI 的权限覆盖；None 表示继承全局 policy。
+    #[serde(default = "default_permission_scope_policies")]
+    pub scoped_policies: BTreeMap<String, Option<PermissionPolicy>>,
     #[serde(default = "default_permission_tool_controls")]
-    pub tool_controls: BTreeMap<String, BTreeMap<String, bool>>,
+    pub tool_controls: BTreeMap<String, BTreeMap<String, Option<bool>>>,
 }
 
 impl Default for PermissionsConfig {
@@ -284,123 +519,130 @@ impl Default for PermissionsConfig {
         Self {
             schema_version: current_schema_version(),
             policy: PermissionPolicy::default(),
+            scoped_policies: default_permission_scope_policies(),
             tool_controls: default_permission_tool_controls(),
         }
     }
 }
 
-pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, bool>> {
+impl PermissionsConfig {
+    pub fn validate(&self) -> CoreResult<()> {
+        self.policy.validate()?;
+        for (scope, policy) in &self.scoped_policies {
+            if scope.trim().is_empty() {
+                return Err(CoreError::validation("permission scope cannot be empty"));
+            }
+            if let Some(policy) = policy {
+                policy.validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn default_permission_scope_policies() -> BTreeMap<String, Option<PermissionPolicy>> {
+    BTreeMap::from([
+        ("workflow_nodes".to_owned(), None),
+        ("project_ai".to_owned(), None),
+    ])
+}
+
+pub fn default_permission_tool_controls() -> BTreeMap<String, BTreeMap<String, Option<bool>>> {
     let mut controls = BTreeMap::new();
     controls.insert(
-        "project_ai".to_owned(),
-        tool_controls(&[
-            ("project-ai-search", true),
-            ("project-ai-web-search", true),
-            ("project-ai-workflow-tools", false),
+        "global".to_owned(),
+        explicit_tool_controls(&[
+            ("find", true),
+            ("search", true),
+            ("web-search", true),
+            ("register", false),
+            ("write", false),
+            ("workflow-tools", false),
         ]),
     );
     controls.insert(
-        "llm".to_owned(),
-        tool_controls(&[("llm-search", true), ("llm-web-search", true)]),
+        "project_ai".to_owned(),
+        inherited_tool_controls(&["project-ai-workflow-tools"]),
     );
     controls.insert(
         "outliner".to_owned(),
-        tool_controls(&[
-            ("outliner-register", false),
-            ("outliner-find", true),
-            ("outliner-search", true),
-            ("outliner-web-search", true),
-            ("outliner-insert-lines", false),
-            ("outliner-replace-lines", false),
-            ("outliner-rewrite-file", false),
+        inherited_tool_controls(&[
+            "outliner-register",
+            "outliner-find",
+            "outliner-insert-lines",
+            "outliner-replace-lines",
+            "outliner-rewrite-file",
         ]),
     );
     controls.insert(
         "designer".to_owned(),
-        tool_controls(&[
-            ("designer-register", false),
-            ("designer-find", true),
-            ("designer-search", true),
-            ("designer-web-search", true),
-            ("designer-insert-lines", false),
-            ("designer-replace-lines", false),
-            ("designer-rewrite-file", false),
+        inherited_tool_controls(&[
+            "designer-register",
+            "designer-find",
+            "designer-insert-lines",
+            "designer-replace-lines",
+            "designer-rewrite-file",
         ]),
     );
     controls.insert(
         "planner".to_owned(),
-        tool_controls(&[
-            ("planner-register", false),
-            ("planner-find", true),
-            ("planner-search", true),
-            ("planner-web-search", true),
-            ("planner-insert-lines", false),
-            ("planner-replace-lines", false),
-            ("planner-rewrite-file", false),
+        inherited_tool_controls(&[
+            "planner-register",
+            "planner-find",
+            "planner-insert-lines",
+            "planner-replace-lines",
+            "planner-rewrite-file",
         ]),
     );
     controls.insert(
         "detail".to_owned(),
-        tool_controls(&[
-            ("detail-find", true),
-            ("detail-search", true),
-            ("detail-web-search", true),
-        ]),
+        inherited_tool_controls(&["detail-find"]),
     );
     controls.insert(
         "writer".to_owned(),
-        tool_controls(&[
-            ("writer-find", true),
-            ("writer-search", true),
-            ("writer-web-search", true),
-            ("writer-insert-lines", false),
-            ("writer-replace-lines", false),
-        ]),
+        inherited_tool_controls(&["writer-find", "writer-insert-lines", "writer-replace-lines"]),
     );
     controls.insert(
         "critic".to_owned(),
-        tool_controls(&[
-            ("critic-find", true),
-            ("critic-search", true),
-            ("critic-web-search", true),
-        ]),
+        inherited_tool_controls(&["critic-find"]),
     );
     controls.insert(
         "prudent".to_owned(),
-        tool_controls(&[
-            ("prudent-find", true),
-            ("prudent-search", true),
-            ("prudent-web-search", true),
-        ]),
+        inherited_tool_controls(&["prudent-find"]),
     );
     controls.insert(
         "polisher".to_owned(),
-        tool_controls(&[
-            ("polisher-find", true),
-            ("polisher-search", true),
-            ("polisher-web-search", true),
-            ("polisher-insert-lines", false),
-            ("polisher-replace-lines", false),
+        inherited_tool_controls(&[
+            "polisher-find",
+            "polisher-insert-lines",
+            "polisher-replace-lines",
         ]),
     );
-    controls.insert(
-        "summarizer".to_owned(),
-        tool_controls(&[("summarizer-search", true), ("summarizer-web-search", true)]),
-    );
-    controls.insert(
-        "executor_adapter".to_owned(),
-        tool_controls(&[
-            ("executor-adapter-search", true),
-            ("executor-adapter-web-search", true),
-        ]),
-    );
+    for capability in permission_tool_capabilities() {
+        let node_controls = controls
+            .entry(capability.tool_scope.to_owned())
+            .or_default();
+        if let Some(tool) = capability.project_search_tool {
+            node_controls.entry(tool.to_owned()).or_insert(None);
+        }
+        if let Some(tool) = capability.web_search_tool {
+            node_controls.entry(tool.to_owned()).or_insert(None);
+        }
+    }
     controls
 }
 
-fn tool_controls(tools: &[(&str, bool)]) -> BTreeMap<String, bool> {
+fn explicit_tool_controls(tools: &[(&str, bool)]) -> BTreeMap<String, Option<bool>> {
     tools
         .iter()
-        .map(|(tool, enabled)| ((*tool).to_owned(), *enabled))
+        .map(|(tool, enabled)| ((*tool).to_owned(), Some(*enabled)))
+        .collect()
+}
+
+fn inherited_tool_controls(tools: &[&str]) -> BTreeMap<String, Option<bool>> {
+    tools
+        .iter()
+        .map(|tool| ((*tool).to_owned(), None))
         .collect()
 }
 
@@ -549,9 +791,11 @@ pub struct SidecarConfig {
     pub port: u16,
     #[serde(default = "default_qdrant_data_dir")]
     pub data_dir: String,
-    #[serde(default = "default_qdrant_binary_path")]
+    /// 旧项目兼容输入；正式持久化和运行时事实源位于 app-state。
+    #[serde(default = "default_qdrant_binary_path", skip_serializing)]
     pub binary_path: String,
-    #[serde(default = "default_qdrant_startup_timeout_ms")]
+    /// 旧项目兼容输入；正式持久化和运行时事实源位于 app-state。
+    #[serde(default = "default_qdrant_startup_timeout_ms", skip_serializing)]
     pub startup_timeout_ms: u64,
 }
 
@@ -685,6 +929,49 @@ impl Default for GitConfig {
             ignored_paths: default_ignored_paths(),
         }
     }
+}
+
+impl GitConfig {
+    pub fn validate(&self) -> CoreResult<()> {
+        let mut unique = BTreeSet::new();
+        for path in &self.ignored_paths {
+            let normalized = normalize_git_ignored_path(path)?;
+            if !unique.insert(normalized.clone()) {
+                return Err(CoreError::validation(format!(
+                    "duplicate git ignored path: {normalized}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn normalize_ignored_paths(&mut self) -> CoreResult<()> {
+        self.ignored_paths = self
+            .ignored_paths
+            .iter()
+            .map(|path| normalize_git_ignored_path(path))
+            .collect::<CoreResult<BTreeSet<_>>>()?
+            .into_iter()
+            .collect();
+        Ok(())
+    }
+}
+
+pub fn normalize_git_ignored_path(path: &str) -> CoreResult<String> {
+    let replaced = path.trim().replace('\\', "/");
+    let normalized = replaced.trim_end_matches('/');
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains(':')
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(CoreError::validation(format!(
+            "git ignored path must be project-relative: {path}"
+        )));
+    }
+    Ok(normalized.to_owned())
 }
 
 /// Auto Mode 配置。
@@ -850,4 +1137,21 @@ fn default_ignored_paths() -> Vec<String> {
         "costs.db".to_owned(),
         "runtime.db".to_owned(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_ignored_directory_paths_accept_and_remove_trailing_separator() {
+        assert_eq!(normalize_git_ignored_path(".cache/").unwrap(), ".cache");
+        assert_eq!(normalize_git_ignored_path("drafts\\").unwrap(), "drafts");
+    }
+
+    #[test]
+    fn git_ignored_paths_still_reject_absolute_and_parent_escape() {
+        assert!(normalize_git_ignored_path("/tmp/cache/").is_err());
+        assert!(normalize_git_ignored_path("drafts/../secrets").is_err());
+    }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 use crate::contracts::{AutoModeState, CoreError, CoreResult};
 use crate::rag::memory::MemoryWritingKnowledgeBase;
 use crate::rag::models::{
-    confirmation_state_activates_knowledge, ConfirmationItem, ConfirmationKind, ConfirmationState,
-    SummaryPipelineDraft, SummaryPipelineReport, SummaryPipelineStep, SummaryRerunPlan,
-    WritingConfirmationPolicy,
+    confirmation_state_activates_knowledge, ConfirmationAuditDecision, ConfirmationItem,
+    ConfirmationKind, ConfirmationState, SummaryPipelineDraft, SummaryPipelineReport,
+    SummaryPipelineStep, SummaryRerunPlan, WritingConfirmationPolicy,
 };
 
 /// Summarizer 流水线执行器，消费结构化总结草稿并更新创作知识库。
@@ -18,6 +18,7 @@ pub struct SummaryPipelineExecutor<'a> {
     confirmation_policy: WritingConfirmationPolicy,
     auto_mode: AutoModeState,
     cancellation: crate::contracts::CancellationToken,
+    auto_audit_decisions: Option<BTreeMap<ConfirmationKind, ConfirmationAuditDecision>>,
 }
 
 impl<'a> SummaryPipelineExecutor<'a> {
@@ -47,7 +48,17 @@ impl<'a> SummaryPipelineExecutor<'a> {
             confirmation_policy,
             auto_mode,
             cancellation,
+            auto_audit_decisions: None,
         }
+    }
+
+    /// 生产执行路径必须显式提供每个 AutoAudit 确认项的模型审计决定。
+    pub fn with_auto_audit_decisions(
+        mut self,
+        decisions: BTreeMap<ConfirmationKind, ConfirmationAuditDecision>,
+    ) -> Self {
+        self.auto_audit_decisions = Some(decisions);
+        self
     }
 
     /// 执行故事段 -> 事件 -> 章节 -> 阶段的写入流程。
@@ -257,13 +268,39 @@ impl<'a> SummaryPipelineExecutor<'a> {
         revision_id: &str,
         metadata: serde_json::Value,
     ) -> CoreResult<ConfirmationItem> {
-        let state = self
+        let mut state = self
             .confirmation_policy
             .initial_state(kind, &self.auto_mode);
-        let metadata = merge_metadata(
+        let mut metadata = merge_metadata(
             metadata,
             json!({ "revision_id": revision_id, "chapter_id": chapter_id }),
         );
+        if state == ConfirmationState::AutoAudited {
+            if let Some(decisions) = &self.auto_audit_decisions {
+                let decision = decisions.get(&kind).ok_or_else(|| {
+                    CoreError::validation(format!(
+                        "missing Auto Mode audit decision for confirmation kind {kind:?}"
+                    ))
+                })?;
+                if decision.reason.trim().is_empty() {
+                    return Err(CoreError::validation(format!(
+                        "empty Auto Mode audit reason for confirmation kind {kind:?}"
+                    )));
+                }
+                if !decision.approved {
+                    state = ConfirmationState::Pending;
+                }
+                metadata = merge_metadata(
+                    metadata,
+                    json!({
+                        "auto_audit": {
+                            "approved": decision.approved,
+                            "reason": decision.reason,
+                        }
+                    }),
+                );
+            }
+        }
         Ok(ConfirmationItem::new(
             confirmation_id(kind, chapter_id, revision_id),
             kind,

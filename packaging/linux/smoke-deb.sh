@@ -7,18 +7,27 @@ if [[ "${ARIADNE_REQUIRE_SIGNED_RELEASE:-0}" == "1" ]]; then
   gpg --batch --verify "$DEB.asc" "$DEB"
 fi
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ariadne-deb-smoke.XXXXXX")"
-USER_DATA="$(mktemp -d "${TMPDIR:-/tmp}/ariadne-user-data.XXXXXX")"
-trap 'rm -rf "$ROOT" "$USER_DATA"' EXIT
+SANDBOX_HOME="$(mktemp -d "${TMPDIR:-/tmp}/ariadne-user-home.XXXXXX")"
+export HOME="$SANDBOX_HOME/home"
+export XDG_DATA_HOME="$SANDBOX_HOME/xdg-data"
+USER_DATA="$XDG_DATA_HOME/Ariadne"
+trap 'rm -rf "$ROOT" "$SANDBOX_HOME"' EXIT
 
+mkdir -p "$USER_DATA"
 printf 'preserve-on-upgrade-and-uninstall\n' > "$USER_DATA/sentinel"
+assert_user_data_preserved() {
+  test "$(cat "$XDG_DATA_HOME/Ariadne/sentinel")" = "preserve-on-upgrade-and-uninstall"
+}
+
 dpkg-deb --extract "$DEB" "$ROOT"
 "$ROOT/opt/ariadne/Ariadne.Desktop" --verify-installation
+assert_user_data_preserved
 
 # 再次解包模拟同版本覆盖升级；用户数据位于包管理范围外，必须保持。
 dpkg-deb --extract "$DEB" "$ROOT"
-test "$(cat "$USER_DATA/sentinel")" = "preserve-on-upgrade-and-uninstall"
+assert_user_data_preserved
 rm -rf "$ROOT/opt/ariadne" "$ROOT/usr"
-test "$(cat "$USER_DATA/sentinel")" = "preserve-on-upgrade-and-uninstall"
+assert_user_data_preserved
 
 CONTENTS="$ROOT/deb-contents.txt"
 dpkg-deb --contents "$DEB" > "$CONTENTS"

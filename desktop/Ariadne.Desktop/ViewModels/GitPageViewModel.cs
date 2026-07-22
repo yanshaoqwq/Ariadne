@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Avalonia.Media;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 
@@ -12,12 +13,16 @@ public enum GitOperationState
     Restoring,
 }
 
-public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
+public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IUiPreferencesAware
 {
+    private const string RightPanelPreferenceKey = "git.right_panel";
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
     private readonly Func<Task<bool>> _confirmProjectReload;
     private readonly Func<Task> _reloadProjectData;
+    private readonly Func<string, bool, Task>? _persistPanelState;
+    private string _gitAutoColor = "#8a8f98";
+    private string _gitManualColor = "#f59e0b";
     private bool _isRightPanelOpen = true;
     private string _checkpointMessage = string.Empty;
     private string _restoreBranchName = string.Empty;
@@ -37,14 +42,16 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         DisplayNameService displayNames,
         IAriadneBackendClient backend,
         Func<Task<bool>>? confirmProjectReload = null,
-        Func<Task>? reloadProjectData = null)
+        Func<Task>? reloadProjectData = null,
+        Func<string, bool, Task>? persistPanelState = null)
     {
         _displayNames = displayNames;
         _backend = backend;
         _confirmProjectReload = confirmProjectReload ?? (() => Task.FromResult(true));
         _reloadProjectData = reloadProjectData ?? (() => Task.CompletedTask);
+        _persistPanelState = persistPanelState;
         Commits = new ObservableCollection<GitHistoryItemViewModel>();
-        ToggleRightPanelCommand = new RelayCommand(() => IsRightPanelOpen = !IsRightPanelOpen);
+        ToggleRightPanelCommand = new RelayCommand(() => _ = ToggleRightPanelAsync());
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync(), CanStartOperation);
         CreateCheckpointCommand = new RelayCommand(() => _ = CreateCheckpointAsync(), CanStartOperation);
         ViewDetailsCommand = new RelayCommand(() => ViewDetails(SelectedCommit), () => HasSelection);
@@ -69,6 +76,37 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     public RelayCommand CopyIdCommand { get; }
     public ObservableCollection<GitHistoryItemViewModel> Commits { get; }
     public Func<string, Task>? RequestCopyText { get; set; }
+
+    public void ApplyUiPreferences(UiPreferences preferences)
+    {
+        _gitAutoColor = preferences.GitAutoColor;
+        _gitManualColor = preferences.GitManualColor;
+        if (preferences.PanelStates?.TryGetValue(RightPanelPreferenceKey, out var isOpen) == true)
+        {
+            IsRightPanelOpen = isOpen;
+        }
+        foreach (var commit in Commits)
+        {
+            commit.ApplyMarkerColors(_gitAutoColor, _gitManualColor);
+        }
+    }
+
+    private async Task ToggleRightPanelAsync()
+    {
+        IsRightPanelOpen = !IsRightPanelOpen;
+        if (_persistPanelState is null)
+        {
+            return;
+        }
+        try
+        {
+            await _persistPanelState(RightPanelPreferenceKey, IsRightPanelOpen).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+    }
 
     public string CheckpointMessage
     {
@@ -425,6 +463,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         bool isHead,
         int laneIndex)
     {
+        var resolvedKind = ResolveCheckpointKind(checkpointKind, summary);
         return new GitHistoryItemViewModel(
             commitId,
             summary,
@@ -432,7 +471,11 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
             refs,
             timestampMs,
             author,
-            KindText(checkpointKind, summary),
+            KindText(resolvedKind, summary),
+            resolvedKind == "auto",
+            resolvedKind == "manual",
+            _gitAutoColor,
+            _gitManualColor,
             isHead || refs.Any(value => value == "HEAD" || value.StartsWith("HEAD -> ", StringComparison.Ordinal)),
             laneIndex,
             HeadBadgeText,
@@ -565,7 +608,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
             "degraded" => _displayNames.Text("ui.git.status.degraded"),
             "not_repository" => _displayNames.Text("ui.git.status.not_repository"),
             "unavailable" => _displayNames.Text("ui.git.status.unavailable"),
-            _ => status.Status,
+            _ => _displayNames.Text("ui.git.status.unavailable"),
         };
         CurrentBranchText = string.IsNullOrWhiteSpace(status.Branch)
             ? _displayNames.Text("ui.common.none")
@@ -576,7 +619,12 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
         DirtyStateText = status.Dirty
             ? _displayNames.Text("ui.git.dirty")
             : _displayNames.Text("ui.git.clean");
-        RepositoryReasonText = status.Reason ?? string.Empty;
+        RepositoryReasonText = status.Status switch
+        {
+            "degraded" => _displayNames.Text("ui.git.reason.no_commits"),
+            "not_repository" => _displayNames.Text("ui.git.reason.not_repository"),
+            _ => string.Empty,
+        };
         DiffSummaryText = _displayNames.Format("ui.git.diff_lines", new Dictionary<string, string>
         {
             ["count"] = status.DiffLineCount.ToString(),
@@ -619,13 +667,22 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
 
     private string KindText(string? checkpointKind, string summary)
     {
-        return checkpointKind switch
+        return ResolveCheckpointKind(checkpointKind, summary) switch
         {
             "auto" => AutoKindText,
             "manual" => ManualKindText,
-            _ when summary.StartsWith("Checkpoint:", StringComparison.OrdinalIgnoreCase) => AutoKindText,
-            _ when summary.StartsWith("Archive:", StringComparison.OrdinalIgnoreCase) => ManualKindText,
             _ => string.Empty,
+        };
+    }
+
+    private static string? ResolveCheckpointKind(string? checkpointKind, string summary)
+    {
+        return checkpointKind switch
+        {
+            "auto" or "manual" => checkpointKind,
+            _ when summary.StartsWith("Checkpoint:", StringComparison.OrdinalIgnoreCase) => "auto",
+            _ when summary.StartsWith("Archive:", StringComparison.OrdinalIgnoreCase) => "manual",
+            _ => null,
         };
     }
 
@@ -703,8 +760,10 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable
     }
 }
 
-public sealed class GitHistoryItemViewModel
+public sealed class GitHistoryItemViewModel : ViewModelBase
 {
+    private IBrush? _markerBrush;
+
     public GitHistoryItemViewModel(
         string commitId,
         string summary,
@@ -713,6 +772,10 @@ public sealed class GitHistoryItemViewModel
         long timestampMs,
         string? author,
         string kindText,
+        bool isAutoCheckpoint,
+        bool isManualCheckpoint,
+        string autoColor,
+        string manualColor,
         bool isHead,
         int laneIndex,
         string headBadgeText,
@@ -734,6 +797,8 @@ public sealed class GitHistoryItemViewModel
         TimestampMs = timestampMs;
         AuthorText = string.IsNullOrWhiteSpace(author) ? displayNames.Text("ui.common.none") : author;
         KindText = kindText;
+        IsAutoCheckpoint = isAutoCheckpoint;
+        IsManualCheckpoint = isManualCheckpoint;
         IsHead = isHead;
         LaneIndex = Math.Clamp(laneIndex, 0, 8);
         LaneOffset = LaneIndex * 14d;
@@ -764,6 +829,7 @@ public sealed class GitHistoryItemViewModel
             select(this);
             _ = copyId(this);
         });
+        ApplyMarkerColors(autoColor, manualColor);
     }
 
     public string CommitId { get; }
@@ -776,6 +842,14 @@ public sealed class GitHistoryItemViewModel
     public string RelativeTimeText { get; }
     public string AuthorText { get; }
     public string KindText { get; }
+    public bool IsAutoCheckpoint { get; }
+    public bool IsManualCheckpoint { get; }
+    public bool HasCustomMarker => IsAutoCheckpoint || IsManualCheckpoint;
+    public IBrush? MarkerBrush
+    {
+        get => _markerBrush;
+        private set => SetProperty(ref _markerBrush, value);
+    }
     public string RefsText => Refs.Count == 0 ? string.Empty : string.Join(" · ", Refs);
     public bool HasRefs => Refs.Count > 0;
     public bool HasKind => !string.IsNullOrWhiteSpace(KindText);
@@ -797,6 +871,24 @@ public sealed class GitHistoryItemViewModel
     public void NotifyOperationStateChanged()
     {
         RestoreCommand.NotifyCanExecuteChanged();
+    }
+
+    public void ApplyMarkerColors(string autoColor, string manualColor)
+    {
+        if (!HasCustomMarker)
+        {
+            MarkerBrush = null;
+            return;
+        }
+        var value = IsAutoCheckpoint ? autoColor : manualColor;
+        try
+        {
+            MarkerBrush = new SolidColorBrush(Color.Parse(value));
+        }
+        catch
+        {
+            MarkerBrush = null;
+        }
     }
 
     private static string FormatTimestamp(long timestampMs)

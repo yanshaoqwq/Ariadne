@@ -486,6 +486,9 @@ pub struct WorkflowRunState {
     /// 启动预检后冻结的执行定义。仅写入 runtime.db，不作为运行状态 API 的显示载荷返回。
     #[serde(default, skip_serializing)]
     pub prepared_workflow: Option<WorkflowDefinition>,
+    /// 启动预检后冻结的无秘密依赖计划；独立写入 runtime.db，恢复不得重读当前配置。
+    #[serde(default, skip_serializing)]
+    pub prepared_dependency_plan: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_node_id: Option<NodeId>,
     pub status: RunStatus,
@@ -532,6 +535,7 @@ impl WorkflowRunState {
             run_id,
             state_revision: 0,
             prepared_workflow: None,
+            prepared_dependency_plan: None,
             start_node_id: None,
             status: RunStatus::Queued,
             next_retry_at_ms: None,
@@ -1275,6 +1279,12 @@ impl WorkflowRuntime {
             })?;
         item.state = state;
         let node_id = item.node_id.clone();
+        let stop_on_rejection = state == RuntimeConfirmationState::Rejected
+            && item
+                .metadata
+                .get("rejection_behavior")
+                .and_then(Value::as_str)
+                == Some("stop_workflow");
         let reason = item
             .metadata
             .get("reason")
@@ -1306,10 +1316,17 @@ impl WorkflowRuntime {
         }
         self.record_event(
             WorkflowRuntimeEventType::ConfirmationUpdated,
-            Some(node_id),
+            Some(node_id.clone()),
             format!("confirmation {confirmation_id} updated to {state:?}"),
             Value::Null,
         );
+        if stop_on_rejection {
+            self.stop(format!(
+                "confirmation {confirmation_id} rejected for node {}",
+                node_id.as_str()
+            ));
+            return Ok(());
+        }
         // 保持旧调用兼容：如果唯一暂停原因是待确认项，并且全部确认已经解决，
         // 调用方可以直接再次 run，不必额外调用 resume。
         if !self.state.has_pending_confirmations()
@@ -3173,12 +3190,20 @@ fn dependencies_satisfied(
         .iter()
         .filter_map(|index| workflow.edges.get(*index))
         .all(|edge| {
-            // Loop 回边是显式循环触发器，不应阻塞首轮运行。首轮时 Loop 节点还
-            // 没有状态，因此把未完成的 Loop 回边视为已满足。
+            // 只有配置显式声明的 rerun_node_ids 才是首轮可放行的循环回边。
+            // 普通循环出口必须等待 Loop 真实产出，否则导出/下游会在 Loop 前抢跑。
             if graph_index.loop_nodes.contains(&edge.from.node_id)
                 && !state.nodes.contains_key(&edge.from.node_id)
             {
-                return true;
+                return graph_index
+                    .node(workflow, &edge.from.node_id)
+                    .and_then(|loop_node| loop_node.config.get("rerun_node_ids"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|rerun_node_ids| {
+                        rerun_node_ids
+                            .iter()
+                            .any(|target| target.as_str() == Some(edge.to.node_id.as_str()))
+                    });
             }
             matches!(
                 control_edge_state(graph_index, state, edge),

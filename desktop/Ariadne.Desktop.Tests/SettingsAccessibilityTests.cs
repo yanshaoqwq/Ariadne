@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Reflection;
+using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Controls;
 using Ariadne.Desktop.Localization;
 using Ariadne.Desktop.ViewModels;
@@ -34,17 +36,72 @@ public sealed class SettingsAccessibilityTests
     }
 
     [Fact]
-    public void SettingsNavigation_UsesStandardSingleSelectionWithoutBypassingLeaveGuard()
+    public void SettingsNavigation_UsesSingleSelectionListsWithoutBypassingLeaveGuard()
     {
         var view = File.ReadAllText(ResolveDesktopSource("Views", "SettingsPageView.axaml"));
         var viewModel = File.ReadAllText(ResolveDesktopSource("ViewModels", "SettingsPageViewModel.cs"));
+        var codeBehind = File.ReadAllText(ResolveDesktopSource("Views", "SettingsPageView.axaml.cs"));
 
         Assert.Contains("<ListBox ItemsSource=\"{Binding Tabs}\"", view, StringComparison.Ordinal);
-        Assert.Contains("SelectionMode=\"Single\"", view, StringComparison.Ordinal);
         Assert.Contains("SelectedItem=\"{Binding NavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
-        Assert.Contains("await SelectTabAsync(tab)", viewModel, StringComparison.Ordinal);
+        Assert.Contains("ItemsSource=\"{Binding SectionIndexItems}\"", view, StringComparison.Ordinal);
+        Assert.Contains("SelectedItem=\"{Binding SectionNavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Matches(view, "SelectionMode=\"Single\"").Count);
+        Assert.Contains("ScrollToSectionRequested", viewModel, StringComparison.Ordinal);
+        Assert.Contains("QueueNavigationAsync(tab, null)", viewModel, StringComparison.Ordinal);
+        Assert.Contains("ProcessNavigationQueueAsync", viewModel, StringComparison.Ordinal);
         Assert.Contains("ConfirmLeaveIfNeededAsync()", viewModel, StringComparison.Ordinal);
-        Assert.Contains("OnPropertyChanged(nameof(NavigationSelection))", viewModel, StringComparison.Ordinal);
+        Assert.Contains("SelectedTab = tab;", viewModel, StringComparison.Ordinal);
+        Assert.Contains("SettingsContentScroll.Offset = new Vector", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("BringIntoView", codeBehind, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SettingsSectionNavigation_SwitchesTabAndRaisesCatalogAnchorRequest()
+    {
+        var vm = new SettingsPageViewModel(DisplayNameService.LoadDefault(), NoopBackend.Create());
+        SettingsSectionNavigationRequest? request = null;
+        vm.ScrollToSectionRequested += (_, current) => request = current;
+
+        await vm.SelectSectionForTestsAsync("provider");
+
+        Assert.Equal("models", vm.SelectedTab.Id);
+        Assert.Equal("provider", vm.SectionNavigationSelection.Id);
+        Assert.NotNull(request);
+        Assert.Equal("ProviderSectionAnchor", request.AnchorName);
+        Assert.Equal(vm.SectionNavigationSelection.Title, request.SectionTitle);
+    }
+
+    [Fact]
+    public void SettingsSectionCatalog_MapsEveryEntryToAUniqueViewAnchor()
+    {
+        var view = File.ReadAllText(ResolveDesktopSource("Views", "SettingsPageView.axaml"));
+
+        Assert.Equal(24, SettingsNavigationCatalog.Sections.Count);
+        Assert.Equal(
+            SettingsNavigationCatalog.Sections.Count,
+            SettingsNavigationCatalog.Sections.Select(item => item.Id).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(
+            SettingsNavigationCatalog.Sections,
+            item => Assert.Contains($"x:Name=\"{item.AnchorName}\"", view, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AvaloniaListBoxPeer_ExposesSelectionProvider()
+    {
+        var list = new ListBox
+        {
+            ItemsSource = new[] { "general", "models", "permissions" },
+            SelectionMode = SelectionMode.Single,
+            SelectedIndex = 0,
+        };
+        var peer = ControlAutomationPeer.CreatePeerForElement(list);
+
+        var provider = peer.GetProvider<ISelectionProvider>();
+        Assert.NotNull(provider);
+        Assert.False(provider.CanSelectMultiple);
+        list.SelectedIndex = 1;
+        Assert.Equal("models", list.SelectedItem);
     }
 
     [Fact]
@@ -149,7 +206,8 @@ public sealed class SettingsAccessibilityTests
         var action = viewModel[start..end];
         var miscStart = view.IndexOf("<StackPanel IsVisible=\"{Binding IsMiscSelected}\" Spacing=\"18\">", StringComparison.Ordinal);
         var tutorialStart = view.IndexOf("Command=\"{Binding ShowTutorialCommand}\"", miscStart, StringComparison.Ordinal);
-        var editableSettingsStart = view.IndexOf("<StackPanel IsEnabled=\"{Binding IsMiscEditable}\" Spacing=\"18\">", miscStart, StringComparison.Ordinal);
+        // Editable retrieval/git blocks use Border.IsEnabled (not a wrapping StackPanel).
+        var editableSettingsStart = view.IndexOf("IsEnabled=\"{Binding IsMiscEditable}\"", miscStart, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding ShowTutorialCommand}\"", view, StringComparison.Ordinal);
         Assert.Contains("Content=\"{Binding OpenTutorialText}\"", view, StringComparison.Ordinal);
         Assert.True(miscStart >= 0 && tutorialStart > miscStart && editableSettingsStart > tutorialStart);
@@ -201,5 +259,14 @@ public sealed class SettingsAccessibilityTests
         }
 
         throw new FileNotFoundException(string.Join('/', parts));
+    }
+
+    private class NoopBackend : DispatchProxy
+    {
+        public static IAriadneBackendClient Create() =>
+            Create<IAriadneBackendClient, NoopBackend>();
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) =>
+            throw new NotSupportedException(targetMethod?.Name);
     }
 }

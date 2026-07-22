@@ -24,7 +24,7 @@ public interface IAriadneBackendClient
 
     Task SetProjectRootAsync(string projectRoot, CancellationToken cancellationToken = default);
 
-    void ClearProjectRoot();
+    Task CloseProjectAsync(CancellationToken cancellationToken = default);
 
     /// <summary>桌面侧是否已打开项目根（未打开时项目页应走空态，勿把 cwd 当项目）。</summary>
     bool HasProjectRoot { get; }
@@ -81,6 +81,10 @@ public interface IAriadneBackendClient
 
     Task<RagSettings> GetRagSettingsAsync(CancellationToken cancellationToken = default);
 
+    Task<AppRuntimeSettings> GetAppRuntimeSettingsAsync(CancellationToken cancellationToken = default);
+
+    Task<AppRuntimeSettings> SaveAppRuntimeSettingsAsync(AppRuntimeSettings settings, CancellationToken cancellationToken = default);
+
     Task<RagSettings> SaveRagSettingsAsync(RagSettings settings, CancellationToken cancellationToken = default);
 
     Task<MiscSectionSettings> SaveMiscSectionSettingsAsync(MiscSectionSettings settings, CancellationToken cancellationToken = default);
@@ -89,7 +93,11 @@ public interface IAriadneBackendClient
 
     Task<TemplateDetail> GetTemplateDetailAsync(string baseUrl, string id, CancellationToken cancellationToken = default);
 
-    Task<TemplateInstallReport> InstallTemplateAsync(string baseUrl, string id, CancellationToken cancellationToken = default);
+    Task<TemplateInstallReport> InstallTemplateAsync(
+        string baseUrl,
+        string id,
+        string expectedProjectRoot,
+        CancellationToken cancellationToken = default);
 
     Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default);
 
@@ -138,7 +146,11 @@ public interface IAriadneBackendClient
 
     Task<WorkflowGraphData> LoadWorkflowGraphAsync(string? workflowId = null, CancellationToken cancellationToken = default);
 
+    Task<WorkflowGraphData> LoadProjectCanvasAsync(CancellationToken cancellationToken = default);
+
     Task<WorkflowGraphData> SaveWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default);
+
+    Task<WorkflowGraphData> SaveProjectCanvasAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default);
 
     Task ValidateWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default);
 

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,13 +20,13 @@ use ariadne::rag::{
     render_node_prompt_with_trace, render_prompt_template, NodePromptConfig, PromptTemplateContext,
 };
 use ariadne::skills::{
-    sanitize_skill_log, HttpSkillBackend, HttpSkillConfig, LlmSkillConfig, NativeHttpSkillBackend,
-    NativeWasmSkillBackend, PromptTemplateLoader, PromptTemplateManifest, PromptTemplateReference,
-    PromptTemplateUpdateKind, SkillBackendOutput, SkillExecutionContext, SkillExecutor,
-    SkillExecutorConfig, SkillIoSchema, SkillLimits, SkillLoader, SkillManifest, SkillPortSchema,
-    SkillRunRequest, TemplateSourceKind, WasmSkillBackend, WasmSkillConfig, WorkflowManifest,
-    WorkflowTemplateLoader, PROMPT_TEMPLATE_MANIFEST_FILE, SKILL_MANIFEST_FILE,
-    WORKFLOW_MANIFEST_FILE,
+    sanitize_skill_log, ExecutorAdapterExecutionPlan, HttpSkillBackend, HttpSkillConfig,
+    LlmSkillConfig, NativeHttpSkillBackend, NativeWasmSkillBackend, PromptTemplateLoader,
+    PromptTemplateManifest, PromptTemplateReference, PromptTemplateUpdateKind, SkillBackendOutput,
+    SkillExecutionContext, SkillExecutor, SkillExecutorConfig, SkillIoSchema, SkillLimits,
+    SkillLoader, SkillManifest, SkillPortSchema, SkillRunRequest, TemplateSourceKind,
+    WasmSkillBackend, WasmSkillConfig, WorkflowManifest, WorkflowTemplateLoader,
+    PROMPT_TEMPLATE_MANIFEST_FILE, SKILL_MANIFEST_FILE, WORKFLOW_MANIFEST_FILE,
 };
 use serde_json::{json, Value};
 
@@ -313,6 +314,173 @@ fn skill_loader_prefers_project_manifest_and_generates_ports() {
     assert_eq!(overrides[0].skill_id, "fetch-info");
     assert_eq!(definition.input_ports[0].name, "query");
     assert_eq!(definition.output_ports[0].name, "result");
+}
+
+#[test]
+fn n25_skill_execution_plan_ignores_unreferenced_broken_manifests() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("skills");
+    std::fs::create_dir_all(root.join("healthy-http")).unwrap();
+    std::fs::create_dir_all(root.join("unused-broken")).unwrap();
+
+    let mut healthy = http_manifest();
+    healthy.skill_id = "healthy-http".to_owned();
+    healthy.name = "Healthy HTTP".to_owned();
+    std::fs::write(
+        root.join("healthy-http").join(SKILL_MANIFEST_FILE),
+        serde_json::to_string(&healthy).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("unused-broken").join(SKILL_MANIFEST_FILE),
+        "{not-json",
+    )
+    .unwrap();
+
+    let loader = SkillLoader::new().with_project_root(&root);
+    let plan = ExecutorAdapterExecutionPlan::compile(
+        &loader,
+        &BTreeSet::from(["healthy-http".to_owned()]),
+    )
+    .unwrap();
+    assert_eq!(plan.manifests().len(), 1);
+    assert_eq!(plan.manifests()[0].manifest.skill_id, "healthy-http");
+    assert!(!plan.uses_llm());
+
+    let referenced_error = ExecutorAdapterExecutionPlan::compile(
+        &loader,
+        &BTreeSet::from(["unused-broken".to_owned()]),
+    )
+    .unwrap_err();
+    assert!(!referenced_error.to_string().is_empty());
+}
+
+#[test]
+fn n28_broken_renamed_project_override_cannot_fall_back_to_global_skill() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(global.join("target")).unwrap();
+    std::fs::create_dir_all(project.join("renamed-folder")).unwrap();
+
+    let mut global_manifest = http_manifest();
+    global_manifest.skill_id = "target".to_owned();
+    std::fs::write(
+        global.join("target").join(SKILL_MANIFEST_FILE),
+        serde_json::to_string(&global_manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("renamed-folder").join(SKILL_MANIFEST_FILE),
+        "{not-json",
+    )
+    .unwrap();
+
+    let loader = SkillLoader::new()
+        .with_global_root(&global)
+        .with_project_root(&project);
+    let error =
+        ExecutorAdapterExecutionPlan::compile(&loader, &BTreeSet::from(["target".to_owned()]))
+            .unwrap_err();
+    assert!(error.to_string().contains("json"));
+}
+
+#[test]
+fn n28_valid_renamed_project_override_uses_declared_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(global.join("target")).unwrap();
+    std::fs::create_dir_all(project.join("renamed-folder")).unwrap();
+
+    let mut global_manifest = http_manifest();
+    global_manifest.skill_id = "target".to_owned();
+    global_manifest.name = "Global Target".to_owned();
+    let mut project_manifest = global_manifest.clone();
+    project_manifest.name = "Project Target".to_owned();
+    std::fs::write(
+        global.join("target").join(SKILL_MANIFEST_FILE),
+        serde_json::to_string(&global_manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("renamed-folder").join(SKILL_MANIFEST_FILE),
+        serde_json::to_string(&project_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let plan = ExecutorAdapterExecutionPlan::compile(
+        &SkillLoader::new()
+            .with_global_root(&global)
+            .with_project_root(&project),
+        &BTreeSet::from(["target".to_owned()]),
+    )
+    .unwrap();
+    assert_eq!(plan.manifests().len(), 1);
+    assert_eq!(plan.manifests()[0].manifest.name, "Project Target");
+}
+
+#[test]
+fn n25_project_override_resolution_is_independent_of_unrelated_directory_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let global = temp.path().join("global");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(global.join("target")).unwrap();
+    std::fs::create_dir_all(project.join("000-unused-broken")).unwrap();
+    std::fs::create_dir_all(project.join("renamed-target")).unwrap();
+
+    let mut global_manifest = http_manifest();
+    global_manifest.skill_id = "target".to_owned();
+    global_manifest.name = "Global Target".to_owned();
+    let mut project_manifest = global_manifest.clone();
+    project_manifest.name = "Project Target".to_owned();
+    std::fs::write(
+        global.join("target").join(SKILL_MANIFEST_FILE),
+        serde_json::to_string(&global_manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("000-unused-broken").join(SKILL_MANIFEST_FILE),
+        "{not-json",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("renamed-target").join(SKILL_MANIFEST_FILE),
+        serde_json::to_string(&project_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let plan = ExecutorAdapterExecutionPlan::compile(
+        &SkillLoader::new()
+            .with_global_root(&global)
+            .with_project_root(&project),
+        &BTreeSet::from(["target".to_owned()]),
+    )
+    .unwrap();
+    assert_eq!(plan.manifests().len(), 1);
+    assert_eq!(plan.manifests()[0].manifest.name, "Project Target");
+}
+
+#[test]
+fn n28_duplicate_project_manifest_identity_fails_loud() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("first")).unwrap();
+    std::fs::create_dir_all(project.join("second")).unwrap();
+    let mut manifest = http_manifest();
+    manifest.skill_id = "target".to_owned();
+    let text = serde_json::to_string(&manifest).unwrap();
+    std::fs::write(project.join("first").join(SKILL_MANIFEST_FILE), &text).unwrap();
+    std::fs::write(project.join("second").join(SKILL_MANIFEST_FILE), &text).unwrap();
+
+    let error = ExecutorAdapterExecutionPlan::compile(
+        &SkillLoader::new().with_project_root(&project),
+        &BTreeSet::from(["target".to_owned()]),
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("duplicate Project skill manifest"));
 }
 
 /// 验证 PromptTemplate 加载、项目覆盖、固定版本解析和可更新检测。

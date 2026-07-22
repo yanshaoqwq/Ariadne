@@ -10,10 +10,10 @@ use crate::providers::{
     ToolDefinition,
 };
 
-pub const PROJECT_AI_WEB_SEARCH_TOOL: &str = "project-ai-web-search";
-pub const GENERIC_LLM_WEB_SEARCH_TOOL: &str = "llm-web-search";
-pub const SUMMARIZER_WEB_SEARCH_TOOL: &str = "summarizer-web-search";
-pub const EXECUTOR_ADAPTER_WEB_SEARCH_TOOL: &str = "executor-adapter-web-search";
+pub use crate::node_capabilities::{
+    EXECUTOR_ADAPTER_WEB_SEARCH_TOOL, GENERIC_LLM_WEB_SEARCH_TOOL, PROJECT_AI_WEB_SEARCH_TOOL,
+    SUMMARIZER_WEB_SEARCH_TOOL,
+};
 pub const DEFAULT_WEB_SEARCH_LIMIT: usize = 8;
 
 /// 构造外部 Web 搜索工具定义；与当前项目的本地 Search 明确分离。

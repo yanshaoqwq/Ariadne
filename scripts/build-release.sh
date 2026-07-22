@@ -7,6 +7,14 @@ OUTPUT="${2:-$ROOT/artifacts/staging/ariadne-$RID}"
 LOCAL_TOOLCHAIN="$ROOT/.rustup/toolchains/stable-aarch64-unknown-linux-gnu/bin"
 CARGO_BIN="${CARGO:-}"
 
+run_bounded() {
+  local timeout_seconds="$1"
+  shift
+  python3 "$ROOT/scripts/run-with-timeout.py" \
+    --timeout-seconds "$timeout_seconds" \
+    -- "$@"
+}
+
 case "$RID" in
   linux-x64) RUST_TARGET="x86_64-unknown-linux-gnu" ;;
   linux-arm64) RUST_TARGET="aarch64-unknown-linux-gnu" ;;
@@ -34,7 +42,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DESKTOP_PUBLISH="$ROOT/artifacts/publish/$RID"
 RUST_BIN_DIR="$CARGO_TARGET_DIR/$RUST_TARGET/release"
 
-"$CARGO_BIN" build \
+run_bounded 2700 "$CARGO_BIN" build \
   --manifest-path "$ROOT/core/Cargo.toml" \
   --release \
   --locked \
@@ -43,8 +51,8 @@ RUST_BIN_DIR="$CARGO_TARGET_DIR/$RUST_TARGET/release"
   --bin ariadne \
   --bin ariadne-ipc
 
-dotnet restore "$ROOT/desktop/Ariadne.Desktop/Ariadne.Desktop.csproj" --runtime "$RID"
-dotnet publish "$ROOT/desktop/Ariadne.Desktop/Ariadne.Desktop.csproj" \
+run_bounded 900 dotnet restore "$ROOT/desktop/Ariadne.Desktop/Ariadne.Desktop.csproj" --runtime "$RID"
+run_bounded 1200 dotnet publish "$ROOT/desktop/Ariadne.Desktop/Ariadne.Desktop.csproj" \
   --configuration Release \
   --runtime "$RID" \
   --self-contained true \
@@ -57,12 +65,19 @@ dotnet publish "$ROOT/desktop/Ariadne.Desktop/Ariadne.Desktop.csproj" \
 # Windows 第一方二进制必须在 ReleaseTool 生成 manifest 前完成签名，
 # 否则安装器中的文件与 release-manifest.json 哈希会产生第二份身份。
 if [[ "$RID" == "win-x64" ]]; then
-  pwsh -NoProfile -NonInteractive -File "$ROOT/packaging/windows/sign-release-binaries.ps1" \
+  run_bounded 600 pwsh -NoProfile -NonInteractive -File "$ROOT/packaging/windows/sign-release-binaries.ps1" \
     -DesktopPublishDirectory "$DESKTOP_PUBLISH" \
     -RustBinaryDirectory "$RUST_BIN_DIR"
 fi
+# macOS 的嵌套 Mach-O 先完成平台签名，再把签名后的稳定字节写入 manifest。
+# 外层 app bundle 封印只能改变 manifest 明确标记的主 apphost。
+if [[ "$RID" == osx-* ]]; then
+  run_bounded 900 bash "$ROOT/packaging/macos/sign-release-binaries.sh" \
+    "$DESKTOP_PUBLISH" \
+    "$RUST_BIN_DIR"
+fi
 
-dotnet run --project "$ROOT/tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj" -- \
+run_bounded 600 dotnet run --project "$ROOT/tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj" -- \
   assemble \
   --root "$ROOT" \
   --rid "$RID" \
@@ -70,7 +85,7 @@ dotnet run --project "$ROOT/tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj
   --rust-bin-dir "$RUST_BIN_DIR" \
   --output "$OUTPUT"
 
-dotnet run --project "$ROOT/tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj" -- \
+run_bounded 600 dotnet run --project "$ROOT/tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj" -- \
   verify-package \
   --root "$ROOT" \
   --package "$OUTPUT"

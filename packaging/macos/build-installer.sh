@@ -2,6 +2,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+run_bounded() {
+  local timeout_seconds="$1"
+  shift
+  python3 "$ROOT/scripts/run-with-timeout.py" \
+    --timeout-seconds "$timeout_seconds" \
+    -- "$@"
+}
+
 PACKAGE_INPUT="${1:?usage: packaging/macos/build-installer.sh <assembled-package> [output-directory]}"
 [[ -d "$PACKAGE_INPUT" ]] || { echo "assembled package does not exist: $PACKAGE_INPUT" >&2; exit 1; }
 PACKAGE_DIR="$(cd "$PACKAGE_INPUT" && pwd -P)"
@@ -12,6 +21,13 @@ MANIFEST="$PACKAGE_DIR/release-manifest.json"
 VERSION="$(jq -er '.version' "$MANIFEST")"
 RID="$(jq -er '.rid' "$MANIFEST")"
 case "$RID" in osx-x64|osx-arm64) ;; *) echo "macOS packaging requires an osx RID" >&2; exit 2 ;; esac
+
+# 安装器边界先重新验证 staging 的全部原始字节；外层 bundle 封印完成后，
+# 才能对唯一 platform_sealed 主入口使用显式 post-seal 校验。
+run_bounded 300 dotnet run --project "$ROOT/tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj" -- \
+  verify-package \
+  --root "$ROOT" \
+  --package "$PACKAGE_DIR" >&2
 
 if [[ "${ARIADNE_REQUIRE_SIGNED_RELEASE:-0}" == "1" ]]; then
   [[ -n "${ARIADNE_MACOS_SIGNING_IDENTITY:-}" ]] || { echo "formal release requires ARIADNE_MACOS_SIGNING_IDENTITY" >&2; exit 1; }
@@ -41,25 +57,30 @@ sips -z 1024 1024 "$PACKAGE_DIR/Integration/icons/ariadne-512.png" --out "$ICONS
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Ariadne.icns"
 
 SIGNING_IDENTITY="${ARIADNE_MACOS_SIGNING_IDENTITY:--}"
-codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP" >&2
-codesign --verify --deep --strict --verbose=2 "$APP" >&2
-"$APP/Contents/MacOS/Ariadne.Desktop" --verify-installation >&2
+run_bounded 300 codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP" >&2
+run_bounded 120 codesign --verify --deep --strict --verbose=2 "$APP" >&2
+run_bounded 300 dotnet run --project "$ROOT/tools/Ariadne.ReleaseTool/Ariadne.ReleaseTool.csproj" -- \
+  verify-package \
+  --root "$ROOT" \
+  --package "$APP/Contents/MacOS" \
+  --allow-platform-sealed-mutation >&2
+run_bounded 60 "$APP/Contents/MacOS/Ariadne.Desktop" --verify-installation >&2
 
 PKG="$OUTPUT_DIR/Ariadne-$VERSION-$RID.pkg"
 PKG_ARGS=(--root "$PKG_ROOT" --identifier io.github.yanshaoqwq.ariadne --version "$VERSION" --install-location /Applications)
 if [[ -n "${ARIADNE_MACOS_INSTALLER_IDENTITY:-}" ]]; then
   PKG_ARGS+=(--sign "$ARIADNE_MACOS_INSTALLER_IDENTITY")
 fi
-pkgbuild "${PKG_ARGS[@]}" "$PKG" >&2
+run_bounded 300 pkgbuild "${PKG_ARGS[@]}" "$PKG" >&2
 if [[ -n "${ARIADNE_MACOS_INSTALLER_IDENTITY:-}" ]]; then
-  pkgutil --check-signature "$PKG" >&2
+  run_bounded 120 pkgutil --check-signature "$PKG" >&2
 fi
 
 DMG_ROOT="$STAGE/dmg"
 mkdir -p "$DMG_ROOT"
 cp -a "$APP" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/Applications"
-hdiutil create -quiet -fs HFS+ -srcfolder "$DMG_ROOT" -volname Ariadne "$OUTPUT_DIR/Ariadne-$VERSION-$RID.dmg" >&2
+run_bounded 300 hdiutil create -quiet -fs HFS+ -srcfolder "$DMG_ROOT" -volname Ariadne "$OUTPUT_DIR/Ariadne-$VERSION-$RID.dmg" >&2
 DMG="$OUTPUT_DIR/Ariadne-$VERSION-$RID.dmg"
 
 NOTARY_ARGS=()
@@ -81,11 +102,11 @@ if [[ "${ARIADNE_REQUIRE_SIGNED_RELEASE:-0}" == "1" && ${#NOTARY_ARGS[@]} -eq 0 
   exit 1
 fi
 if (( ${#NOTARY_ARGS[@]} > 0 )); then
-  xcrun notarytool submit "$PKG" "${NOTARY_ARGS[@]}" --wait >&2
-  xcrun stapler staple "$PKG" >&2
-  xcrun stapler validate "$PKG" >&2
-  xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait >&2
-  xcrun stapler staple "$DMG" >&2
-  xcrun stapler validate "$DMG" >&2
+  run_bounded 1800 xcrun notarytool submit "$PKG" "${NOTARY_ARGS[@]}" --wait >&2
+  run_bounded 300 xcrun stapler staple "$PKG" >&2
+  run_bounded 120 xcrun stapler validate "$PKG" >&2
+  run_bounded 1800 xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait >&2
+  run_bounded 300 xcrun stapler staple "$DMG" >&2
+  run_bounded 120 xcrun stapler validate "$DMG" >&2
 fi
 printf '%s\n' "$PKG"

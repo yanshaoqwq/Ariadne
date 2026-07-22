@@ -120,6 +120,36 @@ public sealed class GitTimelineStateTests
         Assert.True(viewModel.RestoreCommand.CanExecute(null));
     }
 
+    [Theory]
+    [InlineData("degraded", "ui.git.status.degraded", "ui.git.reason.no_commits")]
+    [InlineData("not_repository", "ui.git.status.not_repository", "ui.git.reason.not_repository")]
+    [InlineData("unexpected_backend_token", "ui.git.status.unavailable", "")]
+    public async Task RepositoryHealth_MapsStatusAndReasonThroughLocalization(
+        string status,
+        string expectedStatusKey,
+        string expectedReasonKey)
+    {
+        var backend = GitBackend.Create();
+        backend.RepositoryStatus = new GitRepositoryStatus(
+            status,
+            null,
+            null,
+            false,
+            "raw backend diagnostic must not be displayed",
+            0,
+            string.Empty);
+        var viewModel = NewViewModel(backend);
+
+        await viewModel.ReloadProjectDataAsync();
+
+        var names = DisplayNameService.LoadDefault();
+        Assert.Equal(names.Text(expectedStatusKey), viewModel.RepositoryStatusText);
+        Assert.Equal(
+            string.IsNullOrEmpty(expectedReasonKey) ? string.Empty : names.Text(expectedReasonKey),
+            viewModel.RepositoryReasonText);
+        Assert.DoesNotContain("raw backend diagnostic", viewModel.RepositoryReasonText, StringComparison.Ordinal);
+    }
+
     private static GitPageViewModel NewViewModel(GitBackend backend) =>
         new(DisplayNameService.LoadDefault(), backend.Client);
 
@@ -159,6 +189,14 @@ public sealed class GitTimelineStateTests
     {
         public IAriadneBackendClient Client { get; private set; } = null!;
         public IReadOnlyList<BranchGraphNode> Graph { get; set; } = Array.Empty<BranchGraphNode>();
+        public GitRepositoryStatus RepositoryStatus { get; set; } = new(
+            "healthy",
+            "main",
+            "merge-commit",
+            false,
+            null,
+            0,
+            string.Empty);
         public int CreateCheckpointCalls { get; private set; }
         public Func<string, CancellationToken, Task<ArchivePoint>> CreateCheckpointHandler { get; set; } =
             (message, _) => Task.FromResult(new ArchivePoint("checkpoint", "new", message, "manual"));
@@ -179,14 +217,7 @@ public sealed class GitTimelineStateTests
             }
             if (targetMethod?.Name == nameof(IAriadneBackendClient.GetGitRepositoryStatusAsync))
             {
-                return Task.FromResult(new GitRepositoryStatus(
-                    "healthy",
-                    "main",
-                    "merge-commit",
-                    false,
-                    null,
-                    0,
-                    string.Empty));
+                return Task.FromResult(RepositoryStatus);
             }
             if (targetMethod?.Name == nameof(IAriadneBackendClient.GetGitBranchGraphAsync))
             {

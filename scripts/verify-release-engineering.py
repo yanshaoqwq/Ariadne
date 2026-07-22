@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 import json
 import hashlib
+import os
 import re
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -97,6 +102,15 @@ def verify_release_matrix(ci: str, release: str) -> None:
     require("actions/setup-python@v5" in ci_package, "CI native package job must provision Python")
     require("actions/setup-python@v5" in release_gate, "release gate must provision Python")
     require("actions/setup-python@v5" in release_package, "release package job must provision Python")
+    for job, label in ((ci_package, "CI"), (release_package, "Release")):
+        require("ilammy/msvc-dev-cmd@v1" in job,
+                f"{label} Windows package job must initialize the MSVC developer environment")
+        require("python3 scripts/run-with-timeout.py --timeout-seconds 600 -- choco install" in job,
+                f"{label} Windows packaging-tool install must have a hard timeout")
+        require("scripts/run-with-timeout.py --timeout-seconds 1200" in job,
+                f"{label} Qdrant provisioning must have a hard timeout")
+        require("scripts/run-with-timeout.py --timeout-seconds 300" in job,
+                f"{label} Qdrant runtime smoke must have a hard timeout")
     require("scripts/check-release-readiness.py" in release_gate, "tag workflow must execute the readiness gate")
     require("--static-only" in release_gate, "tag preflight must validate static blockers before expensive jobs")
     require("--tag" in release_gate, "tag workflow must validate the release tag")
@@ -138,6 +152,9 @@ def verify_release_matrix(ci: str, release: str) -> None:
 
 def verify_ci_execution_policy(ci: str, release: str) -> None:
     require("full_release_matrix:" in ci, "CI manual full release matrix input is missing")
+    dispatch_input = ci.split("full_release_matrix:", 1)[1].split("concurrency:", 1)[0]
+    require("default: true" in dispatch_input,
+            "manual CI must run the full release matrix unless the caller explicitly opts out")
     require("cancel-in-progress: true" in ci, "CI must cancel superseded branch runs")
     manual_gate = "github.event_name == 'workflow_dispatch' && inputs.full_release_matrix"
     for job in ("native-package", "performance-evidence", "evidence-gate"):
@@ -166,6 +183,18 @@ def verify_readiness_contract() -> None:
 
 def verify_package_security_contract() -> None:
     build = read("scripts/build-release.sh")
+    require('python3 "$ROOT/scripts/run-with-timeout.py"' in build,
+            "release build must use the shared process-tree timeout runner")
+    for command_timeout in (
+        "run_bounded 2700 \"$CARGO_BIN\" build",
+        "run_bounded 900 dotnet restore",
+        "run_bounded 1200 dotnet publish",
+        "run_bounded 600 pwsh",
+        "run_bounded 900 bash",
+        "run_bounded 600 dotnet run",
+    ):
+        require(command_timeout in build,
+                f"release build is missing bounded execution: {command_timeout}")
     require("--features system-keychain" in build, "formal Rust binaries must use the OS keychain")
     require("--self-contained true" in build, "Desktop release must be self-contained")
     require("verify-package" in build, "release assembly must run package verification")
@@ -174,10 +203,25 @@ def verify_package_security_contract() -> None:
             "Windows first-party binaries must be signed before package assembly")
     require(build.index("packaging/windows/sign-release-binaries.ps1") < build.index("  assemble "),
             "Windows signing must precede release-manifest assembly")
+    require("packaging/macos/sign-release-binaries.sh" in build,
+            "macOS Mach-O files must be signed before package assembly")
+    require(build.index("packaging/macos/sign-release-binaries.sh") < build.index("  assemble "),
+            "macOS nested signing must precede release-manifest assembly")
 
     release_tool = read("tools/Ariadne.ReleaseTool/Program.cs")
     require('"ariadne-server", "ariadne-server.exe"' in release_tool,
             "package verifier must reject the remote REST server")
+    require('new PackageManifest(\n            2,' in release_tool,
+            "release manifest must use the explicit platform-seal schema")
+    require('new[] { "Ariadne.Desktop" }' in release_tool
+            and 'manifest.Rid.StartsWith("osx-"' in release_tool,
+            "only the macOS main executable may use platform-sealed integrity")
+    require('var verifyManifestBytes = !allowPlatformSealedMutation || !entry.PlatformSealed;' in release_tool
+            and 'Package size mismatch' in release_tool
+            and 'Package hash mismatch' in release_tool,
+            "default package verification must hash every file and post-seal mode may skip only the platform-sealed path")
+    require('--allow-platform-sealed-mutation' not in build,
+            "pre-seal release assembly must strictly verify every manifest size and SHA-256")
     desktop_validator = read("desktop/Ariadne.Desktop/ReleaseLayoutValidator.cs")
     require("release package must not contain the remote REST server" in desktop_validator,
             "Desktop installation probe must reject the remote REST server")
@@ -216,10 +260,10 @@ def verify_installer_smoke_contract(ci: str, release: str) -> None:
             "Windows packaging must tolerate Chocolatey PATH propagation delay")
     require('Inno Setup 6\\ISCC.exe' in windows_build,
             "Windows packaging must probe the fixed Inno Setup install directory")
-    require("$compilerOutput = & $iscc $arguments 2>&1" in windows_build,
-            "Windows packaging must isolate compiler logs from its output value")
-    require("$compilerOutput | ForEach-Object { Write-Host $_ }" in windows_build,
-            "Windows compiler logs must not enter the installer path pipeline")
+    require("python3 $timeoutRunner --timeout-seconds 600 -- $iscc @arguments" in windows_build,
+            "Windows Inno Setup compilation must use the shared hard timeout")
+    require("2>&1 | ForEach-Object { Write-Host $_ }" in windows_build,
+            "Windows compiler logs must stream to the host without entering the installer path pipeline")
     require("$installers.Count -ne 1" in windows_build,
             "Windows packaging must require exactly one deterministic installer")
     require("Get-AuthenticodeSignature -FilePath $installer" in windows_build,
@@ -228,6 +272,13 @@ def verify_installer_smoke_contract(ci: str, release: str) -> None:
             "formal Windows installer signature must require a timestamp")
     require("Get-AuthenticodeSignature -FilePath $uninstaller" in windows_smoke,
             "formal Windows smoke must verify the signed uninstaller")
+    require("function Invoke-BoundedNative" in windows_smoke
+            and windows_smoke.count("Invoke-BoundedNative -Label") == 5,
+            "Windows install, verification, upgrade and uninstall must share bounded process supervision")
+    require('$env:APPDATA = Join-Path $sandbox "AppData\\Roaming"' in windows_smoke
+            and '$userData = Join-Path $env:APPDATA "Ariadne"' in windows_smoke
+            and windows_smoke.count("Assert-UserDataPreserved") == 4,
+            "Windows smoke sentinel must use the sandboxed product APPDATA/Ariadne path at every stage")
 
     linux_build = read("packaging/linux/build-deb.sh")
     linux_smoke = read("packaging/linux/smoke-deb.sh")
@@ -236,9 +287,20 @@ def verify_installer_smoke_contract(ci: str, release: str) -> None:
     require('formal release detached signature is missing' in linux_smoke
             and 'gpg --batch --verify "$DEB.asc" "$DEB"' in linux_smoke,
             "formal Linux smoke must require and verify the detached signature")
+    require('export XDG_DATA_HOME="$SANDBOX_HOME/xdg-data"' in linux_smoke
+            and 'USER_DATA="$XDG_DATA_HOME/Ariadne"' in linux_smoke
+            and linux_smoke.count("assert_user_data_preserved") == 4,
+            "Linux smoke sentinel must use the sandboxed product XDG_DATA_HOME/Ariadne path at every stage")
 
     macos_build = read("packaging/macos/build-installer.sh")
     macos_smoke = read("packaging/macos/smoke-installer.sh")
+    macos_sign = read("packaging/macos/sign-release-binaries.sh")
+    require("file -b \"$candidate\" | grep -q '^Mach-O'" in macos_sign,
+            "macOS pre-assembly signing must discover all Mach-O files")
+    require("codesign --verify --strict" in macos_sign,
+            "macOS nested code signatures must be verified before manifest assembly")
+    require('formal release requires ARIADNE_MACOS_SIGNING_IDENTITY before manifest assembly' in macos_sign,
+            "formal macOS release must fail before assembly when its signing identity is missing")
     require("realpath" not in macos_build and "realpath" not in macos_smoke,
             "macOS packaging must not depend on non-portable realpath availability")
     require('Ariadne.Desktop" --verify-installation >&2' in macos_build,
@@ -247,6 +309,18 @@ def verify_installer_smoke_contract(ci: str, release: str) -> None:
             "macOS pkgbuild logs must not contaminate the package path")
     require('codesign --verify --deep --strict' in macos_build,
             "macOS app signing must be verified before packaging")
+    require('--package "$PACKAGE_DIR" >&2' in macos_build,
+            "macOS installer must strictly re-verify staging before copying or sealing it")
+    require(macos_build.index('--package "$PACKAGE_DIR" >&2') < macos_build.index('cp -a "$PACKAGE_DIR/."'),
+            "strict macOS staging verification must precede app bundle assembly")
+    require('codesign --force --deep' not in macos_build,
+            "macOS outer app sealing must not rewrite already manifested nested binaries")
+    require('--package "$APP/Contents/MacOS"' in macos_build
+            and '--allow-platform-sealed-mutation' in macos_build,
+            "macOS outer app sealing must explicitly re-verify the assembled manifest in post-seal mode")
+    require(macos_build.index('codesign --verify --deep --strict')
+            < macos_build.index('--allow-platform-sealed-mutation'),
+            "post-seal manifest mutation mode must only run after strict bundle signature verification")
     require('pkgutil --check-signature "$PKG"' in macos_build,
             "macOS signed pkg must be verified before notarization")
     require('xcrun stapler validate "$PKG"' in macos_build
@@ -261,6 +335,12 @@ def verify_installer_smoke_contract(ci: str, release: str) -> None:
     require('spctl --assess --type install' in macos_smoke
             and 'spctl --assess --type execute' in macos_smoke,
             "formal macOS smoke must assess both pkg and app with Gatekeeper")
+    require('python3 "$ROOT/scripts/run-with-timeout.py"' in macos_build
+            and macos_build.count("run_bounded ") >= 14,
+            "macOS build, signing, packaging and notarization must use bounded process supervision")
+    require('python3 "$ROOT/scripts/run-with-timeout.py"' in macos_smoke
+            and macos_smoke.count("run_bounded ") >= 13,
+            "macOS mount, verification, install and upgrade smoke must use bounded process supervision")
 
     for workflow, label in ((ci, "CI"), (release, "Release")):
         require("expected installer is missing" in workflow,
@@ -275,6 +355,105 @@ def verify_installer_smoke_contract(ci: str, release: str) -> None:
                 f"{label} must not capture Windows build logs as the installer path")
         require('pkg="$(bash packaging/macos/build-installer.sh' not in workflow,
                 f"{label} must not capture macOS build logs as the package path")
+
+
+def verify_timeout_runner_contract() -> None:
+    source = read("scripts/run-with-timeout.py")
+    for required in (
+        "subprocess.CREATE_NEW_PROCESS_GROUP",
+        '["taskkill", "/PID", str(process.pid), "/T", "/F"]',
+        'popen_options["start_new_session"] = True',
+        "os.killpg(process_group_id, signal.SIGTERM)",
+        "os.killpg(process_group_id, signal.SIGKILL)",
+        "TIMEOUT_EXIT_CODE = 124",
+        "CLEANUP_FAILURE_EXIT_CODE = 125",
+        "wait_for_unix_process_group_exit",
+    ):
+        require(required in source, f"timeout runner is missing process-tree contract: {required}")
+
+    runner = [sys.executable, str(ROOT / "scripts" / "run-with-timeout.py")]
+    success = subprocess.run(
+        [*runner, "--timeout-seconds", "5", "--", sys.executable, "-c", "print('bounded-ok')"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    require(success.returncode == 0 and "bounded-ok" in success.stdout,
+            "timeout runner must preserve successful command output and exit status")
+
+    failure = subprocess.run(
+        [*runner, "--timeout-seconds", "5", "--", sys.executable, "-c", "raise SystemExit(7)"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    require(failure.returncode == 7,
+            "timeout runner must preserve non-zero command exit status")
+
+    started = time.monotonic()
+    timed_out = subprocess.run(
+        [*runner, "--timeout-seconds", "0.2", "--", sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+    require(timed_out.returncode == 124 and "timed out after 0.2s" in timed_out.stderr,
+            "timeout runner must return the stable timeout exit code and diagnostic")
+    require(elapsed < 8,
+            "timeout runner must terminate the full child process tree promptly")
+
+    if os.name != "nt":
+        with tempfile.TemporaryDirectory(prefix="ariadne-timeout-tree-") as temp:
+            pid_file = Path(temp) / "pids"
+            grandchild = (
+                "import os,signal,time,pathlib;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()));"
+                "time.sleep(30)"
+            )
+            child = (
+                "import os,signal,subprocess,sys,time,pathlib;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                f"p=subprocess.Popen([sys.executable,'-c',{grandchild!r}]);"
+                f"path=pathlib.Path({str(pid_file)!r});"
+                "deadline=time.monotonic()+5;"
+                "\nwhile not path.exists() and time.monotonic()<deadline: time.sleep(0.01)\n"
+                "path.write_text(str(os.getpid())+' '+path.read_text());"
+                "time.sleep(30)"
+            )
+            parent = (
+                "import signal,subprocess,sys,time;"
+                f"subprocess.Popen([sys.executable,'-c',{child!r}]);"
+                "signal.signal(signal.SIGTERM,lambda *_:sys.exit(0));"
+                "time.sleep(30)"
+            )
+            nested = subprocess.run(
+                [*runner, "--timeout-seconds", "1", "--", sys.executable, "-c", parent],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            require(nested.returncode == 124,
+                    "timeout runner must preserve timeout status after nested-tree cleanup")
+            pids = [int(value) for value in pid_file.read_text().split()]
+            alive = []
+            for pid in pids:
+                try:
+                    os.kill(pid, 0)
+                    alive.append(pid)
+                except ProcessLookupError:
+                    pass
+            require(not alive,
+                    f"timeout runner returned before nested descendants exited: {alive}")
 
 
 def verify_legal_contract() -> None:
@@ -382,6 +561,7 @@ def main() -> None:
     verify_readiness_contract()
     verify_package_security_contract()
     verify_installer_smoke_contract(ci, release)
+    verify_timeout_runner_contract()
     verify_legal_contract()
     verify_version_consumers(workspace_version())
     print(f"release engineering contract accepted for Ariadne {workspace_version()}")

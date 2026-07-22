@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -82,26 +84,64 @@ impl<'a> ProjectCredentialScope<'a> {
         self.secrets.get_secret(&self.provider_key_id(provider_id)?)
     }
 
+    /// 返回项目 Provider 凭据代次。代次本身保存在 SecretStore 中，不进入项目配置；
+    /// 工作流只持久化该不透明标识，用于恢复时拒绝静默采用替换后的凭据。
+    pub fn provider_secret_generation(&self, provider_id: &str) -> CoreResult<String> {
+        let generation_key = self.provider_generation_key_id(provider_id)?;
+        if let Some(generation) = self.secrets.get_secret(&generation_key)? {
+            let generation = generation.expose_secret().trim();
+            if !generation.is_empty() {
+                return Ok(generation.to_owned());
+            }
+        }
+        let generation = new_secret_generation();
+        self.secrets
+            .set_secret(&generation_key, SecretValue::new(generation.clone()))?;
+        Ok(generation)
+    }
+
     /// 写入当前项目指定 Provider 的凭据。
     pub fn set_provider_secret(&self, provider_id: &str, value: SecretValue) -> CoreResult<()> {
+        // 先推进代次再写凭据：若第二步失败，旧运行会因代次不匹配安全失败。
+        self.secrets.set_secret(
+            &self.provider_generation_key_id(provider_id)?,
+            SecretValue::new(new_secret_generation()),
+        )?;
         self.secrets
             .set_secret(&self.provider_key_id(provider_id)?, value)
     }
 
     /// 删除当前项目指定 Provider 的凭据。
     pub fn delete_provider_secret(&self, provider_id: &str) -> CoreResult<()> {
+        self.secrets.set_secret(
+            &self.provider_generation_key_id(provider_id)?,
+            SecretValue::new(new_secret_generation()),
+        )?;
         self.secrets
             .delete_secret(&self.provider_key_id(provider_id)?)
     }
 
     fn provider_key_id(&self, provider_id: &str) -> CoreResult<String> {
+        self.scoped_key_id(provider_id, b"provider\0", "ariadne-credential-v1-")
+    }
+
+    fn provider_generation_key_id(&self, provider_id: &str) -> CoreResult<String> {
+        self.scoped_key_id(
+            provider_id,
+            b"provider-generation\0",
+            "ariadne-credential-generation-v1-",
+        )
+    }
+
+    fn scoped_key_id(&self, provider_id: &str, domain: &[u8], prefix: &str) -> CoreResult<String> {
         if provider_id.trim().is_empty() {
             return Err(CoreError::validation("provider_id cannot be empty"));
         }
         let mut hasher = Sha256::new();
         hasher.update(b"ariadne-project-credential-v1\0");
         hasher.update(&self.project_identity);
-        hasher.update(b"\0provider\0");
+        hasher.update(b"\0");
+        hasher.update(domain);
         hasher.update(provider_id.as_bytes());
         let digest = hasher.finalize();
         let mut encoded = String::with_capacity(digest.len() * 2);
@@ -109,8 +149,18 @@ impl<'a> ProjectCredentialScope<'a> {
             use std::fmt::Write;
             write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
         }
-        Ok(format!("ariadne-credential-v1-{encoded}"))
+        Ok(format!("{prefix}{encoded}"))
     }
+}
+
+fn new_secret_generation() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{timestamp:032x}-{sequence:016x}")
 }
 
 #[cfg(unix)]

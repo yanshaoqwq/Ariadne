@@ -7,6 +7,139 @@ namespace Ariadne.Desktop.Tests;
 public sealed class BackendModelSerializationTests
 {
     [Fact]
+    public void ProjectLifecycleModels_DeserializeTheRustIpcShape()
+    {
+        const string recentJson = """
+        {
+          "name": "Novel",
+          "path": "/projects/novel",
+          "last_opened_ms": 1234
+        }
+        """;
+        const string reportJson = """
+        {
+          "project_root": "/projects/novel",
+          "project_name": "Novel",
+          "created_dirs": ["/projects/novel/.config", "/projects/novel/documents"],
+          "created_config_files": ["/projects/novel/.config/app.yaml"],
+          "git_initialized": true,
+          "ready": true
+        }
+        """;
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+        var recent = JsonSerializer.Deserialize<RecentProjectEntry>(recentJson, options);
+        var report = JsonSerializer.Deserialize<ProjectInitReport>(reportJson, options);
+
+        Assert.NotNull(recent);
+        Assert.Equal("/projects/novel", recent.ProjectRoot);
+        Assert.Equal((ulong)1234, recent.LastOpenedMs);
+        Assert.NotNull(report);
+        Assert.Equal("Novel", report.ProjectName);
+        Assert.True(report.GitInitialized);
+        Assert.True(report.Ready);
+        Assert.Equal("/projects/novel/.config/app.yaml", Assert.Single(report.CreatedConfigFiles));
+    }
+
+    [Fact]
+    public void PermissionAndNodePresetModels_PreserveInheritanceOverrides()
+    {
+        const string json = """
+        {
+          "policy": {
+            "allow_network": false,
+            "allow_web_search": false,
+            "allow_http_skill": false,
+            "allow_wasm_network": false,
+            "allow_secret_read": false,
+            "writable_file_roots": [],
+            "readable_file_roots": []
+          },
+          "scoped_policies": {
+            "workflow_nodes": {
+              "allow_network": true,
+              "allow_web_search": true,
+              "allow_http_skill": false,
+              "allow_wasm_network": false,
+              "allow_secret_read": false,
+              "writable_file_roots": [],
+              "readable_file_roots": []
+            },
+            "project_ai": null
+          },
+          "tool_controls": {
+            "global": { "search": true, "web-search": false },
+            "writer": { "writer-search": null, "writer-web-search": true }
+          }
+        }
+        """;
+        var settings = JsonSerializer.Deserialize<PermissionsSettings>(
+            json,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(settings);
+        Assert.True(settings.ScopedPolicies["workflow_nodes"]!.AllowWebSearch);
+        Assert.Null(settings.ScopedPolicies["project_ai"]);
+        Assert.Null(settings.ToolControls["writer"]["writer-search"]);
+        Assert.True(settings.ToolControls["writer"]["writer-web-search"]);
+
+        var preset = new NodeTypePreset(
+            "writer",
+            "agent.writer",
+            "writer-model",
+            300_000,
+            0.5,
+            settings.ScopedPolicies["workflow_nodes"],
+            new Dictionary<string, bool?> { ["search"] = false, ["web-search"] = null },
+            "provider-a");
+        var presetJson = JsonSerializer.Serialize(preset, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.Contains("\"provider_id\":\"provider-a\"", presetJson, StringComparison.Ordinal);
+        Assert.Contains("\"permission_policy\"", presetJson, StringComparison.Ordinal);
+        Assert.Contains("\"search\":false", presetJson, StringComparison.Ordinal);
+        Assert.Contains("\"web-search\":null", presetJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UiPreferences_PreservesReduceMotionAndDefaultsItOff()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        const string enabledJson = """
+        {
+          "theme": "system",
+          "git_auto_color": "#8a8f98",
+          "git_manual_color": "#f59e0b",
+          "project_panel_visible": true,
+          "project_panel_position": null,
+          "panel_states": {},
+          "onboarding_seen": false,
+          "reduce_motion": true,
+          "locale": "fr"
+        }
+        """;
+        const string legacyJson = """
+        {
+          "theme": "system",
+          "git_auto_color": "#8a8f98",
+          "git_manual_color": "#f59e0b",
+          "project_panel_visible": true,
+          "project_panel_position": null,
+          "panel_states": {},
+          "onboarding_seen": false
+        }
+        """;
+
+        var enabled = JsonSerializer.Deserialize<UiPreferences>(enabledJson, options);
+        var legacy = JsonSerializer.Deserialize<UiPreferences>(legacyJson, options);
+
+        Assert.NotNull(enabled);
+        Assert.True(enabled.ReduceMotion);
+        Assert.Equal("fr", enabled.Locale);
+        Assert.NotNull(legacy);
+        Assert.False(legacy.ReduceMotion);
+        Assert.Equal("zh", legacy.Locale);
+    }
+
+    [Fact]
     public void ProviderStatus_PreservesConfiguredBoundary()
     {
         const string json = """

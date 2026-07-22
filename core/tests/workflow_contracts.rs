@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, ProviderConfig};
 use ariadne::contracts::{
@@ -39,12 +39,12 @@ use ariadne::workflow::{
     NodeErrorKind, NodeRetryPolicy, NoopExternalNodeExecutor, PatchWriteBackState,
     RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
     RuntimeReferenceKind, RuntimeReferenceResolver, SqliteWorkflowRuntimeStore,
-    WorkflowExportRequest, WorkflowExportSink, WorkflowExternalNodeExecutor,
-    WorkflowLlmSearchOptions, WorkflowMutationClaimResult, WorkflowNodeExecutionOutput,
-    WorkflowNodeExecutionRequest, WorkflowNodeExecutor, WorkflowOperationPolicy,
-    WorkflowOperationRecoveryPolicy, WorkflowOperationResponsePolicy, WorkflowOperationStatus,
-    WorkflowResumeClaimResult, WorkflowRunState, WorkflowRuntime, WorkflowRuntimeEventType,
-    WorkflowRuntimeStore, WorkflowStopRequestResult,
+    WorkflowExecutionDependencySet, WorkflowExportRequest, WorkflowExportSink,
+    WorkflowExternalNodeExecutor, WorkflowLlmSearchOptions, WorkflowMutationClaimResult,
+    WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest, WorkflowNodeExecutor,
+    WorkflowOperationPolicy, WorkflowOperationRecoveryPolicy, WorkflowOperationResponsePolicy,
+    WorkflowOperationStatus, WorkflowResumeClaimResult, WorkflowRunState, WorkflowRuntime,
+    WorkflowRuntimeEventType, WorkflowRuntimeStore, WorkflowStopRequestResult,
 };
 use serde_json::{json, Value};
 use std::sync::{mpsc, Arc, Mutex};
@@ -67,6 +67,36 @@ struct ProjectSearchLlmProvider {
 struct WebSearchLlmProvider {
     calls: AtomicUsize,
     requests: Mutex<Vec<LlmRequest>>,
+}
+
+#[test]
+fn n25_workflow_dependency_set_compiles_exact_executor_adapter_ids() {
+    let mut workflow = WorkflowDefinition {
+        id: WorkflowId::from("n25-dependencies"),
+        name: "N25 Dependencies".to_owned(),
+        nodes: vec![
+            node("http", "executor_adapter:healthy-http"),
+            node("llm", "executor_adapter:required-llm"),
+            node("writer", "writer"),
+        ],
+        edges: Vec::new(),
+        metadata: Value::Null,
+    };
+    let dependencies = WorkflowExecutionDependencySet::compile(&workflow).unwrap();
+    assert_eq!(
+        dependencies
+            .executor_adapter_skill_ids()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["healthy-http".to_owned(), "required-llm".to_owned()]
+    );
+    assert!(dependencies.uses_node_type("writer"));
+    assert!(!dependencies.uses_node_type("executor_adapter:unused-bad"));
+
+    workflow.nodes[0].type_name = "executor_adapter:".to_owned();
+    let error = WorkflowExecutionDependencySet::compile(&workflow).unwrap_err();
+    assert!(error.to_string().contains("has no skill id"));
 }
 
 impl Provider for WebSearchLlmProvider {
@@ -279,7 +309,7 @@ fn utility_node_contracts_require_matching_aliases_and_valid_branch_selectors() 
             node("source", "writer"),
             NodeInstance {
                 id: NodeId::from("utility"),
-                type_name: "search".to_owned(),
+                type_name: "project_search".to_owned(),
                 label: None,
                 config: json!({ "query_alias": "query", "limit": 5 }),
                 position: None,
@@ -366,12 +396,18 @@ fn runtime_store_round_trips_prepared_workflow_snapshot() {
     let run_id = RunId::from("run-1");
     let mut state = WorkflowRunState::new(workflow.id.clone(), run_id.clone());
     state.prepared_workflow = Some(workflow.clone());
+    let dependency_plan = json!({
+        "version": 1,
+        "marker": "n27-frozen-dependency-plan-must-not-rewrite"
+    });
+    state.prepared_dependency_plan = Some(dependency_plan.clone());
     state.start_node_id = Some(NodeId::from("start"));
 
     store.create_state(&state).unwrap();
     let loaded = store.load_state(&workflow.id, &run_id).unwrap().unwrap();
 
     assert_eq!(loaded.prepared_workflow, Some(workflow));
+    assert_eq!(loaded.prepared_dependency_plan, Some(dependency_plan));
     assert_eq!(loaded.start_node_id, Some(NodeId::from("start")));
 }
 
@@ -390,6 +426,11 @@ fn c10_save_slims_prepared_workflow_but_load_rehydrates_from_column() {
     let run_id = RunId::from("run-c10");
     let mut state = WorkflowRunState::new(workflow.id.clone(), run_id.clone());
     state.prepared_workflow = Some(workflow.clone());
+    let dependency_plan = json!({
+        "version": 1,
+        "marker": "n27-frozen-dependency-plan-must-not-rewrite"
+    });
+    state.prepared_dependency_plan = Some(dependency_plan.clone());
     state.start_node_id = Some(NodeId::from("start"));
     store.create_state(&state).unwrap();
 
@@ -415,6 +456,10 @@ fn c10_save_slims_prepared_workflow_but_load_rehydrates_from_column() {
         !state_json.contains("C10 Slim Workflow Unique Marker"),
         "state_json after slim must not re-embed full prepared_workflow body"
     );
+    assert!(
+        !state_json.contains("n27-frozen-dependency-plan-must-not-rewrite"),
+        "state_json after slim must not re-embed the frozen dependency plan"
+    );
     let column: Option<String> = db
         .query_row(
             "SELECT prepared_workflow_json FROM workflow_runs WHERE workflow_id = ?1 AND run_id = ?2",
@@ -428,9 +473,23 @@ fn c10_save_slims_prepared_workflow_but_load_rehydrates_from_column() {
             .is_some_and(|raw| raw.contains("C10 Slim Workflow Unique Marker")),
         "prepared_workflow_json column must keep frozen definition"
     );
+    let dependency_column: Option<String> = db
+        .query_row(
+            "SELECT prepared_dependency_plan_json FROM workflow_runs WHERE workflow_id = ?1 AND run_id = ?2",
+            rusqlite::params![workflow.id.as_str(), run_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        dependency_column
+            .as_deref()
+            .is_some_and(|raw| raw.contains("n27-frozen-dependency-plan-must-not-rewrite")),
+        "prepared_dependency_plan_json column must keep the frozen plan"
+    );
 
     let loaded = store.load_state(&workflow.id, &run_id).unwrap().unwrap();
     assert_eq!(loaded.prepared_workflow, Some(workflow));
+    assert_eq!(loaded.prepared_dependency_plan, Some(dependency_plan));
     assert_eq!(loaded.status, RunStatus::Queued);
     assert_eq!(loaded.state_revision, 2);
 }
@@ -1646,7 +1705,13 @@ fn persisted_external_node_commits_operation_journal_after_state_save() {
         .run_persisted(&workflow, &mut executor, &store)
         .unwrap();
 
-    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!(
+        status,
+        RunStatus::Succeeded,
+        "mixed graph status={status:?}, events={:?}, export_error={:?}",
+        runtime.state.events,
+        runtime.state.nodes[&NodeId::from("export")].error
+    );
     assert_eq!(executor.call_count("writer"), 1);
     let operations = store
         .list_operations(&workflow.id, &runtime.state.run_id)
@@ -3247,7 +3312,7 @@ fn f13_llm_node_timeout_and_budget_enter_provider_context() {
         type_name: "writer".to_owned(),
         config: json!({
             "schema_version": 1,
-            "provider_id": "p",
+            "provider_id": "default-provider",
             "model_id": "m",
             "prompt_template": "写",
             "timeout_ms": 7_500,
@@ -3293,7 +3358,7 @@ fn f13_llm_node_accepts_ui_shaped_string_timeout_and_budget() {
         // 与桌面 MergeUiFields 旧行为 / 已存 graph JSON 一致：string 形态
         config: json!({
             "schema_version": 1,
-            "provider_id": "p",
+            "provider_id": "default-provider",
             "model_id": "m",
             "prompt_template": "写",
             "timeout_ms": "7500",
@@ -3332,7 +3397,7 @@ fn f13_llm_node_fails_when_cost_exceeds_single_call_budget() {
         type_name: "writer".to_owned(),
         config: json!({
             "schema_version": 1,
-            "provider_id": "p",
+            "provider_id": "default-provider",
             "model_id": "m",
             "prompt_template": "写",
             "single_call_budget_usd": 1.0,
@@ -3483,6 +3548,10 @@ fn summarizer_receipt_replays_dispatched_runtime_operation_without_second_llm_pi
                 "is_new_stage": true
             })
             .to_string(),
+            json!({"approved": true, "reason": "故事段概括与正文一致"}).to_string(),
+            json!({"approved": true, "reason": "事件归并引用完整"}).to_string(),
+            json!({"approved": true, "reason": "章节总结未虚构事实"}).to_string(),
+            json!({"approved": true, "reason": "阶段总结与章节一致"}).to_string(),
         ]),
         calls: AtomicUsize::new(0),
     });
@@ -3574,7 +3643,7 @@ fn summarizer_receipt_replays_dispatched_runtime_operation_without_second_llm_pi
     assert!(first_error
         .to_string()
         .contains("forced summarizer completion failure"));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
     let operation = store
         .list_operations(&workflow.id, &run_id)
         .unwrap()
@@ -3626,7 +3695,7 @@ fn summarizer_receipt_replays_dispatched_runtime_operation_without_second_llm_pi
             .unwrap(),
         RunStatus::Succeeded
     );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
     assert_eq!(
         store
             .load_operation(&operation.operation_id)
@@ -5463,6 +5532,256 @@ fn builtin_approval_node_pauses_and_resume_publishes_result() {
     );
 }
 
+/// 审批拒绝是终止策略：回写 rejected 输出，但不能解除暂停并继续执行下游。
+#[test]
+fn builtin_approval_node_rejection_stops_run_and_never_executes_downstream() {
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf-reject"),
+        name: "Approval rejection".to_owned(),
+        nodes: vec![
+            NodeInstance {
+                id: NodeId::from("approval"),
+                type_name: "approval".to_owned(),
+                label: None,
+                config: json!({
+                    "approval_id": "reject-1",
+                    "auto_approve": false,
+                }),
+                position: None,
+            },
+            node("downstream", "writer"),
+        ],
+        edges: vec![control_edge(
+            "approval-downstream",
+            "approval",
+            "downstream",
+        )],
+        metadata: Value::Null,
+    };
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-reject")).unwrap();
+    let mut external = NoopExternalNodeExecutor::default();
+    {
+        let mut executor = BuiltinWorkflowNodeExecutor::new(&mut external);
+        assert_eq!(
+            runtime.run(&workflow, &mut executor).unwrap(),
+            RunStatus::Paused
+        );
+    }
+
+    runtime
+        .update_confirmation_state("reject-1", RuntimeConfirmationState::Rejected)
+        .unwrap();
+
+    assert_eq!(runtime.state.status, RunStatus::Stopped);
+    assert_eq!(runtime.state.control, RunControl::Stop);
+    assert!(matches!(
+        runtime.state.nodes[&NodeId::from("approval")].outputs.get("approved"),
+        Some(PortValue::Inline { value }) if value == &json!(false)
+    ));
+    assert!(matches!(
+        runtime.state.nodes[&NodeId::from("approval")].outputs.get("rejected"),
+        Some(PortValue::Inline { value }) if value == &json!(true)
+    ));
+    assert_eq!(external.calls.get("downstream"), None);
+}
+
+/// 入口、项目搜索、条件、审批和导出通过真实数据/控制边闭环执行。
+#[test]
+fn mixed_builtin_and_external_graph_executes_search_condition_approval_export() {
+    let workflow = WorkflowDefinition {
+        id: WorkflowId::from("wf-mixed"),
+        name: "Mixed graph".to_owned(),
+        nodes: vec![
+            NodeInstance {
+                id: NodeId::from("start"),
+                type_name: "start".to_owned(),
+                label: None,
+                config: json!({
+                    "initial_inputs": { "query": "facts" },
+                }),
+                position: None,
+            },
+            NodeInstance {
+                id: NodeId::from("search"),
+                type_name: "project_search".to_owned(),
+                label: None,
+                config: json!({ "query_alias": "query", "limit": 5 }),
+                position: None,
+            },
+            NodeInstance {
+                id: NodeId::from("condition"),
+                type_name: "condition".to_owned(),
+                label: None,
+                config: json!({ "input_alias": "matches", "operator": "truthy" }),
+                position: None,
+            },
+            NodeInstance {
+                id: NodeId::from("approval"),
+                type_name: "approval".to_owned(),
+                label: None,
+                config: json!({ "approval_id": "mixed-approval", "auto_approve": true }),
+                position: None,
+            },
+            NodeInstance {
+                id: NodeId::from("loop"),
+                type_name: "loop".to_owned(),
+                label: None,
+                config: json!({
+                    "max_iterations": 2,
+                    "timeout_ms": 3000,
+                    "stop_condition": {
+                        "input_alias": "approved",
+                        "equals": true,
+                    },
+                    "rerun_node_ids": [],
+                }),
+                position: None,
+            },
+            NodeInstance {
+                id: NodeId::from("export"),
+                type_name: "export".to_owned(),
+                label: None,
+                config: json!({
+                    "artifact_id": "exports/mixed.json",
+                    "format": "json",
+                    "title": "Mixed",
+                }),
+                position: None,
+            },
+        ],
+        edges: vec![
+            control_edge("start-search", "start", "search"),
+            Edge {
+                id: EdgeId::from("query-data"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("start"),
+                    port_name: "query".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("search"),
+                    port_name: "input".to_owned(),
+                },
+                alias: Some("query".to_owned()),
+                communication: None,
+            },
+            control_edge("search-condition", "search", "condition"),
+            Edge {
+                id: EdgeId::from("matches-data"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("search"),
+                    port_name: "results".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("condition"),
+                    port_name: "input".to_owned(),
+                },
+                alias: Some("matches".to_owned()),
+                communication: None,
+            },
+            Edge {
+                id: EdgeId::from("condition-approval"),
+                kind: WorkflowEdgeKind::Control,
+                from: PortEndpoint {
+                    node_id: NodeId::from("condition"),
+                    port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("approval"),
+                    port_name: EXECUTION_INPUT_PORT.to_owned(),
+                },
+                alias: Some("true".to_owned()),
+                communication: None,
+            },
+            control_edge("approval-loop", "approval", "loop"),
+            Edge {
+                id: EdgeId::from("approved-data"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("approval"),
+                    port_name: "approved".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("loop"),
+                    port_name: "input".to_owned(),
+                },
+                alias: Some("approved".to_owned()),
+                communication: None,
+            },
+            control_edge("loop-export", "loop", "export"),
+            Edge {
+                id: EdgeId::from("termination-data"),
+                kind: WorkflowEdgeKind::Data,
+                from: PortEndpoint {
+                    node_id: NodeId::from("loop"),
+                    port_name: "termination_reason".to_owned(),
+                },
+                to: PortEndpoint {
+                    node_id: NodeId::from("export"),
+                    port_name: "input".to_owned(),
+                },
+                alias: Some("termination_reason".to_owned()),
+                communication: None,
+            },
+        ],
+        metadata: Value::Null,
+    };
+    validate_workflow_execution_contracts(&workflow).unwrap();
+
+    let search_calls = Arc::new(AtomicUsize::new(0));
+    let search_calls_for_handler = Arc::clone(&search_calls);
+    let mut external = RoutedExternalNodeExecutor::new();
+    external
+        .register_handler(
+            "project_search",
+            Box::new(move |request| {
+                search_calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                assert!(matches!(
+                    request.inputs.get("query"),
+                    Some(PortValue::Inline { value }) if value == &json!("facts")
+                ));
+                Ok(WorkflowNodeExecutionOutput {
+                    outputs: PortMap::from([(
+                        "results".to_owned(),
+                        PortValue::inline(json!([{"title": "fact"}])),
+                    )]),
+                    ..WorkflowNodeExecutionOutput::default()
+                })
+            }),
+        )
+        .unwrap();
+    let mut sink = RecordingExportSink::default();
+    let mut runtime = WorkflowRuntime::new(&workflow, RunId::from("run-mixed")).unwrap();
+    let status = {
+        let mut executor =
+            BuiltinWorkflowNodeExecutor::new(&mut external).with_export_sink(&mut sink);
+        runtime.run(&workflow, &mut executor).unwrap()
+    };
+
+    assert_eq!(
+        status,
+        RunStatus::Succeeded,
+        "mixed graph status={status:?}, events={:?}",
+        runtime.state.events
+    );
+    assert_eq!(search_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.exports.len(), 1);
+    assert_eq!(sink.exports[0].artifact_id, "exports/mixed.json");
+    assert!(matches!(
+        sink.exports[0].inputs.get("termination_reason"),
+        Some(PortValue::Inline { value }) if value == &json!("stop_condition_satisfied")
+    ));
+    assert_eq!(
+        runtime.state.nodes[&NodeId::from("loop")].execution_attempts,
+        1
+    );
+    assert_eq!(
+        runtime.state.confirmations["mixed-approval"].state,
+        RuntimeConfirmationState::AutoAudited
+    );
+}
+
 /// 验证 loop 节点按显式目标重跑，直到停止条件满足。
 #[test]
 fn builtin_loop_node_reruns_explicit_target_until_condition_passes() {
@@ -6209,6 +6528,7 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
 
     struct PolicyProvider {
         calls: AtomicUsize,
+        custom_prompt_seen: AtomicBool,
     }
     impl Provider for PolicyProvider {
         fn definition(&self) -> ProviderDefinition {
@@ -6231,7 +6551,8 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
             request: LlmRequest,
         ) -> ariadne::contracts::CoreResult<LlmResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let body = match request.metadata["summarizer_step"].as_str().unwrap() {
+            let step = request.metadata["summarizer_step"].as_str().unwrap();
+            let body = match step {
                 "segments" => {
                     r#"{"segments":[{"number":"1","summary":"段","start_line":1,"end_line":1}]}"#
                 }
@@ -6241,6 +6562,24 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
                 "chapter" => r#"{"summary":"章节总结"}"#,
                 "stage" => {
                     r#"{"stage_id":"stage-policy","stage_summary":"阶段总结","is_new_stage":true}"#
+                }
+                "auto_audit_segment_summary" => {
+                    let request_text = request
+                        .messages
+                        .iter()
+                        .flat_map(|message| message.content.iter())
+                        .filter_map(|part| match part {
+                            ariadne::providers::ContentPart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    if request_text.contains("CUSTOM SEGMENT AUDIT PROMPT") {
+                        self.custom_prompt_seen.store(true, Ordering::SeqCst);
+                    }
+                    r#"{"approved":true,"reason":"段落总结与正文一致"}"#
+                }
+                "auto_audit_stage_summary" => {
+                    r#"{"approved":false,"reason":"阶段边界依据不足，需要人工确认"}"#
                 }
                 other => panic!("unexpected summarizer step {other}"),
             };
@@ -6267,7 +6606,8 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
                 {
                     "confirmation_kind": "segment_summary",
                     "normal_policy": "allow_by_default",
-                    "auto_mode_policy": "auto_approval"
+                    "auto_mode_policy": "auto_approval",
+                    "approval_prompt": "CUSTOM SEGMENT AUDIT PROMPT"
                 },
                 {
                     "confirmation_kind": "event_summary",
@@ -6282,7 +6622,8 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
                 {
                     "confirmation_kind": "stage_summary",
                     "normal_policy": "manual_review",
-                    "auto_mode_policy": "auto_approval"
+                    "auto_mode_policy": "auto_approval",
+                    "approval_prompt": "CUSTOM STAGE AUDIT PROMPT"
                 }
             ]))
             .unwrap(),
@@ -6290,6 +6631,7 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
         .unwrap();
         let provider = PolicyProvider {
             calls: AtomicUsize::new(0),
+            custom_prompt_seen: AtomicBool::new(false),
         };
         let ledger = SqliteCostLedger::open(temp.path()).unwrap();
         let request = WorkflowNodeExecutionRequest {
@@ -6315,7 +6657,10 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
             dispatch_authorization: Default::default(),
         };
         let output = execute_summarizer_node(request, &provider, &ledger, temp.path()).unwrap();
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            if auto_mode { 6 } else { 4 }
+        );
         let knowledge = SqliteWritingKnowledgeStore::open(temp.path())
             .unwrap()
             .load_knowledge()
@@ -6326,10 +6671,15 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
             .into_iter()
             .map(|item| (item.kind, item.state))
             .collect::<BTreeMap<_, _>>();
-        (states, output.run_control)
+        (
+            states,
+            output.run_control,
+            provider.custom_prompt_seen.load(Ordering::SeqCst),
+        )
     };
 
-    let (normal, normal_control) = run_case(false);
+    let (normal, normal_control, normal_prompt_seen) = run_case(false);
+    assert!(!normal_prompt_seen);
     assert_eq!(
         normal[&ConfirmationKind::SegmentSummary],
         ConfirmationState::Skipped
@@ -6348,7 +6698,8 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
     );
     assert_eq!(normal_control, Some(RunControl::Pause));
 
-    let (auto, auto_control) = run_case(true);
+    let (auto, auto_control, auto_prompt_seen) = run_case(true);
+    assert!(auto_prompt_seen);
     assert_eq!(
         auto[&ConfirmationKind::SegmentSummary],
         ConfirmationState::AutoAudited
@@ -6363,9 +6714,9 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
     );
     assert_eq!(
         auto[&ConfirmationKind::StageSummary],
-        ConfirmationState::AutoAudited
+        ConfirmationState::Pending
     );
-    assert_eq!(auto_control, None);
+    assert_eq!(auto_control, Some(RunControl::Pause));
 }
 
 /// F17：策略文件损坏必须在首次 provider dispatch 前阻断。

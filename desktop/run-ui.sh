@@ -101,8 +101,15 @@ EOF
     ;;
 
   shot)
-    build
+    # Prefer existing ariadne-ipc when present so shot still works if cargo tree is dirty.
     OUT="${2:-$PROJ_DIR/ui-preview.png}"
+    if [[ -x "$BACKEND_IPC" ]]; then
+      echo "[shot] 复用已有后端 IPC：$BACKEND_IPC"
+      echo "[build] dotnet build ..."
+      dotnet build "$CSPROJ/Ariadne.Desktop.csproj" -v quiet --nologo --no-restore
+    else
+      build
+    fi
     VDISP="${ARIADNE_SHOT_DISPLAY:-}"
     if [[ -z "$VDISP" ]]; then
       for display_num in $(seq 90 119); do
@@ -117,9 +124,14 @@ EOF
       exit 1
     fi
     DISPLAY_ID="${VDISP#:}"
-    XVFB_LOG="/tmp/ariadne-xvfb-${DISPLAY_ID}.log"
-    APP_LOG="/tmp/ariadne-desktop-${DISPLAY_ID}.log"
-    FFMPEG_LOG="/tmp/ariadne-ffmpeg-${DISPLAY_ID}.log"
+    SCRATCH_SHOT_DIR="${ARIADNE_SHOT_LOG_DIR:-/tmp}"
+    mkdir -p "$SCRATCH_SHOT_DIR"
+    XVFB_LOG="$SCRATCH_SHOT_DIR/ariadne-xvfb-${DISPLAY_ID}.log"
+    APP_LOG="$SCRATCH_SHOT_DIR/ariadne-desktop-${DISPLAY_ID}.log"
+    FFMPEG_LOG="$SCRATCH_SHOT_DIR/ariadne-ffmpeg-${DISPLAY_ID}.log"
+    # Max wait for first mapped window (seconds); then settle before grab.
+    SHOT_WAIT_MAX="${ARIADNE_SHOT_WAIT_MAX:-90}"
+    SHOT_SETTLE_SEC="${ARIADNE_SHOT_SETTLE_SEC:-4}"
     XVFB_PID=""
     APP_PID=""
     cleanup_shot() {
@@ -131,37 +143,129 @@ EOF
       fi
     }
     trap cleanup_shot EXIT
+
+    # Return 0 if PNG has enough non-black pixels (not an empty Xvfb frame).
+    png_has_content() {
+      local png="$1"
+      [[ -f "$png" ]] || return 1
+      python3 - "$png" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+try:
+    from PIL import Image
+except ImportError:
+    # Fallback: reject tiny files (all-black 1440x900 PNG is usually ~4KB).
+    sys.exit(0 if path.stat().st_size > 20000 else 1)
+im = Image.open(path)
+# Sample every 4th pixel for speed.
+px = im.load()
+w, h = im.size
+nonblack = 0
+total = 0
+for y in range(0, h, 4):
+    for x in range(0, w, 4):
+        total += 1
+        p = px[x, y]
+        r, g, b = p[0], p[1], p[2]
+        if r + g + b > 60:
+            nonblack += 1
+# Need at least ~2% of samples non-black (real UI, not pure Xvfb black).
+sys.exit(0 if total and (nonblack / total) >= 0.02 else 1)
+PY
+    }
+
+    # Block until a non-trivial client window is mapped on the virtual display.
+    wait_for_ui_window() {
+      local disp="$1"
+      local deadline=$((SECONDS + SHOT_WAIT_MAX))
+      local tree=""
+      echo "[shot] 阻塞等待 UI 窗口出现（最长 ${SHOT_WAIT_MAX}s）..."
+      while (( SECONDS < deadline )); do
+        if [[ -n "$APP_PID" ]] && ! kill -0 "$APP_PID" 2>/dev/null; then
+          echo "[shot] UI 进程已退出，日志如下：" >&2
+          sed -n '1,200p' "$APP_LOG" >&2 || true
+          return 1
+        fi
+        tree="$(DISPLAY="$disp" xwininfo -root -tree 2>/dev/null || true)"
+        # Prefer Ariadne / Avalonia window names; fall back to any sizable child of root.
+        if echo "$tree" | grep -Eiq 'Ariadne|Avalonia'; then
+          echo "[shot] 检测到 Ariadne/Avalonia 窗口"
+          return 0
+        fi
+        # "  0x... \"title\"  WxH+X+Y" with W,H both >= 200
+        if echo "$tree" | grep -E '^\s+0x[0-9a-fA-F]+ .*: \(.*\)  [0-9]{3,}x[0-9]{3,}\+' >/dev/null 2>&1; then
+          echo "[shot] 检测到已映射的客户端窗口"
+          return 0
+        fi
+        sleep 1
+      done
+      echo "[shot] 等待窗口超时（${SHOT_WAIT_MAX}s）。xwininfo -root -tree：" >&2
+      DISPLAY="$disp" xwininfo -root -tree 2>&1 | sed -n '1,80p' >&2 || true
+      sed -n '1,200p' "$APP_LOG" >&2 || true
+      return 1
+    }
+
     echo "[shot] 启动 Xvfb $VDISP (1440x900) ..."
-    Xvfb "$VDISP" -screen 0 1440x900x24 >"$XVFB_LOG" 2>&1 &
+    Xvfb "$VDISP" -screen 0 1440x900x24 -ac +extension GLX +render -noreset >"$XVFB_LOG" 2>&1 &
     XVFB_PID=$!
-    sleep 1.5
-    if ! kill -0 "$XVFB_PID" 2>/dev/null; then
-      echo "[shot] Xvfb 启动失败，日志如下：" >&2
+    # Block until X server answers (not fixed sleep only).
+    for _ in $(seq 1 40); do
+      if DISPLAY="$VDISP" xdpyinfo >/dev/null 2>&1; then
+        break
+      fi
+      if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+        echo "[shot] Xvfb 启动失败，日志如下：" >&2
+        sed -n '1,120p' "$XVFB_LOG" >&2 || true
+        exit 1
+      fi
+      sleep 0.25
+    done
+    if ! DISPLAY="$VDISP" xdpyinfo >/dev/null 2>&1; then
+      echo "[shot] Xvfb 未就绪，日志如下：" >&2
       sed -n '1,120p' "$XVFB_LOG" >&2 || true
       exit 1
     fi
 
     echo "[shot] 无头启动 UI ..."
-    DISPLAY="$VDISP" ARIADNE_BACKEND_IPC="$BACKEND_IPC" dotnet run --project "$CSPROJ/Ariadne.Desktop.csproj" -v quiet --nologo >"$APP_LOG" 2>&1 &
+    DISPLAY="$VDISP" ARIADNE_BACKEND_IPC="$BACKEND_IPC" \
+      dotnet run --project "$CSPROJ/Ariadne.Desktop.csproj" -v quiet --nologo --no-build \
+      >"$APP_LOG" 2>&1 &
     APP_PID=$!
-    # 等待窗口绘制完成
-    sleep 20
-    if ! kill -0 "$APP_PID" 2>/dev/null; then
-      echo "[shot] UI 进程已退出，日志如下：" >&2
-      sed -n '1,160p' "$APP_LOG" >&2 || true
+
+    if ! wait_for_ui_window "$VDISP"; then
       exit 1
     fi
+    echo "[shot] 窗口已出现，再 settle ${SHOT_SETTLE_SEC}s 等首帧绘制..."
+    sleep "$SHOT_SETTLE_SEC"
 
-    echo "[shot] 截图 -> $OUT"
-    if ! ffmpeg -y -f x11grab -video_size 1440x900 -i "$VDISP" -frames:v 1 "$OUT" >"$FFMPEG_LOG" 2>&1; then
-      echo "[shot] ffmpeg 截图失败，日志如下：" >&2
-      sed -n '1,160p' "$FFMPEG_LOG" >&2 || true
+    capture_ok=0
+    for attempt in 1 2 3 4 5; do
+      echo "[shot] 截图尝试 #$attempt -> $OUT（-draw_mouse 0）"
+      if ! ffmpeg -y -f x11grab -draw_mouse 0 -video_size 1440x900 -i "$VDISP" \
+          -frames:v 1 -update 1 "$OUT" >"$FFMPEG_LOG" 2>&1; then
+        echo "[shot] ffmpeg 失败，日志：" >&2
+        sed -n '1,80p' "$FFMPEG_LOG" >&2 || true
+        sleep 2
+        continue
+      fi
+      if png_has_content "$OUT"; then
+        capture_ok=1
+        break
+      fi
+      echo "[shot] 截图疑似全黑/空帧（文件 $(stat -c%s "$OUT" 2>/dev/null || echo 0) bytes），继续等待绘制..."
+      sleep 3
+    done
+
+    if [[ "$capture_ok" -ne 1 ]]; then
+      echo "[shot] 多次截图仍无有效画面；app 日志：" >&2
+      sed -n '1,200p' "$APP_LOG" >&2 || true
       exit 1
     fi
 
     cleanup_shot
     trap - EXIT
-    echo "[shot] 完成：$OUT"
+    echo "[shot] 完成：$OUT ($(stat -c%s "$OUT" 2>/dev/null || echo '?') bytes, non-black content verified)"
     ;;
 
   *)

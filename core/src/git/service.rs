@@ -29,6 +29,14 @@ pub struct GitDiffPreview {
     pub preview: String,
 }
 
+#[derive(Debug)]
+struct GitCommandOutput {
+    status: ExitStatus,
+    stdout: String,
+    stdout_bytes: u64,
+    stderr: String,
+}
+
 /// Git 服务，所有 Git 写操作通过同一把锁串行化。
 #[derive(Debug)]
 pub struct GitService {
@@ -98,9 +106,11 @@ impl GitService {
         &self,
         policy: &GitStagePolicy,
     ) -> CoreResult<(GitHealthReport, String)> {
-        match self.run_git(["rev-parse", "--is-inside-work-tree"]) {
-            Ok(_) => {}
-            Err(CoreError::External { service, .. }) if service == "git" => {
+        let repository_probe = self.run_git_output(["rev-parse", "--is-inside-work-tree"])?;
+        if !repository_probe.status.success() {
+            // 没有本地 Git 元数据时才是普通“未初始化”；已有 .git 却探测失败
+            // 表示损坏、权限或其它真实故障，必须保留严格错误而不是伪装成未初始化。
+            if !self.local_git_metadata_exists()? {
                 return Ok((
                     GitHealthReport {
                         status: GitHealthStatus::NotRepository,
@@ -112,10 +122,11 @@ impl GitService {
                     String::new(),
                 ));
             }
-            Err(error) => return Err(error),
+            return Err(git_command_error(&repository_probe));
         }
+        ensure_git_stdout_within_limit(&repository_probe)?;
 
-        let head = self.optional_git_value(["rev-parse", "--verify", "HEAD"])?;
+        let head = self.optional_git_value(["rev-parse", "--verify", "--quiet", "HEAD"])?;
         let branch = self
             .optional_git_value(["branch", "--show-current"])?
             .filter(|value| !value.trim().is_empty());
@@ -212,7 +223,7 @@ impl GitService {
     /// 按暂存策略返回工作区 diff，和存档/状态展示排除规则保持一致。
     pub fn diff_with_policy(&self, policy: &GitStagePolicy) -> CoreResult<String> {
         let mut args = vec!["diff".to_owned(), "--".to_owned(), ".".to_owned()];
-        args.extend(policy.exclude_pathspecs());
+        args.extend(policy.exclude_pathspecs()?);
         self.run_git(args)
     }
 
@@ -224,7 +235,7 @@ impl GitService {
         preview_char_limit: usize,
     ) -> CoreResult<GitDiffPreview> {
         let mut args = vec!["diff".to_owned(), "--".to_owned(), ".".to_owned()];
-        args.extend(policy.exclude_pathspecs());
+        args.extend(policy.exclude_pathspecs()?);
         let mut child = self.spawn_git(args)?;
         let stdout = child
             .stdout
@@ -239,18 +250,16 @@ impl GitService {
         let stderr_handle = std::thread::spawn(move || {
             drain_bounded(stderr_pipe, MAX_GIT_STDERR_BYTES).map_err(CoreError::from)
         });
-        let status = self.wait_for_git_child(&mut child, "diff")?;
-        let preview_result = join_git_reader(stdout_handle, "git diff stdout")?;
-        let (stderr, _) = join_git_reader(stderr_handle, "git diff stderr")?;
+        let (status, preview_result, (stderr, _)) = self.finish_git_child(
+            &mut child,
+            "diff",
+            stdout_handle,
+            stderr_handle,
+            "git diff stdout",
+            "git diff stderr",
+        )?;
         if !status.success() {
-            return Err(CoreError::External {
-                service: "git".to_owned(),
-                message: if stderr.trim().is_empty() {
-                    format!("git exited with status {status}")
-                } else {
-                    stderr.trim().chars().take(2000).collect()
-                },
-            });
+            return Err(git_command_error_from_parts(status, &stderr));
         }
         Ok(preview_result)
     }
@@ -264,7 +273,7 @@ impl GitService {
             "--".to_owned(),
             ".".to_owned(),
         ];
-        args.extend(policy.exclude_pathspecs());
+        args.extend(policy.exclude_pathspecs()?);
         self.run_git(args)
     }
 
@@ -365,7 +374,7 @@ impl GitService {
             "--".to_owned(),
             ".".to_owned(),
         ];
-        args.extend(policy.exclude_pathspecs());
+        args.extend(policy.exclude_pathspecs()?);
         self.run_git(args)?;
         Ok(())
     }
@@ -394,8 +403,15 @@ impl GitService {
     }
 
     fn has_head_commit(&self) -> CoreResult<bool> {
-        self.optional_git_value(["rev-parse", "--verify", "HEAD"])
+        self.optional_git_value(["rev-parse", "--verify", "--quiet", "HEAD"])
             .map(|value| value.is_some())
+    }
+
+    fn local_git_metadata_exists(&self) -> CoreResult<bool> {
+        self.repo_root
+            .join(".git")
+            .try_exists()
+            .map_err(CoreError::from)
     }
 
     /// 回档前要求工作区干净，避免覆盖用户未保存改动。
@@ -412,6 +428,20 @@ impl GitService {
 
     /// 执行 Git 命令并返回 stdout。
     fn run_git<I, S>(&self, args: I) -> CoreResult<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let output = self.run_git_output(args)?;
+        ensure_git_stdout_within_limit(&output)?;
+        if output.status.success() {
+            return Ok(output.stdout.trim_end().to_owned());
+        }
+
+        Err(git_command_error(&output))
+    }
+
+    fn run_git_output<I, S>(&self, args: I) -> CoreResult<GitCommandOutput>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
@@ -439,27 +469,19 @@ impl GitService {
         let stderr_handle = std::thread::spawn(move || {
             drain_bounded(stderr, MAX_GIT_STDERR_BYTES).map_err(CoreError::from)
         });
-        let status = self.wait_for_git_child(&mut child, &operation)?;
-        let (stdout, stdout_bytes) = join_git_reader(stdout_handle, "git stdout")?;
-        let (stderr, _) = join_git_reader(stderr_handle, "git stderr")?;
-
-        if status.success() {
-            if stdout_bytes > MAX_GIT_STDOUT_BYTES as u64 {
-                return Err(CoreError::ResourceLimitExceeded {
-                    resource: "git_stdout".to_owned(),
-                    reason: format!("output exceeds {MAX_GIT_STDOUT_BYTES} bytes"),
-                });
-            }
-            return Ok(stdout.trim_end().to_owned());
-        }
-
-        Err(CoreError::External {
-            service: "git".to_owned(),
-            message: if stderr.trim().is_empty() {
-                format!("git exited with status {status}")
-            } else {
-                stderr.trim().to_owned()
-            },
+        let (status, (stdout, stdout_bytes), (stderr, _)) = self.finish_git_child(
+            &mut child,
+            &operation,
+            stdout_handle,
+            stderr_handle,
+            "git stdout",
+            "git stderr",
+        )?;
+        Ok(GitCommandOutput {
+            status,
+            stdout,
+            stdout_bytes,
+            stderr,
         })
     }
 
@@ -482,14 +504,33 @@ impl GitService {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        match self.run_git(args) {
-            Ok(value) => Ok(Some(value)),
-            Err(error @ (CoreError::ExternalCancellation { .. } | CoreError::Cancelled)) => {
-                Err(error)
-            }
-            Err(CoreError::External { service, .. }) if service == "git" => Ok(None),
-            Err(error) => Err(error),
+        let output = self.run_git_output(args)?;
+        ensure_git_stdout_within_limit(&output)?;
+        if output.status.success() {
+            return Ok(Some(output.stdout.trim_end().to_owned()));
         }
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        Err(git_command_error(&output))
+    }
+
+    fn finish_git_child<T>(
+        &self,
+        child: &mut Child,
+        operation: &str,
+        stdout_handle: std::thread::JoinHandle<CoreResult<T>>,
+        stderr_handle: std::thread::JoinHandle<CoreResult<(String, u64)>>,
+        stdout_stream: &str,
+        stderr_stream: &str,
+    ) -> CoreResult<(ExitStatus, T, (String, u64))> {
+        let wait_result = self.wait_for_git_child(child, operation);
+        // 即使取消、超时或 wait 失败，也必须回收两条 pipe reader，避免快速取消
+        // 把已失去所有权的后台读取线程留在进程内。
+        let stdout_result = join_git_reader(stdout_handle, stdout_stream);
+        let stderr_result = join_git_reader(stderr_handle, stderr_stream);
+        let status = wait_result?;
+        Ok((status, stdout_result?, stderr_result?))
     }
 
     fn wait_for_git_child(&self, child: &mut Child, operation: &str) -> CoreResult<ExitStatus> {
@@ -513,8 +554,13 @@ impl GitService {
                     ),
                 });
             }
-            if let Some(status) = child.try_wait()? {
-                return Ok(status);
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => {}
+                Err(error) => {
+                    terminate_git_process_tree(child);
+                    return Err(CoreError::from(error));
+                }
             }
             std::thread::sleep(GIT_POLL_INTERVAL);
         }
@@ -538,6 +584,31 @@ fn terminate_git_process_tree(child: &mut Child) {
     #[cfg(not(any(unix, windows)))]
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn ensure_git_stdout_within_limit(output: &GitCommandOutput) -> CoreResult<()> {
+    if output.stdout_bytes <= MAX_GIT_STDOUT_BYTES as u64 {
+        return Ok(());
+    }
+    Err(CoreError::ResourceLimitExceeded {
+        resource: "git_stdout".to_owned(),
+        reason: format!("output exceeds {MAX_GIT_STDOUT_BYTES} bytes"),
+    })
+}
+
+fn git_command_error(output: &GitCommandOutput) -> CoreError {
+    git_command_error_from_parts(output.status, &output.stderr)
+}
+
+fn git_command_error_from_parts(status: ExitStatus, stderr: &str) -> CoreError {
+    CoreError::External {
+        service: "git".to_owned(),
+        message: if stderr.trim().is_empty() {
+            format!("git exited with status {status}")
+        } else {
+            stderr.trim().chars().take(2000).collect()
+        },
+    }
 }
 
 fn drain_bounded(mut reader: impl Read, limit: usize) -> std::io::Result<(String, u64)> {
@@ -609,28 +680,16 @@ impl GitStagePolicy {
         self
     }
 
-    fn exclude_pathspecs(&self) -> Vec<String> {
-        self.ignored_paths
+    fn exclude_pathspecs(&self) -> CoreResult<Vec<String>> {
+        Ok(self
+            .ignored_paths
             .iter()
-            .filter_map(|path| normalize_excluded_path(path))
-            .collect::<BTreeSet<_>>()
+            .map(|path| crate::config::normalize_git_ignored_path(path))
+            .collect::<CoreResult<BTreeSet<_>>>()?
             .into_iter()
             .map(|path| format!(":(exclude,top,literal){path}"))
-            .collect()
+            .collect())
     }
-}
-
-fn normalize_excluded_path(path: &str) -> Option<String> {
-    let normalized = path.trim().replace('\\', "/");
-    let normalized = normalized.trim_matches('/');
-    if normalized.is_empty()
-        || normalized
-            .split('/')
-            .any(|component| component.is_empty() || component == "..")
-    {
-        return None;
-    }
-    Some(normalized.to_owned())
 }
 
 fn default_ignored_paths() -> Vec<String> {

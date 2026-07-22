@@ -9,6 +9,58 @@ namespace Ariadne.Desktop.Tests;
 public sealed class WorksDocumentStateTests
 {
     [Fact]
+    public async Task PreparedLeaveSave_KeepsEditMadeDuringCommitDirty()
+    {
+        var backend = WorksBackend.Create();
+        var saveStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var saveRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? savedContent = null;
+        backend.SaveHandler = async (_, content, _, _) =>
+        {
+            savedContent = content;
+            saveStarted.TrySetResult(true);
+            await saveRelease.Task;
+            return WriteReport("a.md", "v2");
+        };
+        var vm = NewViewModel(backend);
+        vm.SeedOpenDocumentForTests("a.md", "v1", "A");
+        vm.DocumentContent = "A*";
+
+        Assert.True(await vm.PrepareUnsavedChangesAsync());
+        var commit = vm.CommitPreparedUnsavedChangesAsync();
+        await saveStarted.Task;
+        vm.DocumentContent = "A*+";
+        saveRelease.TrySetResult(true);
+
+        Assert.False(await commit);
+        Assert.Equal("A*", savedContent);
+        Assert.Equal("A*+", vm.DocumentContent);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public async Task PreparedLeaveSave_RejectsEditBeforeCommitWithoutWriting()
+    {
+        var backend = WorksBackend.Create();
+        var saveCalls = 0;
+        backend.SaveHandler = (_, _, _, _) =>
+        {
+            saveCalls++;
+            return Task.FromResult(WriteReport("a.md", "v2"));
+        };
+        var vm = NewViewModel(backend);
+        vm.SeedOpenDocumentForTests("a.md", "v1", "A");
+        vm.DocumentContent = "A*";
+
+        Assert.True(await vm.PrepareUnsavedChangesAsync());
+        vm.DocumentContent = "A*+";
+
+        Assert.False(await vm.CommitPreparedUnsavedChangesAsync());
+        Assert.Equal(0, saveCalls);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
     public async Task SaveCompletionAfterLocalEdit_KeepsTheNewEditDirty()
     {
         var backend = WorksBackend.Create();

@@ -294,6 +294,30 @@ public sealed class CanvasHelpersTests
     }
 
     [Fact]
+    public void UpdateEdgePathFromAnchors_UsesMeasuredPinCentersExactly()
+    {
+        var edge = new WorkflowEdgeViewModel(
+            new Ariadne.Desktop.Backend.CanvasEdge(
+                "measured", "a", "b", "output", "data-in-2", "data", null, null),
+            Ariadne.Desktop.Localization.DisplayNameService.LoadDefault(),
+            _ => { },
+            () => { });
+
+        edge.UpdateEdgePathFromAnchors(
+            47.5, 61.25, 321.75, 144.5,
+            NodePortKind.Data, NodePortKind.Data);
+
+        var path = Assert.IsType<Avalonia.Media.PathGeometry>(edge.EdgePath);
+        var figure = Assert.Single(path.Figures!);
+        var bezier = Assert.IsType<Avalonia.Media.BezierSegment>(Assert.Single(figure.Segments!));
+        Assert.Equal(new Avalonia.Point(47.5, 61.25), figure.StartPoint);
+        Assert.Equal(new Avalonia.Point(321.75, 144.5), bezier.Point3);
+        // Product edge model is a single cubic path (no separate arrow-head geometries).
+        Assert.Null(edge.GetType().GetProperty("StartArrowPath"));
+        Assert.Null(edge.GetType().GetProperty("EndArrowPath"));
+    }
+
+    [Fact]
     public void BuildCommunicationJumpPath_ArchesAboveEndpoints()
     {
         // 开口向下二次感：中点 Y 必须小于两端（更靠上），形成「从上面跳过去」

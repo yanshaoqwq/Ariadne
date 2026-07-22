@@ -29,11 +29,11 @@ public sealed class PermissionsDangerGroupingTests
     {
         var group = new ToolControlGroupViewModel("writer", "Writer");
         group.Controls.Add(new ToolControlItemViewModel(
-            "writer-find", "查找", true, ToolControlItemViewModel.IsDangerToolId("writer-find"), () => { }));
+            "writer-find", "查找", true, ToolControlItemViewModel.IsDangerToolId("writer-find"), canInherit: false, markDirty: () => { }));
         group.Controls.Add(new ToolControlItemViewModel(
-            "writer-rewrite-file", "重写", false, ToolControlItemViewModel.IsDangerToolId("writer-rewrite-file"), () => { }));
+            "writer-rewrite-file", "重写", false, ToolControlItemViewModel.IsDangerToolId("writer-rewrite-file"), canInherit: false, markDirty: () => { }));
         group.Controls.Add(new ToolControlItemViewModel(
-            "writer-insert-lines", "插入", true, ToolControlItemViewModel.IsDangerToolId("writer-insert-lines"), () => { }));
+            "writer-insert-lines", "插入", true, ToolControlItemViewModel.IsDangerToolId("writer-insert-lines"), canInherit: false, markDirty: () => { }));
 
         group.RefreshPartitions();
 

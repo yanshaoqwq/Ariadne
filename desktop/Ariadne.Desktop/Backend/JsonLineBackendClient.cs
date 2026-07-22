@@ -76,8 +76,9 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeCommandAndRememberProjectAsync("set_project_root", projectRoot, new { project_root = projectRoot }, cancellationToken);
     }
 
-    public void ClearProjectRoot()
+    public async Task CloseProjectAsync(CancellationToken cancellationToken = default)
     {
+        await InvokeCommandAsync("close_project", null, cancellationToken).ConfigureAwait(false);
         _projectRoot = null;
     }
 
@@ -216,6 +217,16 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<RagSettings>("get_rag_settings", null, cancellationToken);
     }
 
+    public Task<AppRuntimeSettings> GetAppRuntimeSettingsAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<AppRuntimeSettings>("get_app_runtime_settings", null, cancellationToken);
+    }
+
+    public Task<AppRuntimeSettings> SaveAppRuntimeSettingsAsync(AppRuntimeSettings settings, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<AppRuntimeSettings>("save_app_runtime_settings", new { settings }, cancellationToken);
+    }
+
     public Task<RagSettings> SaveRagSettingsAsync(RagSettings settings, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<RagSettings>("save_rag_settings", new { settings }, cancellationToken);
@@ -246,12 +257,17 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
-    public Task<TemplateInstallReport> InstallTemplateAsync(string baseUrl, string id, CancellationToken cancellationToken = default)
+    public Task<TemplateInstallReport> InstallTemplateAsync(
+        string baseUrl,
+        string id,
+        string expectedProjectRoot,
+        CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<TemplateInstallReport>("install_template", new
         {
             request = new { base_url = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl },
             id,
+            expected_project_root = expectedProjectRoot,
         }, cancellationToken);
     }
 
@@ -388,9 +404,19 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<WorkflowGraphData>("load_workflow_graph", new { workflow_id = workflowId }, cancellationToken);
     }
 
+    public Task<WorkflowGraphData> LoadProjectCanvasAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowGraphData>("load_project_canvas", null, cancellationToken);
+    }
+
     public Task<WorkflowGraphData> SaveWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<WorkflowGraphData>("save_workflow_graph", new { graph_data = graphData }, cancellationToken);
+    }
+
+    public Task<WorkflowGraphData> SaveProjectCanvasAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<WorkflowGraphData>("save_project_canvas", new { graph_data = graphData }, cancellationToken);
     }
 
     public Task ValidateWorkflowGraphAsync(WorkflowGraphData graphData, CancellationToken cancellationToken = default)

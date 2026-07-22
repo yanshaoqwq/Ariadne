@@ -118,7 +118,7 @@ where
         move |request: IpcRequest, cancellation: &crate::contracts::ExecutionCancellation| {
             let changes_project = matches!(
                 request.method.as_str(),
-                "create_project" | "open_project" | "set_project_root"
+                "create_project" | "open_project" | "close_project" | "set_project_root"
             );
             let result = if changes_project {
                 project_gate
@@ -438,6 +438,7 @@ fn dispatch_request(
                 params.name,
             )?)
         }
+        "close_project" => ok(commands::close_project(state)?),
         "get_current_project" => ok(commands::get_current_project(state)?),
         "get_app_status" => ok(commands::get_app_status(state)?),
         "get_sidebar_badges" => ok(commands::get_sidebar_badges(state)?),
@@ -500,6 +501,7 @@ fn dispatch_request(
             let params: WorkflowIdParams = params(request.params)?;
             ok(commands::load_workflow_graph(state, params.workflow_id)?)
         }
+        "load_project_canvas" => ok(commands::load_project_canvas(state)?),
         "list_workflow_graphs" => ok(commands::list_workflow_graphs(state)?),
         "validate_workflow_graph" => {
             let params: WorkflowGraphParams = params(request.params)?;
@@ -508,6 +510,10 @@ fn dispatch_request(
         "save_workflow_graph" => {
             let params: WorkflowGraphParams = params(request.params)?;
             ok(commands::save_workflow_graph(state, params.graph_data)?)
+        }
+        "save_project_canvas" => {
+            let params: WorkflowGraphParams = params(request.params)?;
+            ok(commands::save_project_canvas(state, params.graph_data)?)
         }
         "apply_node_detail_patch" => {
             let params: ApplyNodeDetailPatchParams = params(request.params)?;
@@ -640,9 +646,14 @@ fn dispatch_request(
         }
         "get_budget_status" => ok(commands::get_budget_status(state)?),
         "get_app_settings" => ok(commands::get_app_settings(state)?),
+        "get_app_runtime_settings" => ok(commands::get_app_runtime_settings(state)?),
         "save_app_settings" => {
             let params: SettingsParam<commands::AppSettings> = params(request.params)?;
             ok(commands::save_app_settings(state, params.settings)?)
+        }
+        "save_app_runtime_settings" => {
+            let params: SettingsParam<crate::config::AppRuntimeSettings> = params(request.params)?;
+            ok(commands::save_app_runtime_settings(state, params.settings)?)
         }
         "save_general_section_settings" => {
             let params: SettingsParam<commands::GeneralSectionSettings> = params(request.params)?;
@@ -923,11 +934,12 @@ fn dispatch_request(
             )?)
         }
         "install_template" => {
-            let params: TemplateDetailParams = params(request.params)?;
-            ok(commands::install_template_with_cancellation(
+            let params: TemplateInstallParams = params(request.params)?;
+            ok(commands::install_template_for_project_with_cancellation(
                 state,
                 params.request,
                 params.id,
+                params.expected_project_root,
                 cancellation,
             )?)
         }
@@ -1234,6 +1246,13 @@ struct SearchTemplatesParams {
 struct TemplateDetailParams {
     request: commands::TemplateRepositoryRequest,
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateInstallParams {
+    request: commands::TemplateRepositoryRequest,
+    id: String,
+    expected_project_root: String,
 }
 
 #[cfg(test)]

@@ -9,38 +9,58 @@
     Loaded="OnLoaded">
   <Grid RowDefinitions="52,*" Background="{DynamicResource Ariadne.BackgroundMain}">
 
-    <!-- 顶栏 -->
+    <!-- 顶栏：标题 + 在线检索状态芯片（避免右上角孤儿 subtle 文案） -->
     <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Background="{DynamicResource Ariadne.BackgroundSurface}">
       <Border Grid.ColumnSpan="3" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" />
       <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="subtitle" VerticalAlignment="Center" Margin="18,0,0,0" />
-      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="0,0,18,0">
-        <TextBlock Text="{Binding OnlineSearchText}" Classes="subtle" VerticalAlignment="Center" />
-      </StackPanel>
+      <Border Grid.Column="2"
+              Classes="chip"
+              VerticalAlignment="Center"
+              Margin="0,0,18,0"
+              Background="{DynamicResource Ariadne.BackgroundSubtle}"
+              BorderBrush="{DynamicResource Ariadne.BorderMuted}">
+        <TextBlock Text="{Binding OnlineSearchText}"
+                   Classes="caption"
+                   VerticalAlignment="Center"
+                   Foreground="{DynamicResource Ariadne.TextSecondary}" />
+      </Border>
     </Grid>
 
     <ScrollViewer Grid.Row="1">
       <StackPanel MaxWidth="1040" Margin="32,28">
 
-        <!-- 搜索栏：600px 固定宽度居中，右侧搜索键 -->
-        <Grid ColumnDefinitions="*,Auto" HorizontalAlignment="Stretch" ColumnSpacing="8">
-          <TextBox Grid.Column="0"
-              Text="{Binding SearchQuery, Mode=TwoWay}"
-              PlaceholderText="{Binding SearchPlaceholder}"
-              MinHeight="48"
-              FontSize="16" />
-          <Button Grid.Column="1" Classes="primary" Width="52" Height="48" Padding="0"
-                  Command="{Binding SearchCommand}"
-                  ToolTip.Tip="{Binding SearchText}">
-            <Path Classes="icon" Width="20" Height="20"
-                  Stroke="{DynamicResource Ariadne.TextOnAccent}"
-                  Data="{StaticResource Ariadne.Icon.Search}" />
-          </Button>
-        </Grid>
+        <!-- 一体搜索壳：左侧提示图标 + 输入 + 右侧提交，居中限宽 -->
+        <Border Classes="search-shell"
+                MaxWidth="560"
+                HorizontalAlignment="Center">
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <Path Grid.Column="0"
+                  Classes="icon"
+                  Width="16"
+                  Height="16"
+                  Margin="10,0,2,0"
+                  Opacity="0.55"
+                  Data="{StaticResource Ariadne.Icon.Search}"
+                  IsHitTestVisible="False" />
+            <TextBox Grid.Column="1"
+                     Classes="search-input"
+                     Text="{Binding SearchQuery, Mode=TwoWay}"
+                     PlaceholderText="{Binding SearchPlaceholder}"
+                     AutomationProperties.Name="{Binding SearchPlaceholder}" />
+            <Button Grid.Column="2"
+                    Classes="search-submit"
+                    Command="{Binding SearchCommand}"
+                    ToolTip.Tip="{Binding SearchText}"
+                    AutomationProperties.Name="{Binding SearchText}">
+              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Search}" />
+            </Button>
+          </Grid>
+        </Border>
 
         <ItemsControl ItemsSource="{Binding Tags}"
                       IsEnabled="{Binding CanInteract}"
                       HorizontalAlignment="Center"
-                      Margin="0,16,0,24">
+                      Margin="0,18,0,26">
           <ItemsControl.ItemsPanel>
             <ItemsPanelTemplate>
               <WrapPanel />
@@ -48,11 +68,12 @@
           </ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:TemplateTagViewModel}">
-              <Button Classes="subtle" Margin="4" Padding="0" Command="{Binding SelectCommand}">
-                <Border Classes="chip">
-                  <TextBlock Text="{Binding Title}" Classes="caption" />
-                </Border>
-              </Button>
+              <Button Classes="chip-filter"
+                      Margin="0,0,8,8"
+                      Padding="12,6"
+                      Command="{Binding SelectCommand}"
+                      Content="{Binding Title}"
+                      AutomationProperties.Name="{Binding Title}" />
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
@@ -67,21 +88,29 @@
           </ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:TemplateCardViewModel}">
-              <Border Classes="card" Margin="8" Padding="18" MinHeight="168">
+              <Border Classes="card" Margin="8" Padding="16" MinHeight="160">
                 <DockPanel>
-                  <StackPanel DockPanel.Dock="Top" Spacing="10">
+                  <StackPanel DockPanel.Dock="Top" Spacing="8">
                     <Grid ColumnDefinitions="*,Auto">
-                      <TextBlock Grid.Column="0" Text="{Binding Name}" Classes="subtitle" />
+                      <TextBlock Grid.Column="0" Text="{Binding Name}" Classes="subtitle" TextTrimming="CharacterEllipsis" />
                       <Border Grid.Column="1" Classes="chip" Background="{DynamicResource Ariadne.AccentLight}" IsVisible="{Binding RequiresPermissions}">
                         <TextBlock Text="{Binding #Root.DataContext.PermissionText}" Classes="caption" Foreground="{DynamicResource Ariadne.AccentPrimary}" />
                       </Border>
                     </Grid>
-                    <TextBlock Text="{Binding Id}" Classes="mono" />
-                    <TextBlock Text="{Binding TagsText}" Classes="caption" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding Id}" Classes="mono" Opacity="0.85" />
+                    <TextBlock Text="{Binding TagsText}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                   </StackPanel>
-                  <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                    <Button Classes="secondary" Content="{Binding #Root.DataContext.DetailText}" Command="{Binding ShowDetailsCommand}" />
-                    <Button Classes="primary" Content="{Binding #Root.DataContext.ImportText}" Command="{Binding InstallCommand}" />
+                  <StackPanel DockPanel.Dock="Bottom"
+                              Orientation="Horizontal"
+                              Spacing="8"
+                              HorizontalAlignment="Right"
+                              Margin="0,14,0,0">
+                    <Button Classes="secondary btn-compact"
+                            Content="{Binding #Root.DataContext.DetailText}"
+                            Command="{Binding ShowDetailsCommand}" />
+                    <Button Classes="primary btn-compact"
+                            Content="{Binding #Root.DataContext.ImportText}"
+                            Command="{Binding InstallCommand}" />
                   </StackPanel>
                 </DockPanel>
               </Border>

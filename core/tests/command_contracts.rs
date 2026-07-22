@@ -1,24 +1,26 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use ariadne::commands::{
-    create_checkpoint_impl, create_project, ensure_index_bootstrap_on_open, fetch_provider_models,
-    fetch_provider_models_impl, fetch_provider_models_with_cancellation, get_app_settings_impl,
-    get_app_status, get_automation_settings_impl, get_backend_diagnostics, get_budget_status_impl,
+    close_project, create_checkpoint_impl, create_project, ensure_index_bootstrap_on_open,
+    export_chapters, fetch_provider_models, fetch_provider_models_impl,
+    fetch_provider_models_with_cancellation, get_app_settings_impl, get_app_status,
+    get_automation_settings_impl, get_backend_diagnostics, get_budget_status_impl,
     get_chapter_summary_view, get_display_name_language_pack_template, get_document_content_impl,
     get_document_tree_impl, get_git_history_impl, get_git_repository_status_impl,
     get_git_settings_impl, get_node_preset_settings_impl, get_permissions_settings_impl,
     get_provider_config_impl, get_rag_settings_impl, get_sidebar_badges,
     get_template_repository_settings, get_template_repository_settings_impl,
     get_workflow_settings_impl, get_works_tree, import_chapter, install_template,
-    list_confirmations, list_external_workflow_tools_impl, list_workflow_graphs_impl,
+    install_template_for_project_with_cancellation, list_confirmations,
+    list_external_workflow_tools_impl, list_workflow_graphs_impl, load_project_canvas_impl,
     load_workflow_graph_impl, mark_workflow_run_failed_impl,
     mark_workflow_run_failed_with_lease_impl, open_project, override_confirmation_output,
     pack_workflow_selection_impl, pack_workflow_selection_impl_with_operation_id, pause_workflow,
@@ -28,22 +30,24 @@ use ariadne::commands::{
     restore_to_new_branch, resume_from_node, resume_workflow, run_workflow, run_workflow_impl,
     save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
     save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
-    save_provider_key, save_provider_key_impl, save_provider_section_settings,
-    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings,
-    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
-    search_project_documents_impl, search_templates, set_project_root, start_workflow_with_request,
-    stop_workflow, update_budget_config_impl, validate_display_name_language_pack, AppSettings,
-    AriadneAppState, AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy,
-    ConfirmationDecision, ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings,
-    InDoubtDecision, NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
+    save_project_canvas_impl, save_provider_key, save_provider_key_impl,
+    save_provider_section_settings, save_provider_settings_impl, save_rag_settings_impl,
+    save_template_repository_settings, save_template_repository_settings_impl,
+    save_workflow_graph_impl, save_workflow_settings_impl, search_project_documents_impl,
+    search_templates, set_project_root, start_workflow_with_request, stop_workflow,
+    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
+    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
+    ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, InDoubtDecision,
+    NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
     ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSectionSettings,
     ProviderSettingsUpdate, QuickEditRequest, RagSettings, ResolveConfirmationRequest,
     ResolveInDoubtOperationRequest, ResumeFromNodeRequest, RunLogQuery, TemplateRepositoryRequest,
     TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{
-    ConfigStore, MemorySecretStore, ModelConfig, PathWriteLock, ProjectCredentialScope,
-    ProviderConfig, SecretRef, SecretStore, SecretValue, PROVIDERS_CONFIG_FILE,
+    AppRuntimeSettings, ConfigStore, MemorySecretStore, ModelConfig, PathWriteLock, ProjectConfig,
+    ProjectCredentialScope, ProviderConfig, SecretRef, SecretStore, SecretValue,
+    PROVIDERS_CONFIG_FILE,
 };
 use ariadne::contracts::{
     ExecutionCancellation, NodeId, NodeInstance, PermissionPolicy, PortValue, ProviderCapability,
@@ -59,9 +63,9 @@ use ariadne::retrieval::{FullTextSearchRequest, FullTextStore, TantivyFullTextSt
 use ariadne::workflow::{
     ConfirmationResolutionDecision, ConfirmationResolutionStatus, NewWorkflowOperation,
     RuntimeConfirmation, RuntimeConfirmationState, SqliteWorkflowRuntimeStore,
-    WorkflowNodeExecutionOutput, WorkflowNodeRuntimeState, WorkflowOperationPolicy,
-    WorkflowOperationStatus, WorkflowRunState, WorkflowRuntime, WorkflowRuntimeEventType,
-    WorkflowRuntimeStore,
+    WorkflowExecutionDependencySet, WorkflowNodeExecutionOutput, WorkflowNodeRuntimeState,
+    WorkflowOperationPolicy, WorkflowOperationStatus, WorkflowRunState, WorkflowRuntime,
+    WorkflowRuntimeEventType, WorkflowRuntimeStore,
 };
 use serde_json::{json, Value};
 
@@ -84,6 +88,22 @@ fn wait_for_terminal_workflow_state(
         thread::sleep(Duration::from_millis(20));
     }
     last.expect("workflow state should be persisted by background worker")
+}
+
+fn minimal_frozen_dependency_plan(workflow: &WorkflowDefinition) -> Value {
+    let dependencies = WorkflowExecutionDependencySet::compile(workflow).unwrap();
+    let requires_project_retrieval = dependencies.uses_node_type("search");
+    json!({
+        "version": 1,
+        "workflow": serde_json::to_value(&dependencies).unwrap(),
+        "project_config": serde_json::to_value(ProjectConfig::default()).unwrap(),
+        "node_presets": serde_json::to_value(NodePresetSettings::default()).unwrap(),
+        "llm_node_routes": {},
+        "executor_adapter_manifests": [],
+        "credential_generations": {},
+        "requires_project_retrieval": requires_project_retrieval,
+        "requires_web_search": false
+    })
 }
 
 #[test]
@@ -225,8 +245,9 @@ fn f2a_open_project_bootstraps_full_rebuild_for_existing_documents() {
     // open_project / set_project_root must call ensure_index_bootstrap_on_open (shipped wiring).
     let commands_src = include_str!("../src/commands.rs");
     assert!(
-        commands_src.contains("ensure_index_bootstrap_on_open(&project_root)?")
+        commands_src.contains("ensure_index_bootstrap_on_open(project_root)")
             && commands_src.contains("pub fn open_project")
+            && commands_src.contains("complete_committed_project_activation")
             && commands_src.contains("pub fn set_project_root"),
         "open_project and set_project_root must invoke ensure_index_bootstrap_on_open"
     );
@@ -361,6 +382,7 @@ fn f10d_open_project_recovers_orphaned_queued_run() {
     let run_id = RunId::from("orphan-queued-1");
     let mut state = WorkflowRunState::new(workflow.id.clone(), run_id.clone());
     state.prepared_workflow = Some(workflow.clone());
+    state.prepared_dependency_plan = Some(minimal_frozen_dependency_plan(&workflow));
     state.status = RunStatus::Queued;
     let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
     store.create_state(&state).unwrap();
@@ -403,6 +425,7 @@ fn f10d_open_project_recovers_orphaned_queued_run() {
     let run_id2 = RunId::from("orphan-queued-2");
     let mut state2 = WorkflowRunState::new(workflow.id.clone(), run_id2.clone());
     state2.prepared_workflow = Some(workflow.clone());
+    state2.prepared_dependency_plan = Some(minimal_frozen_dependency_plan(&workflow));
     state2.status = RunStatus::Queued;
     store.create_state(&state2).unwrap();
     set_project_root(&app, temp.path().to_string_lossy().into_owned()).unwrap();
@@ -515,7 +538,8 @@ fn f9_open_project_scheduler_wakes_future_retry_without_reopen() {
         .as_millis() as u64
         + 600;
     let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
-    state.prepared_workflow = Some(workflow);
+    state.prepared_workflow = Some(workflow.clone());
+    state.prepared_dependency_plan = Some(minimal_frozen_dependency_plan(&workflow));
     state.next_retry_at_ms = Some(retry_at_ms);
     state.nodes.insert(
         NodeId::from("start"),
@@ -771,6 +795,20 @@ fn app_state_root_can_be_separated_from_project_root_env() {
 }
 
 #[test]
+fn default_project_root_does_not_treat_process_working_directory_as_an_open_project() {
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let previous = std::env::var_os("ARIADNE_PROJECT_ROOT");
+    std::env::remove_var("ARIADNE_PROJECT_ROOT");
+
+    let resolved = ariadne::commands::default_project_root();
+
+    if let Some(previous) = previous {
+        std::env::set_var("ARIADNE_PROJECT_ROOT", previous);
+    }
+    assert!(resolved.as_os_str().is_empty());
+}
+
+#[test]
 fn app_state_rejects_missing_or_uninitialized_project_root() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -790,6 +828,10 @@ fn app_state_rejects_missing_or_uninitialized_project_root() {
     assert!(uninitialized_error.contains("not initialized"));
 
     std::fs::create_dir_all(uninitialized.join(".config")).unwrap();
+    let marker_only_error = state.set_project_root(&uninitialized).unwrap_err();
+    assert!(marker_only_error.contains("missing .config/app.yaml"));
+
+    ariadne::frontend::initialize_project(&uninitialized).unwrap();
     state.set_project_root(&uninitialized).unwrap();
     assert_eq!(state.project_root().unwrap(), uninitialized);
 }
@@ -805,21 +847,251 @@ fn project_create_and_open_persist_display_name_in_project_config() {
         Arc::new(MemorySecretStore::default()),
     );
 
-    create_project(
+    let report = create_project(
         &state,
         project_root.to_string_lossy().into_owned(),
         Some("作品项目".to_owned()),
     )
     .unwrap();
+    assert!(report.ready);
+    assert!(report.git_initialized);
+    assert_eq!(report.project_root, project_root);
+    assert_eq!(report.project_name, "作品项目");
+    assert_eq!(report.created_config_files.len(), 7);
+    for directory in [
+        ".config",
+        ".runtime",
+        "planning",
+        "planning/stages",
+        "planning/chapters",
+        "documents",
+        "workflows",
+        "skills",
+        "exports",
+    ] {
+        assert!(project_root.join(directory).is_dir(), "missing {directory}");
+        assert!(report.created_dirs.contains(&project_root.join(directory)));
+    }
     let config = ConfigStore::new(&project_root).load().unwrap();
     assert_eq!(config.app.project_name, "作品项目");
     assert_eq!(
         get_app_status(&state).unwrap().current_project.project_name,
         "作品项目"
     );
+    let recent = ariadne::commands::list_recent_projects(&state).unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].name, "作品项目");
+    assert_eq!(recent[0].path, project_root);
+
+    close_project(&state).unwrap();
+    assert!(state.project_root().unwrap().as_os_str().is_empty());
+    assert!(get_app_status(&state)
+        .unwrap()
+        .current_project
+        .project_root
+        .as_os_str()
+        .is_empty());
+    assert!(project_root.join(".config/app.yaml").is_file());
 
     let reopened = open_project(&state, project_root.to_string_lossy().into_owned(), None).unwrap();
     assert_eq!(reopened.project_name, "作品项目");
+}
+
+#[test]
+fn project_open_rejects_corrupt_candidate_workflow_store_before_identity_commit() {
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project_a.path()).unwrap();
+    ariadne::frontend::initialize_project(project_b.path()).unwrap();
+    let state = AriadneAppState::new(
+        project_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    set_project_root(&state, project_a.path().to_string_lossy().into_owned()).unwrap();
+    std::fs::write(
+        project_b.path().join(ariadne::workflow::RUNTIME_DB_FILE),
+        b"not-a-sqlite-database",
+    )
+    .unwrap();
+
+    let error = open_project(
+        &state,
+        project_b.path().to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(!error.diagnostic_text().is_empty());
+    assert_eq!(
+        state.project_root().unwrap(),
+        project_a.path().canonicalize().unwrap()
+    );
+    assert_eq!(
+        ariadne::commands::get_current_project(&state)
+            .unwrap()
+            .project_root,
+        project_a.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn project_open_rejects_corrupt_candidate_index_outbox_before_identity_commit() {
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project_a.path()).unwrap();
+    ariadne::frontend::initialize_project(project_b.path()).unwrap();
+    let state = AriadneAppState::new(
+        project_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    set_project_root(&state, project_a.path().to_string_lossy().into_owned()).unwrap();
+    std::fs::write(
+        project_b
+            .path()
+            .join(".runtime")
+            .join("index_invalidation.db"),
+        b"not-a-sqlite-database",
+    )
+    .unwrap();
+
+    let error = open_project(
+        &state,
+        project_b.path().to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(!error.diagnostic_text().is_empty());
+    assert_eq!(
+        state.project_root().unwrap(),
+        project_a.path().canonicalize().unwrap()
+    );
+    assert_eq!(
+        ariadne::commands::get_current_project(&state)
+            .unwrap()
+            .project_root,
+        project_a.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn project_open_rolls_back_active_identity_when_recent_project_commit_fails() {
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project_a.path()).unwrap();
+    ariadne::frontend::initialize_project(project_b.path()).unwrap();
+    let state = AriadneAppState::new(
+        project_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    state.set_project_root(project_a.path()).unwrap();
+    std::fs::create_dir(app_state.path().join("recent_projects.json")).unwrap();
+
+    let error = open_project(
+        &state,
+        project_b.path().to_string_lossy().into_owned(),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(!error.diagnostic_text().is_empty());
+    assert_eq!(
+        state.project_root().unwrap(),
+        project_a.path().canonicalize().unwrap()
+    );
+    assert_eq!(
+        ariadne::commands::get_current_project(&state)
+            .unwrap()
+            .project_root,
+        project_a.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn project_create_refuses_existing_target_without_mutating_it() {
+    let project_parent = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let project_root = project_parent.path().join("existing");
+    std::fs::create_dir(&project_root).unwrap();
+    std::fs::write(project_root.join("keep.txt"), "keep").unwrap();
+    let state = AriadneAppState::new("", app_state.path(), Arc::new(MemorySecretStore::default()));
+
+    let error = create_project(
+        &state,
+        project_root.to_string_lossy().into_owned(),
+        Some("不可覆盖".to_owned()),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.code,
+        ariadne::command_error::CommandErrorCode::Conflict
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_root.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    assert!(!project_root.join(".config").exists());
+    assert!(state.project_root().unwrap().as_os_str().is_empty());
+}
+
+#[test]
+fn project_create_failure_removes_staging_and_final_directories() {
+    let project_parent = tempfile::tempdir().unwrap();
+    let app_state_parent = tempfile::tempdir().unwrap();
+    let app_state_file = app_state_parent.path().join("not-a-directory");
+    std::fs::write(&app_state_file, "occupied").unwrap();
+    let project_root = project_parent.path().join("must-not-survive");
+    let state = AriadneAppState::new("", &app_state_file, Arc::new(MemorySecretStore::default()));
+
+    let error = create_project(
+        &state,
+        project_root.to_string_lossy().into_owned(),
+        Some("失败项目".to_owned()),
+    )
+    .unwrap_err();
+
+    assert!(!error.diagnostic_text().is_empty());
+    assert!(!project_root.exists());
+    assert!(std::fs::read_dir(project_parent.path())
+        .unwrap()
+        .all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ariadne-create-")
+        }));
+    assert!(state.project_root().unwrap().as_os_str().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_open_uses_one_canonical_identity_for_state_status_and_recent_projects() {
+    use std::os::unix::fs::symlink;
+
+    let parent = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let project_root = parent.path().join("real-project");
+    let alias = parent.path().join("project-alias");
+    ariadne::frontend::initialize_project(&project_root).unwrap();
+    symlink(&project_root, &alias).unwrap();
+    let state = AriadneAppState::new("", app_state.path(), Arc::new(MemorySecretStore::default()));
+
+    let current = open_project(&state, alias.to_string_lossy().into_owned(), None).unwrap();
+    let canonical = project_root.canonicalize().unwrap();
+    let recent = ariadne::commands::list_recent_projects(&state).unwrap();
+
+    assert_eq!(current.project_root, canonical);
+    assert_eq!(state.project_root().unwrap(), canonical);
+    assert_eq!(recent[0].path, canonical);
+    close_project(&state).unwrap();
 }
 
 #[test]
@@ -1219,6 +1491,43 @@ fn async_start_rejects_missing_workflow_before_returning_queued() {
 }
 
 #[test]
+fn n25_async_start_rejects_missing_referenced_skill_before_returning_queued() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "missing-adapter-skill".to_owned(),
+            name: "Missing Adapter Skill".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "adapter".to_owned(),
+                r#type: "executor_adapter:not-installed".to_owned(),
+                label: None,
+                data: json!({ "skill_id": "not-installed" }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let error = run_workflow(&state, "missing-adapter-skill".to_owned(), None).unwrap_err();
+
+    assert!(error.contains("required skill manifest not found: not-installed"));
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    assert!(store.list_non_terminal_states().unwrap().is_empty());
+}
+
+#[test]
 fn async_start_rejects_corrupt_runtime_store_before_returning_queued() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -1258,7 +1567,7 @@ fn async_start_rejects_corrupt_runtime_store_before_returning_queued() {
 }
 
 #[test]
-fn workflow_graph_list_returns_all_saved_workflows() {
+fn workflow_graph_list_returns_the_single_merged_project_canvas() {
     let temp = tempfile::tempdir().unwrap();
     save_workflow_graph_impl(
         temp.path(),
@@ -1310,20 +1619,108 @@ fn workflow_graph_list_returns_all_saved_workflows() {
 
     let workflows = list_workflow_graphs_impl(temp.path()).unwrap();
 
+    assert_eq!(workflows.len(), 1);
+    assert_eq!(workflows[0].workflow_id, "default");
+    assert_eq!(workflows[0].name, "Project Canvas");
+    assert_eq!(workflows[0].path, "workflows/default.json");
+    assert_eq!(workflows[0].node_count, 3);
+    let loaded = load_workflow_graph_impl(temp.path(), Some("default".to_owned())).unwrap();
+    assert_eq!(loaded.nodes.len(), 3);
+}
+
+#[test]
+fn project_canvas_merges_legacy_workflows_once_and_preserves_edge_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "default".to_owned(),
+            name: "Project Canvas".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Main".to_owned()),
+                data: Value::Null,
+                position: json!({ "x": 0.0, "y": 0.0 }),
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "review/flow".to_owned(),
+            name: "Review".to_owned(),
+            nodes: vec![
+                CanvasNode {
+                    id: "start".to_owned(),
+                    r#type: "start".to_owned(),
+                    label: Some("Review start".to_owned()),
+                    data: Value::Null,
+                    position: json!({ "x": 0.0, "y": 20.0 }),
+                },
+                CanvasNode {
+                    id: "writer".to_owned(),
+                    r#type: "writer".to_owned(),
+                    label: Some("Review writer".to_owned()),
+                    data: Value::Null,
+                    position: json!({ "x": 160.0, "y": 20.0 }),
+                },
+            ],
+            edges: vec![CanvasEdge {
+                id: "next".to_owned(),
+                source: "start".to_owned(),
+                target: "writer".to_owned(),
+                source_handle: "exec_out".to_owned(),
+                target_handle: "exec_in".to_owned(),
+                kind: WorkflowEdgeKind::Control,
+                label: None,
+                data: Value::Null,
+            }],
+            metadata: json!({
+                "canvas_annotations": [{
+                    "annotation_id": "review-group",
+                    "title": "Review",
+                    "node_ids": ["start", "writer"],
+                    "metadata": null
+                }]
+            }),
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+
+    let first = load_project_canvas_impl(temp.path()).unwrap();
+    let second = load_project_canvas_impl(temp.path()).unwrap();
+
+    assert_eq!(first.workflow_id, "default");
+    assert_eq!(first.nodes.len(), 3);
+    assert_eq!(first.edges.len(), 1);
+    assert_eq!(first.edges[0].source, "review-flow--start");
+    assert_eq!(first.edges[0].target, "review-flow--writer");
+    assert_eq!(second.nodes.len(), first.nodes.len());
+    assert_eq!(second.edges.len(), first.edges.len());
     assert_eq!(
-        workflows
-            .iter()
-            .map(|workflow| workflow.workflow_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["draft-flow", "review/review-flow"]
+        second.metadata["project_canvas"]["imported_workflows"][0]["workflow_id"],
+        "review/flow"
     );
-    assert_eq!(workflows[0].name, "Draft Flow");
-    assert_eq!(workflows[0].node_count, 1);
-    assert_eq!(workflows[1].name, "Review Flow");
-    assert_eq!(workflows[1].node_count, 2);
-    let loaded =
-        load_workflow_graph_impl(temp.path(), Some(workflows[1].workflow_id.clone())).unwrap();
-    assert_eq!(loaded.name, "Review Flow");
+    assert_eq!(
+        second.metadata["canvas_annotations"][0]["node_ids"][0],
+        "review-flow--start"
+    );
+
+    let mut saved = second;
+    saved.name = "Renamed project canvas".to_owned();
+    saved.expected_revision = saved.content_revision.clone();
+    let saved = save_project_canvas_impl(temp.path(), saved).unwrap();
+    assert_eq!(saved.workflow_id, "default");
+    assert_eq!(saved.name, "Renamed project canvas");
+    assert!(saved.metadata.get("project_canvas").is_some());
 }
 
 #[test]
@@ -1365,8 +1762,9 @@ fn workflow_graph_list_and_load_support_template_manifest_files() {
     let loaded = load_workflow_graph_impl(temp.path(), Some("market-basic".to_owned())).unwrap();
 
     assert_eq!(workflows.len(), 1);
-    assert_eq!(workflows[0].workflow_id, "market-basic");
-    assert_eq!(workflows[0].path, "workflows/market-basic/workflow.json");
+    assert_eq!(workflows[0].workflow_id, "default");
+    assert_eq!(workflows[0].path, "workflows/default.json");
+    assert_eq!(workflows[0].node_count, 1);
     assert_eq!(loaded.workflow_id, "market-basic");
     assert_eq!(loaded.nodes.len(), 1);
 }
@@ -2001,6 +2399,10 @@ fn async_run_persists_inputs_and_expired_lease_resume_uses_prepared_snapshot() {
         .prepared_workflow
         .clone()
         .expect("validated workflow snapshot must be persisted before returning queued");
+    let prepared_dependency_plan = persisted_after_return
+        .prepared_dependency_plan
+        .clone()
+        .expect("queued snapshot must persist the frozen dependency plan");
     assert_eq!(
         prepared_workflow
             .nodes
@@ -2018,6 +2420,7 @@ fn async_run_persists_inputs_and_expired_lease_resume_uses_prepared_snapshot() {
     let recovery_run_id = RunId::from("recovered-tool-run");
     let mut recovery = WorkflowRuntime::new(&prepared_workflow, recovery_run_id.clone()).unwrap();
     recovery.state.prepared_workflow = Some(prepared_workflow);
+    recovery.state.prepared_dependency_plan = Some(prepared_dependency_plan);
     recovery.state.start_node_id = Some(NodeId::from("start-main"));
     recovery.state.status = RunStatus::Running;
     store.create_state(&recovery.state).unwrap();
@@ -2143,7 +2546,139 @@ fn run_workflow_llm_node_requires_configured_provider_instead_of_noop() {
     )
     .unwrap_err();
 
-    assert!(error.contains("LLM provider"));
+    assert!(error.contains("provider"));
+}
+
+#[test]
+fn workflow_llm_node_routes_to_declared_provider_instead_of_project_default() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+
+    let default_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    default_listener.set_nonblocking(true).unwrap();
+    let default_base_url = format!("http://{}", default_listener.local_addr().unwrap());
+
+    let declared_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    declared_listener.set_nonblocking(true).unwrap();
+    let declared_base_url = format!("http://{}", declared_listener.local_addr().unwrap());
+    let declared_server = thread::spawn(move || {
+        let mut stream = accept_with_deadline(&declared_listener, Duration::from_secs(5));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = [0u8; 65536];
+        let read = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        assert!(request.starts_with("POST /chat/completions "));
+        assert!(request.contains("authorization: Bearer declared-secret"));
+        assert!(request.contains("\"model\":\"declared-model\""));
+        let body = r#"{
+          "model":"declared-model",
+          "choices":[{"message":{"content":"declared route"},"finish_reason":"stop"}],
+          "usage":{"prompt_tokens":4,"completion_tokens":2}
+        }"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "default_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Default Chat".to_owned(),
+            enabled: true,
+            base_url: Some(default_base_url),
+            models: vec![ModelConfig {
+                model_id: "default-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "declared_chat".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Declared Chat".to_owned(),
+            enabled: true,
+            base_url: Some(declared_base_url),
+            models: vec![ModelConfig {
+                model_id: "declared-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: false,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+    let secrets = MemorySecretStore::default();
+    let credentials = ProjectCredentialScope::new(temp.path(), &secrets).unwrap();
+    credentials
+        .set_provider_secret("default_chat", SecretValue::new("default-secret"))
+        .unwrap();
+    credentials
+        .set_provider_secret("declared_chat", SecretValue::new("declared-secret"))
+        .unwrap();
+
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "declared-provider-flow".to_owned(),
+            name: "Declared Provider".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "ask".to_owned(),
+                r#type: "llm".to_owned(),
+                label: None,
+                data: json!({
+                    "provider_id": "declared_chat",
+                    "model_id": "declared-model",
+                    "prompt_template": "route this request"
+                }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+
+    let run = run_workflow_impl(
+        temp.path(),
+        &secrets,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "declared-provider-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+
+    declared_server.join().unwrap();
+    assert_eq!(run.status, "succeeded");
+    assert!(matches!(
+        default_listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
 }
 
 #[test]
@@ -2159,13 +2694,22 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
             display_name: "OpenAI".to_owned(),
             enabled: true,
             base_url: None,
-            models: vec![ModelConfig {
-                model_id: "gpt-test".to_owned(),
-                capability: ProviderCapability::Llm,
-                max_context_tokens: Some(4096),
-                input_cost_per_million_tokens: None,
-                output_cost_per_million_tokens: None,
-            }],
+            models: vec![
+                ModelConfig {
+                    model_id: "gpt-test".to_owned(),
+                    capability: ProviderCapability::Llm,
+                    max_context_tokens: Some(4096),
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                },
+                ModelConfig {
+                    model_id: "text-embedding-3-small".to_owned(),
+                    capability: ProviderCapability::Embedding,
+                    max_context_tokens: None,
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                },
+            ],
             make_default_llm: true,
             make_default_embedding: true,
             make_default_reranker: false,
@@ -2383,14 +2927,17 @@ fn provider_removal_is_blocked_by_presets_workflows_and_active_run_snapshots() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(project.path()).unwrap();
+    ariadne::config::bind_project_app_state(project.path(), app_state.path()).unwrap();
     configure_removable_provider(project.path(), "target", "target-model", true);
     configure_removable_provider(project.path(), "remaining", "remaining-model", false);
 
     let mut presets = NodePresetSettings {
+        default_provider_id: "target".to_owned(),
         default_model_id: "target-model".to_owned(),
         ..NodePresetSettings::default()
     };
     for preset in &mut presets.presets {
+        preset.provider_id = "target".to_owned();
         preset.model_id = "target-model".to_owned();
     }
     save_node_preset_settings_impl(project.path(), presets).unwrap();
@@ -3001,13 +3548,22 @@ fn provider_model_fetch_returns_configured_and_embedding_models() {
             display_name: "OpenAI".to_owned(),
             enabled: true,
             base_url: None,
-            models: vec![ModelConfig {
-                model_id: "gpt-test".to_owned(),
-                capability: ProviderCapability::Llm,
-                max_context_tokens: Some(4096),
-                input_cost_per_million_tokens: None,
-                output_cost_per_million_tokens: None,
-            }],
+            models: vec![
+                ModelConfig {
+                    model_id: "gpt-test".to_owned(),
+                    capability: ProviderCapability::Llm,
+                    max_context_tokens: Some(4096),
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                },
+                ModelConfig {
+                    model_id: "text-embedding-3-small".to_owned(),
+                    capability: ProviderCapability::Embedding,
+                    max_context_tokens: None,
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                },
+            ],
             make_default_llm: true,
             make_default_embedding: true,
             make_default_reranker: false,
@@ -3310,6 +3866,161 @@ fn node_preset_settings_reject_unknown_configured_model() {
 }
 
 #[test]
+fn node_preset_model_identity_rejects_ambiguous_ids_and_preserves_explicit_provider() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    ariadne::config::bind_project_app_state(project.path(), app_state.path()).unwrap();
+    configure_removable_provider(project.path(), "provider_a", "shared-model", true);
+    configure_removable_provider(project.path(), "provider_b", "shared-model", false);
+
+    let mut ambiguous = NodePresetSettings {
+        default_model_id: "shared-model".to_owned(),
+        ..NodePresetSettings::default()
+    };
+    for preset in &mut ambiguous.presets {
+        preset.model_id = "shared-model".to_owned();
+    }
+    let error = save_node_preset_settings_impl(project.path(), ambiguous).unwrap_err();
+    assert!(error.contains("ambiguous across Providers"));
+
+    let mut explicit = NodePresetSettings {
+        default_provider_id: "provider_a".to_owned(),
+        default_model_id: "shared-model".to_owned(),
+        ..NodePresetSettings::default()
+    };
+    for preset in &mut explicit.presets {
+        preset.provider_id = "provider_a".to_owned();
+        preset.model_id = "shared-model".to_owned();
+    }
+    save_node_preset_settings_impl(project.path(), explicit).unwrap();
+
+    let loaded = get_node_preset_settings_impl(project.path()).unwrap();
+    assert_eq!(loaded.default_provider_id, "provider_a");
+    assert!(loaded
+        .presets
+        .iter()
+        .all(|preset| preset.provider_id == "provider_a"));
+
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let preview = preview_provider_removal(&state, "provider_a".to_owned()).unwrap();
+    assert!(preview.blocking_references.iter().any(|reference| {
+        reference.reference_type == "node_preset"
+            && reference.model_id.as_deref() == Some("shared-model")
+    }));
+}
+
+#[test]
+fn node_authoring_defaults_are_global_while_budget_and_node_access_overrides_remain_project_scoped()
+{
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project_a.path()).unwrap();
+    ariadne::frontend::initialize_project(project_b.path()).unwrap();
+    configure_removable_provider(project_a.path(), "openai", "gpt-4.1-mini", true);
+    configure_removable_provider(project_b.path(), "openai", "gpt-4.1-mini", true);
+    let state = AriadneAppState::new(
+        project_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let mut a = ariadne::commands::get_node_preset_settings(&state).unwrap();
+    a.default_timeout_ms = 47_000;
+    a.default_budget_usd = 7.0;
+    let writer = a
+        .presets
+        .iter_mut()
+        .find(|preset| preset.node_type == "writer")
+        .unwrap();
+    writer.timeout_ms = 48_000;
+    writer.budget_usd = 8.0;
+    ariadne::commands::save_node_preset_settings(&state, a).unwrap();
+
+    state.set_project_root(project_b.path()).unwrap();
+    let mut b = ariadne::commands::get_node_preset_settings(&state).unwrap();
+    assert_eq!(b.default_timeout_ms, 47_000);
+    assert_eq!(b.default_budget_usd, 1.0);
+    let writer = b
+        .presets
+        .iter()
+        .find(|preset| preset.node_type == "writer")
+        .unwrap();
+    assert_eq!(writer.timeout_ms, 48_000);
+    assert_eq!(writer.budget_usd, 1.0);
+    b.default_timeout_ms = 53_000;
+    b.default_budget_usd = 2.0;
+    ariadne::commands::save_node_preset_settings(&state, b).unwrap();
+
+    state.set_project_root(project_a.path()).unwrap();
+    let reread_a = ariadne::commands::get_node_preset_settings(&state).unwrap();
+    assert_eq!(reread_a.default_timeout_ms, 53_000);
+    assert_eq!(reread_a.default_budget_usd, 7.0);
+    assert_eq!(
+        reread_a
+            .presets
+            .iter()
+            .find(|preset| preset.node_type == "writer")
+            .unwrap()
+            .budget_usd,
+        8.0
+    );
+
+    let project_json =
+        std::fs::read_to_string(project_a.path().join(".runtime/ui_node_presets.json")).unwrap();
+    assert!(!project_json.contains("model_id"));
+    assert!(!project_json.contains("timeout_ms"));
+    let app_json =
+        std::fs::read_to_string(app_state.path().join("node_authoring_defaults.json")).unwrap();
+    assert!(app_json.contains("model_id"));
+    assert!(app_json.contains("timeout_ms"));
+    assert!(!app_json.contains("budget_usd"));
+    assert!(!app_json.contains("permission_policy"));
+}
+
+#[test]
+fn node_preset_project_write_failure_rolls_back_global_defaults() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "openai", "gpt-4.1-mini", true);
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let mut initial = ariadne::commands::get_node_preset_settings(&state).unwrap();
+    initial.default_timeout_ms = 41_000;
+    ariadne::commands::save_node_preset_settings(&state, initial).unwrap();
+
+    let project_path = project.path().join(".runtime/ui_node_presets.json");
+    std::fs::remove_file(&project_path).unwrap();
+    std::fs::create_dir(&project_path).unwrap();
+    let mut failed = ariadne::commands::get_node_preset_settings(&state).unwrap_err();
+    assert_eq!(failed.code, ariadne::command_error::CommandErrorCode::Io);
+    std::fs::remove_dir(&project_path).unwrap();
+
+    let update = NodePresetSettings {
+        default_timeout_ms: 59_000,
+        ..NodePresetSettings::default()
+    };
+    std::fs::create_dir(&project_path).unwrap();
+    failed = ariadne::commands::save_node_preset_settings(&state, update).unwrap_err();
+    assert_eq!(failed.code, ariadne::command_error::CommandErrorCode::Io);
+    std::fs::remove_dir(&project_path).unwrap();
+
+    let app_json =
+        std::fs::read_to_string(app_state.path().join("node_authoring_defaults.json")).unwrap();
+    let app_value: serde_json::Value = serde_json::from_str(&app_json).unwrap();
+    assert_eq!(app_value["default_timeout_ms"], 41_000);
+}
+
+#[test]
 fn backend_diagnostics_reports_provider_configuration_gaps() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -3422,6 +4133,8 @@ fn backend_diagnostics_never_marks_unverified_embedding_configuration_healthy() 
 #[test]
 fn node_preset_settings_are_per_node_type() {
     let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
     let mut settings = NodePresetSettings::default();
     assert!(settings
         .presets
@@ -3436,6 +4149,14 @@ fn node_preset_settings_are_per_node_type() {
     writer.model_id = "gpt-writer".to_owned();
     writer.timeout_ms = 600_000;
     writer.budget_usd = 0.25;
+    writer.permission_policy = Some(PermissionPolicy {
+        allow_network: true,
+        allow_web_search: true,
+        ..PermissionPolicy::default()
+    });
+    writer
+        .tool_controls
+        .insert("search".to_owned(), Some(false));
 
     save_node_preset_settings_impl(temp.path(), settings).unwrap();
     let loaded = get_node_preset_settings_impl(temp.path()).unwrap();
@@ -3448,11 +4169,15 @@ fn node_preset_settings_are_per_node_type() {
     assert_eq!(writer.model_id, "gpt-writer");
     assert_eq!(writer.timeout_ms, 600_000);
     assert_eq!(writer.budget_usd, 0.25);
+    assert!(writer.permission_policy.as_ref().unwrap().allow_web_search);
+    assert_eq!(writer.tool_controls.get("search"), Some(&Some(false)));
 }
 
 #[test]
 fn automation_and_permission_settings_round_trip_config_files() {
     let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
     update_budget_config_impl(temp.path(), 10.0, 1.0).unwrap();
     let current = get_automation_settings_impl(temp.path()).unwrap();
     save_automation_settings_impl(
@@ -3469,11 +4194,13 @@ fn automation_and_permission_settings_round_trip_config_files() {
                     confirmation_kind: "chapter_write".to_owned(),
                     normal_policy: ConfirmationNormalPolicy::ManualReview,
                     auto_mode_policy: ConfirmationAutoModePolicy::AutoApproval,
+                    approval_prompt: "Audit chapter write".to_owned(),
                 },
                 ConfirmationPolicySetting {
                     confirmation_kind: "summary_write".to_owned(),
                     normal_policy: ConfirmationNormalPolicy::AllowByDefault,
                     auto_mode_policy: ConfirmationAutoModePolicy::AllowByDefault,
+                    approval_prompt: "Audit summary write".to_owned(),
                 },
             ],
         },
@@ -3489,13 +4216,15 @@ fn automation_and_permission_settings_round_trip_config_files() {
         .iter()
         .any(|item| item.confirmation_kind == "chapter_write"
             && item.normal_policy == ConfirmationNormalPolicy::ManualReview
-            && item.auto_mode_policy == ConfirmationAutoModePolicy::AutoApproval));
+            && item.auto_mode_policy == ConfirmationAutoModePolicy::AutoApproval
+            && item.approval_prompt == "Audit chapter write"));
     assert!(automation
         .confirmation_policies
         .iter()
         .any(|item| item.confirmation_kind == "summary_write"
             && item.normal_policy == ConfirmationNormalPolicy::AllowByDefault
-            && item.auto_mode_policy == ConfirmationAutoModePolicy::AllowByDefault));
+            && item.auto_mode_policy == ConfirmationAutoModePolicy::AllowByDefault
+            && item.approval_prompt == "Audit summary write"));
 
     let mut policy = PermissionPolicy {
         allow_network: true,
@@ -3509,9 +4238,10 @@ fn automation_and_permission_settings_round_trip_config_files() {
         temp.path(),
         PermissionsSettings {
             policy: policy.clone(),
+            scoped_policies: BTreeMap::new(),
             tool_controls: BTreeMap::from([(
                 "project_ai".to_owned(),
-                BTreeMap::from([("project-ai-workflow-tools".to_owned(), false)]),
+                BTreeMap::from([("project-ai-workflow-tools".to_owned(), Some(false))]),
             )]),
         },
     )
@@ -3524,7 +4254,7 @@ fn automation_and_permission_settings_round_trip_config_files() {
             .tool_controls
             .get("project_ai")
             .and_then(|scope| scope.get("project-ai-workflow-tools")),
-        Some(&false)
+        Some(&Some(false))
     );
     assert!(permissions.tool_controls.contains_key("writer"));
     for (scope, tool) in [
@@ -3542,8 +4272,8 @@ fn automation_and_permission_settings_round_trip_config_files() {
                 .tool_controls
                 .get(scope)
                 .and_then(|controls| controls.get(tool)),
-            Some(&true),
-            "{scope}/{tool} should be enabled by default"
+            Some(&None),
+            "{scope}/{tool} should inherit the global default"
         );
     }
     assert_eq!(
@@ -3551,15 +4281,51 @@ fn automation_and_permission_settings_round_trip_config_files() {
             .tool_controls
             .get("writer")
             .and_then(|scope| scope.get("writer-insert-lines")),
-        Some(&false)
+        Some(&None)
     );
     assert_eq!(
         permissions
             .tool_controls
             .get("writer")
             .and_then(|scope| scope.get("writer-find")),
-        Some(&true)
+        Some(&None)
     );
+    assert_eq!(
+        permissions
+            .tool_controls
+            .get("global")
+            .and_then(|scope| scope.get("search")),
+        Some(&Some(true))
+    );
+    assert_eq!(
+        permissions
+            .tool_controls
+            .get("global")
+            .and_then(|scope| scope.get("write")),
+        Some(&Some(false))
+    );
+}
+
+#[test]
+fn automation_settings_reject_empty_prompt_for_auto_approval() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+    let mut settings = get_automation_settings_impl(temp.path()).unwrap();
+    let chapter = settings
+        .confirmation_policies
+        .iter_mut()
+        .find(|item| item.confirmation_kind == "chapter_write")
+        .unwrap();
+    chapter.auto_mode_policy = ConfirmationAutoModePolicy::AutoApproval;
+    chapter.approval_prompt = "   ".to_owned();
+
+    let error = save_automation_settings_impl(temp.path(), settings).unwrap_err();
+    assert!(error
+        .diagnostic
+        .as_deref()
+        .unwrap_or_default()
+        .contains("auto approval prompt cannot be empty: chapter_write"));
 }
 
 #[test]
@@ -3685,6 +4451,231 @@ fn module_settings_round_trip_config_files() {
 }
 
 #[test]
+fn configured_project_layout_drives_documents_workflows_exports_skills_and_git() {
+    use ariadne::costs::SqliteCostLedger;
+    use ariadne::providers::OpenAiCompatibleLlmProvider;
+    use ariadne::workflow::RoutedExternalNodeExecutor;
+
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let mut app = get_app_settings_impl(project.path()).unwrap().app;
+    app.documents_dir = "content/docs".to_owned();
+    app.workflows_dir = "automation/flows".to_owned();
+    app.skills_dir = "extensions/skills".to_owned();
+    app.exports_dir = "output/exports".to_owned();
+    save_app_settings_impl(project.path(), AppSettings { app }).unwrap();
+    for path in [
+        "content/docs",
+        "automation/flows",
+        "extensions/skills",
+        "output/exports",
+    ] {
+        assert!(
+            project.path().join(path).is_dir(),
+            "missing configured {path}"
+        );
+    }
+
+    save_document_content_impl(
+        project.path(),
+        "content/docs/chapter.md".to_owned(),
+        "custom document root".to_owned(),
+    )
+    .unwrap();
+    let tree = get_document_tree_impl(project.path()).unwrap();
+    assert!(format!("{tree:?}").contains("content/docs/chapter.md"));
+    assert!(!project.path().join("documents/chapter.md").exists());
+
+    save_workflow_graph_impl(
+        project.path(),
+        WorkflowGraphData {
+            workflow_id: "custom-flow".to_owned(),
+            name: "Custom Flow".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Start".to_owned()),
+                data: Value::Null,
+                position: json!({ "x": 0.0, "y": 0.0 }),
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    assert!(project
+        .path()
+        .join("automation/flows/custom-flow.json")
+        .is_file());
+    assert_eq!(
+        load_workflow_graph_impl(project.path(), Some("custom-flow".to_owned()))
+            .unwrap()
+            .name,
+        "Custom Flow"
+    );
+    assert!(!project.path().join("workflows/custom-flow.json").exists());
+
+    std::fs::create_dir_all(project.path().join("planning/imports")).unwrap();
+    std::fs::write(
+        project.path().join("planning/imports/chapter.md"),
+        "export body",
+    )
+    .unwrap();
+    import_chapter(
+        &state,
+        ChapterImportRequest {
+            chapter_id: "chapter-1".to_owned(),
+            title: "Chapter 1".to_owned(),
+            order: 1,
+            source_path: "planning/imports/chapter.md".into(),
+            target_path: "content/docs/chapter-1.md".into(),
+            overwrite: false,
+            outline_ref: None,
+        },
+    )
+    .unwrap();
+    let exported = export_chapters(
+        &state,
+        vec!["chapter-1".to_owned()],
+        "exports/book.md".to_owned(),
+        None,
+    )
+    .unwrap();
+    assert!(project.path().join("output/exports/book.md").is_file());
+    assert!(exported.storage_uri.contains("output/exports/book.md"));
+    assert!(!project.path().join("exports/book.md").exists());
+
+    let skill_dir = project.path().join("extensions/skills/layout-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("skill.json"),
+        r#"{
+          "skill_id":"layout-skill",
+          "name":"Layout Skill",
+          "version":"1.0.0",
+          "executor":{
+            "kind":"llm",
+            "provider_id":"mock",
+            "model_id":"mock-model",
+            "prompt_template":"layout"
+          },
+          "schema":{"inputs":[],"outputs":[]},
+          "limits":{"timeout_ms":1000,"max_output_bytes":1024},
+          "estimated_cost_usd":0.0
+        }"#,
+    )
+    .unwrap();
+    let provider = OpenAiCompatibleLlmProvider::new(
+        ProviderConfig {
+            provider_id: "mock".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Mock".to_owned(),
+            enabled: true,
+            base_url: Some("https://example.invalid".to_owned()),
+            api_key: None,
+            models: vec![ModelConfig {
+                model_id: "mock-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+        },
+        None,
+    )
+    .unwrap();
+    let mut external = RoutedExternalNodeExecutor::new();
+    let registered = register_executor_adapters_for_project(
+        &mut external,
+        project.path(),
+        &BTreeSet::from(["layout-skill".to_owned()]),
+        provider,
+        Arc::new(SqliteCostLedger::open_in_memory().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(registered, vec!["executor_adapter:layout-skill"]);
+
+    run_git(project.path(), ["config", "user.name", "Ariadne Test"]);
+    run_git(
+        project.path(),
+        ["config", "user.email", "ariadne@example.test"],
+    );
+    create_checkpoint_impl(project.path(), "custom layout".to_owned()).unwrap();
+    let committed = git_stdout(project.path(), ["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(committed.contains("content/docs/chapter.md"));
+    assert!(committed.contains("automation/flows/custom-flow.json"));
+    assert!(committed.contains("extensions/skills/layout-skill/skill.json"));
+    assert!(committed.contains("output/exports/book.md"));
+}
+
+#[test]
+fn provider_role_checkboxes_can_clear_all_defaults() {
+    let project = tempfile::tempdir().unwrap();
+    let models = [
+        ("chat", ProviderCapability::Llm),
+        ("embedding", ProviderCapability::Embedding),
+        ("reranker", ProviderCapability::Reranker),
+        ("search", ProviderCapability::Search),
+    ]
+    .into_iter()
+    .map(|(model_id, capability)| ModelConfig {
+        model_id: model_id.to_owned(),
+        capability,
+        max_context_tokens: None,
+        input_cost_per_million_tokens: None,
+        output_cost_per_million_tokens: None,
+    })
+    .collect::<Vec<_>>();
+    let update = |enabled| ProviderSettingsUpdate {
+        provider_id: "all_roles".to_owned(),
+        provider_type: ProviderType::OpenAi,
+        display_name: "All Roles".to_owned(),
+        enabled: true,
+        base_url: None,
+        models: models.clone(),
+        make_default_llm: enabled,
+        make_default_embedding: enabled,
+        make_default_reranker: enabled,
+        make_default_search: enabled,
+    };
+
+    save_provider_settings_impl(project.path(), update(true)).unwrap();
+    let assigned = ConfigStore::new(project.path()).load().unwrap().providers;
+    assert_eq!(
+        assigned.default_llm_provider_id.as_deref(),
+        Some("all_roles")
+    );
+    assert_eq!(
+        assigned.default_embedding_provider_id.as_deref(),
+        Some("all_roles")
+    );
+    assert_eq!(
+        assigned.default_reranker_provider_id.as_deref(),
+        Some("all_roles")
+    );
+    assert_eq!(
+        assigned.default_search_provider_id.as_deref(),
+        Some("all_roles")
+    );
+
+    save_provider_settings_impl(project.path(), update(false)).unwrap();
+    let cleared = ConfigStore::new(project.path()).load().unwrap().providers;
+    assert!(cleared.default_llm_provider_id.is_none());
+    assert!(cleared.default_embedding_provider_id.is_none());
+    assert!(cleared.default_reranker_provider_id.is_none());
+    assert!(cleared.default_search_provider_id.is_none());
+}
+
+#[test]
 fn rag_settings_hot_reload_reuses_open_tantivy_generation() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -3774,6 +4765,65 @@ fn rag_index_configuration_change_is_rejected_while_runtime_arc_is_active() {
 }
 
 #[test]
+fn qdrant_process_settings_are_app_scoped_and_absent_from_project_rag_yaml() {
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project_a.path()).unwrap();
+    ariadne::frontend::initialize_project(project_b.path()).unwrap();
+    let state = AriadneAppState::new(
+        project_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    drop(state.retrieval_runtime().unwrap());
+
+    let saved = ariadne::commands::save_app_runtime_settings(
+        &state,
+        AppRuntimeSettings {
+            qdrant_binary_path: "/opt/ariadne/qdrant".to_owned(),
+            qdrant_startup_timeout_ms: 51_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state
+            .retrieval_runtime()
+            .unwrap()
+            .config()
+            .rag
+            .vector_store
+            .sidecar
+            .binary_path,
+        saved.qdrant_binary_path
+    );
+
+    ariadne::commands::set_project_root(&state, project_b.path().to_string_lossy().into_owned())
+        .unwrap();
+    assert_eq!(
+        ariadne::commands::get_app_runtime_settings(&state).unwrap(),
+        saved
+    );
+    assert_eq!(
+        state
+            .retrieval_runtime()
+            .unwrap()
+            .config()
+            .rag
+            .vector_store
+            .sidecar
+            .startup_timeout_ms,
+        51_000
+    );
+
+    let rag = get_rag_settings_impl(project_b.path()).unwrap();
+    save_rag_settings_impl(project_b.path(), rag).unwrap();
+    let yaml = std::fs::read_to_string(project_b.path().join(".config/rag.yaml")).unwrap();
+    assert!(!yaml.contains("binary_path"));
+    assert!(!yaml.contains("startup_timeout_ms"));
+}
+
+#[test]
 fn failed_vector_enable_keeps_config_and_last_good_runtime() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -3838,6 +4888,115 @@ fn template_repository_settings_are_app_scoped_across_projects() {
         .join(".runtime")
         .join("template_repository_settings.json")
         .exists());
+}
+
+#[test]
+fn template_install_rejects_project_switch_after_user_selected_target() {
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project_a.path()).unwrap();
+    ariadne::frontend::initialize_project(project_b.path()).unwrap();
+    let state = AriadneAppState::new(
+        project_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let selected_project = project_a.path().to_string_lossy().into_owned();
+    state.set_project_root(project_b.path()).unwrap();
+
+    let error = install_template_for_project_with_cancellation(
+        &state,
+        TemplateRepositoryRequest { base_url: None },
+        "official-novel-starter".to_owned(),
+        selected_project,
+        &ExecutionCancellation::new(),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.code,
+        ariadne::command_error::CommandErrorCode::Conflict
+    );
+    assert!(!project_a
+        .path()
+        .join("workflows")
+        .join("official-novel-starter")
+        .exists());
+    assert!(!project_b
+        .path()
+        .join("workflows")
+        .join("official-novel-starter")
+        .exists());
+}
+
+#[test]
+fn template_install_revalidates_project_after_download_before_commit() {
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_TEMPLATE_REPOSITORY", "1");
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project_a.path()).unwrap();
+    ariadne::frontend::initialize_project(project_b.path()).unwrap();
+    let state = AriadneAppState::new(
+        project_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let selected_project = project_a.path().to_string_lossy().into_owned();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_seen_sender, request_seen_receiver) = mpsc::channel();
+    let (release_response_sender, release_response_receiver) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        assert!(String::from_utf8_lossy(&request)
+            .starts_with("GET /templates/official-novel-starter/download"));
+        request_seen_sender.send(()).unwrap();
+        release_response_receiver.recv().unwrap();
+
+        let body = include_bytes!("../resources/template_repository/v1/novel_starter.json");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let install_state = state.clone();
+    let install = thread::spawn(move || {
+        install_template_for_project_with_cancellation(
+            &install_state,
+            TemplateRepositoryRequest {
+                base_url: Some(format!("http://{address}")),
+            },
+            "official-novel-starter".to_owned(),
+            selected_project,
+            &ExecutionCancellation::new(),
+        )
+    });
+
+    request_seen_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    state.set_project_root(project_b.path()).unwrap();
+    release_response_sender.send(()).unwrap();
+
+    server.join().unwrap();
+    let error = install.join().unwrap().unwrap_err();
+    assert_eq!(
+        error.code,
+        ariadne::command_error::CommandErrorCode::Conflict
+    );
+    for project in [project_a.path(), project_b.path()] {
+        assert!(!project
+            .join("workflows")
+            .join("official-novel-starter")
+            .exists());
+    }
 }
 
 #[test]
@@ -4096,6 +5255,92 @@ fn d3a_git_restore_drains_inflight_project_mutation_before_checkout() {
     );
 }
 
+#[test]
+fn d3b_git_restore_holds_project_activation_until_fixed_root_rebind_commits() {
+    let temp_a = tempfile::tempdir().unwrap();
+    let temp_b = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp_a.path()).unwrap();
+    ariadne::frontend::initialize_project(temp_b.path()).unwrap();
+    run_git(temp_a.path(), ["config", "user.name", "Ariadne Test"]);
+    run_git(
+        temp_a.path(),
+        ["config", "user.email", "ariadne@example.test"],
+    );
+    fs::write(temp_a.path().join("documents").join("chapter.md"), "base").unwrap();
+    let checkpoint = create_checkpoint_impl(temp_a.path(), "base".to_owned()).unwrap();
+
+    let state = Arc::new(AriadneAppState::new(
+        temp_a.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    ));
+    let outbox =
+        IndexInvalidationOutbox::new(temp_a.path().join(".runtime").join("index_invalidation.db"));
+    let inflight = outbox
+        .acquire_project_mutation("d3b_inflight_writer")
+        .unwrap();
+    let restore_state = Arc::clone(&state);
+    let commit_id = checkpoint.commit_id;
+    let (restore_sender, restore_receiver) = std::sync::mpsc::channel();
+    let restore_thread = thread::spawn(move || {
+        restore_sender
+            .send(restore_to_new_branch(
+                &restore_state,
+                commit_id,
+                "restore/d3b-fixed-root".to_owned(),
+            ))
+            .unwrap();
+    });
+
+    for _ in 0..100 {
+        if outbox
+            .maintenance_state()
+            .unwrap()
+            .is_some_and(|maintenance| maintenance.status == "active")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        outbox.maintenance_state().unwrap().unwrap().status,
+        "active"
+    );
+
+    let switch_state = Arc::clone(&state);
+    let target_root = temp_b.path().to_path_buf();
+    let (switch_sender, switch_receiver) = std::sync::mpsc::channel();
+    let switch_thread = thread::spawn(move || {
+        switch_sender
+            .send(set_project_root(
+                &switch_state,
+                target_root.to_string_lossy().into_owned(),
+            ))
+            .unwrap();
+    });
+    assert!(
+        switch_receiver
+            .recv_timeout(Duration::from_millis(150))
+            .is_err(),
+        "project activation must wait until restore has committed A's fixed-root rebind"
+    );
+    drop(inflight);
+
+    let restore_report = restore_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("restore must complete after mutation drain")
+        .unwrap();
+    switch_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("project switch must complete after restore")
+        .unwrap();
+    restore_thread.join().unwrap();
+    switch_thread.join().unwrap();
+    assert_eq!(restore_report.new_branch, "restore/d3b-fixed-root");
+    assert_eq!(state.project_root().unwrap(), temp_b.path());
+}
+
 /// D3-a：旧 generation 的 Start 可在首次扫描后落盘 run；restore 必须继续扫描到其停止。
 #[test]
 fn d3a_git_restore_stops_run_created_after_maintenance_intent_before_checkout() {
@@ -4248,7 +5493,13 @@ fn d3a_maintenance_rejects_provider_model_fetch_before_network_dispatch() {
             display_name: "D3A Models".to_owned(),
             enabled: true,
             base_url: Some(base_url),
-            models: Vec::new(),
+            models: vec![ModelConfig {
+                model_id: "d3a-chat".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
             make_default_llm: true,
             make_default_embedding: false,
             make_default_reranker: false,
@@ -4686,6 +5937,8 @@ fn project_ai_can_call_project_search_and_receive_indexed_document() {
 fn project_ai_can_call_web_search_and_receive_cited_results() {
     let temp = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
 
     let llm_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let llm_base_url = format!("http://{}", llm_listener.local_addr().unwrap());
@@ -4833,6 +6086,8 @@ fn project_ai_can_call_web_search_and_receive_cited_results() {
 fn executor_adapter_web_search_uses_project_permission_policy_in_product_workflow() {
     let temp = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
 
     let llm_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     llm_listener.set_nonblocking(true).unwrap();
@@ -5090,6 +6345,9 @@ fn executor_adapter_llm_routes_to_manifest_provider_instead_of_project_default()
         }"#,
     )
     .unwrap();
+    let unused_broken_skill = temp.path().join("skills").join("unused-broken");
+    std::fs::create_dir_all(&unused_broken_skill).unwrap();
+    std::fs::write(unused_broken_skill.join("skill.json"), "{not-json").unwrap();
 
     save_provider_settings_impl(
         temp.path(),
@@ -5181,6 +6439,231 @@ fn executor_adapter_llm_routes_to_manifest_provider_instead_of_project_default()
         default_listener.accept(),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
     ));
+}
+
+#[test]
+fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills() {
+    use ariadne::costs::{CostLedger, CostQuery, SqliteCostLedger};
+    use ariadne::skills::SkillBackendOutput;
+
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+
+    let healthy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    healthy_listener.set_nonblocking(true).unwrap();
+    let healthy_base_url = format!("http://{}", healthy_listener.local_addr().unwrap());
+    let healthy_server = thread::spawn(move || {
+        for _ in 0..2 {
+            let mut stream = accept_with_deadline(&healthy_listener, Duration::from_secs(5));
+            let request = read_http_request(&mut stream);
+            assert!(String::from_utf8_lossy(&request).starts_with("POST /run HTTP/1.1"));
+
+            let mut outputs = ariadne::contracts::PortMap::new();
+            outputs.insert(
+                "result".to_owned(),
+                PortValue::inline(json!("healthy-result")),
+            );
+            let body = serde_json::to_vec(&SkillBackendOutput {
+                outputs,
+                logs: vec!["healthy HTTP skill completed".to_owned()],
+                metadata: Value::Null,
+                elapsed_ms: 1,
+            })
+            .unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let bad_provider_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    bad_provider_listener.set_nonblocking(true).unwrap();
+    let bad_provider_base_url = format!("http://{}", bad_provider_listener.local_addr().unwrap());
+    save_provider_settings_impl(
+        temp.path(),
+        ProviderSettingsUpdate {
+            provider_id: "disabled_adapter_provider".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Disabled Adapter Provider".to_owned(),
+            enabled: false,
+            base_url: Some(bad_provider_base_url),
+            models: vec![ModelConfig {
+                model_id: "bad-model".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: false,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+
+    let healthy_skill_dir = temp.path().join("skills").join("healthy-http");
+    std::fs::create_dir_all(&healthy_skill_dir).unwrap();
+    std::fs::write(
+        healthy_skill_dir.join("skill.json"),
+        format!(
+            r#"{{
+              "skill_id":"healthy-http",
+              "name":"Healthy HTTP",
+              "version":"1.0.0",
+              "executor":{{
+                "kind":"http",
+                "host":"{healthy_base_url}",
+                "method":"POST",
+                "path":"/run"
+              }},
+              "schema":{{
+                "inputs":[],
+                "outputs":[{{"name":"result","type_name":"inline","required":true}}]
+              }},
+              "limits":{{"timeout_ms":5000,"max_output_bytes":4096}},
+              "estimated_cost_usd":0.0
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let bad_skill_dir = temp.path().join("skills").join("unused-bad-llm");
+    std::fs::create_dir_all(&bad_skill_dir).unwrap();
+    std::fs::write(
+        bad_skill_dir.join("skill.json"),
+        r#"{
+          "skill_id":"unused-bad-llm",
+          "name":"Unused Bad LLM",
+          "version":"1.0.0",
+          "executor":{
+            "kind":"llm",
+            "provider_id":"disabled_adapter_provider",
+            "model_id":"bad-model",
+            "prompt_template":"must not dispatch"
+          },
+          "schema":{
+            "inputs":[],
+            "outputs":[{"name":"text","type_name":"inline","required":true}]
+          },
+          "limits":{"timeout_ms":5000,"max_output_bytes":4096},
+          "estimated_cost_usd":1.0
+        }"#,
+    )
+    .unwrap();
+
+    let mut permissions = get_permissions_settings_impl(temp.path()).unwrap();
+    permissions.policy.allow_network = true;
+    permissions.policy.allow_http_skill = true;
+    save_permissions_settings_impl(temp.path(), permissions).unwrap();
+
+    for (workflow_id, skill_id) in [
+        ("n25-healthy-flow", "healthy-http"),
+        ("n25-bad-flow", "unused-bad-llm"),
+    ] {
+        save_workflow_graph_impl(
+            temp.path(),
+            WorkflowGraphData {
+                workflow_id: workflow_id.to_owned(),
+                name: workflow_id.to_owned(),
+                nodes: vec![CanvasNode {
+                    id: "adapter".to_owned(),
+                    r#type: format!("executor_adapter:{skill_id}"),
+                    label: Some(skill_id.to_owned()),
+                    data: json!({ "skill_id": skill_id }),
+                    position: Value::Null,
+                }],
+                edges: Vec::new(),
+                metadata: Value::Null,
+                content_revision: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+    }
+
+    let secrets = MemorySecretStore::default();
+    let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    std::env::set_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL", "1");
+
+    let first_healthy = run_workflow_impl(
+        temp.path(),
+        &secrets,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "n25-healthy-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let first_healthy_state = SqliteWorkflowRuntimeStore::open(temp.path())
+        .unwrap()
+        .load_state(
+            &WorkflowId::from("n25-healthy-flow"),
+            &RunId::from(first_healthy.run_id.clone()),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first_healthy.status, "succeeded",
+        "state={first_healthy_state:#?}"
+    );
+
+    let ledger = SqliteCostLedger::open(temp.path()).unwrap();
+    let costs_before_bad = ledger.list_costs(&CostQuery::default()).unwrap().len();
+    let runtime_db = rusqlite::Connection::open(temp.path().join("runtime.db")).unwrap();
+    let runs_before_bad: i64 = runtime_db
+        .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
+        .unwrap();
+
+    let bad_error = run_workflow_impl(
+        temp.path(),
+        &secrets,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "n25-bad-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap_err();
+    assert!(bad_error.contains("references a disabled provider"));
+    assert_eq!(
+        ledger.list_costs(&CostQuery::default()).unwrap().len(),
+        costs_before_bad,
+        "referenced invalid dependency must fail before cost accounting"
+    );
+    let runs_after_bad: i64 = runtime_db
+        .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        runs_after_bad, runs_before_bad,
+        "referenced invalid dependency must fail before run state persistence"
+    );
+    assert!(matches!(
+        bad_provider_listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+
+    let second_healthy = run_workflow_impl(
+        temp.path(),
+        &secrets,
+        ariadne::commands::RunWorkflowRequest {
+            workflow_id: "n25-healthy-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    std::env::remove_var("ARIADNE_ALLOW_LOCAL_HTTP_SKILL");
+    healthy_server.join().unwrap();
+
+    assert_eq!(second_healthy.status, "succeeded");
 }
 
 #[test]
@@ -5537,6 +7020,8 @@ fn project_ai_chat_assembles_document_knowledge_artifact_and_node_references() {
 fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
     let temp = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -5564,9 +7049,10 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
         temp.path(),
         PermissionsSettings {
             policy: PermissionPolicy::default(),
+            scoped_policies: BTreeMap::new(),
             tool_controls: BTreeMap::from([(
                 "project_ai".to_owned(),
-                BTreeMap::from([("project-ai-workflow-tools".to_owned(), true)]),
+                BTreeMap::from([("project-ai-workflow-tools".to_owned(), Some(true))]),
             )]),
         },
     )
@@ -5674,7 +7160,6 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
     )
     .unwrap();
 
-    let app_state = tempfile::tempdir().unwrap();
     let state = AriadneAppState::new(temp.path(), app_state.path(), secrets);
     let response = project_ai_chat(
         &state,
@@ -5702,15 +7187,19 @@ fn project_ai_chat_exposes_start_nodes_as_workflow_tools() {
     );
     let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
     let run_id = RunId::from(workflow_run.run_id);
-    let state = wait_for_terminal_workflow_state(&store, &WorkflowId::from("tool-flow"), &run_id);
+    let state = wait_for_terminal_workflow_state(&store, &WorkflowId::from("default"), &run_id);
     assert_eq!(state.status, RunStatus::Succeeded);
-    assert!(state.nodes.contains_key(&NodeId::from("start-draft")));
+    assert!(state
+        .nodes
+        .contains_key(&NodeId::from("tool-flow--start-draft")));
 }
 
 #[test]
 fn project_ai_start_node_catalog_includes_id_name_user_note() {
     let temp = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -5742,16 +7231,18 @@ fn project_ai_start_node_catalog_includes_id_name_user_note() {
         temp.path(),
         PermissionsSettings {
             policy: PermissionPolicy::default(),
+            scoped_policies: BTreeMap::new(),
             tool_controls: BTreeMap::from([(
                 "project_ai".to_owned(),
-                BTreeMap::from([("project-ai-workflow-tools".to_owned(), true)]),
+                BTreeMap::from([("project-ai-workflow-tools".to_owned(), Some(true))]),
             )]),
         },
     )
     .unwrap();
     let tools = list_external_workflow_tools_impl(temp.path()).unwrap();
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].start_node_id, "start-a");
+    assert_eq!(tools[0].workflow_id, "default");
+    assert_eq!(tools[0].start_node_id, "note-flow--start-a");
     assert!(tools[0].display_name.contains("正篇") || tools[0].display_name.contains("起点"));
 }
 
@@ -5759,6 +7250,8 @@ fn project_ai_start_node_catalog_includes_id_name_user_note() {
 fn project_ai_chat_respects_disabled_workflow_tool_permission() {
     let temp = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
     save_workflow_graph_impl(
         temp.path(),
         WorkflowGraphData {
@@ -5786,9 +7279,10 @@ fn project_ai_chat_respects_disabled_workflow_tool_permission() {
         temp.path(),
         PermissionsSettings {
             policy: PermissionPolicy::default(),
+            scoped_policies: BTreeMap::new(),
             tool_controls: BTreeMap::from([(
                 "project_ai".to_owned(),
-                BTreeMap::from([("project-ai-workflow-tools".to_owned(), false)]),
+                BTreeMap::from([("project-ai-workflow-tools".to_owned(), Some(false))]),
             )]),
         },
     )
@@ -6251,6 +7745,9 @@ fn f14_open_recovers_knowledge_receipt_crash_and_blocks_racing_resume() {
         edges: Vec::new(),
         metadata: Value::Null,
     });
+    state.prepared_dependency_plan = Some(minimal_frozen_dependency_plan(
+        state.prepared_workflow.as_ref().unwrap(),
+    ));
     state.status = RunStatus::Paused;
     state.control = RunControl::Pause;
     state.pause_reason = Some("pending confirmation items".to_owned());
@@ -7169,8 +8666,15 @@ fn register_executor_adapters_for_project_registers_skill_handlers() {
     // If ProviderConfig fields differ, compile will tell us — use minimal via new if needed.
     let provider = OpenAiCompatibleLlmProvider::new(provider_config, None).unwrap();
     let ledger = Arc::new(SqliteCostLedger::open_in_memory().unwrap());
-    let registered =
-        register_executor_adapters_for_project(&mut external, project, provider, ledger).unwrap();
+    let required_skill_ids = BTreeSet::from(["fetch-info".to_owned()]);
+    let registered = register_executor_adapters_for_project(
+        &mut external,
+        project,
+        &required_skill_ids,
+        provider,
+        ledger,
+    )
+    .unwrap();
     assert!(
         registered
             .iter()
@@ -7199,6 +8703,39 @@ fn accept_with_deadline(listener: &TcpListener, timeout: Duration) -> std::net::
             Err(error) => panic!("failed to accept local HTTP request: {error}"),
         }
     }
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        let Some(header_offset) = request.windows(4).position(|window| window == b"\r\n\r\n")
+        else {
+            continue;
+        };
+        let header_end = header_offset + 4;
+        let content_length = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        if request.len() >= header_end + content_length {
+            break;
+        }
+    }
+    request
 }
 
 fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
@@ -7366,6 +8903,7 @@ fn seed_command_in_doubt_search_run(
     };
     let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
     state.prepared_workflow = Some(workflow.clone());
+    state.prepared_dependency_plan = Some(minimal_frozen_dependency_plan(&workflow));
     state.status = RunStatus::Paused;
     state.control = RunControl::Pause;
     state.pause_reason = Some("operation result is unknown".to_owned());

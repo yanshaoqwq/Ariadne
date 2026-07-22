@@ -1,5 +1,6 @@
 use std::fs;
 
+use ariadne::contracts::CoreError;
 use ariadne::git::{CheckpointKind, GitHealthStatus, GitService, GitStagePolicy};
 
 /// 初始化带本地提交身份的临时 Git 仓库。
@@ -153,6 +154,36 @@ fn git_service_streams_bounded_diff_preview_and_reuses_porcelain_status() {
     assert!(diff.line_count > 2_000);
     assert_eq!(diff.preview.chars().count(), 128);
     assert!(diff.preview.contains("diff --git"));
+}
+
+#[test]
+fn git_service_bounds_preview_for_a_single_very_long_line() {
+    let (temp_dir, service) = init_test_repo();
+    let document = temp_dir.path().join("chapter.md");
+    fs::write(&document, "original\n").unwrap();
+    service.create_checkpoint("initial", None).unwrap();
+    fs::write(&document, format!("{}\n", "长".repeat(700_000))).unwrap();
+
+    let diff = service
+        .diff_preview_with_policy(&GitStagePolicy::default(), 96)
+        .unwrap();
+
+    assert!(diff.line_count > 0);
+    assert_eq!(diff.preview.chars().count(), 96);
+    assert!(diff.preview.contains("diff --git"));
+}
+
+#[test]
+fn git_health_distinguishes_absent_repository_from_corrupt_metadata() {
+    let absent = tempfile::tempdir().unwrap();
+    let absent_health = GitService::new(absent.path()).health_check().unwrap();
+    assert_eq!(absent_health.status, GitHealthStatus::NotRepository);
+
+    let corrupt = tempfile::tempdir().unwrap();
+    fs::write(corrupt.path().join(".git"), "broken git metadata\n").unwrap();
+    let error = GitService::new(corrupt.path()).health_check().unwrap_err();
+
+    assert!(matches!(error, CoreError::External { ref service, .. } if service == "git"));
 }
 
 #[test]

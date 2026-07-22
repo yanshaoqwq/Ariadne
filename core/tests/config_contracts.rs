@@ -1,11 +1,12 @@
 use std::fs;
 
 use ariadne::config::{
-    ConfigStore, MemorySecretStore, ModelConfig, ProjectConfig, ProjectCredentialScope,
+    normalize_git_ignored_path, normalize_project_relative_directory, ConfigStore,
+    MemorySecretStore, ModelConfig, ProjectConfig, ProjectCredentialScope, ProjectLayout,
     ProviderConfig, SecretRef, SecretValue, AUTO_MODE_CONFIG_FILE, PERMISSIONS_CONFIG_FILE,
     RAG_CONFIG_FILE,
 };
-use ariadne::contracts::{ProviderCapability, ProviderType};
+use ariadne::contracts::{PermissionPolicy, ProviderCapability, ProviderType};
 
 #[test]
 fn default_project_config_is_split_across_yaml_files() {
@@ -169,7 +170,13 @@ fn credential_rebind_load_strips_all_untrusted_provider_secret_refs() {
             enabled: true,
             base_url: None,
             api_key: Some(SecretRef::new(format!("legacy-{provider_id}-secret"))),
-            models: Vec::new(),
+            models: vec![ModelConfig {
+                model_id: format!("{provider_id}-chat"),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
         })
         .collect();
     config.providers.default_llm_provider_id = Some("openai".to_owned());
@@ -374,4 +381,115 @@ fn d4a_config_store_concurrent_saves_leave_readable_consistent_config() {
     assert!(!ariadne::config::atomic_commit::has_pending_journal(
         &project, &app_state
     ));
+}
+
+#[test]
+fn project_layout_rejects_escape_and_resolves_all_configured_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = ProjectConfig::default();
+    config.app.documents_dir = "content/docs".to_owned();
+    config.app.workflows_dir = "automation/flows".to_owned();
+    config.app.skills_dir = "extensions/skills".to_owned();
+    config.app.exports_dir = "output/exports".to_owned();
+
+    let layout = ProjectLayout::from_app(temp.path(), &config.app).unwrap();
+    layout.create_configured_directories().unwrap();
+    assert_eq!(layout.documents, temp.path().join("content/docs"));
+    assert!(layout.workflows.is_dir());
+    assert!(layout.skills.is_dir());
+    assert!(layout.exports.is_dir());
+
+    for invalid in [
+        "",
+        "/tmp/outside",
+        "../outside",
+        "a/../outside",
+        "C:/outside",
+        "//server/share",
+    ] {
+        assert!(normalize_project_relative_directory("documents_dir", invalid).is_err());
+    }
+    assert_eq!(
+        normalize_project_relative_directory("documents_dir", "content\\docs").unwrap(),
+        "content/docs"
+    );
+
+    config.app.workflows_dir = "content/docs/flows".to_owned();
+    assert!(config.app.validate().is_err());
+    config.app.workflows_dir = ".runtime/flows".to_owned();
+    assert!(config.app.validate().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_layout_rejects_configured_directory_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), project.path().join("documents")).unwrap();
+
+    let error = ProjectLayout::from_app(project.path(), &ProjectConfig::default().app)
+        .expect_err("configured roots must not escape through symlinks");
+    assert!(error.to_string().contains("outside allowed root"));
+}
+
+#[test]
+fn provider_defaults_require_enabled_executable_provider_and_role_capability() {
+    let mut config = ProjectConfig::default();
+    config.providers.providers.push(ProviderConfig {
+        provider_id: "provider".to_owned(),
+        provider_type: ProviderType::OpenAi,
+        display_name: "Provider".to_owned(),
+        enabled: false,
+        base_url: None,
+        api_key: None,
+        models: vec![ModelConfig {
+            model_id: "embedding".to_owned(),
+            capability: ProviderCapability::Embedding,
+            max_context_tokens: None,
+            input_cost_per_million_tokens: None,
+            output_cost_per_million_tokens: None,
+        }],
+    });
+    config.providers.default_llm_provider_id = Some("provider".to_owned());
+    assert!(config.validate().is_err());
+
+    config.providers.providers[0].enabled = true;
+    assert!(config.validate().is_err());
+
+    config.providers.providers[0].models.push(ModelConfig {
+        model_id: "chat".to_owned(),
+        capability: ProviderCapability::Llm,
+        max_context_tokens: None,
+        input_cost_per_million_tokens: None,
+        output_cost_per_million_tokens: None,
+    });
+    assert!(config.validate().is_ok());
+
+    config.providers.providers[0].provider_type = ProviderType::Other;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn permission_and_git_configs_reject_values_that_runtime_would_ignore() {
+    let mut config = ProjectConfig::default();
+    config.permissions.policy.allow_web_search = true;
+    assert!(config.validate().is_err());
+
+    config.permissions.policy = PermissionPolicy {
+        readable_file_roots: vec!["relative/path".into()],
+        ..PermissionPolicy::default()
+    };
+    assert!(config.validate().is_err());
+
+    config.permissions.policy = PermissionPolicy::default();
+    config.git.ignored_paths = vec!["../outside".to_owned()];
+    assert!(config.validate().is_err());
+    assert!(normalize_git_ignored_path("a//b").is_err());
+    assert!(normalize_git_ignored_path("C:/outside").is_err());
+    assert_eq!(
+        normalize_git_ignored_path("cache\\models").unwrap(),
+        "cache/models"
+    );
 }

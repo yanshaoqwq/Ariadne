@@ -23,7 +23,6 @@ use crate::documents::{
     ArtifactWriteRequest, ChapterDocumentEntry, ChapterDocumentIndex, ChapterDocumentKind,
     DocumentReadRequest, DocumentRepository, DocumentWriteRequest, FileDocumentService,
 };
-use crate::git::GitService;
 use crate::llm::{LlmRunRequest, LlmService, LlmServiceConfig};
 use crate::providers::{ContentPart, LlmMessage, LlmProvider};
 use crate::rag::{FindRequest, FindScope, KnowledgeRetrievalSnapshot, MemoryWritingKnowledgeBase};
@@ -50,109 +49,6 @@ const MAX_PROJECT_MEMORY_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROJECT_REFERENCE_TEXT_CHARS: usize = 32 * 1024;
 const MAX_PROJECT_REFERENCE_MATCH_WINDOWS: usize = 8;
 const MAX_PROJECT_REFERENCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
-
-/// 最近项目和项目初始化状态，默认落在 `.runtime/recent_projects.json`。
-#[derive(Debug, Clone)]
-pub struct ProjectRegistryStore {
-    path: PathBuf,
-}
-
-/// 最近项目条目。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecentProjectEntry {
-    pub name: String,
-    pub path: PathBuf,
-    pub last_opened_ms: u64,
-}
-
-/// 项目初始化报告。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectInitReport {
-    pub project_root: PathBuf,
-    #[serde(default)]
-    pub created_dirs: Vec<PathBuf>,
-    pub git_initialized: bool,
-}
-
-impl ProjectRegistryStore {
-    /// 创建最近项目存储。
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-
-    /// 使用项目根目录下默认 `.runtime/recent_projects.json`。
-    pub fn default_for_project(project_root: impl AsRef<Path>) -> Self {
-        Self::new(project_root.as_ref().join(".runtime/recent_projects.json"))
-    }
-
-    /// 读取最近项目列表。
-    pub fn read_all(&self) -> CoreResult<Vec<RecentProjectEntry>> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(content) => serde_json::from_str(&content).map_err(Into::into),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    /// 写入最近项目列表。
-    pub fn write_all(&self, entries: &[RecentProjectEntry]) -> CoreResult<()> {
-        let bytes = serde_json::to_vec_pretty(entries)?;
-        crate::config::store::atomic_write(&self.path, &bytes)?;
-        Ok(())
-    }
-
-    /// 记录最近打开项目；同一路径移动到顶部。
-    pub fn record_opened(
-        &self,
-        name: impl Into<String>,
-        project_root: impl Into<PathBuf>,
-    ) -> CoreResult<Vec<RecentProjectEntry>> {
-        let project_root = project_root.into();
-        let mut entries = self.read_all()?;
-        entries.retain(|entry| entry.path != project_root);
-        entries.insert(
-            0,
-            RecentProjectEntry {
-                name: name.into(),
-                path: project_root,
-                last_opened_ms: now_timestamp_ms(),
-            },
-        );
-        entries.truncate(20);
-        self.write_all(&entries)?;
-        Ok(entries)
-    }
-}
-
-/// 初始化项目目录结构和 Git 仓库。
-pub fn initialize_project(project_root: impl AsRef<Path>) -> CoreResult<ProjectInitReport> {
-    let project_root = project_root.as_ref();
-    validate_non_empty("project_root", &project_root.to_string_lossy())?;
-    std::fs::create_dir_all(project_root)?;
-    let dirs = [
-        ".config",
-        ".runtime",
-        "planning",
-        "planning/stages",
-        "planning/chapters",
-        "documents",
-        "workflows",
-    ];
-    let mut created_dirs = Vec::new();
-    for dir in dirs {
-        let path = project_root.join(dir);
-        std::fs::create_dir_all(&path)?;
-        created_dirs.push(path);
-    }
-    ConfigStore::new(project_root).load_or_create()?;
-    let git = GitService::new(project_root);
-    git.init_repository()?;
-    Ok(ProjectInitReport {
-        project_root: project_root.to_path_buf(),
-        created_dirs,
-        git_initialized: true,
-    })
-}
 
 /// 构造项目内文档读写权限，供 Module 12 后端服务实例化文档服务。
 pub fn project_document_permission(project_root: impl AsRef<Path>) -> PermissionPolicy {
@@ -2153,6 +2049,9 @@ pub fn upsert_canvas_annotation(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiPreferences {
     pub theme: String,
+    /// 桌面显示语言属于应用级个性化偏好；空字符串仅表示旧文件尚未迁移。
+    #[serde(default)]
+    pub locale: String,
     pub git_auto_color: String,
     pub git_manual_color: String,
     /// 主题自定义三色·昼（主底 / 表面 / 强调）。空字符串 = 使用主题预设 swatch。
@@ -2191,6 +2090,7 @@ impl Default for UiPreferences {
     fn default() -> Self {
         Self {
             theme: "system".to_owned(),
+            locale: "zh".to_owned(),
             git_auto_color: "#8a8f98".to_owned(),
             git_manual_color: "#f59e0b".to_owned(),
             theme_main_color: String::new(),
@@ -2210,6 +2110,8 @@ impl Default for UiPreferences {
 }
 
 /// UI 偏好文件存储。
+const UI_PREFERENCES_LOCK_FILE: &str = ".ui-preferences.lock";
+
 #[derive(Debug, Clone)]
 pub struct UiPreferencesStore {
     path: PathBuf,
@@ -2237,18 +2139,31 @@ impl UiPreferencesStore {
         project_root: Option<&Path>,
     ) -> CoreResult<UiPreferences> {
         let global = Self::default_for_app(app_state_root.as_ref());
-        if global.path.is_file() {
-            return global.read();
-        }
-        if let Some(root) = project_root {
-            let project = Self::default_for_project(root);
-            if project.path.is_file() {
-                let prefs = project.read()?;
-                let _ = global.write(&prefs);
-                return Ok(prefs);
+        let lock = global.lock_exclusive()?;
+        let result = if global.path.is_file() {
+            let mut preferences = global.read()?;
+            if preferences.locale.trim().is_empty() {
+                preferences.locale = legacy_project_ui_locale(project_root);
+                global.write_unlocked(&preferences)?;
             }
-        }
-        global.read()
+            Ok(preferences)
+        } else if let Some(root) = project_root {
+            let project = Self::default_for_project(root);
+            let mut preferences = if project.path.is_file() {
+                project.read()?
+            } else {
+                UiPreferences::default()
+            };
+            if preferences.locale.trim().is_empty() || !project.path.is_file() {
+                preferences.locale = legacy_project_ui_locale(Some(root));
+            }
+            global.write_unlocked(&preferences)?;
+            Ok(preferences)
+        } else {
+            global.read()
+        };
+        drop(lock);
+        result
     }
 
     /// 存储文件路径（测试 / 迁移用）。
@@ -2269,6 +2184,14 @@ impl UiPreferencesStore {
 
     /// 写入 UI 偏好。
     pub fn write(&self, preferences: &UiPreferences) -> CoreResult<()> {
+        let lock = self.lock_exclusive()?;
+        let result = self.write_unlocked(preferences);
+        drop(lock);
+        result
+    }
+
+    fn write_unlocked(&self, preferences: &UiPreferences) -> CoreResult<()> {
+        validate_ui_locale(&preferences.locale)?;
         validate_color("git_auto_color", &preferences.git_auto_color)?;
         validate_color("git_manual_color", &preferences.git_manual_color)?;
         validate_optional_color("theme_main_color", &preferences.theme_main_color)?;
@@ -2287,6 +2210,32 @@ impl UiPreferencesStore {
         crate::config::store::atomic_write(&self.path, bytes.as_bytes())?;
         Ok(())
     }
+
+    fn lock_exclusive(&self) -> CoreResult<std::fs::File> {
+        let parent = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        crate::config::store::acquire_app_state_lock(
+            parent,
+            UI_PREFERENCES_LOCK_FILE,
+            "ui_preferences_lock",
+        )
+    }
+}
+
+fn legacy_project_ui_locale(project_root: Option<&Path>) -> String {
+    let locale = project_root
+        .and_then(|root| {
+            ConfigStore::new(root)
+                .load_app_read_only_optional()
+                .ok()
+                .flatten()
+        })
+        .map(|app| app.locale.trim().to_owned())
+        .filter(|locale| is_valid_ui_locale(locale));
+    locale.unwrap_or_else(|| "zh".to_owned())
 }
 
 /// 框选导出的子流程片段。
@@ -3637,6 +3586,25 @@ fn validate_color(field: &str, value: &str) -> CoreResult<()> {
     }
 }
 
+fn is_valid_ui_locale(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn validate_ui_locale(value: &str) -> CoreResult<()> {
+    let value = value.trim();
+    if is_valid_ui_locale(value) {
+        Ok(())
+    } else {
+        Err(CoreError::validation(
+            "locale must be a non-empty language code of at most 32 ASCII characters",
+        ))
+    }
+}
+
 /// 空字符串表示「跟随主题预设」；非空则须为 #RRGGBB。
 fn validate_optional_color(field: &str, value: &str) -> CoreResult<()> {
     if value.trim().is_empty() {
@@ -3667,6 +3635,9 @@ pub fn now_timestamp_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -3698,5 +3669,46 @@ mod tests {
     fn template_repository_url_allows_local_targets_with_explicit_override() {
         validate_template_repository_base_url_with_policy("http://127.0.0.1:8080", true, None)
             .unwrap();
+    }
+
+    #[test]
+    fn global_ui_preferences_migration_waits_for_domain_lock() {
+        let project = tempfile::tempdir().unwrap();
+        let app_state = tempfile::tempdir().unwrap();
+        let project_store = UiPreferencesStore::default_for_project(project.path());
+        project_store
+            .write(&UiPreferences {
+                theme: "dark".to_owned(),
+                ..UiPreferences::default()
+            })
+            .unwrap();
+
+        let global_store = UiPreferencesStore::default_for_app(app_state.path());
+        let lock = global_store.lock_exclusive().unwrap();
+        let app_state_root = app_state.path().to_path_buf();
+        let project_root = project.path().to_path_buf();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_sender.send(()).unwrap();
+            result_sender
+                .send(UiPreferencesStore::read_global_or_migrate(
+                    app_state_root,
+                    Some(&project_root),
+                ))
+                .unwrap();
+        });
+
+        started_receiver.recv().unwrap();
+        assert!(result_receiver
+            .recv_timeout(Duration::from_millis(150))
+            .is_err());
+        drop(lock);
+        let migrated = result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(migrated.theme, "dark");
     }
 }

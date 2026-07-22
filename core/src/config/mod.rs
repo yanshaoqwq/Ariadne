@@ -1,15 +1,21 @@
+pub mod app_permissions;
+pub mod app_runtime;
 pub mod app_state;
 pub mod atomic_commit;
 pub mod confirmation;
 pub mod migration;
 pub mod models;
+pub mod provider_catalog;
 pub mod secrets;
 pub mod store;
 
+pub use app_permissions::*;
+pub use app_runtime::*;
 pub use app_state::*;
 pub use atomic_commit::*;
 pub use confirmation::*;
 pub use migration::*;
 pub use models::*;
+pub use provider_catalog::*;
 pub use secrets::*;
 pub use store::*;
