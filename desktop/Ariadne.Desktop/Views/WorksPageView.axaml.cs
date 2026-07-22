@@ -29,6 +29,12 @@ public partial class WorksPageView : UserControl
         AttachEditorActions();
     }
 
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        AttachEditorActions();
+    }
+
     private void OnDocumentEditorKeyDown(object? sender, KeyEventArgs e)
     {
         HandleKeyboardShortcut(sender, e);
@@ -288,24 +294,36 @@ public partial class WorksPageView : UserControl
 
     private async Task CopySelectionAsync()
     {
-        if (DataContext is WorksPageViewModel { IsEditMode: true }
-            && DocumentEditor.SelectionLength > 0)
+        try
         {
-            DocumentEditor.Copy();
-            return;
-        }
+            if (DataContext is WorksPageViewModel { IsEditMode: true }
+                && DocumentEditor.SelectionLength > 0)
+            {
+                DocumentEditor.Copy();
+                return;
+            }
 
-        var selectedText = DataContext is WorksPageViewModel viewModel
-            ? viewModel.DocumentContent
-            : string.Empty;
-        if (string.IsNullOrEmpty(selectedText))
-        {
-            return;
+            var selectedText = DataContext is WorksPageViewModel viewModel
+                ? viewModel.DocumentContent
+                : string.Empty;
+            if (string.IsNullOrEmpty(selectedText))
+            {
+                return;
+            }
+            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+            if (clipboard is not null)
+            {
+                await clipboard.SetTextAsync(selectedText);
+            }
         }
-        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-        if (clipboard is not null)
+        catch (Exception ex)
         {
-            await clipboard.SetTextAsync(selectedText);
+            if (DataContext is WorksPageViewModel viewModel)
+            {
+                viewModel.StatusText = UserFacingError.Format(
+                    ex,
+                    Ariadne.Desktop.Localization.DisplayNameService.Current);
+            }
         }
     }
 }

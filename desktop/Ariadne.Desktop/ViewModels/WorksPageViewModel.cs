@@ -7,7 +7,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware
+public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
 {
     private const string ProjectAiConversationId = "works";
     private const string RightPanelPreferenceKey = "works.right_panel";
@@ -147,6 +147,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     }
 
     public string ToggleRightPanelText => _displayNames.Text("ui.action.toggle_right_panel");
+
+    public void RefreshLocalizedUi()
+    {
+        ExportFormats[0] = new ExportFormatOption("markdown", _displayNames.Text("ui.works.export_format.markdown"));
+        ExportFormats[1] = new ExportFormatOption("epub", _displayNames.Text("ui.works.export_format.epub"));
+        ExportFormats[2] = new ExportFormatOption("pdf", _displayNames.Text("ui.works.export_format.pdf"));
+        OnPropertyChanged(string.Empty);
+    }
     public ProjectAutomationState ProjectAutomation => _projectAutomation;
 
     /// 右侧栏开合状态；开合入口由三页共用的边缘控制器承载。
@@ -2381,6 +2389,15 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     }
 
     public string UnsavedChangesPageTitle => _displayNames.Text("ui.nav.works");
+    public string UnsavedChangesPageId => "works";
+    public string? PreparedUnsavedChangesPayloadIdentity => _preparedContent is null
+        ? null
+        : BatchLeaveSaveCoordinator.CreatePayloadIdentity(JsonSerializer.Serialize(new
+        {
+            DocumentId = _preparedDocumentId,
+            Version = _preparedVersion,
+            Content = _preparedContent,
+        }));
 
     public async Task<bool> ConfirmLeaveIfNeededAsync()
     {
@@ -2447,9 +2464,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             return true;
         }
 
-        if (!string.Equals(_currentDocumentId, _preparedDocumentId, StringComparison.Ordinal)
-            || !string.Equals(_currentDocumentVersion, _preparedVersion, StringComparison.Ordinal)
-            || !string.Equals(AssembleDocumentContent(), _preparedContent, StringComparison.Ordinal))
+        var preparedDocumentId = _preparedDocumentId;
+        var preparedContent = _preparedContent ?? string.Empty;
+        var preparedVersion = _preparedVersion;
+        if (!string.Equals(_currentDocumentId, preparedDocumentId, StringComparison.Ordinal)
+            || !string.Equals(_currentDocumentVersion, preparedVersion, StringComparison.Ordinal)
+            || !string.Equals(AssembleDocumentContent(), preparedContent, StringComparison.Ordinal))
         {
             ClearPreparedLeave();
             return false;
@@ -2459,13 +2479,19 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         {
             // Commit prepared payload only (not whatever the editor currently holds).
             var report = await _backend.SaveDocumentContentAsync(
-                _preparedDocumentId!,
-                _preparedContent ?? string.Empty,
-                _preparedVersion).ConfigureAwait(true);
+                preparedDocumentId,
+                preparedContent,
+                preparedVersion).ConfigureAwait(true);
+            if (!string.Equals(_currentDocumentId, preparedDocumentId, StringComparison.Ordinal)
+                || !string.Equals(_currentDocumentVersion, preparedVersion, StringComparison.Ordinal))
+            {
+                ClearPreparedLeave();
+                return false;
+            }
             _currentDocumentPath = report.Metadata.Path;
             _currentDocumentVersion = report.Metadata.Version;
             OnPropertyChanged(nameof(DocumentInfoText));
-            AcceptSavedDocumentSnapshot(_preparedContent ?? string.Empty);
+            AcceptSavedDocumentSnapshot(preparedContent);
             ClearPreparedLeave();
             return !HasUnsavedChanges;
         }

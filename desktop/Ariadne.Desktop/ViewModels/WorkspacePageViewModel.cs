@@ -8,7 +8,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware
+public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
 {
     private const string RightPanelPreferenceKey = "workspace.right_panel";
     private const string ProjectAiConversationId = "workspace";
@@ -185,6 +185,30 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                     _displayNames.Text(entry.DisplayNameKey),
                     () => AddNode(nodeType));
             }));
+    }
+
+    public void RefreshLocalizedUi()
+    {
+        foreach (var group in new[] { EntryNodes, WritingAgents, UtilityNodes })
+        {
+            foreach (var item in group)
+            {
+                var descriptor = WorkflowNodeCatalog.ForGroup(
+                        ReferenceEquals(group, EntryNodes) ? "entry"
+                        : ReferenceEquals(group, WritingAgents) ? "writing"
+                        : "utility")
+                    .FirstOrDefault(candidate => candidate.NodeType == item.NodeType);
+                if (descriptor is not null)
+                {
+                    item.Title = _displayNames.Text(descriptor.DisplayNameKey);
+                }
+            }
+        }
+        if (AvailableModelOptions.Count > 0 && AvailableModelOptions[0].IsInherited)
+        {
+            AvailableModelOptions[0] = WorkflowModelOption.Inherited(ModelInheritGlobalText);
+        }
+        OnPropertyChanged(string.Empty);
     }
 
     public string Title => _displayNames.Text("ui.nav.workspace");
@@ -3093,6 +3117,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 
     public string UnsavedChangesPageTitle => Title;
+    public string UnsavedChangesPageId => "workspace";
+    public string? PreparedUnsavedChangesPayloadIdentity => _preparedLeaveSnapshot is null
+        ? null
+        : BatchLeaveSaveCoordinator.CreatePayloadIdentity(_preparedLeaveSnapshot);
 
     private bool _leavePrepared;
     private WorkflowGraphData? _preparedLeaveGraph;
@@ -3167,7 +3195,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             return true;
         }
 
-        if (!string.Equals(CurrentContentSnapshot(), _preparedLeaveSnapshot, StringComparison.Ordinal))
+        var preparedGraph = _preparedLeaveGraph;
+        var preparedSnapshot = _preparedLeaveSnapshot;
+        if (!string.Equals(CurrentContentSnapshot(), preparedSnapshot, StringComparison.Ordinal))
         {
             _leavePrepared = false;
             _preparedLeaveGraph = null;
@@ -3177,9 +3207,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         try
         {
-            var saved = await _backend.SaveProjectCanvasAsync(_preparedLeaveGraph).ConfigureAwait(true);
+            var saved = await _backend.SaveProjectCanvasAsync(preparedGraph).ConfigureAwait(true);
             RememberWorkflowRevision(saved);
-            AcceptSavedGraph(_preparedLeaveGraph);
+            AcceptSavedGraph(preparedGraph);
             _leavePrepared = false;
             _preparedLeaveGraph = null;
             _preparedLeaveSnapshot = null;
@@ -3703,17 +3733,19 @@ public sealed record SummarizerChapterOption(
         : $"{Title} · {Path.Replace('\\', '/')}";
 }
 
-public sealed class NodeLibraryItemViewModel
+public sealed class NodeLibraryItemViewModel : ViewModelBase
 {
+    private string _title;
+
     public NodeLibraryItemViewModel(string nodeType, string title, Action add)
     {
         NodeType = nodeType;
-        Title = title;
+        _title = title;
         AddCommand = new RelayCommand(add);
     }
 
     public string NodeType { get; }
-    public string Title { get; }
+    public string Title { get => _title; set => SetProperty(ref _title, value); }
     public RelayCommand AddCommand { get; }
 }
 

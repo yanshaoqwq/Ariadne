@@ -9,7 +9,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware
+public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
 {
     private const string GeneralSection = "general";
     private const string ModelsSection = "models";
@@ -3905,6 +3905,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     }
 
     public string UnsavedChangesPageTitle => Title;
+    public string UnsavedChangesPageId => "settings";
+    public string? PreparedUnsavedChangesPayloadIdentity => CreatePreparedPayloadIdentity();
 
     public async Task<bool> ConfirmLeaveIfNeededAsync()
     {
@@ -3929,6 +3931,26 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private bool _leavePrepared;
     private Dictionary<string, IReadOnlyDictionary<string, string>>? _preparedSettingsSections;
     private IReadOnlyList<PreparedSettingsCommit>? _preparedSettingsCommits;
+
+    private string? CreatePreparedPayloadIdentity()
+    {
+        if (_preparedSettingsSections is null)
+        {
+            return null;
+        }
+
+        var redacted = _preparedSettingsSections.ToDictionary(
+            section => section.Key,
+            section => section.Value.ToDictionary(
+                value => value.Key,
+                value => string.Equals(value.Key, nameof(ApiKey), StringComparison.Ordinal)
+                    ? "<redacted>"
+                    : value.Value,
+                StringComparer.Ordinal),
+            StringComparer.Ordinal);
+        return BatchLeaveSaveCoordinator.CreatePayloadIdentity(
+            System.Text.Json.JsonSerializer.Serialize(redacted));
+    }
 
     public Task<bool> PrepareUnsavedChangesAsync()
     {
@@ -4296,6 +4318,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
 
     }
+
+    void ILocalizedUiAware.RefreshLocalizedUi() => RefreshLocalizedText();
 
     private IReadOnlyDictionary<string, string> CurrentValues()
     {

@@ -15,7 +15,7 @@ public enum PageLoadState
     ContentError,
 }
 
-public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable
+public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable, ILocalizedUiAware
 {
     private const int PageSize = 100;
     private readonly DisplayNameService _displayNames;
@@ -452,13 +452,32 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable
     {
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
+
+    public void RefreshLocalizedUi()
+    {
+        LevelOptions[0] = new RunLogLevelOption(string.Empty, _displayNames.Text("ui.run_log.all_levels"));
+        LevelOptions[1] = new RunLogLevelOption("info", _displayNames.Text("ui.level.info"));
+        LevelOptions[2] = new RunLogLevelOption("warning", _displayNames.Text("ui.level.warning"));
+        LevelOptions[3] = new RunLogLevelOption("error", _displayNames.Text("ui.level.error"));
+        KindOptions[0] = new RunLogKindOption(string.Empty, _displayNames.Text("ui.run_log.all_kinds"));
+        for (var index = 1; index < KindOptions.Count; index++)
+        {
+            var value = KindOptions[index].Value;
+            KindOptions[index] = new RunLogKindOption(value, _displayNames.Text($"ui.run_log.kind.{value}"));
+        }
+        foreach (var log in Logs)
+        {
+            log.RefreshLocalizedUi(_displayNames);
+        }
+        OnPropertyChanged(string.Empty);
+    }
 }
 
 public sealed record RunLogLevelOption(string Value, string Label);
 
 public sealed record RunLogKindOption(string Value, string Label);
 
-public sealed class RunLogItemViewModel
+public sealed class RunLogItemViewModel : ViewModelBase
 {
     public RunLogItemViewModel(UiRunLogEntry entry, DisplayNameService? displayNames = null)
     {
@@ -473,14 +492,7 @@ public sealed class RunLogItemViewModel
         NodeId = entry.NodeId;
         IsUnread = entry.Unread;
         TimestampText = FormatTimestamp(entry.TimestampMs);
-        KindText = names.Text($"ui.run_log.kind.{entry.Kind.ToLowerInvariant()}");
-        UnreadText = names.Text("ui.run_log.unread");
-        var context = new List<string>();
-        AddContext(context, names, "ui.run_log.context.workflow", entry.WorkflowId);
-        AddContext(context, names, "ui.run_log.context.run", entry.RunId);
-        AddContext(context, names, "ui.run_log.context.node", entry.NodeId);
-        ContextText = string.Join(" · ", context);
-        HasContext = context.Count > 0;
+        RefreshLocalizedUi(names);
         var level = entry.Level.ToLowerInvariant();
         LevelBrushKey = level switch
         {
@@ -502,15 +514,28 @@ public sealed class RunLogItemViewModel
     public string? RunId { get; }
     public string? NodeId { get; }
     public string TimestampText { get; }
-    public string KindText { get; }
-    public string ContextText { get; }
-    public string UnreadText { get; }
-    public bool HasContext { get; }
+    public string KindText { get; private set; } = string.Empty;
+    public string ContextText { get; private set; } = string.Empty;
+    public string UnreadText { get; private set; } = string.Empty;
+    public bool HasContext { get; private set; }
     public bool IsUnread { get; }
     public string LevelBrushKey { get; }
     public bool IsError { get; }
     public bool IsWarning { get; }
     public bool IsInfo { get; }
+
+    internal void RefreshLocalizedUi(DisplayNameService names)
+    {
+        KindText = names.Text($"ui.run_log.kind.{Kind.ToLowerInvariant()}");
+        UnreadText = names.Text("ui.run_log.unread");
+        var context = new List<string>();
+        AddContext(context, names, "ui.run_log.context.workflow", WorkflowId);
+        AddContext(context, names, "ui.run_log.context.run", RunId);
+        AddContext(context, names, "ui.run_log.context.node", NodeId);
+        ContextText = string.Join(" · ", context);
+        HasContext = context.Count > 0;
+        OnPropertyChanged(string.Empty);
+    }
 
     private static void AddContext(
         ICollection<string> target,

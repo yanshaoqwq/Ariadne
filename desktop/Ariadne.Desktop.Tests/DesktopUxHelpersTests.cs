@@ -484,6 +484,24 @@ public sealed class DesktopUxHelpersTests
     }
 
     [Fact]
+    public void NavigationToolTip_IsOnlyShownForCollapsedIconNavigation()
+    {
+        var item = new NavigationItemViewModel("works", "作品", null, _ => { });
+
+        Assert.Null(item.ToolTipText);
+        item.SidebarExpanded = false;
+        Assert.Equal("作品", item.ToolTipText);
+        item.Title = "Works";
+        Assert.Equal("Works", item.ToolTipText);
+
+        var app = File.ReadAllText(ResolveDesktopSource("App.axaml"));
+        var window = File.ReadAllText(ResolveDesktopSource("Views", "MainWindow.axaml"));
+        Assert.Contains("ToolTip.Tip=\"{Binding ToolTipText}\"", app, StringComparison.Ordinal);
+        Assert.Contains("ToolTip.Tip=\"{Binding VersionToolTipText}\"", window, StringComparison.Ordinal);
+        Assert.Contains("ToolTip.Tip=\"{Binding FeedbackToolTipText}\"", window, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void U70_WriteThreeColorOverlay_SetsLogTokens()
     {
         var src = File.ReadAllText(Path.Combine(ResolveDesktopSource(""), "ThemeApplication.cs"));
@@ -708,18 +726,29 @@ public sealed class DesktopUxHelpersTests
         var journal = Path.Combine(Path.GetTempPath(), "ariadne-leave-partial-" + Guid.NewGuid().ToString("n") + ".json");
         try
         {
-            var pages = new List<(string, Func<Task<bool>>, Func<Task<bool>>)>
+            var aborts = 0;
+            var pages = new List<BatchLeaveSaveCoordinator.PageRequest>
             {
-                ("A", () => Task.FromResult(true), () => Task.FromResult(true)),
-                ("B", () => Task.FromResult(true), () => Task.FromResult(false)),
+                new("workspace", "A", () => Task.FromResult(true), () => Task.FromResult(true),
+                    () => { aborts++; return Task.CompletedTask; }, () => "payload-a"),
+                new("settings", "B", () => Task.FromResult(true), () => Task.FromResult(false),
+                    () => { aborts++; return Task.CompletedTask; }, () => "payload-b"),
             };
-            var result = await BatchLeaveSaveCoordinator.ExecuteAsync(pages, journal);
+            var result = await BatchLeaveSaveCoordinator.ExecuteAsync(pages, journal, "/project/a");
             Assert.False(result.AllSucceeded);
             Assert.Equal(new[] { "A" }, result.CommittedPages);
+            Assert.Equal(1, aborts);
             Assert.True(File.Exists(journal));
             var j = BatchLeaveSaveCoordinator.ReadJournal(journal);
             Assert.NotNull(j);
             Assert.Equal("partial", j!.Phase);
+            Assert.Equal(2, j.Version);
+            Assert.False(string.IsNullOrWhiteSpace(j.OperationId));
+            Assert.Equal("/project/a", j.ProjectIdentity);
+            Assert.Equal(new[] { "workspace", "settings" }, j.PlannedPageIds);
+            Assert.Equal("payload-a", j.PayloadIdentities["workspace"]);
+            Assert.Equal(new[] { "workspace" }, j.CommittedPageIds);
+            Assert.Equal("settings", j.FailedPageId);
             Assert.Contains("A", j.CommittedPages);
         }
         finally
@@ -741,6 +770,8 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("PrepareUnsavedChangesAsync()", works, StringComparison.Ordinal);
         var main = File.ReadAllText(Path.Combine(ResolveDesktopSource("ViewModels"), "MainWindowViewModel.cs"));
         Assert.Contains("BatchLeaveSaveCoordinator.ExecuteAsync", main, StringComparison.Ordinal);
+        Assert.Contains("BatchLeaveSaveCoordinator.ReadJournal", main, StringComparison.Ordinal);
+        Assert.Contains("PreparedUnsavedChangesPayloadIdentity", main, StringComparison.Ordinal);
         Assert.DoesNotContain("foreach (var guard in dirty)\n                {\n                    if (!await guard.SaveUnsavedChangesAsync()", main);
     }
 

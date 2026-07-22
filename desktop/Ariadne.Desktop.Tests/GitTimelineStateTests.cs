@@ -150,6 +150,26 @@ public sealed class GitTimelineStateTests
         Assert.DoesNotContain("raw backend diagnostic", viewModel.RepositoryReasonText, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task CopyCommitId_WhenClipboardFails_ReportsUserFacingError()
+    {
+        var backend = GitBackend.Create();
+        backend.Graph = new[] { Node("first", "First") };
+        var viewModel = NewViewModel(backend);
+        await viewModel.ReloadProjectDataAsync();
+        viewModel.SelectedCommit = viewModel.Commits[0];
+        var error = new IOException("clipboard failed");
+        viewModel.RequestCopyText = _ => Task.FromException(error);
+
+        Assert.True(viewModel.CopyIdCommand.TryExecute());
+        await WaitUntilAsync(() =>
+            viewModel.StatusText == UserFacingError.Format(error, DisplayNameService.LoadDefault()));
+
+        Assert.Equal(
+            UserFacingError.Format(error, DisplayNameService.LoadDefault()),
+            viewModel.StatusText);
+    }
+
     private static GitPageViewModel NewViewModel(GitBackend backend) =>
         new(DisplayNameService.LoadDefault(), backend.Client);
 

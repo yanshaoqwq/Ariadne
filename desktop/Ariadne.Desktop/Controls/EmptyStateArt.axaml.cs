@@ -32,7 +32,11 @@ public partial class EmptyStateArt : UserControl
             AppIconPainter.IconColorsChanged += OnThemeColorsChanged;
             ApplyKind();
         };
-        Unloaded += (_, _) => AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
+        Unloaded += (_, _) =>
+        {
+            AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
+            ClearImage();
+        };
     }
 
     public string Kind

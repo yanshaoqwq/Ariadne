@@ -67,6 +67,7 @@ use ariadne::workflow::{
     WorkflowOperationPolicy, WorkflowOperationStatus, WorkflowRunState, WorkflowRuntime,
     WorkflowRuntimeEventType, WorkflowRuntimeStore,
 };
+use fs4::FileExt;
 use serde_json::{json, Value};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -4021,6 +4022,52 @@ fn node_preset_project_write_failure_rolls_back_global_defaults() {
 }
 
 #[test]
+fn node_preset_save_waits_for_cross_process_defaults_transaction_lock() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "openai", "gpt-4.1-mini", true);
+    let state = Arc::new(AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    ));
+    let mut settings = ariadne::commands::get_node_preset_settings(&state).unwrap();
+    settings.default_timeout_ms = 63_000;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(app_state.path().join(".node-authoring-defaults.lock"))
+        .unwrap();
+    FileExt::lock_exclusive(&lock).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let worker_state = Arc::clone(&state);
+    let worker = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        result_tx
+            .send(ariadne::commands::save_node_preset_settings(
+                &worker_state,
+                settings,
+            ))
+            .unwrap();
+    });
+
+    started_rx.recv().unwrap();
+    assert!(result_rx.recv_timeout(Duration::from_millis(150)).is_err());
+    FileExt::unlock(&lock).unwrap();
+    drop(lock);
+
+    assert!(result_rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .is_ok());
+    worker.join().unwrap();
+}
+
+#[test]
 fn backend_diagnostics_reports_provider_configuration_gaps() {
     let project = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -4821,6 +4868,56 @@ fn qdrant_process_settings_are_app_scoped_and_absent_from_project_rag_yaml() {
     let yaml = std::fs::read_to_string(project_b.path().join(".config/rag.yaml")).unwrap();
     assert!(!yaml.contains("binary_path"));
     assert!(!yaml.contains("startup_timeout_ms"));
+}
+
+#[test]
+fn app_runtime_save_waits_for_cross_process_transaction_lock() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = Arc::new(AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    ));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(
+            app_state
+                .path()
+                .join(".app-runtime-settings-transaction.lock"),
+        )
+        .unwrap();
+    FileExt::lock_exclusive(&lock).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let worker_state = Arc::clone(&state);
+    let worker = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        result_tx
+            .send(ariadne::commands::save_app_runtime_settings(
+                &worker_state,
+                AppRuntimeSettings {
+                    qdrant_binary_path: "/opt/ariadne/qdrant".to_owned(),
+                    qdrant_startup_timeout_ms: 61_000,
+                },
+            ))
+            .unwrap();
+    });
+
+    started_rx.recv().unwrap();
+    assert!(result_rx.recv_timeout(Duration::from_millis(150)).is_err());
+    FileExt::unlock(&lock).unwrap();
+    drop(lock);
+
+    assert!(result_rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .is_ok());
+    worker.join().unwrap();
 }
 
 #[test]

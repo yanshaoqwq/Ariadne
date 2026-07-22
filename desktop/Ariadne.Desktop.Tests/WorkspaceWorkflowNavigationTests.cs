@@ -12,6 +12,57 @@ namespace Ariadne.Desktop.Tests;
 public sealed class WorkspaceWorkflowNavigationTests
 {
     [Fact]
+    public async Task PreparedCanvasSave_KeepsEditMadeDuringCommitDirty()
+    {
+        var backend = CanvasBackend.Create();
+        var saveStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var saveRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.SaveHandler = async graph =>
+        {
+            backend.SavedGraph = graph;
+            saveStarted.TrySetResult(true);
+            await saveRelease.Task;
+            return graph with { ContentRevision = "saved-revision" };
+        };
+        var vm = new WorkspacePageViewModel(DisplayNameService.LoadDefault(), backend.Client);
+        await vm.ReloadProjectDataAsync();
+        vm.AddNodeAt("llm", 100, 100);
+
+        Assert.True(await vm.PrepareUnsavedChangesAsync());
+        var commit = vm.CommitPreparedUnsavedChangesAsync();
+        await saveStarted.Task;
+        vm.AddNodeAt("llm", 300, 100);
+        saveRelease.TrySetResult(true);
+
+        Assert.False(await commit);
+        Assert.Single(backend.SavedGraph!.Nodes);
+        Assert.Equal(2, vm.Nodes.Count);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public async Task PreparedCanvasSave_RejectsEditBeforeCommitWithoutWriting()
+    {
+        var backend = CanvasBackend.Create();
+        var saveCalls = 0;
+        backend.SaveHandler = graph =>
+        {
+            saveCalls++;
+            return Task.FromResult(graph);
+        };
+        var vm = new WorkspacePageViewModel(DisplayNameService.LoadDefault(), backend.Client);
+        await vm.ReloadProjectDataAsync();
+        vm.AddNodeAt("llm", 100, 100);
+
+        Assert.True(await vm.PrepareUnsavedChangesAsync());
+        vm.AddNodeAt("llm", 300, 100);
+
+        Assert.False(await vm.CommitPreparedUnsavedChangesAsync());
+        Assert.Equal(0, saveCalls);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
     public async Task Reload_LoadsSingleProjectCanvas_AndKeepsForeignConfirmationVisible()
     {
         var backend = CanvasBackend.Create();
@@ -85,6 +136,9 @@ public sealed class WorkspaceWorkflowNavigationTests
         public IAriadneBackendClient Client { get; private set; } = null!;
         public int ProjectCanvasLoadCount { get; private set; }
         public int ListWorkflowGraphsCount { get; private set; }
+        public WorkflowGraphData? SavedGraph { get; set; }
+        public Func<WorkflowGraphData, Task<WorkflowGraphData>> SaveHandler { get; set; } =
+            graph => Task.FromResult(graph);
 
         public static CanvasBackend Create()
         {
@@ -106,11 +160,15 @@ public sealed class WorkspaceWorkflowNavigationTests
                 return true;
             }
 
+            if (targetMethod.Name == nameof(IAriadneBackendClient.SaveProjectCanvasAsync))
+            {
+                return SaveHandler((WorkflowGraphData)args![0]!);
+            }
+
             object? value = targetMethod.Name switch
             {
                 nameof(IAriadneBackendClient.LoadProjectCanvasAsync) => LoadCanvas(),
                 nameof(IAriadneBackendClient.ListWorkflowGraphsAsync) => CountList(),
-                nameof(IAriadneBackendClient.SaveProjectCanvasAsync) => args![0]!,
                 nameof(IAriadneBackendClient.SaveWorkflowGraphAsync) => args![0]!,
                 nameof(IAriadneBackendClient.ValidateWorkflowGraphAsync) => null,
                 nameof(IAriadneBackendClient.ListConfirmationsAsync) => new[] { ForeignConfirmation() },

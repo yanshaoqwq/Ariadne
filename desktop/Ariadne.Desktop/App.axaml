@@ -42,7 +42,7 @@
       <Button Classes="nav"
               ctl:SelectedClass.IsSelected="{Binding IsSelected}"
               Command="{Binding SelectCommand}"
-              ToolTip.Tip="{Binding Title}"
+              ToolTip.Tip="{Binding ToolTipText}"
               AutomationProperties.Name="{Binding Title}">
         <Panel>
           <Grid ColumnDefinitions="3,26,*,Auto" Margin="0,0,10,0"

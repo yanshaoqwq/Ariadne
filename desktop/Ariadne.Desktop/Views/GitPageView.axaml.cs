@@ -16,6 +16,12 @@ public partial class GitPageView : UserControl
         AttachClipboardActions();
     }
 
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        AttachClipboardActions();
+    }
+
     private void AttachClipboardActions()
     {
         if (_attachedViewModel is not null && !ReferenceEquals(_attachedViewModel, DataContext))

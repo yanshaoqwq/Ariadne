@@ -12,7 +12,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     private readonly SemaphoreSlim _ipcWriteLock = new(1, 1);
     private readonly object _processLock = new();
     private readonly IpcResponseRouter _responseRouter = new();
-    private readonly StringBuilder _stderrBuffer = new();
+    private readonly BoundedTextBuffer _stderrBuffer = new(32 * 1024);
     private Process? _backendProcess;
     private StreamWriter? _backendInput;
     private StreamReader? _backendOutput;
@@ -23,7 +23,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     private int _processGeneration;
     private bool _disposed;
 
-    private JsonLineBackendClient(string? backendCommand)
+    internal JsonLineBackendClient(string? backendCommand)
     {
         _backendCommand = backendCommand;
         _appStateRoot = Path.Combine(
@@ -650,6 +650,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         object? parameters,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
             return default;
@@ -657,6 +658,10 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         try
         {
             return await SendRequestAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -846,10 +851,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
                 {
                     while (await process.StandardError.ReadLineAsync().ConfigureAwait(false) is { } line)
                     {
-                        lock (_stderrBuffer)
-                        {
-                            _stderrBuffer.AppendLine(line);
-                        }
+                        _stderrBuffer.AppendLine(line);
                     }
                 }
                 catch
@@ -910,10 +912,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
 
     private string CurrentBackendStderr()
     {
-        lock (_stderrBuffer)
-        {
-            return _stderrBuffer.ToString().Trim();
-        }
+        return _stderrBuffer.Read().Trim();
     }
 
     private void ResetBackendProcess()

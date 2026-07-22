@@ -20,7 +20,19 @@ public sealed class NavigationItemViewModel : ViewModelBase
 
     public string Id { get; }
 
-    public string Title { get => _title; set => SetProperty(ref _title, value); }
+    public string Title
+    {
+        get => _title;
+        set
+        {
+            if (SetProperty(ref _title, value))
+            {
+                OnPropertyChanged(nameof(ToolTipText));
+            }
+        }
+    }
+
+    public string? ToolTipText => SidebarCollapsed ? Title : null;
 
     /// 矢量图标几何（来自主题资源 Ariadne.Icon.*），用 Path 渲染，不依赖任何字体。
     public Geometry? Icon { get; }
@@ -42,6 +54,7 @@ public sealed class NavigationItemViewModel : ViewModelBase
             if (SetProperty(ref _sidebarExpanded, value))
             {
                 OnPropertyChanged(nameof(SidebarCollapsed));
+                OnPropertyChanged(nameof(ToolTipText));
             }
         }
     }

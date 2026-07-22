@@ -122,6 +122,9 @@ public partial class WorkspacePageView : UserControl
             MotionPreferences.Changed += OnMotionPreferenceChanged;
             _motionPreferenceAttached = true;
         }
+        // DataContext 可能在脱离视觉树期间保持不变；重附着时必须恢复所有
+        // ViewModel -> View 委托和集合订阅，不能只恢复动效偏好。
+        AttachViewActions();
         ApplyMotionPreference();
     }
 
@@ -190,31 +193,12 @@ public partial class WorkspacePageView : UserControl
 
     private void AttachViewActions()
     {
-        if (_attachedViewModel is not null && !ReferenceEquals(_attachedViewModel, DataContext))
+        if (ReferenceEquals(_attachedViewModel, DataContext))
         {
-            _attachedViewModel.CanvasViewport.EndPan();
-            _attachedViewModel.EndPortDragHighlight();
-            _keyboardEdgeSourceNode = null;
-            _keyboardEdgeSourceHandle = null;
-            _attachedViewModel.RequestFitView = null;
-            _attachedViewModel.RequestCanvasZoomStep = null;
-            _attachedViewModel.RequestResetCanvasZoom = null;
-            _attachedViewModel.RequestEnsureNodeVisible = null;
-            _attachedViewModel.PickFolder = null;
-            _attachedViewModel.PickFile = null;
-            _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
-            _attachedViewModel.Edges.CollectionChanged -= OnEdgesCollectionChanged;
-            _attachedViewModel.PropertyChanged -= OnViewModelPropertyChanged;
-            foreach (var node in _attachedViewModel.Nodes)
-            {
-                node.PropertyChanged -= OnNodePropertyChanged;
-            }
-            foreach (var edge in _attachedViewModel.Edges)
-            {
-                edge.PropertyChanged -= OnEdgePropertyChanged;
-            }
-            _attachedViewModel = null;
+            return;
         }
+
+        DetachViewActions();
 
         if (DataContext is WorkspacePageViewModel viewModel)
         {
@@ -250,6 +234,37 @@ public partial class WorkspacePageView : UserControl
             ScheduleEdgeSync();
             ScheduleMiniMapSync();
         }
+    }
+
+    private void DetachViewActions()
+    {
+        if (_attachedViewModel is null)
+        {
+            return;
+        }
+
+        _attachedViewModel.CanvasViewport.EndPan();
+        _attachedViewModel.EndPortDragHighlight();
+        _keyboardEdgeSourceNode = null;
+        _keyboardEdgeSourceHandle = null;
+        _attachedViewModel.RequestFitView = null;
+        _attachedViewModel.RequestCanvasZoomStep = null;
+        _attachedViewModel.RequestResetCanvasZoom = null;
+        _attachedViewModel.RequestEnsureNodeVisible = null;
+        _attachedViewModel.PickFolder = null;
+        _attachedViewModel.PickFile = null;
+        _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
+        _attachedViewModel.Edges.CollectionChanged -= OnEdgesCollectionChanged;
+        _attachedViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        foreach (var node in _attachedViewModel.Nodes)
+        {
+            node.PropertyChanged -= OnNodePropertyChanged;
+        }
+        foreach (var edge in _attachedViewModel.Edges)
+        {
+            edge.PropertyChanged -= OnEdgePropertyChanged;
+        }
+        _attachedViewModel = null;
     }
 
     private async Task<string?> PickFolderAsync(string? title)
@@ -294,26 +309,7 @@ public partial class WorkspacePageView : UserControl
         _spacePanMode = false;
         _keyboardEdgeSourceNode = null;
         _keyboardEdgeSourceHandle = null;
-        if (_attachedViewModel is not null)
-        {
-            _attachedViewModel.CanvasViewport.EndPan();
-            _attachedViewModel.RequestFitView = null;
-            _attachedViewModel.RequestCanvasZoomStep = null;
-            _attachedViewModel.RequestResetCanvasZoom = null;
-            _attachedViewModel.Nodes.CollectionChanged -= OnNodesCollectionChanged;
-            _attachedViewModel.Edges.CollectionChanged -= OnEdgesCollectionChanged;
-            _attachedViewModel.PropertyChanged -= OnViewModelPropertyChanged;
-            _attachedViewModel.EndPortDragHighlight();
-            foreach (var node in _attachedViewModel.Nodes)
-            {
-                node.PropertyChanged -= OnNodePropertyChanged;
-            }
-            foreach (var edge in _attachedViewModel.Edges)
-            {
-                edge.PropertyChanged -= OnEdgePropertyChanged;
-            }
-            _attachedViewModel = null;
-        }
+        DetachViewActions();
 
         base.OnDetachedFromVisualTree(e);
     }

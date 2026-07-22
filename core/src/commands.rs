@@ -118,6 +118,7 @@ const BUDGET_CONFIG_FILE: &str = "budget.json";
 const CHAPTER_INDEX_FILE: &str = "chapter_index.json";
 const UI_NODE_PRESETS_FILE: &str = "ui_node_presets.json";
 const APP_NODE_DEFAULTS_FILE: &str = "node_authoring_defaults.json";
+const APP_NODE_DEFAULTS_LOCK_FILE: &str = ".node-authoring-defaults.lock";
 const TEMPLATE_REPOSITORY_SETTINGS_FILE: &str = "template_repository_settings.json";
 const PROVIDER_REFERENCE_GRAPH_LOCK: &str = ".provider-reference-graph";
 const DEFAULT_TEMPLATE_REPOSITORY_URL: &str = OFFICIAL_TEMPLATE_REPOSITORY_URL;
@@ -2715,6 +2716,9 @@ pub fn save_app_runtime_settings(
         .map(|root| acquire_project_mutation_guard(root, "app_runtime_settings_update"))
         .transpose()?;
     let store = AppRuntimeSettingsStore::default_for_app(state.app_state_root());
+    let _runtime_transaction = store
+        .lock_transaction_exclusive()
+        .map_err(error_to_string)?;
     let previous = AppRuntimeSettingsStore::read_global_or_migrate(
         state.app_state_root(),
         active_project.as_deref(),
@@ -9807,13 +9811,19 @@ fn read_node_preset_settings_with_app_state(
     app_state_root: &Path,
 ) -> CommandResult<NodePresetSettings> {
     validate_project_root(project_root)?;
+    let _node_defaults_lock = crate::config::store::acquire_app_state_lock(
+        app_state_root,
+        APP_NODE_DEFAULTS_LOCK_FILE,
+        "app_node_defaults_lock",
+    )
+    .map_err(error_to_string)?;
     let path = node_preset_settings_path(project_root);
     let legacy = match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str::<NodePresetSettings>(&content).ok(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error_to_string(error)),
     };
-    let app = read_app_node_defaults(app_state_root, legacy.as_ref())?;
+    let app = read_app_node_defaults_unlocked(app_state_root, legacy.as_ref())?;
     let project = match std::fs::read_to_string(path) {
         Ok(content) => {
             serde_json::from_str::<ProjectNodePresetOverrides>(&content).map_err(error_to_string)?
@@ -9826,7 +9836,7 @@ fn read_node_preset_settings_with_app_state(
     Ok(project.merge(app))
 }
 
-fn read_app_node_defaults(
+fn read_app_node_defaults_unlocked(
     app_state_root: &Path,
     legacy: Option<&NodePresetSettings>,
 ) -> CommandResult<AppNodeDefaults> {
@@ -9896,6 +9906,12 @@ fn write_node_preset_settings(
         ));
     }
     validate_money("default_budget_usd", settings.default_budget_usd)?;
+    let _node_defaults_lock = crate::config::store::acquire_app_state_lock(
+        app_state_root,
+        APP_NODE_DEFAULTS_LOCK_FILE,
+        "app_node_defaults_lock",
+    )
+    .map_err(error_to_string)?;
     let app_path = app_node_defaults_path(app_state_root);
     let project_path = node_preset_settings_path(project_root);
     let previous_app = std::fs::read(&app_path).ok();

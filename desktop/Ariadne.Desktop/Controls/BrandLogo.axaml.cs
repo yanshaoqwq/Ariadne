@@ -33,7 +33,11 @@ public partial class BrandLogo : UserControl
             ApplyChrome();
             QueueRefresh();
         };
-        Unloaded += (_, _) => AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
+        Unloaded += (_, _) =>
+        {
+            AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
+            ClearImage();
+        };
     }
 
     public bool OnAccent
@@ -98,5 +102,16 @@ public partial class BrandLogo : UserControl
         {
             // 资源未加载时忽略
         }
+    }
+
+    private void ClearImage()
+    {
+        if (LogoImage is not null)
+        {
+            LogoImage.Source = null;
+        }
+
+        _current?.Dispose();
+        _current = null;
     }
 }

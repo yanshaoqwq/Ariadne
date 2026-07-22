@@ -14,10 +14,13 @@ public partial class MainWindow : Window
     private bool _closeConfirmed;
     private bool _closeCheckRunning;
     private bool? _wasCompact;
+    private readonly Func<string?, Task<string?>> _projectFolderPicker;
+    private WelcomeViewModel? _attachedWelcome;
 
     public MainWindow()
     {
         InitializeComponent();
+        _projectFolderPicker = PickProjectFolderAsync;
         DataContextChanged += (_, _) => AttachProjectFolderPicker();
         AttachProjectFolderPicker();
         Opened += (_, _) =>
@@ -30,16 +33,28 @@ public partial class MainWindow : Window
         };
         PropertyChanged += OnWindowPropertyChanged;
         AppIconPainter.IconColorsChanged += OnIconColorsChanged;
-        Closed += (_, _) => AppIconPainter.IconColorsChanged -= OnIconColorsChanged;
+        Closed += (_, _) =>
+        {
+            DetachProjectFolderPicker();
+            AppIconPainter.IconColorsChanged -= OnIconColorsChanged;
+        };
     }
 
     private void AttachProjectFolderPicker()
     {
+        DetachProjectFolderPicker();
         if (DataContext is MainWindowViewModel viewModel)
         {
             // 原生目录选择器属于仍附着于桌面的顶层窗口，不能挂在可能被导航切走的 WelcomeView 上。
-            viewModel.Welcome.SetProjectFolderPicker(PickProjectFolderAsync);
+            viewModel.Welcome.SetProjectFolderPicker(_projectFolderPicker);
+            _attachedWelcome = viewModel.Welcome;
         }
+    }
+
+    private void DetachProjectFolderPicker()
+    {
+        _attachedWelcome?.ClearProjectFolderPicker(_projectFolderPicker);
+        _attachedWelcome = null;
     }
 
     private async Task<string?> PickProjectFolderAsync(string? title)
@@ -180,8 +195,8 @@ public partial class MainWindow : Window
         _closeCheckRunning = true;
         try
         {
-            if (DataContext is MainWindowViewModel { CurrentPage: IUnsavedChangesGuard guard }
-                && !await guard.ConfirmLeaveIfNeededAsync().ConfigureAwait(true))
+            if (DataContext is MainWindowViewModel viewModel
+                && !await viewModel.ConfirmCloseAsync().ConfigureAwait(true))
             {
                 return;
             }
@@ -196,7 +211,8 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {
-        if (!_closeConfirmed && DataContext is MainWindowViewModel { CurrentPage: IUnsavedChangesGuard { HasUnsavedChanges: true } })
+        if (!_closeConfirmed
+            && DataContext is MainWindowViewModel { HasCachedUnsavedChanges: true })
         {
             e.Cancel = true;
             _ = CloseWithUnsavedCheckAsync();

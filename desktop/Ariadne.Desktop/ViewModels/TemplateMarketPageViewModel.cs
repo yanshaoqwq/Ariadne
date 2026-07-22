@@ -5,7 +5,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class TemplateMarketPageViewModel : ViewModelBase
+public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAware
 {
     private const int PageSize = 20;
 
@@ -124,11 +124,20 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase
     private TemplateTagViewModel CreateTag(string key)
     {
         var title = _displayNames.Text(key);
-        return new TemplateTagViewModel(title, () =>
+        return new TemplateTagViewModel(key, title, tag =>
         {
-            SearchQuery = title;
+            SearchQuery = tag.Title;
             _ = SearchAsync();
         }, () => !IsBusy);
+    }
+
+    public void RefreshLocalizedUi()
+    {
+        foreach (var tag in Tags)
+        {
+            tag.Title = _displayNames.Text(tag.DisplayNameKey);
+        }
+        OnPropertyChanged(string.Empty);
     }
 
     private async Task<string> LoadRepositoryAsync(
@@ -582,14 +591,22 @@ public sealed class TemplateCardViewModel
     public RelayCommand InstallCommand { get; }
 }
 
-public sealed class TemplateTagViewModel
+public sealed class TemplateTagViewModel : ViewModelBase
 {
-    public TemplateTagViewModel(string title, Action select, Func<bool>? canSelect = null)
+    private string _title;
+
+    public TemplateTagViewModel(
+        string displayNameKey,
+        string title,
+        Action<TemplateTagViewModel> select,
+        Func<bool>? canSelect = null)
     {
-        Title = title;
-        SelectCommand = new RelayCommand(select, canSelect);
+        DisplayNameKey = displayNameKey;
+        _title = title;
+        SelectCommand = new RelayCommand(() => select(this), canSelect);
     }
 
-    public string Title { get; }
+    public string DisplayNameKey { get; }
+    public string Title { get => _title; set => SetProperty(ref _title, value); }
     public RelayCommand SelectCommand { get; }
 }

@@ -109,6 +109,14 @@ public sealed class WelcomeViewModel : ViewModelBase
         _pickProjectFolder = picker;
     }
 
+    public void ClearProjectFolderPicker(Func<string?, Task<string?>> picker)
+    {
+        if (_pickProjectFolder == picker)
+        {
+            _pickProjectFolder = _ => Task.FromResult<string?>(null);
+        }
+    }
+
     private void RefreshLocalizedText()
     {
         OnPropertyChanged(nameof(BrandName));

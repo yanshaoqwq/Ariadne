@@ -30,6 +30,7 @@ public partial class App : Application
 
             var backend = JsonLineBackendClient.CreateDefault();
             var viewModel = new MainWindowViewModel(DisplayNameService.Current, backend);
+            desktop.Exit += (_, _) => backend.Dispose();
             desktop.MainWindow = new MainWindow
             {
                 DataContext = viewModel,

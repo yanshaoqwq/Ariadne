@@ -4,6 +4,12 @@ public interface IUnsavedChangesGuard
 {
     bool HasUnsavedChanges { get; }
 
+    /// <summary>跨语言稳定的页面身份，用于离开事务日志。</summary>
+    string UnsavedChangesPageId { get; }
+
+    /// <summary>prepare 后的不可逆载荷指纹；不得包含明文内容或密钥。</summary>
+    string? PreparedUnsavedChangesPayloadIdentity { get; }
+
     /// <summary>批量离开对话框中展示的页面名称（本地化后）。</summary>
     string UnsavedChangesPageTitle { get; }
 

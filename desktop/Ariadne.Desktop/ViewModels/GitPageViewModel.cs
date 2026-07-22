@@ -13,7 +13,7 @@ public enum GitOperationState
     Restoring,
 }
 
-public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IUiPreferencesAware
+public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
 {
     private const string RightPanelPreferenceKey = "git.right_panel";
     private readonly DisplayNameService _displayNames;
@@ -89,6 +89,22 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         {
             commit.ApplyMarkerColors(_gitAutoColor, _gitManualColor);
         }
+    }
+
+    public void RefreshLocalizedUi()
+    {
+        foreach (var commit in Commits)
+        {
+            commit.RefreshLocalizedUi(
+                _displayNames,
+                commit.IsAutoCheckpoint ? AutoKindText : commit.IsManualCheckpoint ? ManualKindText : string.Empty,
+                HeadBadgeText,
+                MergeBadgeText,
+                CtxViewDetailsText,
+                CtxRestoreText,
+                CtxCopyIdText);
+        }
+        OnPropertyChanged(string.Empty);
     }
 
     private async Task ToggleRightPanelAsync()
@@ -651,13 +667,20 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             StatusText = NoSelectionText;
             return;
         }
-        if (RequestCopyText is not null)
+        try
         {
-            await RequestCopyText(commit.CommitId).ConfigureAwait(true);
-            StatusText = _displayNames.Text("ui.git.copied_commit_id");
-            return;
+            if (RequestCopyText is not null)
+            {
+                await RequestCopyText(commit.CommitId).ConfigureAwait(true);
+                StatusText = _displayNames.Text("ui.git.copied_commit_id");
+                return;
+            }
+            StatusText = commit.CommitId;
         }
-        StatusText = commit.CommitId;
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
     }
 
     private void SelectCommit(GitHistoryItemViewModel item)
@@ -795,6 +818,7 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         Parents = parents;
         Refs = refs;
         TimestampMs = timestampMs;
+        Author = author;
         AuthorText = string.IsNullOrWhiteSpace(author) ? displayNames.Text("ui.common.none") : author;
         KindText = kindText;
         IsAutoCheckpoint = isAutoCheckpoint;
@@ -838,10 +862,11 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
     public IReadOnlyList<string> Parents { get; }
     public IReadOnlyList<string> Refs { get; }
     public long TimestampMs { get; }
-    public string TimestampText { get; }
-    public string RelativeTimeText { get; }
-    public string AuthorText { get; }
-    public string KindText { get; }
+    public string TimestampText { get; private set; }
+    public string RelativeTimeText { get; private set; }
+    public string? Author { get; }
+    public string AuthorText { get; private set; }
+    public string KindText { get; private set; }
     public bool IsAutoCheckpoint { get; }
     public bool IsManualCheckpoint { get; }
     public bool HasCustomMarker => IsAutoCheckpoint || IsManualCheckpoint;
@@ -858,11 +883,11 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
     public bool HasGraphContinuation => Parents.Count > 0;
     public int LaneIndex { get; }
     public double LaneOffset { get; }
-    public string HeadBadgeText { get; }
-    public string MergeBadgeText { get; }
-    public string ViewDetailsText { get; }
-    public string RestoreText { get; }
-    public string CopyIdText { get; }
+    public string HeadBadgeText { get; private set; }
+    public string MergeBadgeText { get; private set; }
+    public string ViewDetailsText { get; private set; }
+    public string RestoreText { get; private set; }
+    public string CopyIdText { get; private set; }
     public RelayCommand SelectCommand { get; }
     public RelayCommand ViewDetailsCommand { get; }
     public RelayCommand RestoreCommand { get; }
@@ -871,6 +896,31 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
     public void NotifyOperationStateChanged()
     {
         RestoreCommand.NotifyCanExecuteChanged();
+    }
+
+    internal void RefreshLocalizedUi(
+        DisplayNameService displayNames,
+        string kindText,
+        string headBadgeText,
+        string mergeBadgeText,
+        string viewDetailsText,
+        string restoreText,
+        string copyIdText)
+    {
+        AuthorText = string.IsNullOrWhiteSpace(Author) ? displayNames.Text("ui.common.none") : Author!;
+        KindText = kindText;
+        HeadBadgeText = headBadgeText;
+        MergeBadgeText = mergeBadgeText;
+        ViewDetailsText = viewDetailsText;
+        RestoreText = restoreText;
+        CopyIdText = copyIdText;
+        TimestampText = TimestampMs > 0
+            ? FormatTimestamp(TimestampMs)
+            : displayNames.Text("ui.common.none");
+        RelativeTimeText = TimestampMs > 0
+            ? FormatRelativeTime(TimestampMs, displayNames)
+            : displayNames.Text("ui.common.none");
+        OnPropertyChanged(string.Empty);
     }
 
     public void ApplyMarkerColors(string autoColor, string manualColor)

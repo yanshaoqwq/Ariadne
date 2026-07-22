@@ -8,6 +8,7 @@ use crate::contracts::{CoreError, CoreResult};
 
 pub const APP_RUNTIME_SETTINGS_FILE: &str = "app_runtime_settings.json";
 const APP_RUNTIME_SETTINGS_LOCK_FILE: &str = ".app-runtime-settings.lock";
+const APP_RUNTIME_SETTINGS_TRANSACTION_LOCK_FILE: &str = ".app-runtime-settings-transaction.lock";
 
 /// 设备/应用级运行环境配置。项目索引身份、数据目录和远端端点不进入这里。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +122,15 @@ impl AppRuntimeSettingsStore {
             &self.app_state_root,
             APP_RUNTIME_SETTINGS_LOCK_FILE,
             "app_runtime_settings_lock",
+        )
+    }
+
+    /// 串行化跨进程的 write + runtime reload + rollback 完整事务。
+    pub(crate) fn lock_transaction_exclusive(&self) -> CoreResult<std::fs::File> {
+        crate::config::store::acquire_app_state_lock(
+            &self.app_state_root,
+            APP_RUNTIME_SETTINGS_TRANSACTION_LOCK_FILE,
+            "app_runtime_settings_transaction_lock",
         )
     }
 }

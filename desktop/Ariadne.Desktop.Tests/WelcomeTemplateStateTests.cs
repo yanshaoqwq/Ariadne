@@ -125,7 +125,8 @@ public sealed class WelcomeTemplateStateTests
             "Views",
             "WelcomeView.axaml.cs"));
 
-        Assert.Contains("viewModel.Welcome.SetProjectFolderPicker(PickProjectFolderAsync)", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("viewModel.Welcome.SetProjectFolderPicker(_projectFolderPicker)", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("_attachedWelcome?.ClearProjectFolderPicker(_projectFolderPicker)", mainWindow, StringComparison.Ordinal);
         Assert.Contains("StorageProvider.CanPickFolder", mainWindow, StringComparison.Ordinal);
         Assert.Contains("StorageProvider.OpenFolderPickerAsync", mainWindow, StringComparison.Ordinal);
         Assert.DoesNotContain("SetProjectFolderPicker", welcomeView, StringComparison.Ordinal);

@@ -230,7 +230,7 @@
               <Separator Margin="2,6" />
               <Button Classes="nav"
                       Command="{Binding OpenVersionCommand}"
-                      ToolTip.Tip="{Binding VersionText}"
+                      ToolTip.Tip="{Binding VersionToolTipText}"
                       AutomationProperties.Name="{Binding VersionText}">
                 <Panel>
                   <!-- 展开 -->
@@ -246,7 +246,7 @@
               </Button>
               <Button Classes="nav"
                       Command="{Binding OpenFeedbackCommand}"
-                      ToolTip.Tip="{Binding FeedbackText}"
+                      ToolTip.Tip="{Binding FeedbackToolTipText}"
                       AutomationProperties.Name="{Binding FeedbackText}">
                 <Panel>
                   <Grid ColumnDefinitions="30,*" IsVisible="{Binding SidebarExpanded}">

@@ -42,6 +42,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
     private double _budgetUsagePercent;
     private bool _sidebarExpanded = true;
     private bool _hasOpenProject;
+    private string _currentProjectRoot = string.Empty;
     private string? _lastNavId;
     private string _maintenanceBannerText = string.Empty;
     private bool _isMaintenanceBlocking;
@@ -265,10 +266,14 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     public string FeedbackText => _displayNames.Text("ui.layout.feedback");
 
+    public string? FeedbackToolTipText => SidebarCollapsed ? FeedbackText : null;
+
     public string VersionText => _displayNames.Format("ui.layout.version_value", new Dictionary<string, string>
     {
         ["version"] = AppVersion,
     });
+
+    public string? VersionToolTipText => SidebarCollapsed ? VersionText : null;
 
     public string ProjectTitle
     {
@@ -323,6 +328,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             {
                 OnPropertyChanged(nameof(SidebarWidth));
                 OnPropertyChanged(nameof(SidebarCollapsed));
+                OnPropertyChanged(nameof(FeedbackToolTipText));
+                OnPropertyChanged(nameof(VersionToolTipText));
                 foreach (var nav in AllNavigationItems())
                 {
                     nav.SidebarExpanded = value;
@@ -392,6 +399,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     public async Task InitializeAsync()
     {
+        var interruptedLeave = BatchLeaveSaveCoordinator.ReadJournal(
+            BatchLeaveSaveCoordinator.DefaultJournalPath);
         try
         {
             await InitializeCoreAsync().ConfigureAwait(true);
@@ -407,6 +416,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             ResetProjectPageSession();
             CurrentPage = Welcome;
         }
+
+        ApplyInterruptedLeaveJournal(interruptedLeave);
     }
 
     private async Task InitializeCoreAsync()
@@ -449,6 +460,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         {
             await _backend.SetProjectRootAsync(project.ProjectRoot).ConfigureAwait(true);
         }
+
+        _currentProjectRoot = project.ProjectRoot;
 
         await Welcome.LoadAsync().ConfigureAwait(true);
         RefreshProjectMenuItems();
@@ -495,6 +508,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             return;
         }
         HasOpenProject = false;
+        _currentProjectRoot = string.Empty;
         foreach (var nav in AllNavigationItems())
         {
             nav.IsSelected = false;
@@ -599,7 +613,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             DiagnosticSummaryText = failure.PrimaryText(_displayNames);
         }
         OnPropertyChanged(nameof(FeedbackText));
+        OnPropertyChanged(nameof(FeedbackToolTipText));
         OnPropertyChanged(nameof(VersionText));
+        OnPropertyChanged(nameof(VersionToolTipText));
         OnPropertyChanged(nameof(HeaderStatusText));
         foreach (var item in AllNavigationItems())
         {
@@ -613,6 +629,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
                 "settings" => _displayNames.Text("ui.nav.settings"),
                 _ => item.Title,
             };
+        }
+        foreach (var page in _pageCache.Values.OfType<ILocalizedUiAware>())
+        {
+            page.RefreshLocalizedUi();
         }
     }
 
@@ -939,16 +959,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             {
                 // U65: prepare all (no durable write) → journaled commit each page.
                 var pages = dirty
-                    .Select(g => (
+                    .Select(g => new BatchLeaveSaveCoordinator.PageRequest(
+                        PageId: g.UnsavedChangesPageId,
                         Title: g.UnsavedChangesPageTitle,
-                        Prepare: (Func<Task<bool>>)(() => g.PrepareUnsavedChangesAsync()),
-                        Commit: (Func<Task<bool>>)(() => g.CommitPreparedUnsavedChangesAsync())))
+                        Prepare: () => g.PrepareUnsavedChangesAsync(),
+                        Commit: () => g.CommitPreparedUnsavedChangesAsync(),
+                        Abort: () => g.AbortPreparedUnsavedChangesAsync(),
+                        ReadPayloadIdentity: () => g.PreparedUnsavedChangesPayloadIdentity))
                     .ToList();
-                var journalPath = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    "Ariadne",
-                    "leave-save.journal.json");
-                var result = await BatchLeaveSaveCoordinator.ExecuteAsync(pages, journalPath).ConfigureAwait(true);
+                var result = await BatchLeaveSaveCoordinator.ExecuteAsync(
+                    pages,
+                    BatchLeaveSaveCoordinator.DefaultJournalPath,
+                    _currentProjectRoot).ConfigureAwait(true);
                 if (result.AllSucceeded)
                 {
                     return true;
@@ -982,6 +1004,40 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             default:
                 return false;
         }
+    }
+
+    internal bool HasCachedUnsavedChanges => _pageCache.Values
+        .OfType<IUnsavedChangesGuard>()
+        .Any(guard => guard.HasUnsavedChanges);
+
+    internal Task<bool> ConfirmCloseAsync() => ConfirmCachedProjectPagesLeaveAsync();
+
+    private void ApplyInterruptedLeaveJournal(BatchLeaveSaveCoordinator.JournalState? journal)
+    {
+        if (journal is null)
+        {
+            return;
+        }
+
+        if (journal.Phase is "committing" or "partial")
+        {
+            var failedPage = journal.FailedPage
+                ?? journal.PlannedPages.FirstOrDefault(page => !journal.CommittedPages.Contains(page))
+                ?? "?";
+            NotificationText = journal.CommittedPages.Count > 0
+                ? _displayNames.Format(
+                    "ui.dialog.unsaved.save_partial",
+                    new Dictionary<string, string>
+                    {
+                        ["page"] = failedPage,
+                        ["done"] = string.Join("、", journal.CommittedPages),
+                    })
+                : _displayNames.Format(
+                    "ui.dialog.unsaved.save_failed",
+                    new Dictionary<string, string> { ["page"] = failedPage });
+        }
+
+        BatchLeaveSaveCoordinator.ClearJournal(BatchLeaveSaveCoordinator.DefaultJournalPath);
     }
 
     private async Task ReloadCachedProjectPagesAsync()
