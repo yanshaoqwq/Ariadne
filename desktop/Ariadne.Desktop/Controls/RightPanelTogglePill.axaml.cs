@@ -61,6 +61,11 @@ public partial class RightPanelTogglePill : UserControl
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        if (_host is not null)
+        {
+            _host.SizeChanged -= OnHostSizeChanged;
+        }
+
         _host = this.FindAncestorOfType<Panel>();
         if (_host is not null)
         {
@@ -71,6 +76,8 @@ public partial class RightPanelTogglePill : UserControl
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        _pointerDown = false;
+        _moved = false;
         if (_host is not null)
         {
             _host.SizeChanged -= OnHostSizeChanged;

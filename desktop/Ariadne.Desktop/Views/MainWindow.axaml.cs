@@ -5,6 +5,7 @@ using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Ariadne.Desktop.Backend;
+using Ariadne.Desktop.Localization;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -61,7 +62,9 @@ public partial class MainWindow : Window
     {
         if (!StorageProvider.CanPickFolder)
         {
-            throw new BackendException("external", "the active desktop storage provider cannot pick folders");
+            throw new BackendException(
+                "external",
+                DisplayNameService.Current.Text("ui.settings.browse_unavailable"));
         }
 
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions

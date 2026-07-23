@@ -3712,14 +3712,25 @@ public sealed record WorkflowModelOption(
     string ProviderId,
     string ModelId,
     string ProviderDisplayName,
-    string? OverrideDisplayName = null)
+    string? OverrideDisplayName = null,
+    string? AliasId = null)
 {
     public string DisplayName => OverrideDisplayName ?? $"{ProviderDisplayName} · {ModelId}";
 
-    public bool IsInherited => string.IsNullOrWhiteSpace(ProviderId) && string.IsNullOrWhiteSpace(ModelId);
+    public bool IsAlias => !string.IsNullOrWhiteSpace(AliasId);
+
+    public bool IsInherited => !IsAlias
+                               && string.IsNullOrWhiteSpace(ProviderId)
+                               && string.IsNullOrWhiteSpace(ModelId);
 
     public static WorkflowModelOption Inherited(string displayName) =>
         new(string.Empty, string.Empty, string.Empty, displayName);
+
+    public static WorkflowModelOption Unconfigured(string displayName) =>
+        new(string.Empty, string.Empty, string.Empty, displayName);
+
+    public static WorkflowModelOption Alias(string aliasId, string displayName) =>
+        new(string.Empty, string.Empty, string.Empty, displayName, aliasId);
 }
 
 public sealed record SummarizerChapterOption(
@@ -3771,18 +3782,8 @@ public sealed class NodeDataInPinViewModel : ViewModelBase
     public bool IsConnected
     {
         get => _isConnected;
-        set
-        {
-            if (SetProperty(ref _isConnected, value))
-            {
-                OnPropertyChanged(nameof(FillBrush));
-            }
-        }
+        set => SetProperty(ref _isConnected, value);
     }
-
-    public IBrush FillBrush => IsConnected
-        ? new SolidColorBrush(Color.Parse("#2E726B"))
-        : new SolidColorBrush(Colors.Transparent);
 }
 
 /// <summary>画布端口语义类型；拖线时仅同类可连。</summary>
@@ -4127,13 +4128,6 @@ public readonly record struct EdgePathSpec(
 
 public sealed class WorkflowNodeViewModel : ViewModelBase
 {
-    private static readonly IBrush IdleBrush = new SolidColorBrush(Color.Parse("#8B939D"));
-    private static readonly IBrush RunningBrush = new SolidColorBrush(Color.Parse("#2563EB"));
-    private static readonly IBrush PendingBrush = new SolidColorBrush(Color.Parse("#6B7280"));
-    private static readonly IBrush PausedBrush = new SolidColorBrush(Color.Parse("#D97706"));
-    private static readonly IBrush SucceededBrush = new SolidColorBrush(Color.Parse("#0F9D63"));
-    private static readonly IBrush FailedBrush = new SolidColorBrush(Color.Parse("#DC2626"));
-    private static readonly IBrush SelectedBrush = new SolidColorBrush(Color.Parse("#2E726B"));
     private static readonly IBrush TypeStartBrush = new SolidColorBrush(Color.Parse("#0F9D63"));
     private static readonly IBrush TypeLlmBrush = new SolidColorBrush(Color.Parse("#2563EB"));
     private static readonly IBrush TypeAgentBrush = new SolidColorBrush(Color.Parse("#2E726B"));
@@ -4472,8 +4466,11 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         {
             if (SetProperty(ref _statusText, value))
             {
-                OnPropertyChanged(nameof(StatusIndicatorBrush));
-                OnPropertyChanged(nameof(NodeBorderBrush));
+                OnPropertyChanged(nameof(IsRunningStatus));
+                OnPropertyChanged(nameof(IsPendingStatus));
+                OnPropertyChanged(nameof(IsPausedStatus));
+                OnPropertyChanged(nameof(IsSucceededStatus));
+                OnPropertyChanged(nameof(IsFailedStatus));
             }
         }
     }
@@ -4487,19 +4484,12 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         get => _y;
         set => SetProperty(ref _y, value);
     }
-    public bool IsSelected
-    {
-        get => _isSelected;
-        set
-        {
-            if (SetProperty(ref _isSelected, value))
-            {
-                OnPropertyChanged(nameof(NodeBorderBrush));
-            }
-        }
-    }
-    public IBrush NodeBorderBrush => IsSelected ? SelectedBrush : StatusIndicatorBrush;
-    public IBrush StatusIndicatorBrush => BrushForStatus(StatusText);
+    public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
+    public bool IsRunningStatus => ClassifyStatus(StatusText) == NodeRuntimeStatus.Running;
+    public bool IsPendingStatus => ClassifyStatus(StatusText) == NodeRuntimeStatus.Pending;
+    public bool IsPausedStatus => ClassifyStatus(StatusText) == NodeRuntimeStatus.Paused;
+    public bool IsSucceededStatus => ClassifyStatus(StatusText) == NodeRuntimeStatus.Succeeded;
+    public bool IsFailedStatus => ClassifyStatus(StatusText) == NodeRuntimeStatus.Failed;
 
     /// <summary>节点类型色条：入口/代理/控制/工具分色，便于扫读结构。</summary>
     public IBrush TypeAccentBrush
@@ -4526,22 +4516,11 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public bool PortDataOutCompatible { get => _portDataOutCompatible; private set => SetProperty(ref _portDataOutCompatible, value); }
     public bool PortCommunicationCompatible { get => _portCommunicationCompatible; private set => SetProperty(ref _portCommunicationCompatible, value); }
 
-    // 未连接=空心（透明填充），已连接=实心
-    public IBrush PortControlInFill => _portControlInConnected
-        ? new SolidColorBrush(Color.Parse("#2E726B"))
-        : Brushes.Transparent;
-    public IBrush PortControlOutFill => _portControlOutConnected
-        ? new SolidColorBrush(Color.Parse("#2E726B"))
-        : Brushes.Transparent;
-    public IBrush PortDataInFill => _portDataInConnected
-        ? new SolidColorBrush(Color.Parse("#2E726B"))
-        : Brushes.Transparent;
-    public IBrush PortDataOutFill => _portDataOutConnected
-        ? new SolidColorBrush(Color.Parse("#2E726B"))
-        : Brushes.Transparent;
-    public IBrush PortCommunicationFill => _portCommunicationConnected
-        ? new SolidColorBrush(Color.Parse("#7C3AED"))
-        : Brushes.Transparent;
+    public bool PortControlInConnected => _portControlInConnected;
+    public bool PortControlOutConnected => _portControlOutConnected;
+    public bool PortDataInConnected => _portDataInConnected;
+    public bool PortDataOutConnected => _portDataOutConnected;
+    public bool PortCommunicationConnected => _portCommunicationConnected;
 
     public void SetPortConnected(
         bool controlIn, bool controlOut, bool dataIn, bool dataOut, bool communication)
@@ -4549,27 +4528,27 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         if (_portControlInConnected != controlIn)
         {
             _portControlInConnected = controlIn;
-            OnPropertyChanged(nameof(PortControlInFill));
+            OnPropertyChanged(nameof(PortControlInConnected));
         }
         if (_portControlOutConnected != controlOut)
         {
             _portControlOutConnected = controlOut;
-            OnPropertyChanged(nameof(PortControlOutFill));
+            OnPropertyChanged(nameof(PortControlOutConnected));
         }
         if (_portDataInConnected != dataIn)
         {
             _portDataInConnected = dataIn;
-            OnPropertyChanged(nameof(PortDataInFill));
+            OnPropertyChanged(nameof(PortDataInConnected));
         }
         if (_portDataOutConnected != dataOut)
         {
             _portDataOutConnected = dataOut;
-            OnPropertyChanged(nameof(PortDataOutFill));
+            OnPropertyChanged(nameof(PortDataOutConnected));
         }
         if (_portCommunicationConnected != communication)
         {
             _portCommunicationConnected = communication;
-            OnPropertyChanged(nameof(PortCommunicationFill));
+            OnPropertyChanged(nameof(PortCommunicationConnected));
         }
     }
 
@@ -4767,28 +4746,28 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         }
     }
 
-    private static IBrush BrushForStatus(string status)
+    private static NodeRuntimeStatus ClassifyStatus(string status)
     {
         var normalized = status.Trim().ToLowerInvariant();
         if (string.IsNullOrWhiteSpace(normalized))
         {
-            return IdleBrush;
+            return NodeRuntimeStatus.Idle;
         }
         if (normalized.Contains("running") || normalized.Contains("运行"))
         {
-            return RunningBrush;
+            return NodeRuntimeStatus.Running;
         }
         if (normalized.Contains("queued") || normalized.Contains("pending") || normalized.Contains("排队"))
         {
-            return PendingBrush;
+            return NodeRuntimeStatus.Pending;
         }
         if (normalized.Contains("paused") || normalized.Contains("暂停"))
         {
-            return PausedBrush;
+            return NodeRuntimeStatus.Paused;
         }
         if (normalized.Contains("succeeded") || normalized.Contains("success") || normalized.Contains("成功"))
         {
-            return SucceededBrush;
+            return NodeRuntimeStatus.Succeeded;
         }
         if (normalized.Contains("failed")
             || normalized.Contains("error")
@@ -4796,13 +4775,19 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
             || normalized.Contains("失败")
             || normalized.Contains("错误"))
         {
-            return FailedBrush;
+            return NodeRuntimeStatus.Failed;
         }
-        if (normalized.Contains("stopped") || normalized.Contains("停止"))
-        {
-            return IdleBrush;
-        }
-        return IdleBrush;
+        return NodeRuntimeStatus.Idle;
+    }
+
+    private enum NodeRuntimeStatus
+    {
+        Idle,
+        Running,
+        Pending,
+        Paused,
+        Succeeded,
+        Failed,
     }
 }
 
@@ -4851,10 +4836,6 @@ public sealed class ConfirmationItemViewModel : ViewModelBase
 
 public sealed class WorkflowEdgeViewModel : ViewModelBase
 {
-    private static readonly IBrush DataBrush = new SolidColorBrush(Color.Parse("#2E726B"));
-    private static readonly IBrush ControlBrush = new SolidColorBrush(Color.Parse("#8B939D"));
-    private static readonly IBrush CommunicationBrush = new SolidColorBrush(Color.Parse("#7C3AED"));
-
     private readonly DisplayNameService _displayNames;
     private readonly Action _markDirty;
     private bool _isSelected;
@@ -4944,7 +4925,6 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
         {
             if (SetProperty(ref _isSelected, value))
             {
-                OnPropertyChanged(nameof(StrokeBrush));
                 OnPropertyChanged(nameof(StrokeThickness));
                 OnPropertyChanged(nameof(StrokeOpacity));
             }
@@ -4957,19 +4937,6 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     public bool ShowHandleFields => IsData;
     public bool ShowLabelField => true;
     public bool ShowCommunicationFields => IsCommunication;
-    private static readonly IBrush SelectedStrokeBrush = new SolidColorBrush(Color.Parse("#F59E0B"));
-
-    /// <summary>W14：选中边用强调色，未选中按类型色。</summary>
-    public IBrush StrokeBrush =>
-        IsSelected
-            ? SelectedStrokeBrush
-            : Kind.ToLowerInvariant() switch
-            {
-                "control" => ControlBrush,
-                "communication" => CommunicationBrush,
-                _ => DataBrush,
-            };
-
     /// <summary>W14：选中边加粗；通信边默认略粗。</summary>
     public double StrokeThickness =>
         IsSelected ? 3.4 : (IsCommunication ? 2.2 : 1.6);

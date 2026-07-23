@@ -573,6 +573,25 @@ public sealed class ColorAndProviderHelpersTests
     }
 
     [Fact]
+    public void AppIconDesktopSync_LatestIntentGate_CoalescesWithoutDroppingLatestRequest()
+    {
+        var gate = new AppIconDesktopSync.LatestIntentGate<string>();
+
+        Assert.True(gate.Enqueue("first"));
+        Assert.False(gate.Enqueue("second"));
+        Assert.True(gate.TryTake(out var request, out var generation));
+        Assert.Equal("second", request);
+
+        Assert.False(gate.Enqueue("latest"));
+        Assert.False(gate.Complete(generation));
+        Assert.True(gate.TryTake(out request, out generation));
+        Assert.Equal("latest", request);
+        Assert.True(gate.Complete(generation));
+
+        Assert.True(gate.Enqueue("next-batch"));
+    }
+
+    [Fact]
     public void WorkflowExportSelection_FullExportIgnoresSelection()
     {
         var all = new[] { "a", "b", "c" };

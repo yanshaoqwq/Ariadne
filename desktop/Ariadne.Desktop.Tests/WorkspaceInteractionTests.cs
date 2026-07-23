@@ -81,6 +81,7 @@ public sealed class WorkspaceInteractionTests
 
             window.Content = null;
             window.Close();
+            await DrainDispatcherAsync();
             return true;
         }, CancellationToken.None);
     }
@@ -89,6 +90,7 @@ public sealed class WorkspaceInteractionTests
     {
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.SystemIdle);
     }
 
     private static class HeadlessAppBuilder

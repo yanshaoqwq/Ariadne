@@ -3,6 +3,7 @@
 #   ./run-ui.sh         在真实显示（DISPLAY，默认 :0）上开窗口，供人工查看
 #   ./run-ui.sh shot    用 Xvfb 无头跑起来并截图为 PNG（供无显示环境验证渲染）
 #   ./run-ui.sh build   仅编译
+#   ./run-ui.sh probe   用 Release + Xvfb 采集 100/500/1000 节点 UI 性能证据
 #
 # 说明：UI 文案来自 core/resources/display_name.json；
 # 后端 IPC 未连接时页面显示真实空态（不伪造数据）。
@@ -268,8 +269,27 @@ PY
     echo "[shot] 完成：$OUT ($(stat -c%s "$OUT" 2>/dev/null || echo '?') bytes, non-black content verified)"
     ;;
 
+  probe)
+    OUT="${2:-/tmp/ariadne-desktop-ui-performance.json}"
+    echo "[probe] dotnet Release build ..."
+    dotnet build "$CSPROJ/Ariadne.Desktop.csproj" \
+      --configuration Release \
+      --no-restore \
+      -v quiet \
+      --nologo
+    RELEASE_DLL="$CSPROJ/bin/Release/net10.0/Ariadne.Desktop.dll"
+    if [[ ! -f "$RELEASE_DLL" ]]; then
+      echo "[probe] Release 桌面程序集未生成：$RELEASE_DLL" >&2
+      exit 1
+    fi
+    echo "[probe] Xvfb 1600x900 -> $OUT"
+    xvfb-run -a -s "-screen 0 1600x900x24" \
+      dotnet "$RELEASE_DLL" --release-ui-probe "$OUT"
+    echo "[probe] 完成：$OUT"
+    ;;
+
   *)
-    echo "用法: $0 [run|shot|build|install-dev-desktop]"
+    echo "用法: $0 [run|shot|probe|build|install-dev-desktop]"
     exit 2
     ;;
 esac

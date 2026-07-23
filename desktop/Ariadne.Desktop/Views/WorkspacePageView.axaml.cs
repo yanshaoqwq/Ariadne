@@ -301,6 +301,11 @@ public partial class WorkspacePageView : UserControl
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        // 使已排队的短动效在页面离开视觉树后失效，避免重附着时旧任务回写状态。
+        _zoomFeedbackGeneration++;
+        _viewportFeedbackGeneration++;
+        ZoomReadoutButton?.Classes.Set("motion-pulse", false);
+        MiniMapViewportFrame?.Classes.Set("motion-settle", false);
         if (_motionPreferenceAttached)
         {
             MotionPreferences.Changed -= OnMotionPreferenceChanged;
@@ -2224,6 +2229,18 @@ public partial class WorkspacePageView : UserControl
             _draggedNode = previousNode;
             _nodeDragging = previousDragging;
         }
+    }
+
+    /// <summary>发布性能探针：按真实拖拽的脏区域请求下一帧，避免强制整窗重绘污染样本。</summary>
+    internal void RequestReleaseProbeFrame(WorkflowNodeViewModel node)
+    {
+        if (FindNodeContainer(node, NodesItemsControl, _nodeContainersById) is { } container)
+        {
+            container.InvalidateVisual();
+            return;
+        }
+
+        InvalidateVisual();
     }
 
     /// <summary>发布性能探针：模拟松手并将 render transform 一次性提交回布局坐标。</summary>

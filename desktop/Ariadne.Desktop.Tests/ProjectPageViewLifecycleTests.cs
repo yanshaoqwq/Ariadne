@@ -41,6 +41,7 @@ public sealed class ProjectPageViewLifecycleTests
             await AssertGitLifecycleAsync(window, gitView, git);
 
             window.Close();
+            await DrainDispatcherAsync();
             return true;
         }, CancellationToken.None);
     }
@@ -123,6 +124,7 @@ public sealed class ProjectPageViewLifecycleTests
     private static async Task DrainDispatcherAsync()
     {
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.SystemIdle);
     }
 
     private static class HeadlessAppBuilder

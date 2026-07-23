@@ -177,7 +177,7 @@ public partial class SpectrumColorPicker : UserControl
 
     private void OnSvPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (!e.GetCurrentPoint(SvField).Properties.IsLeftButtonPressed || SvField is null)
+        if (SvField is null || !e.GetCurrentPoint(SvField).Properties.IsLeftButtonPressed)
         {
             return;
         }
@@ -216,7 +216,7 @@ public partial class SpectrumColorPicker : UserControl
 
     private void OnHuePointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (!e.GetCurrentPoint(HueBar).Properties.IsLeftButtonPressed || HueBar is null)
+        if (HueBar is null || !e.GetCurrentPoint(HueBar).Properties.IsLeftButtonPressed)
         {
             return;
         }

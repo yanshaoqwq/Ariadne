@@ -9,25 +9,12 @@
 
   <!-- 欢迎页：氛围底 + 左主操作 + 右最近项目，桌面感、大留白 -->
   <Panel>
-    <!-- 氛围背景：主色微光 + 中性底 -->
+    <!-- 中性底；欢迎页内容承担视觉主次，不用装饰光斑抢焦点。 -->
     <Border Background="{DynamicResource Ariadne.WindowBase}" />
-    <Border Opacity="0.55" IsHitTestVisible="False">
-      <Border.Background>
-        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
-          <GradientStop Offset="0" Color="#332E726B" />
-          <GradientStop Offset="0.42" Color="#00000000" />
-          <GradientStop Offset="1" Color="#1A2563EB" />
-        </LinearGradientBrush>
-      </Border.Background>
-    </Border>
-    <!-- 单一低权重装饰光斑，不与最近项目卡争夺视觉重心 -->
-    <Ellipse Width="360" Height="360"
-             HorizontalAlignment="Right" VerticalAlignment="Top"
-             Margin="0,-110,-90,0"
-             IsHitTestVisible="False"
-             Opacity="0.12"
-             Fill="{DynamicResource Ariadne.AccentPrimary}" />
 
+    <ScrollViewer Grid.Row="0"
+                  HorizontalScrollBarVisibility="Disabled"
+                  VerticalScrollBarVisibility="Auto">
     <Grid Margin="0">
       <Grid
           MaxWidth="1080"
@@ -48,7 +35,7 @@
                          FontSize="34"
                          FontWeight="SemiBold"
                          Foreground="{DynamicResource Ariadne.TextHeading}"
-                         LetterSpacing="0.4" />
+                         LetterSpacing="0" />
               <TextBlock Text="{Binding Subtitle}"
                          Classes="secondary"
                          FontSize="15"
@@ -266,5 +253,6 @@
       </Grid>
 
     </Grid>
+    </ScrollViewer>
   </Panel>
 </UserControl>

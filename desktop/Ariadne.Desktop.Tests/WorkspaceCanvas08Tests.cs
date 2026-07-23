@@ -188,6 +188,42 @@ public sealed class WorkspaceCanvas08Tests
     }
 
     [Fact]
+    public void CanvasSemanticColors_UseGlobalDynamicResources_AndNoInfiniteSelectionAnimation()
+    {
+        var axaml = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var theme = File.ReadAllText(Path.Combine(ResolveDesktopSource("Resources", "Styles"), "AriadneTheme.axaml"));
+        var vm = File.ReadAllText(Path.Combine(ResolveDesktopSource("ViewModels"), "WorkspacePageViewModel.cs"));
+
+        Assert.Contains("Path.canvas-edge.control", axaml, StringComparison.Ordinal);
+        Assert.Contains("Path.canvas-edge.communication", axaml, StringComparison.Ordinal);
+        Assert.Contains("{DynamicResource Ariadne.NodeSelected}", axaml, StringComparison.Ordinal);
+        Assert.Contains("{DynamicResource Ariadne.EdgeData}", axaml, StringComparison.Ordinal);
+        Assert.Contains("Classes.connected=\"{Binding PortDataOutConnected}\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Stroke=\"{Binding StrokeBrush}\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Fill=\"{Binding StatusIndicatorBrush}\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("IterationCount=\"Infinite\"", theme, StringComparison.Ordinal);
+        Assert.DoesNotContain("public IBrush PortControlInFill", vm, StringComparison.Ordinal);
+        Assert.DoesNotContain("public IBrush PortDataOutFill", vm, StringComparison.Ordinal);
+        Assert.DoesNotContain("private static readonly IBrush DataBrush", vm, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReleaseUiProbe_UsesDraggedNodeDirtyRegion_AndScriptedReleaseEntry()
+    {
+        var probe = File.ReadAllText(ResolveDesktopSource("ReleaseUiProbe.cs"));
+        var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml.cs"));
+        var script = File.ReadAllText(Path.Combine(ResolveRepoRoot(), "desktop", "run-ui.sh"));
+
+        Assert.Contains("view.RequestReleaseProbeFrame(node);", probe, StringComparison.Ordinal);
+        Assert.Contains("InitialInteractionWarmup", probe, StringComparison.Ordinal);
+        Assert.Contains("container.InvalidateVisual();", view, StringComparison.Ordinal);
+        Assert.Contains("  probe)", script, StringComparison.Ordinal);
+        Assert.Contains("--configuration Release", script, StringComparison.Ordinal);
+        Assert.Contains("-screen 0 1600x900x24", script, StringComparison.Ordinal);
+        Assert.Contains("/tmp/ariadne-desktop-ui-performance.json", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void W10_DirectedEdgePath_PreservesSourceToTarget_ForRightToLeftGraph()
     {
         // Product draws a single cubic EdgePath (no separate arrow-head geometries).

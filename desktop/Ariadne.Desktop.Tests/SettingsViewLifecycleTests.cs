@@ -60,6 +60,7 @@ public sealed class SettingsViewLifecycleTests
 
         window.Content = null;
         window.Close();
+        await DrainDispatcherAsync();
         return true;
         }, CancellationToken.None);
     }
@@ -97,12 +98,14 @@ public sealed class SettingsViewLifecycleTests
         await DrainDispatcherAsync();
         window.Content = null;
         window.Close();
+        await DrainDispatcherAsync();
         return new WeakReference(view);
     }
 
     private static async Task DrainDispatcherAsync()
     {
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.SystemIdle);
     }
 
     private static SettingsPageViewModel NewViewModel() =>

@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
@@ -16,6 +17,7 @@ public partial class EmptyStateArt : UserControl
         AvaloniaProperty.Register<EmptyStateArt, string>(nameof(Kind), defaultValue: "Workspace");
 
     private Bitmap? _current;
+    private bool _isAttachedToVisualTree;
 
     public EmptyStateArt()
     {
@@ -27,16 +29,8 @@ public partial class EmptyStateArt : UserControl
                 ApplyKind();
             }
         };
-        Loaded += (_, _) =>
-        {
-            AppIconPainter.IconColorsChanged += OnThemeColorsChanged;
-            ApplyKind();
-        };
-        Unloaded += (_, _) =>
-        {
-            AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
-            ClearImage();
-        };
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
     public string Kind
@@ -45,8 +39,31 @@ public partial class EmptyStateArt : UserControl
         set => SetValue(KindProperty, value);
     }
 
+    internal bool IsAttachedForTests => _isAttachedToVisualTree;
+    internal bool HasRenderedImageForTests => ArtImage?.Source is not null;
+
+    private void OnLoaded(object? sender, RoutedEventArgs e)
+    {
+        _isAttachedToVisualTree = true;
+        AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
+        AppIconPainter.IconColorsChanged += OnThemeColorsChanged;
+        ApplyKind();
+    }
+
+    private void OnUnloaded(object? sender, RoutedEventArgs e)
+    {
+        _isAttachedToVisualTree = false;
+        AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
+        ClearImage();
+    }
+
     private void OnThemeColorsChanged()
     {
+        if (!_isAttachedToVisualTree)
+        {
+            return;
+        }
+
         Dispatcher.UIThread.Post(ApplyKind, DispatcherPriority.Background);
     }
 
@@ -72,7 +89,7 @@ public partial class EmptyStateArt : UserControl
         SetVis(TemplatesArt, kind, "Templates");
         SetVis(ProjectAiArt, kind, "ProjectAi");
 
-        if (!useImage || ArtImage is null)
+        if (!useImage || ArtImage is null || !_isAttachedToVisualTree)
         {
             ClearImage();
             return;

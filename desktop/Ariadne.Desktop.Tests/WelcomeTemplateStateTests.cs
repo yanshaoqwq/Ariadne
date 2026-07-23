@@ -359,7 +359,7 @@ public sealed class WelcomeTemplateStateTests
         Assert.Contains("VerticalScrollBarVisibility=\"Auto\"", view, StringComparison.Ordinal);
         Assert.DoesNotContain("MinHeight=\"440\"", view, StringComparison.Ordinal);
         Assert.DoesNotContain("Grid RowDefinitions=\"*,Auto\"", view, StringComparison.Ordinal);
-        Assert.Equal(1, view.Split("<Ellipse ", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("Width=\"360\" Height=\"360\"", view, StringComparison.Ordinal);
     }
 
     private class StateBackend : DispatchProxy

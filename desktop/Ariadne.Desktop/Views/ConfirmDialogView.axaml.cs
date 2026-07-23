@@ -11,23 +11,50 @@ namespace Ariadne.Desktop.Views;
 
 public partial class ConfirmDialogView : UserControl
 {
+    private TopLevel? _host;
+
     public ConfirmDialogView()
     {
         InitializeComponent();
         DataContextChanged += OnDataContextChanged;
-        AttachedToVisualTree += OnAttachedToVisualTree;
     }
 
     private void OnDataContextChanged(object? sender, EventArgs e)
     {
         ApplySeverityVisuals();
-            }
+    }
 
-    private void OnAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        base.OnAttachedToVisualTree(e);
+        _host = TopLevel.GetTopLevel(this);
+        if (_host is not null)
+        {
+            _host.SizeChanged += OnHostSizeChanged;
+        }
+
         ApplySeverityVisuals();
-                ApplyHostSizeConstraints();
+        ApplyHostSizeConstraints();
         Dispatcher.UIThread.Post(FocusPrimaryTarget, DispatcherPriority.Loaded);
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        if (_host is not null)
+        {
+            _host.SizeChanged -= OnHostSizeChanged;
+            _host = null;
+        }
+
+        base.OnDetachedFromVisualTree(e);
+    }
+
+    internal double DialogMaxWidthForTests => DialogChrome?.MaxWidth ?? double.NaN;
+    internal double DialogMaxHeightForTests => DialogChrome?.MaxHeight ?? double.NaN;
+
+    private void OnHostSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        ApplyHostSizeConstraints();
     }
 
     private void ApplySeverityVisuals()
@@ -58,7 +85,7 @@ public partial class ConfirmDialogView : UserControl
     private void ApplyHostSizeConstraints()
     {
         // U68: dialog max size from host client area (not fixed 520 on a 480-tall window).
-        var host = TopLevel.GetTopLevel(this) as Window;
+        var host = _host;
         if (host is null)
         {
             return;
@@ -69,13 +96,13 @@ public partial class ConfirmDialogView : UserControl
         {
             DialogChrome.MaxHeight = availH;
             DialogChrome.MaxWidth = Math.Min(560, availW);
+            DialogChrome.MinWidth = Math.Min(360, DialogChrome.MaxWidth);
         }
         if (BodyScroll is not null)
         {
             BodyScroll.MaxHeight = Math.Max(120, availH - 160);
         }
     }
-
     private void FocusPrimaryTarget()
     {
         if (DataContext is not ConfirmDialogViewModel vm)

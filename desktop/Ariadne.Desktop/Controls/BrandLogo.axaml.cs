@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
@@ -15,6 +16,7 @@ public partial class BrandLogo : UserControl
         AvaloniaProperty.Register<BrandLogo, bool>(nameof(OnAccent), defaultValue: false);
 
     private Bitmap? _current;
+    private bool _isAttachedToVisualTree;
 
     public BrandLogo()
     {
@@ -27,23 +29,33 @@ public partial class BrandLogo : UserControl
                 QueueRefresh();
             }
         };
-        Loaded += (_, _) =>
-        {
-            AppIconPainter.IconColorsChanged += OnThemeColorsChanged;
-            ApplyChrome();
-            QueueRefresh();
-        };
-        Unloaded += (_, _) =>
-        {
-            AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
-            ClearImage();
-        };
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
     public bool OnAccent
     {
         get => GetValue(OnAccentProperty);
         set => SetValue(OnAccentProperty, value);
+    }
+
+    internal bool IsAttachedForTests => _isAttachedToVisualTree;
+    internal bool HasRenderedImageForTests => LogoImage?.Source is not null;
+
+    private void OnLoaded(object? sender, RoutedEventArgs e)
+    {
+        _isAttachedToVisualTree = true;
+        AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
+        AppIconPainter.IconColorsChanged += OnThemeColorsChanged;
+        ApplyChrome();
+        QueueRefresh();
+    }
+
+    private void OnUnloaded(object? sender, RoutedEventArgs e)
+    {
+        _isAttachedToVisualTree = false;
+        AppIconPainter.IconColorsChanged -= OnThemeColorsChanged;
+        ClearImage();
     }
 
     private void ApplyChrome()
@@ -67,12 +79,17 @@ public partial class BrandLogo : UserControl
 
     private void OnThemeColorsChanged()
     {
+        if (!_isAttachedToVisualTree)
+        {
+            return;
+        }
+
         Dispatcher.UIThread.Post(QueueRefresh, DispatcherPriority.Background);
     }
 
     private void QueueRefresh()
     {
-        if (LogoImage is null)
+        if (!_isAttachedToVisualTree || LogoImage is null)
         {
             return;
         }

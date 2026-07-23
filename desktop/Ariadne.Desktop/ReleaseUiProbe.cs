@@ -29,6 +29,9 @@ internal sealed record UiPerformanceEvidence(
 internal static class ReleaseUiProbe
 {
     private const int FramesPerNodeCount = 120;
+    private const int WarmupFramesPerNodeCount = 12;
+    private static readonly TimeSpan InitialInteractionWarmup = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan FrameCallbackTimeout = TimeSpan.FromSeconds(30);
 #if DEBUG
     private const string BuildProfile = "debug";
 #else
@@ -69,6 +72,8 @@ internal static class ReleaseUiProbe
                     schema_version = 1,
                     probe = "desktop_ui_performance",
                     error = error.GetType().Name,
+                    error_stage = ReadProgressStage(args[1]),
+                    error_message = error.Message,
                 })).ConfigureAwait(true);
             }
             finally
@@ -112,14 +117,45 @@ internal static class ReleaseUiProbe
             var frameIntervals = new List<double>(FramesPerNodeCount);
             var frameWork = new List<double>(FramesPerNodeCount);
             var allocations = new List<long>(FramesPerNodeCount);
-            long previousTimestamp = Stopwatch.GetTimestamp();
             viewModel.BeginContinuousCanvasEdit();
             try
             {
+                WriteProgress(outputPath, $"warming-{nodeCount}");
+                var warmupTimestamp = Stopwatch.GetTimestamp();
+                var warmupStarted = warmupTimestamp;
+                var warmupFrame = 0;
+                do
+                {
+                    var warmup = await MeasureFrameAsync(
+                            topLevel,
+                            view,
+                            node,
+                            warmupFrame,
+                            warmupTimestamp)
+                        .ConfigureAwait(true);
+                    warmupTimestamp = warmup.Timestamp;
+                    warmupFrame++;
+                }
+                while (warmupFrame < WarmupFramesPerNodeCount
+                       || (samples.Count == 0
+                           && Stopwatch.GetElapsedTime(warmupStarted) < InitialInteractionWarmup));
+
+                WriteProgress(outputPath, $"framing-{nodeCount}");
+                var previousTimestamp = Stopwatch.GetTimestamp();
                 for (var frame = 0; frame < FramesPerNodeCount; frame++)
                 {
-                    var sample = await MeasureFrameAsync(topLevel, view, node, frame, previousTimestamp)
-                        .ConfigureAwait(true);
+                    FrameSample sample;
+                    try
+                    {
+                        sample = await MeasureFrameAsync(topLevel, view, node, frame, previousTimestamp)
+                            .ConfigureAwait(true);
+                    }
+                    catch (TimeoutException error)
+                    {
+                        throw new TimeoutException(
+                            $"animation frame callback timed out at node_count={nodeCount}, frame={frame}",
+                            error);
+                    }
                     previousTimestamp = sample.Timestamp;
                     if (frame > 0)
                     {
@@ -182,8 +218,9 @@ internal static class ReleaseUiProbe
                 (timestamp - workStarted) * 1000.0 / Stopwatch.Frequency,
                 Math.Max(0, after - before)));
         });
-        topLevel.InvalidateVisual();
-        return await completion.Task.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(true);
+        view.RequestReleaseProbeFrame(node);
+        // 存活超时只识别无回调；性能合格仍由完整样本的 p95 阈值判定。
+        return await completion.Task.WaitAsync(FrameCallbackTimeout).ConfigureAwait(true);
     }
 
     private static Task<TimeSpan> NextFrameAsync(TopLevel topLevel, TimeSpan timeout)
@@ -257,6 +294,19 @@ internal static class ReleaseUiProbe
         var path = Path.GetFullPath(outputPath) + ".progress";
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, stage);
+    }
+
+    private static string ReadProgressStage(string outputPath)
+    {
+        try
+        {
+            var path = Path.GetFullPath(outputPath) + ".progress";
+            return File.Exists(path) ? File.ReadAllText(path) : "not-started";
+        }
+        catch
+        {
+            return "unknown";
+        }
     }
 
     private readonly record struct FrameSample(

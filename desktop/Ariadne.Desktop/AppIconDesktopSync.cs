@@ -15,43 +15,200 @@ namespace Ariadne.Desktop;
 public static class AppIconDesktopSync
 {
     private static readonly int[] PngSizes = { 16, 24, 32, 48, 64, 128, 256, 512 };
-    private static int _syncing;
+    private static readonly LatestIntentGate<IconSyncRequest> SyncGate = new();
 
     public static void QueueSync()
     {
-        if (Interlocked.CompareExchange(ref _syncing, 1, 0) != 0)
-        {
-            return;
-        }
-
         Color accent;
-        Color paper;
         try
         {
             accent = AppIconPainter.ResolveColor("Ariadne.AccentPrimary", Color.FromRgb(0x35, 0x6F, 0x68));
-            paper = AppIconPainter.ResolveColor("Ariadne.BackgroundElevated", Color.FromRgb(0xF6, 0xF7, 0xF6));
-            if (paper.A < 10)
-            {
-                paper = Color.FromRgb(0xF6, 0xF7, 0xF6);
-            }
         }
         catch
         {
-            Interlocked.Exchange(ref _syncing, 0);
             return;
         }
 
-        Dispatcher.UIThread.Post(() =>
+        if (!SyncGate.Enqueue(new IconSyncRequest(accent)))
+        {
+            return;
+        }
+
+        Dispatcher.UIThread.Post(ProcessPendingSync, DispatcherPriority.Background);
+    }
+
+    private static void ProcessPendingSync()
+    {
+        if (!SyncGate.TryTake(out var request, out var generation))
+        {
+            return;
+        }
+
+        IReadOnlyList<RenderedIconPayload> payloads;
+        try
+        {
+            // Avalonia 位图在 UI 线程生成并编码；文件系统和平台缓存不阻塞 UI。
+            payloads = RenderIconPayloadsOnUiThread(request.Accent);
+        }
+        catch
+        {
+            FinishPendingSync(generation);
+            return;
+        }
+
+        _ = Task.Run(() => WriteRenderedIconPayloads(payloads))
+            .ContinueWith(
+                task =>
+                {
+                    _ = task.Exception;
+                    Dispatcher.UIThread.Post(
+                        () => FinishPendingSync(generation),
+                        DispatcherPriority.Background);
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+    }
+
+    private static void FinishPendingSync(long generation)
+    {
+        if (SyncGate.Complete(generation))
+        {
+            return;
+        }
+
+        ProcessPendingSync();
+    }
+
+    private readonly record struct IconSyncRequest(Color Accent);
+
+    private readonly record struct RenderedIconPayload(string Path, int Size, byte[] Png);
+
+    private static IReadOnlyList<RenderedIconPayload> RenderIconPayloadsOnUiThread(Color accent)
+    {
+        var payloads = new List<RenderedIconPayload>();
+        var pngBySize = new Dictionary<int, byte[]>();
+        foreach (var path in EnumerateOutputPngPaths())
         {
             try
             {
-                WriteIconsOnUiThread(accent, paper);
+                var size = GuessSizeFromPath(path) ?? 512;
+                if (!pngBySize.TryGetValue(size, out var png))
+                {
+                    using var bmp = AppIconPainter.RenderLineBitmap(
+                        accent,
+                        Color.FromArgb(0, 0, 0, 0),
+                        size,
+                        transparentPaper: true);
+                    using var stream = new MemoryStream();
+                    bmp.Save(stream);
+                    png = stream.ToArray();
+                    pngBySize[size] = png;
+                }
+
+                payloads.Add(new RenderedIconPayload(path, size, png));
             }
-            finally
+            catch
             {
-                Interlocked.Exchange(ref _syncing, 0);
+                // 单尺寸失败继续
             }
-        }, DispatcherPriority.Background);
+        }
+
+        return payloads;
+    }
+
+    private static void WriteRenderedIconPayloads(IReadOnlyList<RenderedIconPayload> payloads)
+    {
+        var sizeToPath = new Dictionary<int, string>();
+        foreach (var payload in payloads)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(payload.Path)!);
+                File.WriteAllBytes(payload.Path, payload.Png);
+                sizeToPath[payload.Size] = payload.Path;
+            }
+            catch
+            {
+                // 单尺寸失败继续
+            }
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            try
+            {
+                var icns = TryBuildMacIcns(sizeToPath);
+                if (icns is not null)
+                {
+                    TryUpdateMacAppBundleIcon(icns);
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        RefreshOsIconCache();
+    }
+
+    internal sealed class LatestIntentGate<T>
+    {
+        private readonly object _gate = new();
+        private T _pending = default!;
+        private long _generation;
+        private bool _hasPending;
+        private bool _scheduled;
+
+        public bool Enqueue(T value)
+        {
+            lock (_gate)
+            {
+                _pending = value;
+                _generation++;
+                _hasPending = true;
+                if (_scheduled)
+                {
+                    return false;
+                }
+
+                _scheduled = true;
+                return true;
+            }
+        }
+
+        public bool TryTake(out T value, out long generation)
+        {
+            lock (_gate)
+            {
+                if (!_hasPending)
+                {
+                    value = default!;
+                    generation = 0;
+                    return false;
+                }
+
+                value = _pending;
+                generation = _generation;
+                _hasPending = false;
+                return true;
+            }
+        }
+
+        public bool Complete(long generation)
+        {
+            lock (_gate)
+            {
+                if (_hasPending && _generation > generation)
+                {
+                    return false;
+                }
+
+                _scheduled = false;
+                return true;
+            }
+        }
     }
 
     /// <summary>须在 UI 线程调用（Avalonia 渲染）。</summary>
