@@ -1381,13 +1381,6 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="BorderThickness" Value="0" />
   </Style>
-  <Style Selector="Border.danger-panel">
-    <Setter Property="Background" Value="#18D97706" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusWarning}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Padding" Value="14,12" />
-  </Style>
 
   <!-- 个性化调色板卡片：固定比例、选中描边 -->
   <Style Selector="Button.theme-swatch">
