@@ -534,6 +534,21 @@
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Subtitle}" />
     <Setter Property="FontWeight" Value="SemiBold" />
   </Style>
+  <!-- 右栏/检查器的「面板标题」：整栏唯一的醒目标题，压在页眉里。 -->
+  <Style Selector="TextBlock.panel-title">
+    <Setter Property="FontSize" Value="14.5" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
+  </Style>
+  <!-- 检查器「分区标签」：安静的定位标记，不与面板标题争主角。
+       小字号 + 加字距 + 弱色，是桌面检查器（Figma/Blender/VS Code）的通行做法：
+       靠字重与字距区分层级，而不是靠给每个分区套盒子。 -->
+  <Style Selector="TextBlock.inspector-label">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="0.7" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+  </Style>
   <Style Selector="TextBlock.body">
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
     <Setter Property="LineHeight" Value="21" />

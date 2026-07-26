@@ -185,9 +185,21 @@
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
       <Setter Property="BorderThickness" Value="0,0,0,1" />
     </Style>
+    <!-- 检查器分区：去掉每组底部横线。
+         10 个同构分区各带一条底线时，右栏会变成一道「横线梯子」，
+         每块都像独立卡片堆叠。改为纯留白分组 —— 真正的分组信号由
+         下面那个安静的小标签承担（Figma/Blender 检查器的做法）。 -->
     <Style Selector="Border.inspector-group">
-      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
-      <Setter Property="BorderThickness" Value="0,0,0,1" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <!-- 分区标题降级：原来用 subtitle（16px SemiBold），与右栏自身的面板标题
+         一样大，导致毫无层级、每块都在抢主角。检查器里的分区名应该是
+         「安静的定位标记」：小字号、加字距、弱色。 -->
+    <Style Selector="Border.inspector-group TextBlock.subtitle">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="LetterSpacing" Value="0.7" />
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
     </Style>
     <Style Selector="Expander.inspector-expander">
       <Setter Property="Background" Value="Transparent" />
@@ -1293,7 +1305,7 @@
 
                 <ScrollViewer IsVisible="{Binding IsNodeDetailsTab}">
                   <StackPanel IsVisible="{Binding HasSelectedNode}" Spacing="0">
-                  <Border Classes="inspector-group" Padding="14,13,14,16">
+                  <Border Classes="inspector-group" Padding="14,6,14,12">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding NodeNameLabel}" Classes="subtitle" />
                       <TextBox Text="{Binding SelectedNode.Name, Mode=TwoWay}"  AutomationProperties.Name="{Binding NodeNameLabel}" />
@@ -1319,7 +1331,7 @@
                   </Border>
 
                   <!-- 文档读：path + include_content（后端 WorkflowDocumentReadConfig） -->
-                  <Border Classes="inspector-group" Padding="14,13,14,16" IsVisible="{Binding SelectedNode.IsDocumentNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsDocumentNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding ImportFileLabel}" Classes="subtitle" />
                       <TextBlock Text="{Binding ImportFileHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1335,7 +1347,7 @@
                   </Border>
 
                   <!-- 搜索：query_alias + limit（后端 project search） -->
-                  <Border Classes="inspector-group" Padding="14,13,14,16" IsVisible="{Binding SelectedNode.IsSearchNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsSearchNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding SearchNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding SearchNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1348,7 +1360,7 @@
                   </Border>
 
                   <!-- 条件：input_alias / operator / expected -->
-                  <Border Classes="inspector-group" Padding="14,13,14,16" IsVisible="{Binding SelectedNode.IsConditionNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsConditionNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding ConditionNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ConditionNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1365,7 +1377,7 @@
                   </Border>
 
                   <!-- 循环：max_iterations + stop_condition -->
-                  <Border Classes="inspector-group" Padding="14,13,14,16" IsVisible="{Binding SelectedNode.IsLoopNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsLoopNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding LoopNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding LoopNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1384,7 +1396,7 @@
                   </Border>
 
                   <!-- 审批：approval_id + auto_approve -->
-                  <Border Classes="inspector-group" Padding="14,13,14,16" IsVisible="{Binding SelectedNode.IsApprovalNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsApprovalNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding ApprovalNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ApprovalNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1396,7 +1408,7 @@
                   </Border>
 
                   <!-- 导出：artifact_id / format / title -->
-                  <Border Classes="inspector-group" Padding="14,13,14,16" IsVisible="{Binding SelectedNode.IsExportNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsExportNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding ExportNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ExportNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1412,7 +1424,7 @@
                   </Border>
 
                   <!-- Summarizer：与 Rust WorkflowSummarizerNodeConfig 同字段，保存前由后端统一校验 -->
-                  <Border Classes="inspector-group" Padding="14,13,14,16" IsVisible="{Binding SelectedNode.IsSummarizerNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsSummarizerNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding SummarizerNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding SummarizerNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1448,7 +1460,7 @@
                   </Border>
 
                   <!-- 数据入口：可建可删 -->
-                  <Border Classes="inspector-group" Padding="14,13,14,16"
+                  <Border Classes="inspector-group" Padding="14,6,14,12"
                           IsVisible="{Binding SelectedNode.ShowDataInPinEditor}">
                     <StackPanel Spacing="9">
                       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
@@ -1491,7 +1503,7 @@
                     </StackPanel>
                   </Border>
 
-                  <Border Classes="inspector-group" Padding="14,13,14,16" IsVisible="{Binding SelectedNode.ShowPromptEditor}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.ShowPromptEditor}">
                     <StackPanel Spacing="10">
                       <TextBlock Text="{Binding PromptTemplateText}" Classes="subtitle" />
                       <TextBox Text="{Binding SelectedNode.PromptTemplate, Mode=TwoWay}" AutomationProperties.Name="{Binding PromptTemplateText}"

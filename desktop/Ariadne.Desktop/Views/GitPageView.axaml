@@ -192,9 +192,10 @@
             IsVisible="{Binding IsRightPanelOpen}">
       <DockPanel>
         <!-- 检查器页眉：去掉额外底色与强调色竖条，只留标题 + 底部发丝线。
-             页面已有 page-header-mark，右栏再来一根竖条属于重复语汇。 -->
+             页面已有 page-header-mark，右栏再来一根竖条属于重复语汇。
+             panel-title 保持醒目（它是整栏的标题），分区名另用安静小标签。 -->
         <Border DockPanel.Dock="Top" Classes="inspector-section">
-          <TextBlock Text="{Binding DetailsText}" Classes="subtitle" VerticalAlignment="Center" />
+          <TextBlock Text="{Binding DetailsText}" Classes="panel-title" VerticalAlignment="Center" />
         </Border>
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Margin="0,0,0,18" Spacing="0">
@@ -224,7 +225,7 @@
 
             <Border Classes="inspector-section">
             <StackPanel Spacing="8">
-              <TextBlock Text="{Binding CreateCheckpointText}" Classes="subtitle" />
+              <TextBlock Text="{Binding CreateCheckpointText}" Classes="inspector-label" />
               <TextBox Text="{Binding CheckpointMessage, Mode=TwoWay}"
                        PlaceholderText="{Binding CheckpointPlaceholder}"
                        IsEnabled="{Binding !IsBusy}" />

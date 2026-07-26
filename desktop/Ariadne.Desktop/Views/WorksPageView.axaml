@@ -32,9 +32,14 @@
       <Border DockPanel.Dock="Top" Classes="page-header" Padding="18,10" MinHeight="58">
         <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
           <Border Grid.Column="0" Classes="page-header-mark" MinHeight="30" />
+          <!-- 顶栏这里降级为「面包屑」：正文标题已由稿纸刊头以大号衬线呈现，
+               同一字符串再用 subtitle 渲染一遍会变成两个同级标题打架。
+               降到 secondary 后它只负责「当前在读哪一篇」的定位（滚动后仍可见），
+               空态下也照样承担「未选择文档」提示。 -->
           <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-            <TextBlock Text="{Binding CurrentDocumentText}" Classes="subtitle" VerticalAlignment="Center" />
-            <TextBlock Text="{Binding DocumentSaveStateText}" Classes="caption" IsVisible="{Binding HasCurrentDocument}" VerticalAlignment="Center" />
+            <TextBlock Text="{Binding CurrentDocumentText}" Classes="secondary"
+                       FontSize="13" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <TextBlock Text="{Binding DocumentSaveStateText}" Classes="subtle" IsVisible="{Binding HasCurrentDocument}" VerticalAlignment="Center" />
           </StackPanel>
           <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
             <Border Classes="segmented-control">
@@ -329,7 +334,7 @@
                                  Foreground="{DynamicResource Ariadne.StatusError}"
                                  IsVisible="{Binding HasImportOrderError}" />
                     </StackPanel>
-                    <TextBlock Text="{Binding ImportSourceGroupText}" Classes="subtitle" Margin="0,4,0,0" />
+                    <TextBlock Text="{Binding ImportSourceGroupText}" Classes="inspector-label" Margin="0,8,0,0" />
                     <TextBlock Text="{Binding ImportSourcePathText}" Classes="caption" />
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                       <TextBox Grid.Column="0"
@@ -343,7 +348,7 @@
                                TextWrapping="Wrap"
                                Foreground="{DynamicResource Ariadne.StatusError}"
                                IsVisible="{Binding HasImportSourceError}" />
-                    <TextBlock Text="{Binding ImportTargetGroupText}" Classes="subtitle" Margin="0,4,0,0" />
+                    <TextBlock Text="{Binding ImportTargetGroupText}" Classes="inspector-label" Margin="0,8,0,0" />
                     <TextBlock Text="{Binding ImportTargetPathText}" Classes="caption" />
                     <TextBox Text="{Binding ImportTargetPath, Mode=TwoWay}"
                              PlaceholderText="{Binding ImportTargetPlaceholder}"
@@ -381,7 +386,7 @@
                      统一改为标题 + 明细竖脊行，只靠留白与竖线分层。 -->
                 <StackPanel Spacing="10" Margin="2,6,2,4" IsVisible="{Binding HasSummaryContext}">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                      <TextBlock Grid.Column="0" Text="{Binding SummaryTitle}" Classes="subtitle" />
+                      <TextBlock Grid.Column="0" Text="{Binding SummaryTitle}" Classes="inspector-label" VerticalAlignment="Center" />
                       <TextBlock Grid.Column="1" Text="{Binding SummaryChapterHeading}" Classes="subtle" VerticalAlignment="Center" />
                     </Grid>
 
