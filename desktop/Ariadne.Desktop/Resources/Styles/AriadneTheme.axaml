@@ -151,6 +151,11 @@
           <SolidColorBrush x:Key="Ariadne.EditorSelection" Color="{StaticResource Ariadne.Color.EditorSelection}" />
           <SolidColorBrush x:Key="Ariadne.DiffAddBackground" Color="{StaticResource Ariadne.Color.DiffAddBackground}" />
           <SolidColorBrush x:Key="Ariadne.DiffRemoveBackground" Color="{StaticResource Ariadne.Color.DiffRemoveBackground}" />
+          <!-- 微观打磨：深色提示气泡 + 细滚动条滑块（浅色主题下用墨色半透明） -->
+          <SolidColorBrush x:Key="Ariadne.TooltipBackground" Color="#F22B3230" />
+          <SolidColorBrush x:Key="Ariadne.TooltipText" Color="#F4F7F5" />
+          <SolidColorBrush x:Key="Ariadne.ScrollThumb" Color="#38000000" />
+          <SolidColorBrush x:Key="Ariadne.ScrollThumbHover" Color="#66000000" />
         </ResourceDictionary>
 
         <!-- ========================= 深色（夜航，默认强调=青绿） ========================= -->
@@ -279,6 +284,11 @@
           <SolidColorBrush x:Key="Ariadne.EditorSelection" Color="{StaticResource Ariadne.Color.EditorSelection}" />
           <SolidColorBrush x:Key="Ariadne.DiffAddBackground" Color="{StaticResource Ariadne.Color.DiffAddBackground}" />
           <SolidColorBrush x:Key="Ariadne.DiffRemoveBackground" Color="{StaticResource Ariadne.Color.DiffRemoveBackground}" />
+          <!-- 深色主题下气泡反过来用亮底深字；滚动条滑块用白色半透明 -->
+          <SolidColorBrush x:Key="Ariadne.TooltipBackground" Color="#F0E9EDEB" />
+          <SolidColorBrush x:Key="Ariadne.TooltipText" Color="#181C1E" />
+          <SolidColorBrush x:Key="Ariadne.ScrollThumb" Color="#3DFFFFFF" />
+          <SolidColorBrush x:Key="Ariadne.ScrollThumbHover" Color="#70FFFFFF" />
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
 
@@ -403,9 +413,89 @@
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
   </Style>
 
+  <!-- 悬浮提示：深色小胶囊 + 柔投影。Fluent 默认是与页面同色的浅色方框，
+       浮在浅底上几乎看不出「浮起」；深底反白是桌面工具的通行语汇，
+       小、快、不抢戏。 -->
   <Style Selector="ToolTip">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Caption}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.TooltipBackground}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TooltipText}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="9,5" />
+    <Setter Property="MaxWidth" Value="320" />
+  </Style>
+  <!-- 投影只能挂在模板内的 Border 上（ToolTip 本身无 BoxShadow 属性） -->
+  <Style Selector="ToolTip /template/ Border">
+    <Setter Property="BoxShadow" Value="0 2 6 -1 #2E000000, 0 8 20 -6 #33000000" />
+    <Setter Property="CornerRadius" Value="6" />
+  </Style>
+
+  <!-- ============================ 细滚动条 ============================
+       Fluent 默认滚动条又宽又灰，长文阅读时一直在视野里。
+       改为「静止时几乎隐形的细线，悬停才变宽变实」——
+       内容才是主角，滚动条只在需要时出现。 -->
+  <Style Selector="ScrollBar">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.16" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ScrollBar:vertical">
+    <Setter Property="Width" Value="10" />
+  </Style>
+  <Style Selector="ScrollBar:horizontal">
+    <Setter Property="Height" Value="10" />
+  </Style>
+  <!-- 滑块：静止 4px 细条、半透明；悬停整条滚动条时加粗并转实 -->
+  <Style Selector="ScrollBar /template/ Thumb#thumb">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.ScrollThumb}" />
+    <Setter Property="CornerRadius" Value="4" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <ThicknessTransition Property="Margin" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ScrollBar:vertical /template/ Thumb#thumb">
+    <Setter Property="Margin" Value="3,0" />
+  </Style>
+  <Style Selector="ScrollBar:horizontal /template/ Thumb#thumb">
+    <Setter Property="Margin" Value="0,3" />
+  </Style>
+  <Style Selector="ScrollBar:pointerover /template/ Thumb#thumb">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.ScrollThumbHover}" />
+    <Setter Property="Margin" Value="1,0" />
+  </Style>
+  <Style Selector="ScrollBar:horizontal:pointerover /template/ Thumb#thumb">
+    <Setter Property="Margin" Value="0,1" />
+  </Style>
+  <!-- 去掉两端的箭头按钮与轨道底：现代桌面滚动条不需要 -->
+  <Style Selector="ScrollBar /template/ Border#TrackRail">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="ScrollBar /template/ RepeatButton">
+    <Setter Property="IsVisible" Value="False" />
+  </Style>
+
+  <!-- 分栏拖杆：静止只是一道发丝线，悬停/拖动时转强调色。
+       让「这里可以拖」这件事在需要时才显形。 -->
+  <Style Selector="GridSplitter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="GridSplitter:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
   <!-- 矢量图标：描边线条，统一 stroke。geometry 见资源区 Ariadne.Icon.* -->
