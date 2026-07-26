@@ -13,16 +13,20 @@
     </Style>
     <Style Selector="ListBox.settings-section-index ListBoxItem">
       <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="3,0,0,0" />
+      <Setter Property="CornerRadius" Value="6" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-      <Setter Property="Padding" Value="8,5" />
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="Margin" Value="0,1" />
     </Style>
     <Style Selector="ListBox.settings-section-index ListBoxItem:pointerover">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
     </Style>
     <Style Selector="ListBox.settings-section-index ListBoxItem:selected">
-      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
@@ -30,28 +34,59 @@
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
     </Style>
+    <Style Selector="ListBox.settings-tabs">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+    </Style>
+    <Style Selector="ListBox.settings-tabs ListBoxItem">
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Margin" Value="0,0,4,0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="7" />
+    </Style>
+    <Style Selector="ListBox.settings-tabs ListBoxItem:pointerover">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+    </Style>
+    <Style Selector="ListBox.settings-tabs ListBoxItem:selected">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
   </UserControl.Styles>
-  <Grid RowDefinitions="Auto,*" Background="{DynamicResource Ariadne.BackgroundMain}">
+  <!-- 根容器透明：让 MainWindow 底层的径向光晕透上来 -->
+  <Grid RowDefinitions="Auto,*" Background="Transparent">
 
     <Border
         Grid.Row="0"
-        Background="{DynamicResource Ariadne.BackgroundSurface}"
-        BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-        BorderThickness="0,0,0,1"
-        Padding="28,20,28,12">
-      <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="16" RowSpacing="14">
-          <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Title}" Classes="display" />
-          <Border Grid.Row="0" Grid.Column="1" Classes="chip" HorizontalAlignment="Right" VerticalAlignment="Center">
+        Classes="page-header"
+        Padding="28,16,28,12">
+      <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="Auto,*,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="12">
+          <Border Grid.Row="0" Grid.Column="0" Classes="page-header-mark" />
+          <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Title}" Classes="title" VerticalAlignment="Center" />
+          <Button Grid.Row="0" Grid.Column="2"
+                  Classes="secondary"
+                  Content="{Binding RestoreCurrentTabText}"
+                  Command="{Binding RestoreCurrentTabCommand}" />
+          <Button Grid.Row="0" Grid.Column="3"
+                  Classes="secondary"
+                  Content="{Binding RestoreRecommendedDefaultsText}"
+                  Command="{Binding RestoreRecommendedDefaultsCommand}" />
+          <Border Grid.Row="0" Grid.Column="4" Classes="chip" HorizontalAlignment="Right" VerticalAlignment="Center">
             <TextBlock Text="{Binding StatusText}"
                        Classes="caption"
                        TextWrapping="Wrap"
                        AutomationProperties.Name="{Binding StatusText}"
                        AutomationProperties.LiveSetting="Assertive" />
           </Border>
-          <ScrollViewer Grid.Row="1" Grid.ColumnSpan="2"
+          <ScrollViewer Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="4"
                         HorizontalScrollBarVisibility="Auto"
                         VerticalScrollBarVisibility="Disabled">
             <ListBox ItemsSource="{Binding Tabs}"
+                     Classes="settings-tabs"
                      SelectedItem="{Binding NavigationSelection, Mode=TwoWay}"
                      SelectionMode="Single"
                      Background="Transparent">
@@ -63,20 +98,64 @@
               <ListBox.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:SettingsTabViewModel}">
                   <TextBlock Text="{Binding Title}"
-                             MinWidth="92"
-                             Padding="14,8"
+                             MinWidth="84"
+                             Padding="13,7"
                              TextAlignment="Center"
                              AutomationProperties.Name="{Binding Title}" />
                 </DataTemplate>
               </ListBox.ItemTemplate>
             </ListBox>
           </ScrollViewer>
+          <TextBlock Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="4"
+                     Text="{Binding RecoveryText}"
+                     Classes="caption"
+                     Foreground="{DynamicResource Ariadne.StatusWarning}"
+                     IsVisible="{Binding HasRecoveryText}"
+                     TextWrapping="Wrap"
+                     AutomationProperties.LiveSetting="Polite" />
       </Grid>
     </Border>
 
-    <Grid Grid.Row="1">
-      <ScrollViewer x:Name="SettingsContentScroll" Padding="28,24,204,24">
-        <Panel x:Name="SettingsContentHost" MaxWidth="960" HorizontalAlignment="Stretch">
+    <!-- 页内索引 = 无分栏「悬浮索引」。
+         它不再占据布局列、不画全高栏、不加分栏边界：内容区铺满整宽，
+         索引只是一块浮在内容之上、贴右缘垂直居中的锚点面板。
+         内容 ScrollViewer 右侧留出余量，正文不会跑到索引底下。 -->
+    <Panel Grid.Row="1">
+      <ScrollViewer x:Name="SettingsContentScroll" Padding="32,26,208,32">
+        <StackPanel MaxWidth="1040" HorizontalAlignment="Stretch" Spacing="14">
+        <Border Classes="stream-list"
+                IsVisible="{Binding HasSectionLoadFailures}">
+          <ItemsControl ItemsSource="{Binding SectionLoadFailures}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="{x:Type vm:SettingsSectionLoadFailureViewModel}">
+                <Border Classes="stream-row" Padding="14,9">
+                  <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                    <Border Grid.Column="0"
+                            Width="4"
+                            Height="20"
+                            CornerRadius="2"
+                            Background="{DynamicResource Ariadne.StatusWarning}"
+                            VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                      <TextBlock Text="{Binding Title}"
+                                 Classes="secondary"
+                                 FontWeight="SemiBold" />
+                      <TextBlock Text="{Binding Message}"
+                                 Classes="caption"
+                                 TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Button Grid.Column="2"
+                            Classes="secondary btn-compact"
+                            Content="{Binding RetryText}"
+                            Command="{Binding RetryCommand}"
+                            VerticalAlignment="Center" />
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </Border>
+        <Panel x:Name="SettingsContentHost" HorizontalAlignment="Stretch">
 
           <StackPanel IsVisible="{Binding IsGeneralSelected}" IsEnabled="{Binding IsGeneralEditable}" Spacing="18">
             <TextBlock Text="{Binding GeneralTitle}" Classes="title" />
@@ -84,17 +163,23 @@
             <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="ProjectSectionAnchor" Text="{Binding ProjectSectionTitle}" Classes="subtitle" />
-                <Grid ColumnDefinitions="180,*" ColumnSpacing="18">
+                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="10" ColumnSpacing="18">
                   <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProjectNameLabel}" Classes="secondary" VerticalAlignment="Center" />
                   <TextBox Grid.Row="0" Grid.Column="1"
                            Text="{Binding ProjectName, Mode=TwoWay}"
                            AutomationProperties.Name="{Binding ProjectNameLabel}" />
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding ProjectRootLabel}" Classes="secondary" VerticalAlignment="Top" />
+                  <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding ProjectRoot}" Classes="mono" TextWrapping="Wrap"
+                             AutomationProperties.Name="{Binding ProjectRootLabel}" />
                 </Grid>
               </StackPanel>
             </Border>
             <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="DirectoriesSectionAnchor" Text="{Binding DirectoriesSectionTitle}" Classes="subtitle" />
+                <Border Classes="notice warning">
+                  <TextBlock Text="{Binding DirectorySwitchWarningText}" Classes="caption" TextWrapping="Wrap" />
+                </Border>
                 <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*,Auto" RowSpacing="12" ColumnSpacing="12">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentsDirLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding DocumentsDir, Mode=TwoWay}"
@@ -135,9 +220,10 @@
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsModelsSelected}" IsEnabled="{Binding IsModelsEditable}" Spacing="18">
-            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="14">
+            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="14">
               <TextBlock Grid.Column="0" Text="{Binding ModelsTitle}" Classes="title" />
-              <Button Grid.Column="1" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshModelsCommand}" />
+              <Button Grid.Column="1" Classes="secondary" Content="{Binding TestProviderDraftText}" Command="{Binding TestProviderDraftCommand}" />
+              <Button Grid.Column="2" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshModelsCommand}" />
             </Grid>
             <TextBlock Text="{Binding ProviderScopeHelpText}" Classes="caption" TextWrapping="Wrap" />
             <Border Classes="settings-section" Padding="22">
@@ -146,9 +232,10 @@
                 <Grid ColumnDefinitions="240,*" ColumnSpacing="20">
                 <!-- 多供应商列表 -->
                 <DockPanel Grid.Column="0">
+                  <!-- ProviderStatus 去重：右侧编辑器已有「状态」一行（ProviderStatusLabel +
+                       ProviderStatus），此处左栏再渲染同一字符串，屏上并排重复两遍。 -->
                   <StackPanel DockPanel.Dock="Top" Spacing="6" Margin="0,0,0,12">
                     <TextBlock Text="{Binding ProviderListTitle}" Classes="subtitle" />
-                    <TextBlock Text="{Binding ProviderStatus}" Classes="caption" TextWrapping="Wrap" />
                   </StackPanel>
                   <Button DockPanel.Dock="Bottom"
                           Classes="secondary"
@@ -192,14 +279,8 @@
                             Content="{Binding RemoveProviderText}"
                             Command="{Binding RemoveProviderCommand}" />
                   </Grid>
-                  <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="140,*" RowSpacing="12" ColumnSpacing="14">
-                    <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ProviderIdLabel}" Classes="secondary" VerticalAlignment="Center" />
-                    <!-- 已落库供应商禁止改 ID（反人类误改）；草稿可编辑 -->
-                    <TextBox Grid.Row="0" Grid.Column="1"
-                             Text="{Binding ProviderId, Mode=TwoWay}"
-                             Classes="mono"
-                             AutomationProperties.Name="{Binding ProviderIdLabel}"
-                             IsReadOnly="{Binding !IsSelectedProviderDraft}" />
+                  <TextBlock Text="{Binding LegacyOtherProviderMessage}" Classes="caption" TextWrapping="Wrap" IsVisible="{Binding IsLegacyOtherProvider}" />
+                  <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="140,*" RowSpacing="12" ColumnSpacing="14" IsEnabled="{Binding IsProviderEditorEditable}">
                     <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding ProviderTypeLabel}" Classes="secondary" VerticalAlignment="Center" />
                     <ComboBox Grid.Row="1" Grid.Column="1"
                               ItemsSource="{Binding ProviderTypeOptions}"
@@ -223,13 +304,9 @@
                              AutomationProperties.HelpText="{Binding BaseUrlPlaceholder}" />
                     <WrapPanel Grid.Row="4" Grid.Column="1">
                       <CheckBox Margin="0,0,18,8" IsChecked="{Binding ProviderEnabled, Mode=TwoWay}" Content="{Binding ProviderEnabledText}" />
-                      <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultLlm, Mode=TwoWay}" Content="{Binding MakeDefaultLlmText}" />
-                      <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultEmbedding, Mode=TwoWay}" Content="{Binding MakeDefaultEmbeddingText}" />
-                      <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultReranker, Mode=TwoWay}" Content="{Binding MakeDefaultRerankerText}" />
-                      <CheckBox Margin="0,0,18,8" IsChecked="{Binding MakeDefaultSearch, Mode=TwoWay}" Content="{Binding MakeDefaultSearchText}" />
                     </WrapPanel>
                     <TextBlock Grid.Row="5" Grid.Column="0" Text="{Binding ApiKeyLabel}" Classes="secondary" VerticalAlignment="Center" />
-                    <Grid Grid.Row="5" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                    <Grid Grid.Row="5" Grid.Column="1" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
                       <TextBox Grid.Column="0"
                                Text="{Binding ApiKey, Mode=TwoWay}"
                                PlaceholderText="{Binding ApiKeyPlaceholder}"
@@ -237,67 +314,77 @@
                                AutomationProperties.Name="{Binding ApiKeyLabel}"
                                AutomationProperties.HelpText="{Binding ApiKeyPlaceholder}" />
                       <Button Grid.Column="1" Classes="secondary" Content="{Binding SaveKeyText}" Command="{Binding SaveProviderKeyCommand}" />
+                      <Button Grid.Column="2" Classes="danger" Content="{Binding RevokeKeyText}" Command="{Binding RevokeProviderKeyCommand}" />
                     </Grid>
                     <TextBlock Grid.Row="6" Grid.Column="0" Text="{Binding ProviderStatusLabel}" Classes="secondary" VerticalAlignment="Top" />
                     <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding ProviderStatus}" Classes="caption" TextWrapping="Wrap" />
                   </Grid>
+                  <Expander Header="{Binding AdvancedSettingsText}">
+                    <Grid Margin="0,10,0,0" ColumnDefinitions="140,*" ColumnSpacing="14">
+                      <TextBlock Grid.Column="0" Text="{Binding ProviderIdLabel}" Classes="secondary" VerticalAlignment="Center" />
+                      <TextBox Grid.Column="1" Text="{Binding ProviderId}" Classes="mono" IsReadOnly="True" AutomationProperties.Name="{Binding ProviderIdLabel}" />
+                    </Grid>
+                  </Expander>
                 </StackPanel>
                 </Grid>
               </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsProviderEditorEditable}">
               <StackPanel Spacing="12">
                 <TextBlock x:Name="AvailableModelsSectionAnchor" Text="{Binding AvailableModelsSectionTitle}" Classes="subtitle" />
-                <ItemsControl ItemsSource="{Binding AvailableModels}">
+                <Grid ColumnDefinitions="2*,150,105,105,105,Auto" ColumnSpacing="8">
+                  <TextBlock Grid.Column="0" Text="{Binding ModelIdColumnLabel}" Classes="caption" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="1" Text="{Binding ModelCapabilityColumnLabel}" Classes="caption" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="2" Text="{Binding ModelContextColumnLabel}" Classes="caption" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="3" Text="{Binding ModelInputCostColumnLabel}" Classes="caption" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="4" Text="{Binding ModelOutputCostColumnLabel}" Classes="caption" TextWrapping="Wrap" />
+                </Grid>
+                <ItemsControl ItemsSource="{Binding ProviderModels}">
                   <ItemsControl.ItemTemplate>
-                    <DataTemplate DataType="{x:Type vm:ModelOptionViewModel}">
-                      <Grid ColumnDefinitions="2*,140" ColumnSpacing="12" Margin="0,3">
-                        <TextBlock Grid.Column="0" Text="{Binding ModelId}" TextWrapping="Wrap" />
-                        <Border Grid.Column="1" Classes="chip" HorizontalAlignment="Left">
-                          <TextBlock Text="{Binding CapabilityLabel}" Classes="caption" />
-                        </Border>
+                    <DataTemplate DataType="{x:Type vm:ProviderModelEditorRow}">
+                      <Grid ColumnDefinitions="2*,150,105,105,105,Auto" ColumnSpacing="8" Margin="0,3">
+                        <StackPanel Grid.Column="0" Spacing="3">
+                          <TextBox Text="{Binding ModelId, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelIdColumnLabel}" AutomationProperties.HelpText="{Binding ModelIdError}" />
+                          <TextBlock Text="{Binding ModelIdError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasModelIdError}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                          <ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.ProviderCapabilityOptions}" SelectedValue="{Binding Capability, Mode=TwoWay}" SelectedValueBinding="{Binding Value}" DisplayMemberBinding="{Binding Label}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelCapabilityColumnLabel}" AutomationProperties.HelpText="{Binding CapabilityError}" />
+                          <TextBlock Text="{Binding CapabilityError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasCapabilityError}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Spacing="3">
+                          <TextBox Text="{Binding MaxContextTokens, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelContextColumnLabel}" AutomationProperties.HelpText="{Binding MaxContextTokensError}" />
+                          <TextBlock Text="{Binding MaxContextTokensError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasMaxContextTokensError}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="3" Spacing="3">
+                          <TextBox Text="{Binding InputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelInputCostColumnLabel}" AutomationProperties.HelpText="{Binding InputCostError}" />
+                          <TextBlock Text="{Binding InputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasInputCostError}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="4" Spacing="3">
+                          <TextBox Text="{Binding OutputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelOutputCostColumnLabel}" AutomationProperties.HelpText="{Binding OutputCostError}" />
+                          <TextBlock Text="{Binding OutputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasOutputCostError}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Grid.Column="5" Classes="subtle" Content="{Binding $parent[UserControl].DataContext.RemoveModelText}" Command="{Binding RemoveCommand}" />
                       </Grid>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                <Button Classes="secondary" Content="{Binding AddModelText}" HorizontalAlignment="Left" Command="{Binding AddProviderModelCommand}" />
               </StackPanel>
             </Border>
 
-            <Border Classes="settings-section" Padding="22">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsProviderEditorEditable}">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="EmbeddingSectionAnchor" Text="{Binding EmbeddingSectionTitle}" Classes="subtitle" />
-                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
-                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding EmbeddingModelLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="0" Grid.Column="1"
-                           Text="{Binding EmbeddingModelId, Mode=TwoWay}"
-                           PlaceholderText="{Binding EmbeddingModelPlaceholder}"
-                           AutomationProperties.Name="{Binding EmbeddingModelLabel}"
-                           AutomationProperties.HelpText="{Binding EmbeddingModelPlaceholder}" />
-                  <CheckBox Grid.Row="1" Grid.Column="1" IsChecked="{Binding MakeDefaultEmbedding, Mode=TwoWay}" Content="{Binding MakeDefaultEmbeddingText}" />
-                </Grid>
-              </StackPanel>
-            </Border>
-
-            <Border Classes="settings-section" Padding="22">
-              <StackPanel Spacing="14">
-                <TextBlock x:Name="ManualModelsSectionAnchor" Text="{Binding ManualModelsSectionTitle}" Classes="subtitle" />
-                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
-                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding ModelsTextLabel}" Classes="secondary" VerticalAlignment="Top" />
-                  <ToggleSwitch Grid.Row="0" Grid.Column="1"
-                                IsChecked="{Binding ManualModelsVisible, Mode=TwoWay}"
-                                OnContent="" OffContent=""
-                                Content="{Binding ManualModelsText}"
-                                AutomationProperties.Name="{Binding ManualModelsText}" />
-                  <TextBox Grid.Row="1" Grid.Column="1"
-                           IsVisible="{Binding ManualModelsVisible}"
-                           Text="{Binding ModelsText, Mode=TwoWay}"
-                           PlaceholderText="{Binding ModelsPlaceholder}"
-                           AcceptsReturn="True"
-                           TextWrapping="NoWrap"
-                           MinHeight="116"
-                           AutomationProperties.Name="{Binding ModelsTextLabel}"
-                           AutomationProperties.HelpText="{Binding ModelsPlaceholder}" />
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DefaultLlmRouteLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding DefaultLlmRouteOptions}" SelectedItem="{Binding SelectedDefaultLlmRoute, Mode=TwoWay}" AutomationProperties.Name="{Binding DefaultLlmRouteLabel}" DisplayMemberBinding="{Binding DisplayName}" />
+                  <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding DefaultEmbeddingRouteLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding DefaultEmbeddingRouteOptions}" SelectedItem="{Binding SelectedDefaultEmbeddingRoute, Mode=TwoWay}" AutomationProperties.Name="{Binding DefaultEmbeddingRouteLabel}" DisplayMemberBinding="{Binding DisplayName}" />
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding DefaultRerankerRouteLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding DefaultRerankerRouteOptions}" SelectedItem="{Binding SelectedDefaultRerankerRoute, Mode=TwoWay}" AutomationProperties.Name="{Binding DefaultRerankerRouteLabel}" DisplayMemberBinding="{Binding DisplayName}" />
+                  <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding DefaultSearchRouteLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding DefaultSearchRouteOptions}" SelectedItem="{Binding SelectedDefaultSearchRoute, Mode=TwoWay}" AutomationProperties.Name="{Binding DefaultSearchRouteLabel}" DisplayMemberBinding="{Binding DisplayName}" />
                 </Grid>
               </StackPanel>
             </Border>
@@ -308,6 +395,36 @@
           <StackPanel IsVisible="{Binding IsPresetsSelected}" Spacing="18">
             <TextBlock Text="{Binding PresetsTitle}" Classes="title" />
             <TextBlock Text="{Binding PresetScopeHelpText}" Classes="caption" TextWrapping="Wrap" />
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPresetsEditable}">
+              <StackPanel Spacing="12">
+                <TextBlock x:Name="ModelAliasesSectionAnchor" Text="{Binding ModelAliasesTitle}" Classes="subtitle" />
+                <TextBlock Text="{Binding ModelAliasesHelpText}" Classes="caption" TextWrapping="Wrap" />
+                <Grid ColumnDefinitions="1.2*,2*" ColumnSpacing="12">
+                  <TextBlock Grid.Column="0" Text="{Binding ModelAliasTargetLabel}" Classes="caption" />
+                  <TextBlock Grid.Column="1" Text="{Binding PresetNodeModelLabel}" Classes="caption" />
+                </Grid>
+                <ItemsControl ItemsSource="{Binding ModelAliases}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:ModelAliasViewModel}">
+                      <Grid ColumnDefinitions="1.2*,2*" ColumnSpacing="12" Margin="0,4,0,4">
+                        <TextBlock Grid.Column="0" Text="{Binding DisplayName}" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1"
+                                  ItemsSource="{Binding $parent[UserControl].DataContext.AvailableLlmModelTargetOptions}"
+                                  SelectedItem="{Binding SelectedTargetOption, Mode=TwoWay}"
+                                  AutomationProperties.Name="{Binding DisplayName}"
+                                  HorizontalAlignment="Stretch">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
+                              <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Border>
             <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPresetsEditable}">
               <StackPanel Spacing="12">
                 <TextBlock x:Name="NodePresetsSectionAnchor" Text="{Binding NodePresetsSectionTitle}" Classes="subtitle" />
@@ -342,7 +459,7 @@
                                    AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeBudgetLabel}" />
                         </Grid>
                         <Expander Header="{Binding $parent[UserControl].DataContext.PresetAccessTitle}">
-                          <Border Classes="layer" Padding="14" Margin="0,6,0,0">
+                          <Border Classes="detail-row accent" Margin="0,8,0,2" Padding="14,3,0,3">
                             <StackPanel Spacing="10">
                               <CheckBox IsChecked="{Binding Permissions.InheritGlobal, Mode=TwoWay}"
                                         Content="{Binding $parent[UserControl].DataContext.InheritNodePermissionsText}" />
@@ -418,16 +535,29 @@
             <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsTemplateRepositoryEditable}">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="TemplatesSectionAnchor" Text="{Binding TemplatesSectionTitle}" Classes="subtitle" />
-                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="180,*" RowSpacing="12" ColumnSpacing="18">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding TemplateRepositoryLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="0" Grid.Column="1"
-                         Text="{Binding TemplateRepositoryBaseUrl, Mode=TwoWay}"
-                         AutomationProperties.Name="{Binding TemplateRepositoryLabel}" />
-                <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
-                  <Button Classes="secondary" Content="{Binding OpenTemplateMarketText}" Command="{Binding OpenTemplateMarketCommand}" />
-                  <Button Classes="primary" Content="{Binding SaveTemplateRepositoryText}" Command="{Binding SaveTemplateRepositoryCommand}" />
-                </StackPanel>
+                <Grid ColumnDefinitions="180,*" ColumnSpacing="18">
+                  <TextBlock Grid.Column="0" Text="{Binding TemplateRepositorySourceLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="1" Text="{Binding TemplateRepositorySourceText}" VerticalAlignment="Center" />
                 </Grid>
+                <Button Classes="secondary"
+                        HorizontalAlignment="Left"
+                        Content="{Binding OpenTemplateMarketText}"
+                        Command="{Binding OpenTemplateMarketCommand}" />
+                <Expander Header="{Binding AdvancedTemplateRepositoryText}">
+                  <StackPanel Margin="0,12,0,0" Spacing="12">
+                    <TextBlock Text="{Binding TemplateRepositoryLabel}" Classes="secondary" />
+                    <TextBox Text="{Binding TemplateRepositoryBaseUrl, Mode=TwoWay}"
+                             AutomationProperties.Name="{Binding TemplateRepositoryLabel}" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+                      <Button Classes="secondary"
+                              Content="{Binding RestoreOfficialTemplateRepositoryText}"
+                              Command="{Binding RestoreOfficialTemplateRepositoryCommand}" />
+                      <Button Classes="primary"
+                              Content="{Binding SaveTemplateRepositoryText}"
+                              Command="{Binding SaveTemplateRepositoryCommand}" />
+                    </StackPanel>
+                  </StackPanel>
+                </Expander>
               </StackPanel>
             </Border>
           </StackPanel>
@@ -465,6 +595,23 @@
                            Classes="subtitle"
                            ToolTip.Tip="{Binding ConfirmationPolicyHelpText}"
                            AutomationProperties.HelpText="{Binding ConfirmationPolicyHelpText}" />
+                <Grid ColumnDefinitions="180,*" ColumnSpacing="14">
+                  <TextBlock Grid.Column="0" Text="{Binding ConfirmationProfileLabel}" Classes="secondary" VerticalAlignment="Center" />
+                  <ComboBox Grid.Column="1"
+                            ItemsSource="{Binding ConfirmationProfileOptions}"
+                            SelectedItem="{Binding SelectedConfirmationProfile, Mode=TwoWay}"
+                            AutomationProperties.Name="{Binding ConfirmationProfileLabel}">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate DataType="{x:Type vm:SettingsValueOption}">
+                        <TextBlock Text="{Binding Label}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                </Grid>
+                <TextBlock Text="{Binding ConfirmationProfileHelpText}" Classes="caption" TextWrapping="Wrap" />
+                <Expander Header="{Binding AdvancedConfirmationPoliciesText}"
+                          IsExpanded="{Binding AreAdvancedConfirmationPoliciesExpanded, Mode=TwoWay}">
+                  <StackPanel Spacing="10" Margin="0,8,0,0">
                 <Grid ColumnDefinitions="*,180,180" ColumnSpacing="12">
                   <TextBlock Grid.Column="1" Text="{Binding NormalModeLabel}" Classes="caption" />
                   <TextBlock Grid.Column="2" Text="{Binding AutoModePolicyLabel}" Classes="caption" />
@@ -473,46 +620,58 @@
                 <ItemsControl ItemsSource="{Binding ConfirmationPolicyGroups}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:ConfirmationPolicyGroupViewModel}">
-                      <Border Margin="0,0,0,10" Padding="0,4,0,0">
-                        <StackPanel Spacing="8">
+                      <!-- 原为无任何视觉属性的空 Border（纯 padding 壳），改回 StackPanel -->
+                      <StackPanel Margin="0,4,0,10" Spacing="8">
                           <TextBlock Text="{Binding Title}" Classes="subtitle" FontWeight="SemiBold" />
                           <ItemsControl ItemsSource="{Binding Items}">
                             <ItemsControl.ItemTemplate>
                               <DataTemplate DataType="{x:Type vm:ConfirmationPolicyViewModel}">
                                 <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,180,180" ColumnSpacing="12" RowSpacing="8" Margin="0,3,0,10">
                                   <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Label}" VerticalAlignment="Center" TextWrapping="Wrap" />
-                                  <ToggleSwitch Grid.Row="0" Grid.Column="1"
-                                                IsChecked="{Binding NormalAllowByDefault, Mode=TwoWay}"
-                                                OnContent="{Binding $parent[UserControl].DataContext.PolicyAllowText}"
-                                                OffContent="{Binding $parent[UserControl].DataContext.PolicyReviewText}"
-                                                AutomationProperties.Name="{Binding Label}"
-                                                AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.NormalModeLabel}" />
-                                  <ToggleSwitch Grid.Row="0" Grid.Column="2"
-                                                IsChecked="{Binding AutoModeAutoApproval, Mode=TwoWay}"
-                                                OnContent="{Binding $parent[UserControl].DataContext.PolicyAutoOnText}"
-                                                OffContent="{Binding $parent[UserControl].DataContext.PolicyAutoOffText}"
-                                                AutomationProperties.Name="{Binding Label}"
-                                                AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.AutoModePolicyLabel}" />
+                                  <ComboBox Grid.Row="0" Grid.Column="1"
+                                            ItemsSource="{Binding $parent[UserControl].DataContext.ConfirmationNormalPolicyOptions}"
+                                            SelectedValue="{Binding NormalPolicySelection, Mode=TwoWay}"
+                                            SelectedValueBinding="{Binding Value}"
+                                            DisplayMemberBinding="{Binding Label}"
+                                            AutomationProperties.Name="{Binding Label}"
+                                            AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.NormalModeLabel}" />
+                                  <ComboBox Grid.Row="0" Grid.Column="2"
+                                            ItemsSource="{Binding $parent[UserControl].DataContext.ConfirmationAutoModePolicyOptions}"
+                                            SelectedValue="{Binding AutoModePolicySelection, Mode=TwoWay}"
+                                            SelectedValueBinding="{Binding Value}"
+                                            DisplayMemberBinding="{Binding Label}"
+                                            AutomationProperties.Name="{Binding Label}"
+                                            AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.AutoModePolicyLabel}" />
                                   <Expander Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
+                                            IsVisible="{Binding AutoModeAutoApproval}"
+                                            IsEnabled="{Binding AutoModeAutoApproval}"
+                                            IsExpanded="{Binding IsApprovalPromptExpanded, Mode=TwoWay}"
                                             Header="{Binding $parent[UserControl].DataContext.ApprovalPromptLabel}">
-                                    <TextBox Margin="0,6,0,0"
-                                             Text="{Binding ApprovalPrompt, Mode=TwoWay}"
-                                             PlaceholderText="{Binding $parent[UserControl].DataContext.ApprovalPromptPlaceholder}"
-                                             AcceptsReturn="True"
-                                             TextWrapping="Wrap"
-                                             MinHeight="68"
-                                             AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ApprovalPromptLabel}"
-                                             AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.ApprovalPromptPlaceholder}" />
+                                    <StackPanel Margin="0,6,0,0" Spacing="4">
+                                      <TextBox Text="{Binding ApprovalPrompt, Mode=TwoWay}"
+                                               PlaceholderText="{Binding $parent[UserControl].DataContext.ApprovalPromptPlaceholder}"
+                                               AcceptsReturn="True"
+                                               TextWrapping="Wrap"
+                                               MinHeight="68"
+                                               AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ApprovalPromptLabel}"
+                                               AutomationProperties.HelpText="{Binding ApprovalPromptError}" />
+                                      <TextBlock Text="{Binding ApprovalPromptError}"
+                                                 Classes="caption"
+                                                 Foreground="{DynamicResource Ariadne.StatusDanger}"
+                                                 IsVisible="{Binding HasApprovalPromptError}"
+                                                 TextWrapping="Wrap" />
+                                    </StackPanel>
                                   </Expander>
                                 </Grid>
                               </DataTemplate>
                             </ItemsControl.ItemTemplate>
                           </ItemsControl>
-                        </StackPanel>
-                      </Border>
+                      </StackPanel>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                  </StackPanel>
+                </Expander>
               </StackPanel>
             </Border>
 
@@ -542,8 +701,38 @@
           <StackPanel IsVisible="{Binding IsPermissionsSelected}" IsEnabled="{Binding IsPermissionsEditable}" Spacing="18">
             <TextBlock Text="{Binding PermissionsTitle}" Classes="title" />
             <TextBlock Text="{Binding PermissionsScopeHelpText}" Classes="caption" TextWrapping="Wrap" />
+            <Border Classes="notice warning" Margin="0,0,0,4" IsVisible="{Binding HasCompatibilityPermissionScopes}">
+              <TextBlock Text="{Binding CompatibilityPermissionScopesText}" Classes="caption" TextWrapping="Wrap" />
+            </Border>
             <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="12">
+                <!-- 小节标题去掉：PermissionProfileLabel 既做标题又做下方 ComboBox 的
+                     字段名，屏上重复两遍。ComboBox 已有 AutomationProperties.Name，
+                     语义无损。CapabilitiesSectionAnchor 也从这里移走——它本应落在
+                     真正的「能力」标题上（见下方 CapabilitiesSectionTitle）。 -->
+                <ComboBox ItemsSource="{Binding PermissionProfileOptions}"
+                          SelectedItem="{Binding SelectedPermissionProfile, Mode=TwoWay}"
+                          HorizontalAlignment="Stretch"
+                          AutomationProperties.Name="{Binding PermissionProfileLabel}"
+                          AutomationProperties.HelpText="{Binding PermissionProfileHelpText}">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:SettingsValueOption}">
+                      <TextBlock Text="{Binding Label}" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
+                <TextBlock Text="{Binding PermissionProfileHelpText}"
+                           Classes="caption"
+                           TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+            <Expander Header="{Binding AdvancedPermissionsText}"
+                      IsExpanded="{Binding AreAdvancedPermissionsExpanded, Mode=TwoWay}">
+              <StackPanel Margin="0,12,0,0" Spacing="18">
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="12">
+                <!-- 索引锚点落在真正的「能力」标题上（原先错挂在权限档案标签，
+                     导致左侧索引点「能力」会跳到上一小节）。 -->
                 <TextBlock x:Name="CapabilitiesSectionAnchor"
                            Text="{Binding CapabilitiesSectionTitle}"
                            Classes="subtitle"
@@ -577,16 +766,32 @@
                           <CheckBox Margin="0,0,18,8" IsEnabled="{Binding AllowNetwork}" IsChecked="{Binding AllowWasmNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWasmNetworkText}" />
                           <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowSecretRead, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowSecretReadText}" />
                         </WrapPanel>
-                        <TextBox Text="{Binding ReadableRootsText, Mode=TwoWay}"
-                                 PlaceholderText="{Binding $parent[UserControl].DataContext.PathPlaceholder}"
-                                 AcceptsReturn="True"
-                                 MinHeight="76"
-                                 AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}" />
-                        <TextBox Text="{Binding WritableRootsText, Mode=TwoWay}"
-                                 PlaceholderText="{Binding $parent[UserControl].DataContext.PathPlaceholder}"
-                                 AcceptsReturn="True"
-                                 MinHeight="76"
-                                 AutomationProperties.Name="{Binding $parent[UserControl].DataContext.WritableRootsLabel}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                          <TextBox Grid.Column="0"
+                                   Text="{Binding ReadableRootsText, Mode=TwoWay}"
+                                   PlaceholderText="{Binding $parent[UserControl].DataContext.PathPlaceholder}"
+                                   AcceptsReturn="True"
+                                   MinHeight="76"
+                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}" />
+                          <Button Grid.Column="1"
+                                  Classes="secondary"
+                                  VerticalAlignment="Top"
+                                  Content="{Binding $parent[UserControl].DataContext.BrowseFolderText}"
+                                  Command="{Binding BrowseReadableRootsCommand}" />
+                        </Grid>
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                          <TextBox Grid.Column="0"
+                                   Text="{Binding WritableRootsText, Mode=TwoWay}"
+                                   PlaceholderText="{Binding $parent[UserControl].DataContext.PathPlaceholder}"
+                                   AcceptsReturn="True"
+                                   MinHeight="76"
+                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.WritableRootsLabel}" />
+                          <Button Grid.Column="1"
+                                  Classes="secondary"
+                                  VerticalAlignment="Top"
+                                  Content="{Binding $parent[UserControl].DataContext.BrowseFolderText}"
+                                  Command="{Binding BrowseWritableRootsCommand}" />
+                        </Grid>
                       </StackPanel>
                     </StackPanel>
                   </Border>
@@ -619,7 +824,7 @@
                             </DataTemplate>
                           </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                        <Border Classes="danger-panel" IsVisible="{Binding HasDangerControls}" Margin="0,4,0,0">
+                        <Border Classes="notice warning" IsVisible="{Binding HasDangerControls}" Margin="0,6,0,0">
                           <StackPanel Spacing="8">
                             <TextBlock Text="{Binding $parent[UserControl].DataContext.DangerToolsTitle}"
                                        Foreground="{DynamicResource Ariadne.StatusWarning}"
@@ -678,6 +883,8 @@
                 </Grid>
               </StackPanel>
             </Border>
+              </StackPanel>
+            </Expander>
             <Button Classes="primary" Content="{Binding SavePermissionsText}" HorizontalAlignment="Right" Command="{Binding SavePermissionsCommand}" />
           </StackPanel>
 
@@ -766,7 +973,7 @@
                   <TextBlock Text="{Binding ThemeCustomThreeLabel}" Classes="subtitle" />
                   <TextBlock Text="{Binding ThemeCustomThreeHint}" Classes="caption" TextWrapping="Wrap" />
                 </StackPanel>
-                <Border Classes="layer" Padding="14">
+                <Border Classes="detail-row accent" Margin="0,2,0,4" Padding="14,3,0,3">
                   <StackPanel Spacing="12">
                     <CheckBox IsChecked="{Binding ThemeFollowSystemColors, Mode=TwoWay}"
                               Content="{Binding ThemeFollowSystemColorsText}" />
@@ -872,79 +1079,112 @@
             <Button Classes="primary" Content="{Binding SavePersonalizationText}" HorizontalAlignment="Right" Command="{Binding SavePersonalizationCommand}" />
           </StackPanel>
 
-          <StackPanel IsVisible="{Binding IsMiscSelected}" Spacing="18">
-            <TextBlock Text="{Binding MiscTitle}" Classes="title" />
-            <Border Classes="settings-section" Padding="22">
-              <StackPanel Spacing="14">
-                <TextBlock x:Name="TutorialSectionAnchor" Text="{Binding TutorialText}" Classes="subtitle" />
-                <Button Classes="secondary"
-                        HorizontalAlignment="Left"
-                        Content="{Binding OpenTutorialText}"
-                        Command="{Binding ShowTutorialCommand}"
-                        AutomationProperties.Name="{Binding OpenTutorialText}" />
-              </StackPanel>
-            </Border>
-            <StackPanel Spacing="18">
-            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsAppRuntimeEditable}">
-              <StackPanel Spacing="14">
-                <TextBlock x:Name="AppRuntimeSectionAnchor" Text="{Binding AppRuntimeSectionTitle}" Classes="subtitle" />
-                <TextBlock Text="{Binding AppRuntimeScopeHelpText}" Classes="caption" TextWrapping="Wrap" />
-                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
-                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding QdrantBinaryPathLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding QdrantBinaryPath, Mode=TwoWay}"
-                           AutomationProperties.Name="{Binding QdrantBinaryPathLabel}" />
-                  <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding QdrantStartupTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding QdrantStartupTimeoutMs, Mode=TwoWay}"
-                           AutomationProperties.Name="{Binding QdrantStartupTimeoutLabel}" />
-                </Grid>
-                <Button Classes="primary" Content="{Binding SaveAppRuntimeText}" HorizontalAlignment="Right" Command="{Binding SaveAppRuntimeCommand}" />
-              </StackPanel>
-            </Border>
-            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsMiscEditable}">
+          <StackPanel IsVisible="{Binding IsRetrievalSelected}" Spacing="18">
+            <TextBlock Text="{Binding RetrievalTitle}" Classes="title" />
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsRetrievalEditable}">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="RetrievalSectionAnchor" Text="{Binding RetrievalSectionTitle}" Classes="subtitle" />
                 <TextBlock Text="{Binding RetrievalScopeHelpText}" Classes="caption" TextWrapping="Wrap" />
                 <CheckBox IsChecked="{Binding VectorEnabled, Mode=TwoWay}" Content="{Binding VectorEnabledText}" />
-                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
-                  <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding VectorBackendLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <ComboBox Grid.Row="0" Grid.Column="1"
-                            ItemsSource="{Binding VectorBackendOptions}"
-                            SelectedValue="{Binding VectorBackend, Mode=TwoWay}"
-                            SelectedValueBinding="{Binding Value}"
-                            AutomationProperties.Name="{Binding VectorBackendLabel}">
-                    <ComboBox.ItemTemplate>
-                      <DataTemplate x:DataType="vm:SettingsValueOption">
-                        <TextBlock Text="{Binding Label}" />
-                      </DataTemplate>
-                    </ComboBox.ItemTemplate>
-                  </ComboBox>
-                  <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding VectorCollectionLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding VectorCollection, Mode=TwoWay}"
-                           AutomationProperties.Name="{Binding VectorCollectionLabel}" />
-                  <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding VectorDimensionsLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding VectorDimensions, Mode=TwoWay}"
-                           AutomationProperties.Name="{Binding VectorDimensionsLabel}" />
-                  <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding QdrantHostLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding QdrantHost, Mode=TwoWay}"
-                           AutomationProperties.Name="{Binding QdrantHostLabel}" />
-                  <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding QdrantPortLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding QdrantPort, Mode=TwoWay}"
-                           AutomationProperties.Name="{Binding QdrantPortLabel}" />
-                  <TextBlock Grid.Row="5" Grid.Column="0" Text="{Binding QdrantDataDirLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsQdrantSidecarBackend}" />
-                  <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding QdrantDataDir, Mode=TwoWay}"
-                           IsVisible="{Binding IsQdrantSidecarBackend}"
-                           AutomationProperties.Name="{Binding QdrantDataDirLabel}" />
-                  <TextBlock Grid.Row="6" Grid.Column="0" Text="{Binding ChunkSizeLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding ChunkSizeChars, Mode=TwoWay}"
-                           AutomationProperties.Name="{Binding ChunkSizeLabel}" />
-                  <TextBlock Grid.Row="7" Grid.Column="0" Text="{Binding ChunkOverlapLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding ChunkOverlapChars, Mode=TwoWay}"
-                           AutomationProperties.Name="{Binding ChunkOverlapLabel}" />
-                </Grid>
+                <StackPanel Spacing="12" IsVisible="{Binding IsVectorConfigurationVisible}">
+                  <Grid ColumnDefinitions="220,*" ColumnSpacing="18">
+                    <TextBlock Grid.Column="0" Text="{Binding VectorBackendLabel}" Classes="secondary" VerticalAlignment="Center" />
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding VectorBackendOptions}"
+                              SelectedValue="{Binding VectorBackend, Mode=TwoWay}"
+                              SelectedValueBinding="{Binding Value}"
+                              AutomationProperties.Name="{Binding VectorBackendLabel}">
+                      <ComboBox.ItemTemplate>
+                        <DataTemplate x:DataType="vm:SettingsValueOption">
+                          <TextBlock Text="{Binding Label}" />
+                        </DataTemplate>
+                      </ComboBox.ItemTemplate>
+                    </ComboBox>
+                  </Grid>
+                  <Grid ColumnDefinitions="220,*" ColumnSpacing="18" IsVisible="{Binding IsExternalQdrantBackend}">
+                    <StackPanel Grid.Column="0" Spacing="12">
+                      <TextBlock Text="{Binding QdrantHostLabel}" Classes="secondary" Height="34" VerticalAlignment="Center" />
+                      <TextBlock Text="{Binding QdrantPortLabel}" Classes="secondary" Height="34" VerticalAlignment="Center" />
+                      <TextBlock Text="{Binding QdrantAuthModeLabel}" Classes="secondary" Height="34" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Spacing="12">
+                      <TextBox Text="{Binding QdrantHost, Mode=TwoWay}" AutomationProperties.Name="{Binding QdrantHostLabel}" />
+                      <TextBox Text="{Binding QdrantPort, Mode=TwoWay}" AutomationProperties.Name="{Binding QdrantPortLabel}" />
+                      <ComboBox ItemsSource="{Binding QdrantAuthModeOptions}"
+                                SelectedValue="{Binding QdrantAuthMode, Mode=TwoWay}"
+                                SelectedValueBinding="{Binding Value}"
+                                AutomationProperties.Name="{Binding QdrantAuthModeLabel}">
+                        <ComboBox.ItemTemplate>
+                          <DataTemplate x:DataType="vm:SettingsValueOption">
+                            <TextBlock Text="{Binding Label}" />
+                          </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                      </ComboBox>
+                    </StackPanel>
+                  </Grid>
+                  <CheckBox IsChecked="{Binding QdrantUseTls, Mode=TwoWay}"
+                            Content="{Binding QdrantTlsText}"
+                            IsVisible="{Binding IsExternalQdrantBackend}" />
+                  <Grid ColumnDefinitions="220,*" ColumnSpacing="18" IsVisible="{Binding IsQdrantApiKeyAuth}">
+                    <TextBlock Grid.Column="0" Text="{Binding QdrantApiKeyLabel}" Classes="secondary" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Spacing="6">
+                      <TextBox Text="{Binding QdrantApiKey, Mode=TwoWay}"
+                               PlaceholderText="{Binding QdrantApiKeyPlaceholder}"
+                               PasswordChar="*"
+                               AutomationProperties.Name="{Binding QdrantApiKeyLabel}"
+                               AutomationProperties.HelpText="{Binding QdrantApiKeyErrorText}" />
+                      <TextBlock Text="{Binding QdrantApiKeyErrorText}"
+                                 Classes="caption"
+                                 Foreground="{DynamicResource Ariadne.StatusDanger}"
+                                 IsVisible="{Binding HasQdrantApiKeyError}"
+                                 TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding QdrantApiKeyStatusText}" Classes="caption" />
+                    </StackPanel>
+                  </Grid>
+                </StackPanel>
+                <Expander Header="{Binding AdvancedSettingsText}"
+                          IsExpanded="{Binding AreAdvancedRetrievalSettingsExpanded, Mode=TwoWay}">
+                  <Grid Margin="0,12,0,0" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding VectorCollectionLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsVectorConfigurationVisible}" />
+                    <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding VectorCollection, Mode=TwoWay}" IsVisible="{Binding IsVectorConfigurationVisible}" AutomationProperties.Name="{Binding VectorCollectionLabel}" />
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding VectorDimensionsLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsVectorConfigurationVisible}" />
+                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding VectorDimensions, Mode=TwoWay}" IsVisible="{Binding IsVectorConfigurationVisible}" AutomationProperties.Name="{Binding VectorDimensionsLabel}" />
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding QdrantDataDirLabel}" Classes="secondary" VerticalAlignment="Center" IsVisible="{Binding IsQdrantSidecarBackend}" />
+                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding QdrantDataDir, Mode=TwoWay}" IsVisible="{Binding IsQdrantSidecarBackend}" AutomationProperties.Name="{Binding QdrantDataDirLabel}" />
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding ChunkSizeLabel}" Classes="secondary" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ChunkSizeChars, Mode=TwoWay}" AutomationProperties.Name="{Binding ChunkSizeLabel}" />
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding ChunkOverlapLabel}" Classes="secondary" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding ChunkOverlapChars, Mode=TwoWay}" AutomationProperties.Name="{Binding ChunkOverlapLabel}" />
+                  </Grid>
+                </Expander>
                 <CheckBox IsChecked="{Binding RerankerEnabled, Mode=TwoWay}" Content="{Binding RerankerEnabledText}" />
+                <Button Classes="primary" Content="{Binding SaveRetrievalText}" HorizontalAlignment="Right" Command="{Binding SaveRetrievalCommand}" />
               </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsMiscEditable}">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsAppRuntimeEditable}">
+              <StackPanel Spacing="14">
+                <TextBlock x:Name="AppRuntimeSectionAnchor" Text="{Binding AppRuntimeSectionTitle}" Classes="subtitle" />
+                <TextBlock Text="{Binding AppRuntimeScopeHelpText}" Classes="caption" TextWrapping="Wrap" />
+                <Expander Header="{Binding AdvancedSettingsText}"
+                          IsExpanded="{Binding AreAdvancedAppRuntimeSettingsExpanded, Mode=TwoWay}">
+                  <Grid Margin="0,12,0,0" RowDefinitions="Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding QdrantBinaryPathLabel}" Classes="secondary" VerticalAlignment="Center" />
+                    <Grid Grid.Row="0" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                      <TextBox Grid.Column="0" Text="{Binding QdrantBinaryPath, Mode=TwoWay}" AutomationProperties.Name="{Binding QdrantBinaryPathLabel}" />
+                      <Button Grid.Column="1" Classes="secondary" Content="{Binding BrowseFileText}" Command="{Binding BrowseQdrantBinaryCommand}" />
+                    </Grid>
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding QdrantStartupTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding QdrantStartupTimeoutMs, Mode=TwoWay}" AutomationProperties.Name="{Binding QdrantStartupTimeoutLabel}" />
+                  </Grid>
+                </Expander>
+                <Button Classes="primary" Content="{Binding SaveAppRuntimeText}" HorizontalAlignment="Right" Command="{Binding SaveAppRuntimeCommand}" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsVersionControlSelected}" Spacing="18">
+            <TextBlock Text="{Binding VersionControlTitle}" Classes="title" />
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsGitEditable}">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="GitSectionAnchor" Text="{Binding GitSectionTitle}" Classes="subtitle" />
                 <WrapPanel>
@@ -954,51 +1194,95 @@
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding TrackNonSensitiveConfig, Mode=TwoWay}" Content="{Binding TrackConfigText}" />
                 </WrapPanel>
                 <TextBlock Text="{Binding IgnoredPathsLabel}" Classes="secondary" />
-                <TextBox Text="{Binding IgnoredPathsText, Mode=TwoWay}"
-                         PlaceholderText="{Binding IgnoredPathsPlaceholder}"
-                         AcceptsReturn="True"
-                         MinHeight="120"
-                         AutomationProperties.Name="{Binding IgnoredPathsLabel}"
-                         AutomationProperties.HelpText="{Binding IgnoredPathsPlaceholder}" />
+                <TextBox Text="{Binding IgnoredPathsText, Mode=TwoWay}" PlaceholderText="{Binding IgnoredPathsPlaceholder}" AcceptsReturn="True" MinHeight="120" AutomationProperties.Name="{Binding IgnoredPathsLabel}" AutomationProperties.HelpText="{Binding IgnoredPathsPlaceholder}" />
+                <Button Classes="primary" Content="{Binding SaveGitText}" HorizontalAlignment="Right" Command="{Binding SaveGitCommand}" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsSupportSelected}" Spacing="18">
+            <TextBlock Text="{Binding SupportTitle}" Classes="title" />
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="14">
+                <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
+                  <StackPanel Grid.Column="0" Spacing="4">
+                    <TextBlock x:Name="DiagnosticsSectionAnchor" Text="{Binding DiagnosticsSectionTitle}" Classes="subtitle" />
+                    <TextBlock Text="{Binding DiagnosticsStatusText}" Classes="caption" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <Button Grid.Column="1"
+                          Classes="secondary"
+                          Content="{Binding RefreshDiagnosticsText}"
+                          Command="{Binding RefreshDiagnosticsCommand}" />
+                  <Button Grid.Column="2"
+                          Classes="secondary"
+                          Content="{Binding CopyDiagnosticsText}"
+                          IsEnabled="{Binding HasDiagnosticsItems}"
+                          Click="OnCopyDiagnostics" />
+                </Grid>
+                <TextBlock Text="{Binding DiagnosticsEmptyText}"
+                           Classes="caption"
+                           IsVisible="{Binding !HasDiagnosticsItems}" />
+                <ItemsControl ItemsSource="{Binding DiagnosticsItems}"
+                              IsVisible="{Binding HasDiagnosticsItems}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:SettingsDiagnosticItemViewModel}">
+                      <!-- 诊断行：N 条各自套盒 → 竖脊明细行 -->
+                      <Border Classes="detail-row">
+                        <Grid ColumnDefinitions="1.1*,110,2*,2*" ColumnSpacing="12">
+                          <TextBlock Grid.Column="0" Text="{Binding Component}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                          <TextBlock Grid.Column="1" Text="{Binding Status}" Classes="caption" TextWrapping="Wrap" />
+                          <TextBlock Grid.Column="2" Text="{Binding Reason}" Classes="caption" TextWrapping="Wrap" />
+                          <TextBlock Grid.Column="3" Text="{Binding RecoveryAction}" Classes="caption" TextWrapping="Wrap" />
+                        </Grid>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
               </StackPanel>
             </Border>
             <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
-                <TextBlock x:Name="DiagnosticsSectionAnchor" Text="{Binding DiagnosticsSectionTitle}" Classes="subtitle" />
-                <Grid ColumnDefinitions="180,*" RowDefinitions="Auto" ColumnSpacing="18">
-                  <TextBlock Grid.Column="0" Text="{Binding DiagnosticsLabel}" Classes="secondary" VerticalAlignment="Center" />
-                  <TextBlock Grid.Column="1" Text="{Binding DiagnosticsStatusText}" Classes="caption" TextWrapping="Wrap" />
-                </Grid>
+                <TextBlock x:Name="TutorialSectionAnchor" Text="{Binding TutorialText}" Classes="subtitle" />
+                <Button Classes="secondary" HorizontalAlignment="Left" Content="{Binding OpenTutorialText}" Command="{Binding ShowTutorialCommand}" AutomationProperties.Name="{Binding OpenTutorialText}" />
               </StackPanel>
             </Border>
-            <Button Classes="primary" Content="{Binding SaveMiscText}" HorizontalAlignment="Right" Command="{Binding SaveMiscCommand}" />
-            </StackPanel>
           </StackPanel>
         </Panel>
+        </StackPanel>
       </ScrollViewer>
 
-      <ListBox x:Name="SettingsSectionIndex"
-               Classes="settings-section-index"
-               ItemsSource="{Binding SectionIndexItems}"
-               SelectedItem="{Binding SectionNavigationSelection, Mode=TwoWay}"
-               SelectionMode="Single"
-               Width="176"
-               MaxHeight="560"
-               Margin="0,18,12,18"
-               HorizontalAlignment="Right"
-               VerticalAlignment="Top"
-               ZIndex="4"
-               ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-               ScrollViewer.VerticalScrollBarVisibility="Auto">
-        <ListBox.ItemTemplate>
-          <DataTemplate DataType="{x:Type vm:SettingsSectionNavigationItemViewModel}">
-            <TextBlock Text="{Binding Title}"
-                       TextWrapping="Wrap"
-                       AutomationProperties.Name="{Binding Title}" />
-          </DataTemplate>
-        </ListBox.ItemTemplate>
-      </ListBox>
-
-    </Grid>
+      <!-- 悬浮索引本体：浮层材质（圆角 + 发丝边 + 浮层投影），贴右缘垂直居中。
+           保留 settings-index-rail 类名，窄窗（Window.compact）下仍会整块隐藏。 -->
+      <Border Classes="settings-index-rail"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Center"
+              Margin="0,24,22,24"
+              Width="178"
+              MaxHeight="470"
+              CornerRadius="10"
+              Padding="7"
+              Background="{DynamicResource Ariadne.BackgroundElevated}"
+              BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+              BorderThickness="1"
+              BoxShadow="{DynamicResource Ariadne.Shadow.Flyout}">
+        <ListBox x:Name="SettingsSectionIndex"
+                 Classes="settings-section-index"
+                 ItemsSource="{Binding SectionIndexItems}"
+                 SelectedItem="{Binding SectionNavigationSelection, Mode=TwoWay}"
+                 SelectionMode="Single"
+                 HorizontalAlignment="Stretch"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto">
+          <ListBox.ItemTemplate>
+            <DataTemplate DataType="{x:Type vm:SettingsSectionNavigationItemViewModel}">
+              <TextBlock Text="{Binding Title}"
+                         FontSize="12.5"
+                         TextWrapping="Wrap"
+                         AutomationProperties.Name="{Binding Title}" />
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Border>
+    </Panel>
   </Grid>
 </UserControl>

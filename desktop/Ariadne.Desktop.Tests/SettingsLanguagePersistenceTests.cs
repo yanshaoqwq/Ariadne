@@ -18,12 +18,12 @@ public sealed class SettingsLanguagePersistenceTests
         var generalStart = view.IndexOf("IsGeneralSelected", StringComparison.Ordinal);
         var modelsStart = view.IndexOf("IsModelsSelected", generalStart, StringComparison.Ordinal);
         var personalizationStart = view.IndexOf("IsPersonalizationSelected", modelsStart, StringComparison.Ordinal);
-        var miscStart = view.IndexOf("IsMiscSelected", personalizationStart, StringComparison.Ordinal);
+        var retrievalStart = view.IndexOf("IsRetrievalSelected", personalizationStart, StringComparison.Ordinal);
 
         Assert.True(generalStart >= 0 && modelsStart > generalStart
-            && personalizationStart > modelsStart && miscStart > personalizationStart);
+            && personalizationStart > modelsStart && retrievalStart > personalizationStart);
         Assert.DoesNotContain("SelectedLanguage", view[generalStart..modelsStart], StringComparison.Ordinal);
-        Assert.Contains("SelectedLanguage", view[personalizationStart..miscStart], StringComparison.Ordinal);
+        Assert.Contains("SelectedLanguage", view[personalizationStart..retrievalStart], StringComparison.Ordinal);
         Assert.DoesNotContain("Locale = language", viewModel, StringComparison.Ordinal);
         Assert.Contains("ApplySavedLanguage(preferences.Locale)", viewModel, StringComparison.Ordinal);
         Assert.DoesNotContain("PersistLanguageAsync", viewModel, StringComparison.Ordinal);

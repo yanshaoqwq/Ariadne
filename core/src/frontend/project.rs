@@ -93,9 +93,29 @@ impl ProjectRegistryStore {
         name: impl Into<String>,
         project_root: impl Into<PathBuf>,
     ) -> CoreResult<Vec<RecentProjectEntry>> {
+        self.record_opened_replacing(name, project_root, None)
+    }
+
+    pub fn record_opened_replacing(
+        &self,
+        name: impl Into<String>,
+        project_root: impl Into<PathBuf>,
+        replaced_project_root: Option<&Path>,
+    ) -> CoreResult<Vec<RecentProjectEntry>> {
         let project_root = project_root.into();
         let mut entries = self.read_all()?;
-        entries.retain(|entry| entry.path != project_root);
+        if let Some(replaced) = replaced_project_root {
+            if replaced != project_root && !entries.iter().any(|entry| entry.path == replaced) {
+                return Err(CoreError::RegistryMissing {
+                    registry: "recent_projects",
+                    key: replaced.display().to_string(),
+                });
+            }
+        }
+        entries.retain(|entry| {
+            entry.path != project_root
+                && replaced_project_root.is_none_or(|replaced| entry.path != replaced)
+        });
         entries.insert(
             0,
             RecentProjectEntry {
@@ -105,6 +125,21 @@ impl ProjectRegistryStore {
             },
         );
         entries.truncate(20);
+        self.write_all(&entries)?;
+        Ok(entries)
+    }
+
+    pub fn forget(&self, project_root: impl AsRef<Path>) -> CoreResult<Vec<RecentProjectEntry>> {
+        let project_root = project_root.as_ref();
+        let mut entries = self.read_all()?;
+        let previous_len = entries.len();
+        entries.retain(|entry| entry.path != project_root);
+        if entries.len() == previous_len {
+            return Err(CoreError::RegistryMissing {
+                registry: "recent_projects",
+                key: project_root.display().to_string(),
+            });
+        }
         self.write_all(&entries)?;
         Ok(entries)
     }

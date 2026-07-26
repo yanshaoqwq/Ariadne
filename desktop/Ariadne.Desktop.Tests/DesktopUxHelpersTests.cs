@@ -889,6 +889,11 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("markDraft: !fromConfig.Configured", settings, StringComparison.Ordinal);
         var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "SettingsPageView.axaml"));
         Assert.Contains("Text=\"{Binding ProviderScopeHelpText}\"", view, StringComparison.Ordinal);
+        Assert.Contains("TestProviderDraftCommand", settings, StringComparison.Ordinal);
+        Assert.Contains("TestProviderDraftAsync", settings, StringComparison.Ordinal);
+        Assert.Contains("TestProviderDraftText", view, StringComparison.Ordinal);
+        Assert.Contains("IsLegacyOtherProvider", settings, StringComparison.Ordinal);
+        Assert.Contains("LegacyOtherProviderMessage", view, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -928,7 +933,7 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("SelectedItem=\"{Binding SectionNavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
         // Section anchors keep subtitle class; attributes may wrap across lines after layout polish.
         // Includes AppRuntime section added for global Qdrant runtime settings.
-        Assert.Equal(23, Regex.Matches(
+        Assert.Equal(22, Regex.Matches(
             view,
             "Binding [A-Za-z]+SectionTitle",
             RegexOptions.CultureInvariant).Count);
@@ -940,7 +945,14 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("ScrollToSectionRequested", settings, StringComparison.Ordinal);
         Assert.Contains("OnScrollToSectionRequested", codeBehind, StringComparison.Ordinal);
         Assert.Contains("SettingsContentScroll.Offset = new Vector", codeBehind, StringComparison.Ordinal);
-        Assert.DoesNotContain("BringIntoView", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "BringIntoView",
+            codeBehind[(codeBehind.IndexOf("private void ScrollToSection", StringComparison.Ordinal))..],
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "target.BringIntoView();",
+            codeBehind,
+            StringComparison.Ordinal);
         Assert.Contains("OnAttachedToVisualTree", codeBehind, StringComparison.Ordinal);
         Assert.Contains("OnDetachedFromVisualTree", codeBehind, StringComparison.Ordinal);
         Assert.Contains("DetachBehaviors();", codeBehind, StringComparison.Ordinal);

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{json, Value};
 
 use crate::contracts::{CoreError, CoreResult, ExecutionCancellation, ExternalDispatchOutcome};
@@ -28,6 +29,16 @@ impl QdrantVectorStore {
         collection: impl Into<String>,
         vector_size: usize,
     ) -> CoreResult<Self> {
+        Self::new_with_api_key(endpoint, collection, vector_size, None)
+    }
+
+    /// 创建可选 API key 认证的 Qdrant REST 后端；密钥只进入敏感默认请求头。
+    pub fn new_with_api_key(
+        endpoint: impl Into<String>,
+        collection: impl Into<String>,
+        vector_size: usize,
+        api_key: Option<&str>,
+    ) -> CoreResult<Self> {
         if vector_size == 0 {
             return Err(CoreError::validation("qdrant vector_size cannot be zero"));
         }
@@ -35,8 +46,21 @@ impl QdrantVectorStore {
         let collection = collection.into();
         validate_non_empty("qdrant endpoint", &endpoint)?;
         validate_non_empty("qdrant collection", &collection)?;
+        let mut headers = HeaderMap::new();
+        if let Some(api_key) = api_key {
+            let api_key = api_key.trim();
+            if api_key.is_empty() {
+                return Err(CoreError::validation("qdrant API key cannot be empty"));
+            }
+            let mut value = HeaderValue::from_str(api_key).map_err(|_| {
+                CoreError::validation("qdrant API key contains invalid header characters")
+            })?;
+            value.set_sensitive(true);
+            headers.insert(HeaderName::from_static("api-key"), value);
+        }
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
+            .default_headers(headers)
             .build()
             .map_err(qdrant_error)?;
         Ok(Self {

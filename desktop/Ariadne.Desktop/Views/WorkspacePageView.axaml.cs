@@ -1406,6 +1406,9 @@ public partial class WorkspacePageView : UserControl
             edgeTransform.Y = state.OffsetY;
         }
 
+        // 点阵背景与节点层同帧联动：同一缩放/平移状态，避免两坐标系错位。
+        CanvasGridBg?.SetViewport(state.Zoom, state.OffsetX, state.OffsetY);
+
         SyncMiniMapViewportFrame();
     }
 

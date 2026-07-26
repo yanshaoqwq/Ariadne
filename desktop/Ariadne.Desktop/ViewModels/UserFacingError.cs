@@ -98,13 +98,13 @@ public static partial class UserFacingError
 
         if (ex is BackendException be)
         {
-            return new UserFailure(be.Code, be.Diagnostic, be.MessageKey);
+            return new UserFailure(be.Code, be.Diagnostic, be.MessageKey, be.Parameters);
         }
 
         // Unwrap common wrappers
         if (ex.InnerException is BackendException innerBe)
         {
-            return new UserFailure(innerBe.Code, innerBe.Diagnostic, innerBe.MessageKey);
+            return new UserFailure(innerBe.Code, innerBe.Diagnostic, innerBe.MessageKey, innerBe.Parameters);
         }
 
         // UI-local exceptions: typed mapping only — no English keyword table (U1 / 00A).
@@ -150,7 +150,11 @@ public interface IUserFailureObserver
 }
 
 /// <summary>Stable failure identity + optional redacted diagnostic (secondary only).</summary>
-public readonly record struct UserFailure(string Code, string? Diagnostic, string? MessageKey = null)
+public readonly record struct UserFailure(
+    string Code,
+    string? Diagnostic,
+    string? MessageKey = null,
+    IReadOnlyDictionary<string, string>? Parameters = null)
 {
     public static UserFailure Unknown { get; } = new("unknown", null, null);
 
@@ -161,7 +165,9 @@ public readonly record struct UserFailure(string Code, string? Diagnostic, strin
             var keyed = names.Text(MessageKey);
             if (!keyed.StartsWith('[') || !keyed.EndsWith(']'))
             {
-                return keyed;
+                return Parameters is { Count: > 0 }
+                    ? names.Format(MessageKey, Parameters)
+                    : keyed;
             }
         }
 

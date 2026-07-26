@@ -73,6 +73,55 @@ public sealed class DisplayNameJsonTests
     }
 
     [Fact]
+    public void DisplayNamePacks_RejectDuplicateRootKeys()
+    {
+        var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
+        foreach (var language in new[] { "zh", "en", "ja" })
+        {
+            var path = Path.Combine(resourceDir, $"display_name{(language == "zh" ? string.Empty : "." + language)}.json");
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var duplicates = document.RootElement
+                .EnumerateObject()
+                .GroupBy(property => property.Name, StringComparer.Ordinal)
+                .Where(group => group.Count() > 1)
+                .Select(group => group.Key)
+                .ToArray();
+            Assert.True(duplicates.Length == 0, $"{language} pack has duplicate keys: {string.Join(", ", duplicates)}");
+        }
+    }
+
+    [Fact]
+    public void EnglishOverlay_UiValuesDoNotContainAuthoringStubs()
+    {
+        var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
+        var path = Path.Combine(resourceDir, "display_name.en.json");
+        var map = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+        Assert.NotNull(map);
+
+        var exactStubs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Title", "Empty", "Label", "Item", "TODO", "FIXME", "TBD",
+            "Placeholder", "Desc", "Hint", "Help",
+        };
+        var residuals = map!
+            .Where(item => item.Key.StartsWith("ui.", StringComparison.Ordinal))
+            .Where(item => exactStubs.Contains(item.Value.Trim())
+                           || item.Value.TrimStart().StartsWith("ui.", StringComparison.Ordinal)
+                           || System.Text.RegularExpressions.Regex.IsMatch(
+                               item.Value.Trim(),
+                               @"(^| )(hint|desc|placeholder|label)$",
+                               System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                               | System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+            .Select(item => $"{item.Key} => {item.Value}")
+            .OrderBy(item => item, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(
+            residuals.Length == 0,
+            "English UI authoring stubs:\n" + string.Join('\n', residuals.Take(40)));
+    }
+
+    [Fact]
     public void DisplayNameService_LoadDefault_ResolvesWorkspaceKeysNotBrackets()
     {
         // Real service path used by WorkspacePageViewModel labels (LoadDefault + Text).
@@ -215,6 +264,68 @@ public sealed class DisplayNameJsonTests
 
         Assert.Contains("Timeout", enService.Text("ui.settings.presets.node_timeout_ms"), StringComparison.OrdinalIgnoreCase);
         Assert.Contains("second", enService.Text("ui.settings.presets.node_timeout_ms"), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void JapaneseOverlay_PureAsciiUiValuesAreLimitedToTechnicalTokens()
+    {
+        var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
+        var path = Path.Combine(resourceDir, "display_name.ja.json");
+        var map = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+        Assert.NotNull(map);
+        var allowed = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "ui.brand.logo_letter",
+            "ui.brand.name",
+            "ui.color.channel_b",
+            "ui.color.channel_g",
+            "ui.color.channel_r",
+            "ui.color.rgb_value",
+            "ui.layout.badge_overflow",
+            "ui.layout.budget_status",
+            "ui.node.llm",
+            "ui.settings.misc.git",
+            "ui.settings.misc.language.en",
+            "ui.settings.models.base_url",
+            "ui.settings.models.provider_type.open_ai",
+            "ui.settings.models.provider_type.anthropic",
+            "ui.settings.models.provider_type.gemini",
+            "ui.settings.section.git",
+            "ui.window.project_title",
+            "ui.works.export_format.epub",
+            "ui.works.export_format.markdown",
+            "ui.works.export_format.pdf",
+            "ui.workspace.zoom_in_glyph",
+            "ui.workspace.zoom_out_glyph",
+            "ui.workspace.zoom_percent",
+        };
+        var fallbacks = map!
+            .Where(item => item.Key.StartsWith("ui.", StringComparison.Ordinal)
+                           && item.Value.All(ch => ch <= 0x7f)
+                           && !allowed.Contains(item.Key))
+            .Select(item => $"{item.Key} => {item.Value}")
+            .OrderBy(item => item, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(
+            fallbacks.Length == 0,
+            "Japanese UI text fell back to English phrases:\n" + string.Join('\n', fallbacks.Take(40)));
+    }
+
+    [Fact]
+    public void ChineseNodeCatalogAndEdgeAliases_DoNotExposeEnglishInternalLabels()
+    {
+        var names = DisplayNameService.LoadDefault();
+        Assert.Equal("开始", names.Text("ui.node.start"));
+        Assert.Equal("文档", names.Text("ui.node.document"));
+        Assert.Equal("条件", names.Text("ui.node.condition"));
+        Assert.Equal("循环", names.Text("ui.node.loop"));
+        Assert.Equal("审批", names.Text("ui.node.approval"));
+        Assert.Equal("导出", names.Text("ui.node.export"));
+        Assert.Equal("提示词模板", names.Text("ui.node.prompt_template"));
+        Assert.Equal("模型", names.Text("ui.node.model"));
+        Assert.Equal("别名", names.Text("ui.workspace.edge.label"));
+        Assert.Equal("连线别名", names.Text("ui.workspace.edge_alias"));
     }
 
     [Fact]
@@ -569,6 +680,9 @@ public sealed class DisplayNameJsonTests
     private static bool ContainsCjk(string text) =>
         text.Any(ch => ch >= '\u4e00' && ch <= '\u9fff');
 
+    private static bool ContainsJapaneseText(string text) =>
+        text.Any(ch => ch is >= '\u3040' and <= '\u30ff' or >= '\u4e00' and <= '\u9fff');
+
     // Machine-glue compounds that appear as all-lowercase tokens inside multi-word phrases
     // (e.g. "Allow networksearch", "permissions toolspresets").
     private static readonly HashSet<string> TheaterBadCompounds = new(StringComparer.Ordinal)
@@ -586,43 +700,10 @@ public sealed class DisplayNameJsonTests
         "writepath", "readpath", "pathroots", "autocheckpoints", "summarizerhint",
     };
 
-    // Legitimate mid-sentence all-lowercase English words of length >= 10 (Title Case is never scanned).
-    private static readonly HashSet<string> TheaterRealLowercaseWords = new(StringComparer.Ordinal)
-    {
-        "configured", "configuration", "configurations", "permissions", "permission",
-        "confirmation", "confirmations", "automatically", "documentation", "repository",
-        "repositories", "directories", "directory", "application", "applications",
-        "authentication", "authorization", "description", "descriptions", "temperature",
-        "dimensions", "collection", "collections", "workspace", "workspaces", "workflows",
-        "workflow", "characters", "preference", "preferences", "diagnostic", "diagnostics",
-        "personalization", "initialization", "unavailable", "completion", "completed",
-        "cancelled", "canceled", "succeeded", "embedding", "embeddings", "retrieval",
-        "templates", "template", "providers", "provider", "connection", "credentials",
-        "maintenance", "horizontal", "vertical", "alignment", "saturation", "background",
-        "foreground", "secondary", "tertiary", "placeholder", "accessible", "accessibility",
-        "navigation", "communication", "communications", "checkpoint", "checkpoints",
-        "checkpointing", "preauthorized", "iterations", "automation", "environment",
-        "information", "referenced", "references", "unfinished", "inconsistent",
-        "temporarily", "reproduce", "reproduction", "maintainers", "subfeatures",
-        "registration", "correction", "capability", "capabilities", "compatible",
-        "official", "selection", "transitions", "essential", "feedback", "separately",
-        "following", "incomplete", "manuscripts", "manuscript", "foreshadowing",
-        "relationship", "annotation", "annotations", "subworkflow", "subworkflows",
-        "worldbuilding", "initialized", "definition", "refreshing", "commercial",
-        "generating", "breakpoint", "summarizer", "available", "selected", "disabled",
-        "required", "optional", "processing", "connecting", "downloading", "uploading",
-        "installing", "uninstalling", "validating", "serializing", "deserializing",
-        "separate", "sponsorship", "sponsoring", "projection", "preference",
-        "automatically", "daytime", "sessions", "workspace", "workspaces",
-        "reading", "surfaces", "without", "steady", "refined", "violet",
-        "azure", "accents", "glare", "vision", "low", "paper", "warmer",
-        "softer", "quieter", "oriented", "preference",
-    };
-
     /// <summary>
     /// Strengthened LO-1 theater oracle: token stubs, whole + embedded camelCase,
-    /// bad compounds and long all-lowercase tokens inside multi-word glue (\b[a-z]{10,}\b),
-    /// bare short lowercase, CJK-punct+Latin without CJK prose, punctuation-only, English CJK.
+    /// known machine-glue compounds, bare short lowercase tokens, CJK-punct+Latin without
+    /// CJK prose, punctuation-only strings, and English values that fall back to CJK.
     /// </summary>
     private static bool IsTheaterStub(string text, string? language = null)
     {
@@ -632,7 +713,7 @@ public sealed class DisplayNameJsonTests
             return true;
         }
         // Legitimate short product chrome.
-        if (t is "—" or "-" or "A" or "秒" or "昼" or "夜" or "Day" or "Night"
+        if (t is "—" or "-" or "+" or "A" or "秒" or "章" or "昼" or "夜" or "Day" or "Night"
             or "seconds" or "optional" or "99+" or "…" or "..." or "OK" or "ID" or "Git" or "AI"
             or "URL" or "API" or "ms" or "HTTP" or "JSON" or "YAML" or "LLM" or "RGB" or "hex" or "Hex")
         {
@@ -643,7 +724,9 @@ public sealed class DisplayNameJsonTests
         {
             return false;
         }
-        if (t.Equals("Label", StringComparison.OrdinalIgnoreCase)
+        if (t.Equals("Title", StringComparison.OrdinalIgnoreCase)
+            || t.Equals("Empty", StringComparison.OrdinalIgnoreCase)
+            || t.Equals("Label", StringComparison.OrdinalIgnoreCase)
             || t.Equals("Item", StringComparison.OrdinalIgnoreCase)
             || t.Equals("TODO", StringComparison.OrdinalIgnoreCase)
             || t.Equals("FIXME", StringComparison.OrdinalIgnoreCase)
@@ -652,6 +735,15 @@ public sealed class DisplayNameJsonTests
             || t.Equals("Desc", StringComparison.OrdinalIgnoreCase)
             || t.Equals("Hint", StringComparison.OrdinalIgnoreCase)
             || t.Equals("Help", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        if (t.StartsWith("ui.", StringComparison.Ordinal)
+            || System.Text.RegularExpressions.Regex.IsMatch(
+                t,
+                @"(^| )(hint|desc|placeholder|label)$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant))
         {
             return true;
         }
@@ -664,7 +756,7 @@ public sealed class DisplayNameJsonTests
                      t, @"[A-Za-z][A-Za-z0-9]*"))
         {
             var tok = m.Value;
-            if (tok is "OpenAI")
+            if (tok is "OpenAI" or "PolyForm")
             {
                 continue;
             }
@@ -673,18 +765,12 @@ public sealed class DisplayNameJsonTests
                 return true;
             }
         }
-        // All-lowercase tokens only (Title Case "Permissions" is not scanned):
-        // 1) any known machine compound (pathroot, skillss, networksearch, …) regardless of length
-        // 2) unknown words of length ≥ 10 (glued compounds not yet listed)
+        // Known all-lowercase machine compounds inside otherwise readable phrases.
         foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
                      t, @"\b[a-z]{6,}\b"))
         {
             var tok = m.Value;
             if (TheaterBadCompounds.Contains(tok))
-            {
-                return true;
-            }
-            if (tok.Length >= 10 && !TheaterRealLowercaseWords.Contains(tok))
             {
                 return true;
             }
@@ -702,7 +788,7 @@ public sealed class DisplayNameJsonTests
         // CJK/fullwidth punctuation + Latin without real CJK prose (machine glue English).
         if (System.Text.RegularExpressions.Regex.IsMatch(t, @"[，。；、：]")
             && System.Text.RegularExpressions.Regex.IsMatch(t, @"[A-Za-z]")
-            && !ContainsCjk(t))
+            && !ContainsJapaneseText(t))
         {
             return true;
         }

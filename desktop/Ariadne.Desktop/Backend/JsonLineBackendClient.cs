@@ -41,6 +41,32 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeOrEmptyListAsync<RecentProjectEntry>("list_recent_projects", null, cancellationToken);
     }
 
+    public Task<IReadOnlyList<RecentProjectEntry>> ForgetRecentProjectAsync(
+        string projectRoot,
+        CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredListAsync<RecentProjectEntry>(
+            "forget_recent_project",
+            new { project_root = projectRoot },
+            cancellationToken);
+    }
+
+    public Task<CurrentProjectStatus> RelocateRecentProjectAsync(
+        string previousProjectRoot,
+        string projectRoot,
+        CancellationToken cancellationToken = default)
+    {
+        return InvokeAndRememberProjectAsync<CurrentProjectStatus>(
+            "relocate_recent_project",
+            projectRoot,
+            new
+            {
+                previous_project_root = previousProjectRoot,
+                project_root = projectRoot,
+            },
+            cancellationToken);
+    }
+
     public Task<AppStatus?> GetAppStatusAsync(CancellationToken cancellationToken = default)
     {
         return InvokeAsync<AppStatus>("get_app_status", null, cancellationToken);
@@ -132,9 +158,19 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<ProviderModelsResult>("fetch_provider_models", new { provider_id = providerId }, cancellationToken);
     }
 
+    public Task<ProviderModelsResult> TestProviderDraftAsync(ProviderDraftProbe probe, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProviderModelsResult>("test_provider_draft", new { probe }, cancellationToken);
+    }
+
     public Task<ProviderConfigStatus> SaveProviderKeyAsync(string provider, string key, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<ProviderConfigStatus>("save_provider_key", new { provider, key }, cancellationToken);
+    }
+
+    public Task<ProviderConfigStatus> RevokeProviderKeyAsync(string provider, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProviderConfigStatus>("revoke_provider_key", new { provider }, cancellationToken);
     }
 
     public Task<NodePresetSettings> GetNodePresetSettingsAsync(CancellationToken cancellationToken = default)
@@ -237,13 +273,18 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<MiscSectionSettings>("save_misc_section_settings", new { settings }, cancellationToken);
     }
 
-    public Task<IReadOnlyList<TemplateSummary>> SearchTemplatesAsync(string baseUrl, string query, int page = 0, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<TemplateSummary>> SearchTemplatesAsync(
+        string baseUrl,
+        string query,
+        IReadOnlyList<string> tags,
+        int page = 0,
+        CancellationToken cancellationToken = default)
     {
         return InvokeRequiredListAsync<TemplateSummary>("search_templates", new
         {
             request = new { base_url = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl },
             query,
-            tags = Array.Empty<string>(),
+            tags,
             page,
         }, cancellationToken);
     }
@@ -738,7 +779,12 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
                 throw BackendException.FromIpcPayload(
                     result.ErrorCode,
                     result.Error ?? "backend command failed",
-                    result.ErrorKey);
+                    result.ErrorKey,
+                    result.ErrorParams,
+                    result.ErrorField,
+                    result.ErrorSection,
+                    result.RecoveryAction,
+                    result.CorrelationId);
             }
             return result.Data;
         }

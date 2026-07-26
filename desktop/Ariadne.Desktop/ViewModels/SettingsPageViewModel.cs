@@ -19,7 +19,19 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private const string PermissionsSection = "permissions";
     private const string PersonalizationSection = "personalization";
     private const string AppRuntimeSection = "app_runtime";
-    private const string MiscSection = "misc";
+    private const string RetrievalSection = "retrieval";
+    private const string GitSection = "git";
+    private const string OfficialTemplateRepositoryUrl = "ariadne://official-templates/v1";
+    private static readonly string[] RecommendedGitIgnoredPaths =
+    {
+        ".cache/", ".runtime/", ".indexes/", ".knowledge/", "costs.db", "runtime.db",
+    };
+    private static readonly (string Id, string DisplayNameKey)[] ModelAliasDefinitions =
+    {
+        ("planning", "ui.settings.presets.alias.planning"),
+        ("writing", "ui.settings.presets.alias.writing"),
+        ("review", "ui.settings.presets.alias.review"),
+    };
     private static readonly string[] LocalizedPropertyNames =
     {
         nameof(Title),
@@ -32,10 +44,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(PermissionsTitle),
         nameof(PersonalizationTitle),
         nameof(PersonalizationScopeHelpText),
-        nameof(MiscTitle),
+        nameof(RetrievalTitle),
+        nameof(VersionControlTitle),
+        nameof(SupportTitle),
+        nameof(AdvancedSettingsText),
         nameof(AppRuntimeScopeHelpText),
         nameof(RetrievalScopeHelpText),
         nameof(ProjectNameLabel),
+        nameof(ProjectRootLabel),
+        nameof(DirectorySwitchWarningText),
         nameof(DocumentsDirLabel),
         nameof(WorkflowsDirLabel),
         nameof(SkillsDirLabel),
@@ -53,18 +70,32 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(MakeDefaultEmbeddingText),
         nameof(MakeDefaultRerankerText),
         nameof(MakeDefaultSearchText),
+        nameof(DefaultLlmRouteLabel),
+        nameof(DefaultEmbeddingRouteLabel),
+        nameof(DefaultRerankerRouteLabel),
+        nameof(DefaultSearchRouteLabel),
         nameof(AvailableModelsText),
         nameof(ManualModelsText),
         nameof(ModelsTextLabel),
         nameof(ModelsPlaceholder),
+        nameof(ModelIdColumnLabel),
+        nameof(ModelCapabilityColumnLabel),
+        nameof(ModelContextColumnLabel),
+        nameof(ModelInputCostColumnLabel),
+        nameof(ModelOutputCostColumnLabel),
+        nameof(AddModelText),
+        nameof(RemoveModelText),
         nameof(EmbeddingModelLabel),
         nameof(EmbeddingModelPlaceholder),
         nameof(ApiKeyLabel),
         nameof(ApiKeyPlaceholder),
         nameof(SaveModelText),
         nameof(SaveKeyText),
+        nameof(RevokeKeyText),
         nameof(RemoveProviderText),
         nameof(RefreshText),
+        nameof(TestProviderDraftText),
+        nameof(LegacyOtherProviderMessage),
         nameof(ProviderStatusLabel),
         nameof(AddProviderText),
         nameof(ProviderListTitle),
@@ -77,6 +108,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(PresetAccessTitle),
         nameof(PresetToolsTitle),
         nameof(PresetScopeHelpText),
+        nameof(ModelAliasesTitle),
+        nameof(ModelAliasTargetLabel),
+        nameof(ModelAliasesHelpText),
         nameof(InheritNodePermissionsText),
         nameof(DefaultModelLabel),
         nameof(DefaultTimeoutLabel),
@@ -99,7 +133,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(PolicyReviewText),
         nameof(PolicyAutoOnText),
         nameof(PolicyAutoOffText),
+        nameof(ConfirmationProfileLabel),
+        nameof(ConfirmationProfileHelpText),
+        nameof(AdvancedConfirmationPoliciesText),
         nameof(BrowseFolderText),
+        nameof(BrowseFileText),
         nameof(WorkflowLimitLabel),
         nameof(WorkflowDefaultTimeoutLabel),
         nameof(MaxLoopIterationsLabel),
@@ -112,6 +150,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(AllowHttpSkillText),
         nameof(AllowWasmNetworkText),
         nameof(AllowSecretReadText),
+        nameof(PermissionProfileLabel),
+        nameof(PermissionProfileHelpText),
+        nameof(AdvancedPermissionsText),
         nameof(GlobalDefaultsHelpText),
         nameof(PermissionsScopeHelpText),
         nameof(InheritGlobalText),
@@ -171,6 +212,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(VectorDimensionsLabel),
         nameof(QdrantHostLabel),
         nameof(QdrantPortLabel),
+        nameof(QdrantTlsText),
+        nameof(QdrantAuthModeLabel),
+        nameof(QdrantApiKeyLabel),
+        nameof(QdrantApiKeyPlaceholder),
+        nameof(QdrantApiKeyStatusText),
+        nameof(QdrantApiKeyErrorText),
         nameof(QdrantDataDirLabel),
         nameof(QdrantBinaryPathLabel),
         nameof(QdrantStartupTimeoutLabel),
@@ -185,12 +232,24 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(TrackConfigText),
         nameof(IgnoredPathsLabel),
         nameof(IgnoredPathsPlaceholder),
-        nameof(SaveMiscText),
+        nameof(SaveRetrievalText),
+        nameof(SaveGitText),
         nameof(LanguageLabel),
         nameof(TutorialText),
         nameof(OpenTutorialText),
         nameof(DiagnosticsLabel),
         nameof(DiagnosticsStatusText),
+        nameof(DiagnosticsEmptyText),
+        nameof(RefreshDiagnosticsText),
+        nameof(CopyDiagnosticsText),
+        nameof(SectionLoadFailureRetryText),
+        nameof(CompatibilityPermissionScopesText),
+        nameof(RestoreCurrentTabText),
+        nameof(RestoreRecommendedDefaultsText),
+        nameof(TemplateRepositorySourceLabel),
+        nameof(TemplateRepositorySourceText),
+        nameof(AdvancedTemplateRepositoryText),
+        nameof(RestoreOfficialTemplateRepositoryText),
     };
 
     private readonly DisplayNameService _displayNames;
@@ -212,12 +271,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private string? _pendingProviderSelectionId;
     private Task _providerSelectionTask = Task.CompletedTask;
     private readonly RequestGenerationSession _providerModelRefreshSession = new();
+    private readonly RequestGenerationSession _diagnosticsRefreshSession = new();
+    private readonly Dictionary<string, Func<Task<bool>>> _failedSectionRetries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, PermissionPolicy?> _compatibilityScopedPolicies = new(StringComparer.Ordinal);
 
     private readonly record struct PendingSettingsNavigation(
         SettingsTabViewModel Tab,
         SettingsSectionNavigationItemViewModel? Section);
 
     private sealed record PreparedSettingsCommit(string Section, Func<Task<bool>> Save);
+
+    private sealed record DirectorySwitchChange(string Label, string OldPath, string NewPath, string TargetStatus);
 
     private int _schemaVersion = 1;
     private string _projectRoot = string.Empty;
@@ -245,9 +309,14 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private string _providerStatus = string.Empty;
     private ProviderConfigStatus? _providerConfig;
     private ProviderOptionViewModel? _selectedProviderOption;
+    private ProviderModelRouteOption? _selectedDefaultLlmRoute;
+    private ProviderModelRouteOption? _selectedDefaultEmbeddingRoute;
+    private ProviderModelRouteOption? _selectedDefaultRerankerRoute;
+    private ProviderModelRouteOption? _selectedDefaultSearchRoute;
 
     private string _defaultProviderId = string.Empty;
     private string _defaultModelId = "gpt-4.1-mini";
+    private string? _defaultModelAlias;
     private WorkflowModelOption? _selectedDefaultModelOption;
     // Author-facing timeout fields hold **seconds** (same unit as Workspace); convert to ms at save.
     private string _defaultTimeoutMs = "300";
@@ -258,6 +327,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private string _preauthorizedUsd = "0";
     private string _spentText = "$0.00";
     private double _spentUsd;
+    private SettingsValueOption? _selectedConfirmationProfile;
     private string _workflowDefaultTimeoutMs = "300";
     private string _maxLoopIterations = "5";
     private string _maxToolRounds = "8";
@@ -269,6 +339,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private bool _allowHttpSkill;
     private bool _allowWasmNetwork;
     private bool _allowSecretRead;
+    private SettingsValueOption? _selectedPermissionProfile;
+    private bool _applyingPermissionProfile;
+    private bool _areAdvancedPermissionsExpanded;
+    private bool _areAdvancedConfirmationPoliciesExpanded;
+    private bool _areAdvancedRetrievalSettingsExpanded;
+    private bool _areAdvancedAppRuntimeSettingsExpanded;
+    private string _recoveryText = string.Empty;
     private string _readableRootsText = string.Empty;
     private string _writableRootsText = string.Empty;
 
@@ -293,6 +370,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private string _vectorDimensions = "1536";
     private string _qdrantHost = "127.0.0.1";
     private string _qdrantPort = "6333";
+    private bool _qdrantUseTls;
+    private string _qdrantAuthMode = "none";
+    private string _qdrantApiKey = string.Empty;
+    private bool _hasQdrantApiKey;
+    private bool _hasQdrantApiKeyError;
     private string _qdrantDataDir = ".indexes/qdrant";
     private string _qdrantBinaryPath = "qdrant";
     private string _qdrantStartupTimeoutMs = "10000";
@@ -310,6 +392,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private bool _trackNonSensitiveConfig = true;
     private string _ignoredPathsText = string.Empty;
     private string _diagnosticsStatus = string.Empty;
+    private bool _isDiagnosticsRefreshing;
+    private BackendDiagnosticsReport? _diagnosticsReport;
     private readonly ProjectAutomationState _projectAutomation;
 
     public SettingsPageViewModel(
@@ -335,6 +419,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             new("qdrant_sidecar", displayNames.Text("ui.settings.misc.vector_backend.sidecar")),
             new("external_qdrant", displayNames.Text("ui.settings.misc.vector_backend.external")),
         };
+        QdrantAuthModeOptions = new ObservableCollection<SettingsValueOption>
+        {
+            new("none", displayNames.Text("ui.settings.misc.qdrant_auth.none")),
+            new("api_key", displayNames.Text("ui.settings.misc.qdrant_auth.api_key")),
+        };
 
         ProviderTypeOptions = new ObservableCollection<SettingsValueOption>
         {
@@ -352,12 +441,52 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 .Select(g => new ThemeGroupViewModel(g.Key, g)));
         ConfirmationPolicies = new ObservableCollection<ConfirmationPolicyViewModel>();
         ConfirmationPolicyGroups = new ObservableCollection<ConfirmationPolicyGroupViewModel>();
+        ConfirmationProfileOptions = new ObservableCollection<SettingsValueOption>
+        {
+            new("conservative", displayNames.Text("ui.settings.automation.confirmation.profile.conservative")),
+            new("recommended", displayNames.Text("ui.settings.automation.confirmation.profile.recommended")),
+            new("automated", displayNames.Text("ui.settings.automation.confirmation.profile.automated")),
+            new("custom", displayNames.Text("ui.settings.automation.confirmation.profile.custom")),
+        };
+        ConfirmationNormalPolicyOptions = new ObservableCollection<SettingsValueOption>
+        {
+            new("manual_review", displayNames.Text("ui.settings.automation.confirmation.review")),
+            new("allow_by_default", displayNames.Text("ui.settings.automation.confirmation.allow")),
+        };
+        ConfirmationAutoModePolicyOptions = new ObservableCollection<SettingsValueOption>
+        {
+            new("allow_by_default", displayNames.Text("ui.settings.automation.confirmation.auto_off")),
+            new("auto_approval", displayNames.Text("ui.settings.automation.confirmation.auto_on")),
+        };
+        PermissionProfileOptions = new ObservableCollection<SettingsValueOption>
+        {
+            new("restricted", displayNames.Text("ui.settings.permissions.profile.restricted")),
+            new("recommended", displayNames.Text("ui.settings.permissions.profile.recommended")),
+            new("custom", displayNames.Text("ui.settings.permissions.profile.custom")),
+        };
         NodePresets = new ObservableCollection<NodeTypePresetViewModel>();
+        ModelAliases = new ObservableCollection<ModelAliasViewModel>();
         ProviderOptions = new ObservableCollection<ProviderOptionViewModel>();
         AvailableModels = new ObservableCollection<ModelOptionViewModel>();
+        ProviderModels = new ObservableCollection<ProviderModelEditorRow>();
+        ProviderCapabilityOptions = new ObservableCollection<SettingsValueOption>
+        {
+            new("llm", displayNames.Text("ui.settings.models.capability.llm")),
+            new("tool_use", displayNames.Text("ui.settings.models.capability.tool_use")),
+            new("embedding", displayNames.Text("ui.settings.models.capability.embedding")),
+            new("reranker", displayNames.Text("ui.settings.models.capability.reranker")),
+            new("search", displayNames.Text("ui.settings.models.capability.search")),
+        };
+        DefaultLlmRouteOptions = new ObservableCollection<ProviderModelRouteOption>();
+        DefaultEmbeddingRouteOptions = new ObservableCollection<ProviderModelRouteOption>();
+        DefaultRerankerRouteOptions = new ObservableCollection<ProviderModelRouteOption>();
+        DefaultSearchRouteOptions = new ObservableCollection<ProviderModelRouteOption>();
         AvailableLlmModelOptions = new ObservableCollection<WorkflowModelOption>();
+        AvailableLlmModelTargetOptions = new ObservableCollection<WorkflowModelOption>();
         ToolControlGroups = new ObservableCollection<ToolControlGroupViewModel>();
         ScopedPermissionProfiles = new ObservableCollection<PermissionScopeProfileViewModel>();
+        DiagnosticsItems = new ObservableCollection<SettingsDiagnosticItemViewModel>();
+        SectionLoadFailures = new ObservableCollection<SettingsSectionLoadFailureViewModel>();
         // 先建色图集合，再挂编辑器回调（回调里会同步选中态）
         GitAutoColorSwatches = new ObservableCollection<ColorSwatchItemViewModel>();
         GitManualColorSwatches = new ObservableCollection<ColorSwatchItemViewModel>();
@@ -422,10 +551,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
         SaveGeneralCommand = new RelayCommand(() => _ = SaveGeneralAsync(), () => CanSave(GeneralSection));
         RefreshModelsCommand = new RelayCommand(() => _ = FetchModelsAsync(), CanUsePersistedProvider);
-        SaveModelCommand = new RelayCommand(() => _ = SaveModelAsync(), () => CanSave(ModelsSection));
+        TestProviderDraftCommand = new RelayCommand(() => _ = TestProviderDraftAsync(), CanTestProviderDraft);
+        SaveModelCommand = new RelayCommand(() => _ = SaveModelAsync(), () => CanSave(ModelsSection) && !IsLegacyOtherProvider);
         SaveProviderKeyCommand = new RelayCommand(() => _ = SaveProviderKeyAsync(), CanUsePersistedProvider);
+        RevokeProviderKeyCommand = new RelayCommand(() => _ = RevokeProviderKeyAsync(), CanRevokeProviderKey);
         RemoveProviderCommand = new RelayCommand(() => _ = RemoveProviderAsync(), CanUsePersistedProvider);
         AddProviderCommand = new RelayCommand(() => _ = AddProviderDraftAsync(), () => CanSave(ModelsSection));
+        AddProviderModelCommand = new RelayCommand(AddProviderModelRow, () => CanSave(ModelsSection));
         SavePresetsCommand = new RelayCommand(() => _ = SavePresetsAsync(), () => CanSave(PresetsSection));
         SaveTemplateRepositoryCommand = new RelayCommand(
             () => _ = SaveTemplateRepositoryAsync(),
@@ -435,7 +567,20 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         SavePermissionsCommand = new RelayCommand(() => _ = SavePermissionsAsync(), () => CanSave(PermissionsSection));
         SavePersonalizationCommand = new RelayCommand(() => _ = SavePersonalizationAsync(), () => CanSave(PersonalizationSection));
         SaveAppRuntimeCommand = new RelayCommand(() => _ = SaveAppRuntimeAsync(), () => CanSave(AppRuntimeSection));
-        SaveMiscCommand = new RelayCommand(() => _ = SaveMiscAsync(), () => CanSave(MiscSection));
+        SaveRetrievalCommand = new RelayCommand(() => _ = SaveRetrievalAsync(), () => CanSave(RetrievalSection));
+        SaveGitCommand = new RelayCommand(() => _ = SaveGitAsync(), () => CanSave(GitSection));
+        RestoreCurrentTabCommand = new RelayCommand(
+            () => _ = RestoreSelectedTabAsync(),
+            CanRestoreSelectedTab);
+        RestoreRecommendedDefaultsCommand = new RelayCommand(
+            () => _ = RestoreRecommendedDefaultsAsync(),
+            CanRestoreRecommendedDefaults);
+        RestoreOfficialTemplateRepositoryCommand = new RelayCommand(
+            () => TemplateRepositoryBaseUrl = OfficialTemplateRepositoryUrl,
+            () => CanSave(TemplateRepositorySection));
+        RefreshDiagnosticsCommand = new RelayCommand(
+            () => _ = RefreshDiagnosticsAsync(),
+            () => !IsDiagnosticsRefreshing);
         ShowTutorialCommand = new RelayCommand(() => _ = ShowTutorialAsync());
         BrowseDocumentsDirCommand = new RelayCommand(() => _ = BrowseProjectDirectoryAsync(value => DocumentsDir = value));
         BrowseWorkflowsDirCommand = new RelayCommand(() => _ = BrowseProjectDirectoryAsync(value => WorkflowsDir = value));
@@ -443,6 +588,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         BrowseExportsDirCommand = new RelayCommand(() => _ = BrowseProjectDirectoryAsync(value => ExportsDir = value));
         BrowseReadableRootsCommand = new RelayCommand(() => _ = BrowseIntoAsync(AppendReadableRoot));
         BrowseWritableRootsCommand = new RelayCommand(() => _ = BrowseIntoAsync(AppendWritableRoot));
+        BrowseQdrantBinaryCommand = new RelayCommand(() => _ = BrowseFileIntoAsync(value => QdrantBinaryPath = value));
         SelectThemeMainChannelCommand = new RelayCommand(() => SetActiveThemeColorChannel(ThemeColorChannel.Main));
         SelectThemeSurfaceChannelCommand = new RelayCommand(() => SetActiveThemeColorChannel(ThemeColorChannel.Surface));
         SelectThemeBrandChannelCommand = new RelayCommand(() => SetActiveThemeColorChannel(ThemeColorChannel.Brand));
@@ -482,6 +628,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     }
 
     private Func<string?, Task<string?>>? _folderPickerWithTitle;
+    private Func<string?, Task<string?>>? _filePickerWithTitle;
 
     public void SetFolderPicker(Func<Task<string?>> picker) =>
         _folderPickerWithTitle = _ => picker();
@@ -494,6 +641,39 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         if (_folderPickerWithTitle == picker)
         {
             _folderPickerWithTitle = null;
+        }
+    }
+
+    public void SetFilePicker(Func<string?, Task<string?>> picker) =>
+        _filePickerWithTitle = picker;
+
+    public void ClearFilePicker(Func<string?, Task<string?>> picker)
+    {
+        if (_filePickerWithTitle == picker)
+        {
+            _filePickerWithTitle = null;
+        }
+    }
+
+    private async Task BrowseFileIntoAsync(Action<string> assign)
+    {
+        if (_filePickerWithTitle is null)
+        {
+            StatusText = _displayNames.Text("ui.settings.browse_unavailable");
+            return;
+        }
+        try
+        {
+            var path = await _filePickerWithTitle(
+                _displayNames.Text("ui.settings.browse_file_title")).ConfigureAwait(true);
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                assign(path);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
         }
     }
 
@@ -556,6 +736,18 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     public string Title => _displayNames.Text("ui.settings.title");
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
+    public string RecoveryText
+    {
+        get => _recoveryText;
+        private set
+        {
+            if (SetProperty(ref _recoveryText, value))
+            {
+                OnPropertyChanged(nameof(HasRecoveryText));
+            }
+        }
+    }
+    public bool HasRecoveryText => !string.IsNullOrWhiteSpace(RecoveryText);
     public bool IsLoading { get => _isLoading; private set => SetProperty(ref _isLoading, value); }
     public bool HasUnsavedChanges
     {
@@ -566,6 +758,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public ObservableCollection<SettingsTabViewModel> Tabs { get; }
     public ObservableCollection<SettingsSectionNavigationItemViewModel> SectionIndexItems { get; }
     public event EventHandler<SettingsSectionNavigationRequest>? ScrollToSectionRequested;
+    public event EventHandler<SettingsFieldFocusRequest>? FocusValidationFieldRequested;
 
     internal int SectionNavigationSubscriberCountForTests =>
         ScrollToSectionRequested?.GetInvocationList().Length ?? 0;
@@ -585,8 +778,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 OnPropertyChanged(nameof(IsAutomationSelected));
                 OnPropertyChanged(nameof(IsPermissionsSelected));
                 OnPropertyChanged(nameof(IsPersonalizationSelected));
-                OnPropertyChanged(nameof(IsMiscSelected));
+                OnPropertyChanged(nameof(IsRetrievalSelected));
+                OnPropertyChanged(nameof(IsVersionControlSelected));
+                OnPropertyChanged(nameof(IsSupportSelected));
                 OnPropertyChanged(nameof(NavigationSelection));
+                RestoreCurrentTabCommand.NotifyCanExecuteChanged();
+                RestoreRecommendedDefaultsCommand.NotifyCanExecuteChanged();
             }
         }
     }
@@ -686,6 +883,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         SelectedTab = target.Tab;
 
+        if (string.Equals(target.Tab.Id, PermissionsSection, StringComparison.Ordinal)
+            && target.Section is not null
+            && !string.Equals(target.Section.AnchorName, "CapabilitiesSectionAnchor", StringComparison.Ordinal))
+        {
+            AreAdvancedPermissionsExpanded = true;
+        }
+
         if (target.Section is null)
         {
             SelectFirstSectionForTab(target.Tab.Id);
@@ -719,7 +923,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public bool IsAutomationSelected => SelectedTab.Id == "automation";
     public bool IsPermissionsSelected => SelectedTab.Id == "permissions";
     public bool IsPersonalizationSelected => SelectedTab.Id == "personalization";
-    public bool IsMiscSelected => SelectedTab.Id == "misc";
+    public bool IsRetrievalSelected => SelectedTab.Id == "retrieval";
+    public bool IsVersionControlSelected => SelectedTab.Id == "version_control";
+    public bool IsSupportSelected => SelectedTab.Id == "support";
     public bool IsGeneralEditable => CanSave(GeneralSection);
     public bool IsModelsEditable => CanSave(ModelsSection);
     public bool IsPresetsEditable => CanSave(PresetsSection);
@@ -728,22 +934,38 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public bool IsPermissionsEditable => CanSave(PermissionsSection);
     public bool IsPersonalizationEditable => CanSave(PersonalizationSection);
     public bool IsAppRuntimeEditable => CanSave(AppRuntimeSection);
-    public bool IsMiscEditable => CanSave(MiscSection);
+    public bool IsRetrievalEditable => CanSave(RetrievalSection);
+    public bool IsGitEditable => CanSave(GitSection);
     public ObservableCollection<LanguageOption> LanguageOptions { get; }
     public ObservableCollection<SettingsValueOption> VectorBackendOptions { get; }
+    public ObservableCollection<SettingsValueOption> QdrantAuthModeOptions { get; }
     public ObservableCollection<SettingsValueOption> ProviderTypeOptions { get; }
     public ObservableCollection<ThemeOption> ThemeOptions { get; }
     public ObservableCollection<ThemeGroupViewModel> ThemeGroups { get; }
     public ObservableCollection<ConfirmationPolicyViewModel> ConfirmationPolicies { get; }
     /// <summary>确认项按总结机制分组。</summary>
     public ObservableCollection<ConfirmationPolicyGroupViewModel> ConfirmationPolicyGroups { get; }
+    public ObservableCollection<SettingsValueOption> ConfirmationProfileOptions { get; }
+    public ObservableCollection<SettingsValueOption> ConfirmationNormalPolicyOptions { get; }
+    public ObservableCollection<SettingsValueOption> ConfirmationAutoModePolicyOptions { get; }
+    public ObservableCollection<SettingsValueOption> PermissionProfileOptions { get; }
     public ObservableCollection<NodeTypePresetViewModel> NodePresets { get; }
+    public ObservableCollection<ModelAliasViewModel> ModelAliases { get; }
     public ObservableCollection<ProviderOptionViewModel> ProviderOptions { get; }
     public ObservableCollection<ModelOptionViewModel> AvailableModels { get; }
+    public ObservableCollection<ProviderModelEditorRow> ProviderModels { get; }
+    public ObservableCollection<SettingsValueOption> ProviderCapabilityOptions { get; }
+    public ObservableCollection<ProviderModelRouteOption> DefaultLlmRouteOptions { get; }
+    public ObservableCollection<ProviderModelRouteOption> DefaultEmbeddingRouteOptions { get; }
+    public ObservableCollection<ProviderModelRouteOption> DefaultRerankerRouteOptions { get; }
+    public ObservableCollection<ProviderModelRouteOption> DefaultSearchRouteOptions { get; }
     /// <summary>全局节点默认和节点类型预设使用 Provider/Model 成对身份。</summary>
     public ObservableCollection<WorkflowModelOption> AvailableLlmModelOptions { get; }
+    public ObservableCollection<WorkflowModelOption> AvailableLlmModelTargetOptions { get; }
     public ObservableCollection<ToolControlGroupViewModel> ToolControlGroups { get; }
     public ObservableCollection<PermissionScopeProfileViewModel> ScopedPermissionProfiles { get; }
+    public ObservableCollection<SettingsDiagnosticItemViewModel> DiagnosticsItems { get; }
+    public ObservableCollection<SettingsSectionLoadFailureViewModel> SectionLoadFailures { get; }
     public ColorChannelEditor GitAutoColorEditor { get; }
     public ColorChannelEditor GitManualColorEditor { get; }
     public ColorChannelEditor ThemeMainColorEditor { get; }
@@ -806,10 +1028,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     public RelayCommand SaveGeneralCommand { get; }
     public RelayCommand RefreshModelsCommand { get; }
+    public RelayCommand TestProviderDraftCommand { get; }
     public RelayCommand SaveModelCommand { get; }
     public RelayCommand SaveProviderKeyCommand { get; }
+    public RelayCommand RevokeProviderKeyCommand { get; }
     public RelayCommand RemoveProviderCommand { get; }
     public RelayCommand AddProviderCommand { get; }
+    public RelayCommand AddProviderModelCommand { get; }
     public RelayCommand SavePresetsCommand { get; }
     public RelayCommand SaveTemplateRepositoryCommand { get; }
     public RelayCommand OpenTemplateMarketCommand { get; }
@@ -817,7 +1042,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public RelayCommand SavePermissionsCommand { get; }
     public RelayCommand SavePersonalizationCommand { get; }
     public RelayCommand SaveAppRuntimeCommand { get; }
-    public RelayCommand SaveMiscCommand { get; }
+    public RelayCommand SaveRetrievalCommand { get; }
+    public RelayCommand SaveGitCommand { get; }
+    public RelayCommand RestoreCurrentTabCommand { get; }
+    public RelayCommand RestoreRecommendedDefaultsCommand { get; }
+    public RelayCommand RestoreOfficialTemplateRepositoryCommand { get; }
+    public RelayCommand RefreshDiagnosticsCommand { get; }
     public RelayCommand ShowTutorialCommand { get; }
     public RelayCommand BrowseDocumentsDirCommand { get; }
     public RelayCommand BrowseWorkflowsDirCommand { get; }
@@ -825,6 +1055,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public RelayCommand BrowseExportsDirCommand { get; }
     public RelayCommand BrowseReadableRootsCommand { get; }
     public RelayCommand BrowseWritableRootsCommand { get; }
+    public RelayCommand BrowseQdrantBinaryCommand { get; }
 
     public string GeneralTitle => _displayNames.Text("ui.settings.general.title");
     public string GeneralScopeHelpText => _displayNames.Text("ui.settings.general.scope_help");
@@ -835,11 +1066,16 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string PermissionsTitle => _displayNames.Text("ui.settings.permissions.title");
     public string PersonalizationTitle => _displayNames.Text("ui.settings.personalization.title");
     public string PersonalizationScopeHelpText => _displayNames.Text("ui.settings.personalization.scope_help");
-    public string MiscTitle => _displayNames.Text("ui.settings.misc.title");
+    public string RetrievalTitle => _displayNames.Text("ui.settings.tab.retrieval");
+    public string VersionControlTitle => _displayNames.Text("ui.settings.tab.version_control");
+    public string SupportTitle => _displayNames.Text("ui.settings.tab.support");
+    public string AdvancedSettingsText => _displayNames.Text("ui.settings.advanced");
     public string AppRuntimeScopeHelpText => _displayNames.Text("ui.settings.misc.app_runtime_scope_help");
     public string RetrievalScopeHelpText => _displayNames.Text("ui.settings.misc.retrieval_scope_help");
 
     public string ProjectNameLabel => _displayNames.Text("ui.settings.general.project_name");
+    public string ProjectRootLabel => _displayNames.Text("ui.settings.general.project_root");
+    public string DirectorySwitchWarningText => _displayNames.Text("ui.settings.general.directory_switch_warning");
     public string DocumentsDirLabel => _displayNames.Text("ui.settings.general.documents_dir");
     public string WorkflowsDirLabel => _displayNames.Text("ui.settings.general.workflows_dir");
     public string SkillsDirLabel => _displayNames.Text("ui.settings.general.skills_dir");
@@ -858,18 +1094,32 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string MakeDefaultEmbeddingText => _displayNames.Text("ui.settings.models.make_default_embedding");
     public string MakeDefaultRerankerText => _displayNames.Text("ui.settings.models.make_default_reranker");
     public string MakeDefaultSearchText => _displayNames.Text("ui.settings.models.make_default_search");
+    public string DefaultLlmRouteLabel => _displayNames.Text("ui.settings.models.default_llm_route");
+    public string DefaultEmbeddingRouteLabel => _displayNames.Text("ui.settings.models.default_embedding_route");
+    public string DefaultRerankerRouteLabel => _displayNames.Text("ui.settings.models.default_reranker_route");
+    public string DefaultSearchRouteLabel => _displayNames.Text("ui.settings.models.default_search_route");
     public string AvailableModelsText => _displayNames.Text("ui.settings.models.available_models");
     public string ManualModelsText => _displayNames.Text("ui.settings.models.manual_models");
     public string ModelsTextLabel => _displayNames.Text("ui.settings.models.models");
     public string ModelsPlaceholder => _displayNames.Text("ui.settings.models.models.placeholder");
+    public string ModelIdColumnLabel => _displayNames.Text("ui.settings.models.column.id");
+    public string ModelCapabilityColumnLabel => _displayNames.Text("ui.settings.models.column.capability");
+    public string ModelContextColumnLabel => _displayNames.Text("ui.settings.models.column.context");
+    public string ModelInputCostColumnLabel => _displayNames.Text("ui.settings.models.column.input_cost");
+    public string ModelOutputCostColumnLabel => _displayNames.Text("ui.settings.models.column.output_cost");
+    public string AddModelText => _displayNames.Text("ui.settings.models.add_model");
+    public string RemoveModelText => _displayNames.Text("ui.settings.models.remove_model");
     public string EmbeddingModelLabel => _displayNames.Text("ui.settings.models.embedding_model");
     public string EmbeddingModelPlaceholder => _displayNames.Text("ui.settings.models.embedding_model.placeholder");
     public string ApiKeyLabel => _displayNames.Text("ui.settings.models.api_key");
     public string ApiKeyPlaceholder => _displayNames.Text("ui.settings.models.api_key.placeholder");
     public string SaveModelText => _displayNames.Text("ui.settings.models.save");
     public string SaveKeyText => _displayNames.Text("ui.settings.models.save_key");
+    public string RevokeKeyText => _displayNames.Text("ui.settings.models.revoke_key");
     public string RemoveProviderText => _displayNames.Text("ui.settings.models.remove");
     public string RefreshText => _displayNames.Text("ui.common.refresh");
+    public string TestProviderDraftText => _displayNames.Text("ui.settings.models.test_connection");
+    public string LegacyOtherProviderMessage => _displayNames.Text("ui.settings.models.provider_type.other.migration");
     public string ProviderStatusLabel => _displayNames.Text("ui.settings.models.status");
     public string AddProviderText => _displayNames.Text("ui.settings.models.add_provider");
     public string ProviderListTitle => _displayNames.Text("ui.settings.models.provider_list");
@@ -886,11 +1136,21 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string PresetAccessTitle => _displayNames.Text("ui.settings.presets.access_title");
     public string PresetToolsTitle => _displayNames.Text("ui.settings.presets.tools_title");
     public string PresetScopeHelpText => _displayNames.Text("ui.settings.presets.scope_help");
+    public string ModelAliasesTitle => _displayNames.Text("ui.settings.presets.model_aliases");
+    public string ModelAliasTargetLabel => _displayNames.Text("ui.settings.presets.model_alias_target");
+    public string ModelAliasesHelpText => _displayNames.Text("ui.settings.presets.model_aliases_help");
     public string InheritNodePermissionsText => _displayNames.Text("ui.settings.presets.inherit_node_permissions");
     public string DefaultModelLabel => _displayNames.Text("ui.settings.presets.default_model");
     public string DefaultTimeoutLabel => _displayNames.Text("ui.settings.presets.default_timeout_ms");
     public string DefaultBudgetLabel => _displayNames.Text("ui.settings.presets.default_budget_usd");
     public string TemplateRepositoryLabel => _displayNames.Text("ui.settings.presets.template_repository");
+    public string TemplateRepositorySourceLabel => _displayNames.Text("ui.settings.presets.template_repository_source");
+    public string TemplateRepositorySourceText => _displayNames.Text(
+        string.Equals(TemplateRepositoryBaseUrl, OfficialTemplateRepositoryUrl, StringComparison.Ordinal)
+            ? "ui.settings.presets.template_repository_source.official"
+            : "ui.settings.presets.template_repository_source.custom");
+    public string AdvancedTemplateRepositoryText => _displayNames.Text("ui.settings.presets.template_repository_advanced");
+    public string RestoreOfficialTemplateRepositoryText => _displayNames.Text("ui.settings.presets.template_repository_restore_official");
     public string OpenTemplateMarketText => _displayNames.Text("ui.settings.presets.open_market");
     public string SavePresetsText => _displayNames.Text("ui.settings.presets.save");
     public string SaveTemplateRepositoryText => _displayNames.Text("ui.settings.presets.save_template_repository");
@@ -911,7 +1171,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string PolicyAutoOnText => _displayNames.Text("ui.settings.automation.confirmation.auto_on");
     /// <summary>Auto Mode 列：关 = allow_by_default（默认跳过确认），不是人工审核。</summary>
     public string PolicyAutoOffText => _displayNames.Text("ui.settings.automation.confirmation.auto_off");
+    public string ConfirmationProfileLabel => _displayNames.Text("ui.settings.automation.confirmation.profile");
+    public string ConfirmationProfileHelpText => _displayNames.Text("ui.settings.automation.confirmation.profile.help");
+    public string AdvancedConfirmationPoliciesText => _displayNames.Text("ui.settings.automation.confirmation.advanced");
+    private string DefaultAutoApprovalPrompt => _displayNames.Text("ui.settings.automation.confirmation.default_approval_prompt");
     public string BrowseFolderText => _displayNames.Text("ui.settings.browse_folder");
+    public string BrowseFileText => _displayNames.Text("ui.settings.browse_file");
     public string WorkflowLimitLabel => _displayNames.Text("ui.settings.automation.workflow");
     public string WorkflowDefaultTimeoutLabel => _displayNames.Text("ui.settings.automation.default_timeout_ms");
     public string MaxLoopIterationsLabel => _displayNames.Text("ui.settings.automation.max_loop_iterations");
@@ -925,6 +1190,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string AllowHttpSkillText => _displayNames.Text("ui.settings.permissions.allow_http_skill");
     public string AllowWasmNetworkText => _displayNames.Text("ui.settings.permissions.allow_wasm_network");
     public string AllowSecretReadText => _displayNames.Text("ui.settings.permissions.allow_secret_read");
+    public string PermissionProfileLabel => _displayNames.Text("ui.settings.permissions.profile");
+    public string PermissionProfileHelpText => _displayNames.Text("ui.settings.permissions.profile.help");
+    public string AdvancedPermissionsText => _displayNames.Text("ui.settings.permissions.advanced");
     public string GlobalDefaultsHelpText => _displayNames.Text("ui.settings.permissions.global_defaults_help");
     public string PermissionsScopeHelpText => _displayNames.Text("ui.settings.permissions.scope_help");
     public string InheritGlobalText => _displayNames.Text("ui.settings.permissions.inherit_global");
@@ -961,6 +1229,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string VectorDimensionsLabel => _displayNames.Text("ui.settings.misc.vector_dimensions");
     public string QdrantHostLabel => _displayNames.Text("ui.settings.misc.qdrant_host");
     public string QdrantPortLabel => _displayNames.Text("ui.settings.misc.qdrant_port");
+    public string QdrantTlsText => _displayNames.Text("ui.settings.misc.qdrant_tls");
+    public string QdrantAuthModeLabel => _displayNames.Text("ui.settings.misc.qdrant_auth");
+    public string QdrantApiKeyLabel => _displayNames.Text("ui.settings.misc.qdrant_api_key");
+    public string QdrantApiKeyPlaceholder => _displayNames.Text("ui.settings.misc.qdrant_api_key.placeholder");
+    public string QdrantApiKeyStatusText => _displayNames.Text(
+        HasQdrantApiKeyForCurrentEndpoint() ? "ui.common.configured" : "ui.common.not_configured");
     public string QdrantDataDirLabel => _displayNames.Text("ui.settings.misc.qdrant_data_dir");
     public string QdrantBinaryPathLabel => _displayNames.Text("ui.settings.misc.qdrant_binary_path");
     public string QdrantStartupTimeoutLabel => _displayNames.Text("ui.settings.misc.qdrant_startup_timeout");
@@ -975,17 +1249,52 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string TrackConfigText => _displayNames.Text("ui.settings.misc.track_config");
     public string IgnoredPathsLabel => _displayNames.Text("ui.settings.misc.ignored_paths");
     public string IgnoredPathsPlaceholder => _displayNames.Text("ui.settings.misc.ignored_paths.placeholder");
-    public string SaveMiscText => _displayNames.Text("ui.settings.misc.save");
+    public string SaveRetrievalText => _displayNames.Text("ui.settings.retrieval.save");
+    public string SaveGitText => _displayNames.Text("ui.settings.git.save");
     public string LanguageLabel => _displayNames.Text("ui.settings.misc.language");
     public string TutorialText => _displayNames.Text("ui.settings.index.tutorial");
     public string OpenTutorialText => _displayNames.Text("ui.settings.misc.open_tutorial");
     public string DiagnosticsLabel => _displayNames.Text("ui.settings.misc.diagnostics");
     public string DiagnosticsStatusText => _displayNames.Format("ui.settings.misc.diagnostics.status", new Dictionary<string, string>
     {
-        ["status"] = DiagnosticsStatus,
+        ["status"] = DiagnosticStatusLabel(DiagnosticsStatus),
     });
+    public string DiagnosticsEmptyText => _displayNames.Text("ui.settings.misc.diagnostics.no_items");
+    public string RefreshDiagnosticsText => _displayNames.Text("ui.settings.misc.diagnostics.refresh");
+    public string CopyDiagnosticsText => _displayNames.Text("ui.settings.misc.diagnostics.copy");
+    public string RestoreCurrentTabText => _displayNames.Text("ui.settings.restore_current_tab");
+    public string RestoreRecommendedDefaultsText => _displayNames.Text("ui.settings.restore_recommended_defaults");
+    public bool HasDiagnosticsItems => DiagnosticsItems.Count > 0;
+    public bool HasSectionLoadFailures => SectionLoadFailures.Count > 0;
+    public string SectionLoadFailureRetryText => _displayNames.Text("ui.settings.retry");
+    public bool HasCompatibilityPermissionScopes => _compatibilityScopedPolicies.Count > 0;
+    public string CompatibilityPermissionScopesText => _displayNames.Format(
+        "ui.settings.permissions.compatibility_scopes",
+        new Dictionary<string, string>
+        {
+            ["count"] = _compatibilityScopedPolicies.Count.ToString(CultureInfo.InvariantCulture),
+        });
+    public bool IsDiagnosticsRefreshing
+    {
+        get => _isDiagnosticsRefreshing;
+        private set
+        {
+            if (SetProperty(ref _isDiagnosticsRefreshing, value))
+            {
+                RefreshDiagnosticsCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
+    public string DiagnosticsCopyText => string.Join(
+        Environment.NewLine,
+        DiagnosticsItems.Select(item => $"{item.Component}: {item.Status} - {item.Reason} - {item.RecoveryAction}"));
 
     public string ProjectName { get => _projectName; set => SetProperty(ref _projectName, value); }
+    public string ProjectRoot
+    {
+        get => _projectRoot;
+        private set => SetProperty(ref _projectRoot, value ?? string.Empty);
+    }
     public string Locale { get => _locale; set => SetProperty(ref _locale, value); }
     public string DocumentsDir { get => _documentsDir; set => SetProperty(ref _documentsDir, value); }
     public string WorkflowsDir { get => _workflowsDir; set => SetProperty(ref _workflowsDir, value); }
@@ -994,10 +1303,35 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string ProjectMemory { get => _projectMemory; set => SetProperty(ref _projectMemory, value); }
 
     public string ProviderId { get => _providerId; set => SetProperty(ref _providerId, value); }
-    public string ProviderType { get => _providerType; set => SetProperty(ref _providerType, value); }
+    public string ProviderType
+    {
+        get => _providerType;
+        set
+        {
+            if (SetProperty(ref _providerType, value))
+            {
+                EnsureLegacyOtherProviderTypeOption(value);
+                OnPropertyChanged(nameof(IsLegacyOtherProvider));
+                OnPropertyChanged(nameof(IsProviderEditorEditable));
+                NotifyProviderCommands();
+                NotifySaveCommands();
+            }
+        }
+    }
     public string ProviderDisplayName { get => _providerDisplayName; set => SetProperty(ref _providerDisplayName, value); }
     public string ProviderBaseUrl { get => _providerBaseUrl; set => SetProperty(ref _providerBaseUrl, value); }
-    public bool ProviderEnabled { get => _providerEnabled; set => SetProperty(ref _providerEnabled, value); }
+    public bool ProviderEnabled
+    {
+        get => _providerEnabled;
+        set
+        {
+            if (SetProperty(ref _providerEnabled, value) && !value)
+            {
+                ClearDefaultRoutesForProvider(ProviderId);
+            }
+            RebuildProviderDefaultModelRoutes();
+        }
+    }
     public bool MakeDefaultLlm { get => _makeDefaultLlm; set => SetProperty(ref _makeDefaultLlm, value); }
     public bool MakeDefaultEmbedding { get => _makeDefaultEmbedding; set => SetProperty(ref _makeDefaultEmbedding, value); }
     public bool MakeDefaultReranker { get => _makeDefaultReranker; set => SetProperty(ref _makeDefaultReranker, value); }
@@ -1005,7 +1339,29 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string ApiKey { get => _apiKey; set => SetProperty(ref _apiKey, value); }
     public string ModelsText { get => _modelsText; set => SetProperty(ref _modelsText, value); }
     public string EmbeddingModelId { get => _embeddingModelId; set => SetProperty(ref _embeddingModelId, value); }
+    public bool IsLegacyOtherProvider => string.Equals(ProviderType, "other", StringComparison.Ordinal);
+    public bool IsProviderEditorEditable => IsModelsEditable && !IsLegacyOtherProvider;
     public bool ManualModelsVisible { get => _manualModelsVisible; set => SetProperty(ref _manualModelsVisible, value); }
+    public ProviderModelRouteOption? SelectedDefaultLlmRoute
+    {
+        get => _selectedDefaultLlmRoute;
+        set => SetProperty(ref _selectedDefaultLlmRoute, value);
+    }
+    public ProviderModelRouteOption? SelectedDefaultEmbeddingRoute
+    {
+        get => _selectedDefaultEmbeddingRoute;
+        set => SetProperty(ref _selectedDefaultEmbeddingRoute, value);
+    }
+    public ProviderModelRouteOption? SelectedDefaultRerankerRoute
+    {
+        get => _selectedDefaultRerankerRoute;
+        set => SetProperty(ref _selectedDefaultRerankerRoute, value);
+    }
+    public ProviderModelRouteOption? SelectedDefaultSearchRoute
+    {
+        get => _selectedDefaultSearchRoute;
+        set => SetProperty(ref _selectedDefaultSearchRoute, value);
+    }
     public string ProviderStatus { get => _providerStatus; set => SetProperty(ref _providerStatus, value); }
     public ProviderOptionViewModel? SelectedProviderOption
     {
@@ -1048,6 +1404,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public bool IsSelectedProviderDraft => SelectedProviderOption?.IsDraft == true;
 
     public string DefaultProviderId => _defaultProviderId;
+    public string? DefaultModelAlias => _defaultModelAlias;
     public string DefaultModelId { get => _defaultModelId; set => SetProperty(ref _defaultModelId, value); }
     public WorkflowModelOption? SelectedDefaultModelOption
     {
@@ -1059,16 +1416,37 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 return;
             }
 
-            ApplyDefaultModelIdentity(value.ProviderId, value.ModelId);
+            ApplyDefaultModelIdentity(value.AliasId, value.ProviderId, value.ModelId);
         }
     }
     public string DefaultTimeoutMs { get => _defaultTimeoutMs; set => SetProperty(ref _defaultTimeoutMs, value); }
     public string DefaultBudgetUsd { get => _defaultBudgetUsd; set => SetProperty(ref _defaultBudgetUsd, value); }
-    public string TemplateRepositoryBaseUrl { get => _templateRepositoryBaseUrl; set => SetProperty(ref _templateRepositoryBaseUrl, value); }
+    public string TemplateRepositoryBaseUrl
+    {
+        get => _templateRepositoryBaseUrl;
+        set
+        {
+            if (SetProperty(ref _templateRepositoryBaseUrl, value))
+            {
+                OnPropertyChanged(nameof(TemplateRepositorySourceText));
+            }
+        }
+    }
 
     public string BudgetUsd { get => _budgetUsd; set => SetProperty(ref _budgetUsd, value); }
     public string PreauthorizedUsd { get => _preauthorizedUsd; set => SetProperty(ref _preauthorizedUsd, value); }
     public string SpentText { get => _spentText; set => SetProperty(ref _spentText, value); }
+    public SettingsValueOption? SelectedConfirmationProfile
+    {
+        get => _selectedConfirmationProfile;
+        set
+        {
+            if (SetProperty(ref _selectedConfirmationProfile, value))
+            {
+                ApplyConfirmationProfile(value?.Value);
+            }
+        }
+    }
     public string WorkflowDefaultTimeoutMs { get => _workflowDefaultTimeoutMs; set => SetProperty(ref _workflowDefaultTimeoutMs, value); }
     public string MaxLoopIterations { get => _maxLoopIterations; set => SetProperty(ref _maxLoopIterations, value); }
     public string MaxToolRounds { get => _maxToolRounds; set => SetProperty(ref _maxToolRounds, value); }
@@ -1092,6 +1470,37 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public bool AllowHttpSkill { get => _allowHttpSkill; set => SetProperty(ref _allowHttpSkill, value); }
     public bool AllowWasmNetwork { get => _allowWasmNetwork; set => SetProperty(ref _allowWasmNetwork, value); }
     public bool AllowSecretRead { get => _allowSecretRead; set => SetProperty(ref _allowSecretRead, value); }
+    public SettingsValueOption? SelectedPermissionProfile
+    {
+        get => _selectedPermissionProfile;
+        set
+        {
+            if (SetProperty(ref _selectedPermissionProfile, value) && !_applyingPermissionProfile)
+            {
+                ApplyPermissionProfile(value?.Value);
+            }
+        }
+    }
+    public bool AreAdvancedPermissionsExpanded
+    {
+        get => _areAdvancedPermissionsExpanded;
+        set => SetProperty(ref _areAdvancedPermissionsExpanded, value);
+    }
+    public bool AreAdvancedConfirmationPoliciesExpanded
+    {
+        get => _areAdvancedConfirmationPoliciesExpanded;
+        set => SetProperty(ref _areAdvancedConfirmationPoliciesExpanded, value);
+    }
+    public bool AreAdvancedRetrievalSettingsExpanded
+    {
+        get => _areAdvancedRetrievalSettingsExpanded;
+        set => SetProperty(ref _areAdvancedRetrievalSettingsExpanded, value);
+    }
+    public bool AreAdvancedAppRuntimeSettingsExpanded
+    {
+        get => _areAdvancedAppRuntimeSettingsExpanded;
+        set => SetProperty(ref _areAdvancedAppRuntimeSettingsExpanded, value);
+    }
     public string ReadableRootsText { get => _readableRootsText; set => SetProperty(ref _readableRootsText, value); }
     public string WritableRootsText { get => _writableRootsText; set => SetProperty(ref _writableRootsText, value); }
 
@@ -1566,7 +1975,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public bool ProjectPanelVisible { get => _projectPanelVisible; set => SetProperty(ref _projectPanelVisible, value); }
     public bool ReduceMotion { get => _reduceMotion; set => SetProperty(ref _reduceMotion, value); }
 
-    public bool VectorEnabled { get => _vectorEnabled; set => SetProperty(ref _vectorEnabled, value); }
+    public bool VectorEnabled
+    {
+        get => _vectorEnabled;
+        set
+        {
+            if (SetProperty(ref _vectorEnabled, value))
+            {
+                OnPropertyChanged(nameof(IsVectorConfigurationVisible));
+            }
+        }
+    }
     public string VectorBackend
     {
         get => _vectorBackend;
@@ -1575,14 +1994,96 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             if (SetProperty(ref _vectorBackend, value))
             {
                 OnPropertyChanged(nameof(IsQdrantSidecarBackend));
+                OnPropertyChanged(nameof(IsExternalQdrantBackend));
+                OnPropertyChanged(nameof(IsQdrantApiKeyAuth));
             }
         }
     }
     public bool IsQdrantSidecarBackend => string.Equals(VectorBackend, "qdrant_sidecar", StringComparison.Ordinal);
+    public bool IsExternalQdrantBackend => string.Equals(VectorBackend, "external_qdrant", StringComparison.Ordinal);
+    public bool IsVectorConfigurationVisible => VectorEnabled;
     public string VectorCollection { get => _vectorCollection; set => SetProperty(ref _vectorCollection, value); }
     public string VectorDimensions { get => _vectorDimensions; set => SetProperty(ref _vectorDimensions, value); }
-    public string QdrantHost { get => _qdrantHost; set => SetProperty(ref _qdrantHost, value); }
-    public string QdrantPort { get => _qdrantPort; set => SetProperty(ref _qdrantPort, value); }
+    public string QdrantHost
+    {
+        get => _qdrantHost;
+        set { if (SetProperty(ref _qdrantHost, value)) OnPropertyChanged(nameof(QdrantApiKeyStatusText)); }
+    }
+    public string QdrantPort
+    {
+        get => _qdrantPort;
+        set { if (SetProperty(ref _qdrantPort, value)) OnPropertyChanged(nameof(QdrantApiKeyStatusText)); }
+    }
+    public bool QdrantUseTls
+    {
+        get => _qdrantUseTls;
+        set { if (SetProperty(ref _qdrantUseTls, value)) OnPropertyChanged(nameof(QdrantApiKeyStatusText)); }
+    }
+    public string QdrantAuthMode
+    {
+        get => _qdrantAuthMode;
+        set
+        {
+            if (SetProperty(ref _qdrantAuthMode, value))
+            {
+                OnPropertyChanged(nameof(IsQdrantApiKeyAuth));
+                OnPropertyChanged(nameof(QdrantApiKeyStatusText));
+            }
+        }
+    }
+    public bool IsQdrantApiKeyAuth => IsExternalQdrantBackend
+        && string.Equals(QdrantAuthMode, "api_key", StringComparison.Ordinal);
+    public string QdrantApiKey
+    {
+        get => _qdrantApiKey;
+        set
+        {
+            if (SetProperty(ref _qdrantApiKey, value) && _hasQdrantApiKeyError)
+            {
+                HasQdrantApiKeyError = false;
+            }
+        }
+    }
+    public string QdrantApiKeyErrorText => HasQdrantApiKeyError
+        ? ValidationMessage("ui.settings.validation.required", QdrantApiKeyLabel)
+        : string.Empty;
+    public bool HasQdrantApiKeyError
+    {
+        get => _hasQdrantApiKeyError;
+        private set
+        {
+            if (SetProperty(ref _hasQdrantApiKeyError, value))
+            {
+                OnPropertyChanged(nameof(QdrantApiKeyErrorText));
+            }
+        }
+    }
+    public bool HasQdrantApiKey
+    {
+        get => _hasQdrantApiKey;
+        private set
+        {
+            if (SetProperty(ref _hasQdrantApiKey, value))
+            {
+                OnPropertyChanged(nameof(QdrantApiKeyStatusText));
+            }
+        }
+    }
+
+    private bool HasQdrantApiKeyForCurrentEndpoint()
+    {
+        if (!HasQdrantApiKey)
+        {
+            return false;
+        }
+        return SavedValueMatches(nameof(QdrantHost), QdrantHost)
+            && SavedValueMatches(nameof(QdrantPort), QdrantPort)
+            && SavedValueMatches(nameof(QdrantUseTls), QdrantUseTls.ToString());
+    }
+
+    private bool SavedValueMatches(string field, string current) =>
+        !_draftState.TryGetSavedValue(RetrievalSection, field, out var saved)
+        || string.Equals(saved, current, StringComparison.Ordinal);
     public string QdrantDataDir { get => _qdrantDataDir; set => SetProperty(ref _qdrantDataDir, value); }
     public string QdrantBinaryPath { get => _qdrantBinaryPath; set => SetProperty(ref _qdrantBinaryPath, value); }
     public string QdrantStartupTimeoutMs { get => _qdrantStartupTimeoutMs; set => SetProperty(ref _qdrantStartupTimeoutMs, value); }
@@ -1657,6 +2158,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     {
         _providerModelRefreshSession.Invalidate();
         var generation = _draftState.BeginLoad();
+        _failedSectionRetries.Clear();
+        SectionLoadFailures.Clear();
+        OnPropertyChanged(nameof(HasSectionLoadFailures));
         var failed = false;
         IsLoading = true;
         NotifySectionStateChanged();
@@ -1687,7 +2191,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 cancellationToken.ThrowIfCancellationRequested();
                 if (_draftState.IsCurrentLoad(generation))
                 {
-                    _projectRoot = currentProject?.ProjectRoot ?? string.Empty;
+                    ProjectRoot = currentProject?.ProjectRoot ?? string.Empty;
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1697,7 +2201,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             catch
             {
                 // 项目身份只服务目录浏览边界，失败不能拖垮项目配置和项目记忆的加载事务。
-                _projectRoot = string.Empty;
+                ProjectRoot = string.Empty;
             }
 
             failed |= !await LoadSectionAsync(
@@ -1756,30 +2260,19 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
             failed |= !await LoadSectionAsync(
                 generation,
-                MiscSection,
-                async () => (
-                    await _backend.GetRagSettingsAsync(cancellationToken).ConfigureAwait(true),
-                    await _backend.GetGitSettingsAsync(cancellationToken).ConfigureAwait(true)),
-                value => ApplyMisc(value.Item1, value.Item2),
+                RetrievalSection,
+                () => _backend.GetRagSettingsAsync(cancellationToken),
+                ApplyRag,
                 cancellationToken).ConfigureAwait(true);
 
-            try
-            {
-                var diagnostics = await _backend.GetBackendDiagnosticsAsync(cancellationToken).ConfigureAwait(true);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (_draftState.IsCurrentLoad(generation))
-                {
-                    DiagnosticsStatus = diagnostics.Status;
-                }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                failed = true;
-            }
+            failed |= !await LoadSectionAsync(
+                generation,
+                GitSection,
+                () => _backend.GetGitSettingsAsync(cancellationToken),
+                ApplyGit,
+                cancellationToken).ConfigureAwait(true);
+
+            failed |= !await RefreshDiagnosticsAsync(generation, cancellationToken).ConfigureAwait(true);
 
             EnsureDefaultConfirmationPoliciesIfEmpty();
             StatusText = failed
@@ -1823,7 +2316,16 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 _suppressDirtyTracking = wasSuppressing;
             }
 
-            return _draftState.AcceptLoaded(generation, section, CurrentSectionValues(section));
+            var accepted = _draftState.AcceptLoaded(generation, section, CurrentSectionValues(section));
+            if (accepted)
+            {
+                ClearSectionLoadFailure(section);
+                if (string.Equals(section, RetrievalSection, StringComparison.Ordinal))
+                {
+                    OnPropertyChanged(nameof(QdrantApiKeyStatusText));
+                }
+            }
+            return accepted;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1831,12 +2333,467 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch
         {
+            if (_draftState.IsCurrentLoad(generation))
+            {
+                RegisterSectionLoadFailure(
+                    section,
+                    () => LoadSectionAsync(
+                        _draftState.CurrentLoadGeneration,
+                        section,
+                        read,
+                        apply,
+                        CancellationToken.None));
+            }
             return false;
         }
         finally
         {
             NotifySectionStateChanged();
         }
+    }
+
+    private void RegisterSectionLoadFailure(string section, Func<Task<bool>> retry)
+    {
+        _failedSectionRetries[section] = retry;
+        for (var index = SectionLoadFailures.Count - 1; index >= 0; index--)
+        {
+            if (string.Equals(SectionLoadFailures[index].Section, section, StringComparison.Ordinal))
+            {
+                SectionLoadFailures.RemoveAt(index);
+            }
+        }
+
+        SectionLoadFailures.Add(new SettingsSectionLoadFailureViewModel(
+            section,
+            SectionTitle(section),
+            _displayNames.Format("ui.settings.load_failure", new Dictionary<string, string>
+            {
+                ["section"] = SectionTitle(section),
+            }),
+            SectionLoadFailureRetryText,
+            () => _ = RetryFailedSectionAsync(section)));
+        OnPropertyChanged(nameof(HasSectionLoadFailures));
+    }
+
+    private void ClearSectionLoadFailure(string section)
+    {
+        _failedSectionRetries.Remove(section);
+        for (var index = SectionLoadFailures.Count - 1; index >= 0; index--)
+        {
+            if (string.Equals(SectionLoadFailures[index].Section, section, StringComparison.Ordinal))
+            {
+                SectionLoadFailures.RemoveAt(index);
+            }
+        }
+        OnPropertyChanged(nameof(HasSectionLoadFailures));
+    }
+
+    private async Task RetryFailedSectionAsync(string section)
+    {
+        if (!_failedSectionRetries.TryGetValue(section, out var retry))
+        {
+            return;
+        }
+
+        await retry().ConfigureAwait(true);
+        NotifySectionStateChanged();
+        UpdateDirtyState(updateStatus: false);
+    }
+
+    private bool CanRestoreSelectedTab()
+    {
+        return SelectedTab.Id switch
+        {
+            "general" => _draftState.IsSectionDirty(GeneralSection, CurrentSectionValues(GeneralSection)),
+            "models" => _draftState.IsSectionDirty(ModelsSection, CurrentSectionValues(ModelsSection)),
+            "presets" => _draftState.IsSectionDirty(PresetsSection, CurrentSectionValues(PresetsSection))
+                         || _draftState.IsSectionDirty(TemplateRepositorySection, CurrentSectionValues(TemplateRepositorySection)),
+            "automation" => _draftState.IsSectionDirty(AutomationSection, CurrentSectionValues(AutomationSection)),
+            "permissions" => _draftState.IsSectionDirty(PermissionsSection, CurrentSectionValues(PermissionsSection)),
+            "personalization" => _draftState.IsSectionDirty(PersonalizationSection, CurrentSectionValues(PersonalizationSection)),
+            "retrieval" => _draftState.IsSectionDirty(AppRuntimeSection, CurrentSectionValues(AppRuntimeSection))
+                           || _draftState.IsSectionDirty(RetrievalSection, CurrentSectionValues(RetrievalSection)),
+            "version_control" => _draftState.IsSectionDirty(GitSection, CurrentSectionValues(GitSection)),
+            _ => false,
+        };
+    }
+
+    private bool CanRestoreRecommendedDefaults() => SelectedTab.Id switch
+    {
+        "automation" => CanSave(AutomationSection),
+        "permissions" => CanSave(PermissionsSection),
+        "personalization" => CanSave(PersonalizationSection),
+        "retrieval" => CanSave(AppRuntimeSection) && CanSave(RetrievalSection),
+        "version_control" => CanSave(GitSection),
+        _ => false,
+    };
+
+    private async Task RestoreRecommendedDefaultsAsync()
+    {
+        if (!CanRestoreRecommendedDefaults())
+        {
+            return;
+        }
+
+        var confirmed = await DialogService.Current.ConfirmAsync(new ConfirmDialogViewModel(
+            _displayNames.Text("ui.dialog.settings.restore_defaults.title"),
+            _displayNames.Format(
+                "ui.dialog.settings.restore_defaults.message",
+                new Dictionary<string, string> { ["section"] = SelectedTab.Title }),
+            new[]
+            {
+                new DialogButton(RestoreRecommendedDefaultsText, DialogButtonVariant.Primary, 0),
+                new DialogButton(_displayNames.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
+            })
+        {
+            Severity = DialogSeverity.Warning,
+            ConfirmResultIndex = 0,
+            CancelResultIndex = 1,
+        }.SealKeyboardRoles()).ConfigureAwait(true);
+        if (confirmed != 0)
+        {
+            return;
+        }
+
+        ApplyRecommendedDefaults(SelectedTab.Id);
+        StatusText = _displayNames.Text("ui.settings.restore_recommended_defaults.pending");
+    }
+
+    private void ApplyRecommendedDefaults(string tabId)
+    {
+        switch (tabId)
+        {
+            case "automation":
+                BudgetUsd = "0";
+                PreauthorizedUsd = "0";
+                SelectedConfirmationProfile = ConfirmationProfileOptions.First(item => item.Value == "recommended");
+                WorkflowDefaultTimeoutMs = "300";
+                MaxLoopIterations = "5";
+                MaxToolRounds = "8";
+                CheckpointEnabled = true;
+                RuntimeAutosaveMs = "5000";
+                break;
+            case "permissions":
+                SelectedPermissionProfile = PermissionProfileOptions.First(item => item.Value == "recommended");
+                break;
+            case "personalization":
+                Theme = "system";
+                ThemeFollowSystemColors = true;
+                GitAutoColor = "#8a8f98";
+                GitManualColor = "#f59e0b";
+                ProjectPanelVisible = true;
+                ReduceMotion = false;
+                break;
+            case "retrieval":
+                VectorEnabled = false;
+                VectorBackend = "qdrant_sidecar";
+                VectorCollection = "ariadne_chunks";
+                VectorDimensions = "1536";
+                QdrantHost = "127.0.0.1";
+                QdrantPort = "6333";
+                QdrantUseTls = false;
+                QdrantAuthMode = "none";
+                QdrantApiKey = string.Empty;
+                QdrantDataDir = ".indexes/qdrant";
+                QdrantBinaryPath = "qdrant";
+                QdrantStartupTimeoutMs = "10000";
+                RerankerEnabled = false;
+                ChunkSizeChars = "2000";
+                ChunkOverlapChars = "200";
+                break;
+            case "version_control":
+                TrackDocuments = true;
+                TrackWorkflows = true;
+                TrackSkills = true;
+                TrackNonSensitiveConfig = true;
+                IgnoredPathsText = string.Join(Environment.NewLine, RecommendedGitIgnoredPaths);
+                break;
+        }
+        UpdateDirtyState();
+    }
+
+    internal void ApplyRecommendedDefaultsForTests(string tabId) => ApplyRecommendedDefaults(tabId);
+
+    private async Task RestoreSelectedTabAsync()
+    {
+        var generation = _draftState.CurrentLoadGeneration;
+        var restored = SelectedTab.Id switch
+        {
+            "general" => await LoadSectionAsync(
+                generation,
+                GeneralSection,
+                async () => (
+                    await _backend.GetAppSettingsAsync().ConfigureAwait(true),
+                    await _backend.ReadProjectMemoryAsync().ConfigureAwait(true)),
+                value =>
+                {
+                    _schemaVersion = value.Item1.App.SchemaVersion;
+                    ProjectName = value.Item1.App.ProjectName;
+                    Locale = value.Item1.App.Locale;
+                    DocumentsDir = value.Item1.App.DocumentsDir;
+                    WorkflowsDir = value.Item1.App.WorkflowsDir;
+                    SkillsDir = value.Item1.App.SkillsDir;
+                    ExportsDir = value.Item1.App.ExportsDir;
+                    ProjectMemory = value.Item2;
+                }).ConfigureAwait(true),
+            "models" => await LoadSectionAsync(
+                generation,
+                ModelsSection,
+                () => _backend.GetProviderConfigAsync(),
+                value =>
+                {
+                    _providerConfig = value;
+                    RebuildProviderOptionsFromConfig(preferProviderId: ProviderId);
+                }).ConfigureAwait(true),
+            "presets" => await RestorePresetsTabAsync(generation).ConfigureAwait(true),
+            "automation" => await LoadSectionAsync(
+                generation,
+                AutomationSection,
+                async () => (
+                    await _backend.GetAutomationSettingsAsync().ConfigureAwait(true),
+                    await _backend.GetWorkflowSettingsAsync().ConfigureAwait(true)),
+                value =>
+                {
+                    ApplyAutomation(value.Item1);
+                    _workflowSchemaVersion = value.Item2.Workflow.SchemaVersion;
+                    WorkflowDefaultTimeoutMs = SecondsFromStoredMs(value.Item2.Workflow.DefaultTimeoutMs);
+                    MaxLoopIterations = value.Item2.Workflow.MaxLoopIterations.ToString(CultureInfo.InvariantCulture);
+                    MaxToolRounds = value.Item2.Workflow.MaxToolRounds.ToString(CultureInfo.InvariantCulture);
+                    CheckpointEnabled = value.Item2.Workflow.CheckpointEnabled;
+                    RuntimeAutosaveMs = value.Item2.Workflow.RuntimeAutosaveMs.ToString(CultureInfo.InvariantCulture);
+                }).ConfigureAwait(true),
+            "permissions" => await LoadSectionAsync(
+                generation,
+                PermissionsSection,
+                () => _backend.GetPermissionsSettingsAsync(),
+                ApplyPermissions).ConfigureAwait(true),
+            "personalization" => await LoadSectionAsync(
+                generation,
+                PersonalizationSection,
+                () => _backend.GetUiPreferencesAsync(),
+                ApplyLoadedUiPreferences).ConfigureAwait(true),
+            "retrieval" => await RestoreRetrievalTabAsync(generation).ConfigureAwait(true),
+            "version_control" => await LoadSectionAsync(
+                generation,
+                GitSection,
+                () => _backend.GetGitSettingsAsync(),
+                ApplyGit).ConfigureAwait(true),
+            _ => false,
+        };
+
+        if (restored)
+        {
+            StatusText = _displayNames.Text("ui.common.configured");
+        }
+        NotifySectionStateChanged();
+        UpdateDirtyState(updateStatus: false);
+    }
+
+    private async Task<bool> RestorePresetsTabAsync(long generation)
+    {
+        var presets = await LoadSectionAsync(
+            generation,
+            PresetsSection,
+            () => _backend.GetNodePresetSettingsAsync(),
+            value =>
+            {
+                ApplyModelAliases(value.ModelAliases);
+                ApplyDefaultModelIdentity(value.DefaultModelAlias, value.DefaultProviderId, value.DefaultModelId);
+                DefaultTimeoutMs = SecondsFromStoredMs(value.DefaultTimeoutMs);
+                DefaultBudgetUsd = value.DefaultBudgetUsd.ToString("0.####", CultureInfo.InvariantCulture);
+                ApplyNodePresets(value, BuildEffectiveWorkflowNodePermissionPolicy());
+            }).ConfigureAwait(true);
+        var repository = await LoadSectionAsync(
+            generation,
+            TemplateRepositorySection,
+            () => _backend.GetTemplateRepositorySettingsAsync(),
+            value => TemplateRepositoryBaseUrl = value.BaseUrl).ConfigureAwait(true);
+        return presets && repository;
+    }
+
+    private async Task<bool> RestoreRetrievalTabAsync(long generation)
+    {
+        var runtime = await LoadSectionAsync(
+            generation,
+            AppRuntimeSection,
+            () => _backend.GetAppRuntimeSettingsAsync(),
+            ApplyAppRuntime).ConfigureAwait(true);
+        var retrieval = await LoadSectionAsync(
+            generation,
+            RetrievalSection,
+            () => _backend.GetRagSettingsAsync(),
+            ApplyRag).ConfigureAwait(true);
+        return runtime && retrieval;
+    }
+
+    private string SectionTitle(string section) => section switch
+    {
+        GeneralSection => GeneralTitle,
+        ModelsSection => ModelsTitle,
+        PresetsSection => PresetsTitle,
+        TemplateRepositorySection => TemplatesSectionTitle,
+        AutomationSection => AutomationTitle,
+        PermissionsSection => PermissionsTitle,
+        PersonalizationSection => PersonalizationTitle,
+        AppRuntimeSection => AppRuntimeSectionTitle,
+        RetrievalSection => RetrievalSectionTitle,
+        GitSection => GitSectionTitle,
+        _ => section,
+    };
+
+    private Task<bool> RefreshDiagnosticsAsync() => RefreshDiagnosticsAsync(null, CancellationToken.None);
+
+    private async Task<bool> RefreshDiagnosticsAsync(
+        long? settingsLoadGeneration,
+        CancellationToken cancellationToken)
+    {
+        var ownerGeneration = settingsLoadGeneration ?? 0;
+        var request = _diagnosticsRefreshSession.Begin(ownerGeneration);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            request.CancellationToken);
+        IsDiagnosticsRefreshing = true;
+        try
+        {
+            var diagnostics = await _backend.GetBackendDiagnosticsAsync(linked.Token).ConfigureAwait(true);
+            linked.Token.ThrowIfCancellationRequested();
+            if (!_diagnosticsRefreshSession.IsCurrent(request, ownerGeneration)
+                || (settingsLoadGeneration is { } loadGeneration
+                    && !_draftState.IsCurrentLoad(loadGeneration)))
+            {
+                return false;
+            }
+
+            ApplyDiagnostics(diagnostics);
+            return true;
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            return false;
+        }
+        catch (Exception ex)
+        {
+            if (_diagnosticsRefreshSession.IsCurrent(request, ownerGeneration))
+            {
+                StatusText = UserFacingError.Format(ex, _displayNames);
+            }
+            return false;
+        }
+        finally
+        {
+            if (_diagnosticsRefreshSession.IsCurrent(request, ownerGeneration))
+            {
+                IsDiagnosticsRefreshing = false;
+            }
+        }
+    }
+
+    private void ApplyDiagnostics(BackendDiagnosticsReport report)
+    {
+        _diagnosticsReport = report;
+        DiagnosticsStatus = report.Status;
+        DiagnosticsItems.Clear();
+        foreach (var item in report.Items)
+        {
+            DiagnosticsItems.Add(new SettingsDiagnosticItemViewModel(
+                DiagnosticComponentLabel(item.Component),
+                DiagnosticStatusLabel(item.Status),
+                DiagnosticReasonLabel(item.Status, item.Reason),
+                DiagnosticRecoveryLabel(item.Component, item.Status)));
+        }
+        OnPropertyChanged(nameof(HasDiagnosticsItems));
+        OnPropertyChanged(nameof(DiagnosticsCopyText));
+    }
+
+    private string DiagnosticStatusLabel(string? status) => status switch
+    {
+        "healthy" => _displayNames.Text("ui.settings.misc.diagnostics.status.healthy"),
+        "degraded" => _displayNames.Text("ui.settings.misc.diagnostics.status.degraded"),
+        "unavailable" => _displayNames.Text("ui.settings.misc.diagnostics.status.unavailable"),
+        _ => _displayNames.Text("ui.settings.misc.diagnostics.status.unknown"),
+    };
+
+    private string DiagnosticComponentLabel(string component)
+    {
+        if (component.StartsWith("provider.", StringComparison.Ordinal))
+        {
+            var providerId = component.Split('.').LastOrDefault() ?? string.Empty;
+            var provider = _providerConfig?.Providers.FirstOrDefault(item =>
+                string.Equals(item.Provider, providerId, StringComparison.Ordinal));
+            return _displayNames.Format(
+                "ui.settings.misc.diagnostics.component.provider",
+                new Dictionary<string, string>
+                {
+                    ["provider"] = provider?.DisplayName ?? _displayNames.Text("ui.settings.misc.diagnostics.component.provider_unknown"),
+                });
+        }
+
+        if (component.StartsWith("retrieval", StringComparison.Ordinal)
+            || component.Contains("qdrant", StringComparison.OrdinalIgnoreCase)
+            || component.Contains("tantivy", StringComparison.OrdinalIgnoreCase))
+        {
+            return _displayNames.Text("ui.settings.misc.diagnostics.component.retrieval");
+        }
+
+        return component switch
+        {
+            "runtime.db" => _displayNames.Text("ui.settings.misc.diagnostics.component.runtime_store"),
+            "workflow_runtime_recovery" => _displayNames.Text("ui.settings.misc.diagnostics.component.runtime_recovery"),
+            "project.config" => _displayNames.Text("ui.settings.misc.diagnostics.component.project_config"),
+            "providers.config" => _displayNames.Text("ui.settings.misc.diagnostics.component.provider_config"),
+            "providers.llm.default" => _displayNames.Text("ui.settings.misc.diagnostics.component.default_llm"),
+            "providers.embedding.default" => _displayNames.Text("ui.settings.misc.diagnostics.component.default_embedding"),
+            "providers.reranker.default" => _displayNames.Text("ui.settings.misc.diagnostics.component.default_reranker"),
+            _ => _displayNames.Text("ui.settings.misc.diagnostics.component.other"),
+        };
+    }
+
+    private string DiagnosticReasonLabel(string status, string? reason)
+    {
+        if (!string.IsNullOrWhiteSpace(reason)
+            && reason.StartsWith("diagnostics.", StringComparison.Ordinal))
+        {
+            var localized = _displayNames.Text(reason);
+            if (!string.Equals(localized, $"[{reason}]", StringComparison.Ordinal))
+            {
+                return localized;
+            }
+        }
+
+        return status switch
+        {
+            "healthy" => _displayNames.Text("ui.settings.misc.diagnostics.reason.healthy"),
+            "degraded" => _displayNames.Text("ui.settings.misc.diagnostics.reason.degraded"),
+            "unavailable" => _displayNames.Text("ui.settings.misc.diagnostics.reason.unavailable"),
+            _ => _displayNames.Text("ui.settings.misc.diagnostics.reason.unknown"),
+        };
+    }
+
+    private string DiagnosticRecoveryLabel(string component, string status)
+    {
+        if (string.Equals(status, "healthy", StringComparison.Ordinal))
+        {
+            return _displayNames.Text("ui.settings.misc.diagnostics.recovery.none");
+        }
+        if (component.StartsWith("provider", StringComparison.Ordinal))
+        {
+            return _displayNames.Text("ui.settings.misc.diagnostics.recovery.provider");
+        }
+        if (component.StartsWith("retrieval", StringComparison.Ordinal)
+            || component.Contains("qdrant", StringComparison.OrdinalIgnoreCase)
+            || component.Contains("tantivy", StringComparison.OrdinalIgnoreCase))
+        {
+            return _displayNames.Text("ui.settings.misc.diagnostics.recovery.retrieval");
+        }
+        if (component == "project.config")
+        {
+            return _displayNames.Text("ui.settings.misc.diagnostics.recovery.project_config");
+        }
+        return _displayNames.Text("ui.settings.misc.diagnostics.recovery.runtime");
     }
 
     /// <summary>
@@ -1877,6 +2834,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                         generation,
                         PermissionsSection,
                         CurrentSectionValues(PermissionsSection));
+                    if (permissionsAccepted)
+                    {
+                        ClearSectionLoadFailure(PermissionsSection);
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1898,9 +2859,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     _suppressDirtyTracking = true;
                     try
                     {
-                        ApplyDefaultModelIdentity(presets.DefaultProviderId, presets.DefaultModelId);
+                        ApplyModelAliases(presets.ModelAliases);
+                        ApplyDefaultModelIdentity(
+                            presets.DefaultModelAlias,
+                            presets.DefaultProviderId,
+                            presets.DefaultModelId);
                         DefaultTimeoutMs = SecondsFromStoredMs(presets.DefaultTimeoutMs);
-                        DefaultBudgetUsd = presets.DefaultBudgetUsd.ToString("0.####");
+                        DefaultBudgetUsd = StableNumber(presets.DefaultBudgetUsd);
                         ApplyNodePresets(presets, ResolveWorkflowNodePermissionPolicy(permissions));
                     }
                     finally
@@ -1912,6 +2877,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                         generation,
                         PresetsSection,
                         CurrentSectionValues(PresetsSection));
+                    if (presetsAccepted)
+                    {
+                        ClearSectionLoadFailure(PresetsSection);
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1923,6 +2892,26 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 presetsAccepted = false;
             }
 
+            if (_draftState.IsCurrentLoad(generation))
+            {
+                if (!permissionsAccepted)
+                {
+                    RegisterSectionLoadFailure(
+                        PermissionsSection,
+                        () => LoadPermissionPresetSectionsAsync(
+                            _draftState.CurrentLoadGeneration,
+                            CancellationToken.None));
+                }
+                if (!presetsAccepted)
+                {
+                    RegisterSectionLoadFailure(
+                        PresetsSection,
+                        () => LoadPermissionPresetSectionsAsync(
+                            _draftState.CurrentLoadGeneration,
+                            CancellationToken.None));
+                }
+            }
+
             return presetsAccepted && permissionsAccepted;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1931,6 +2920,19 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch
         {
+            if (_draftState.IsCurrentLoad(generation))
+            {
+                RegisterSectionLoadFailure(
+                    PermissionsSection,
+                    () => LoadPermissionPresetSectionsAsync(
+                        _draftState.CurrentLoadGeneration,
+                        CancellationToken.None));
+                RegisterSectionLoadFailure(
+                    PresetsSection,
+                    () => LoadPermissionPresetSectionsAsync(
+                        _draftState.CurrentLoadGeneration,
+                        CancellationToken.None));
+            }
             return false;
         }
         finally
@@ -1970,6 +2972,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     internal Task RefreshProviderModelsForTestsAsync() => FetchModelsAsync();
 
+    internal void ApplyDiagnosticsForTests(BackendDiagnosticsReport report) => ApplyDiagnostics(report);
+
     internal void SelectProviderForTests(string providerId)
     {
         _providerModelRefreshSession.Invalidate();
@@ -2007,6 +3011,22 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         var tab = Tabs.First(item =>
             string.Equals(item.Id, section.TabId, StringComparison.Ordinal));
         return QueueNavigationAsync(tab, section);
+    }
+
+    /// <summary>仅供 ARIADNE_UI_START_SECTION 视觉验收使用，不加载或伪造项目配置。</summary>
+    internal void OpenPreviewSection(string sectionId)
+    {
+        if (string.Equals(sectionId, "model_aliases", StringComparison.Ordinal)
+            && ModelAliases.Count == 0)
+        {
+            ApplyModelAliases(null);
+        }
+
+        var section = SectionIndexItems.First(item =>
+            string.Equals(item.Id, sectionId, StringComparison.Ordinal));
+        var tab = Tabs.First(item =>
+            string.Equals(item.Id, section.TabId, StringComparison.Ordinal));
+        CommitNavigation(new PendingSettingsNavigation(tab, section));
     }
 
     internal Task SelectNavigationTabForTestsAsync(string tabId)
@@ -2056,7 +3076,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         MotionPreferences.Apply(preferences.ReduceMotion);
     }
 
-    private void ApplyMisc(RagSettings rag, GitSettings git)
+    private void ApplyRag(RagSettings rag)
     {
         _ragSchemaVersion = rag.Rag.SchemaVersion;
         VectorEnabled = rag.Rag.VectorStore.Enabled;
@@ -2065,12 +3085,20 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         VectorDimensions = rag.Rag.VectorStore.VectorDimensions.ToString();
         QdrantHost = rag.Rag.VectorStore.Sidecar.Host;
         QdrantPort = rag.Rag.VectorStore.Sidecar.Port.ToString();
+        QdrantUseTls = rag.Rag.VectorStore.Sidecar.UseTls;
+        QdrantAuthMode = rag.Rag.VectorStore.Sidecar.AuthMode;
+        QdrantApiKey = string.Empty;
+        HasQdrantApiKey = rag.HasQdrantApiKey;
         QdrantDataDir = rag.Rag.VectorStore.Sidecar.DataDir;
         _fullTextBackend = rag.Rag.FullTextStore.Backend;
         _fullTextIndexDir = rag.Rag.FullTextStore.IndexDir;
         RerankerEnabled = rag.Rag.RerankerEnabled;
         ChunkSizeChars = rag.Rag.ChunkSizeChars.ToString();
         ChunkOverlapChars = rag.Rag.ChunkOverlapChars.ToString();
+    }
+
+    private void ApplyGit(GitSettings git)
+    {
         _gitSchemaVersion = git.Git.SchemaVersion;
         TrackDocuments = git.Git.TrackDocuments;
         TrackWorkflows = git.Git.TrackWorkflows;
@@ -2126,6 +3154,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 ["count"] = _providerConfig.Providers.Count.ToString(),
             });
         RebuildAvailableLlmModelOptions();
+        RebuildProviderDefaultModelRoutes();
     }
 
     private ProviderOptionViewModel CreateProviderOption(
@@ -2433,11 +3462,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             ModelsText = snapshot.ModelsText;
             EmbeddingModelId = snapshot.EmbeddingModelId;
             ManualModelsVisible = false;
-            AvailableModels.Clear();
-            foreach (var line in ParseModelsForDisplay(ModelsText))
-            {
-                AvailableModels.Add(CreateModelOption(line));
-            }
+            ApplyProviderModels(ParseModelsForDisplay(ModelsText));
         }
         finally
         {
@@ -2476,11 +3501,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         ModelsText = string.Join(Environment.NewLine, selected.Models.Select(ModelLine));
         EmbeddingModelId = selected.Models.FirstOrDefault(IsEmbeddingModel)?.ModelId ?? string.Empty;
         ManualModelsVisible = false;
-        AvailableModels.Clear();
-        foreach (var model in selected.Models)
-        {
-            AvailableModels.Add(CreateModelOption(model));
-        }
+        ApplyProviderModels(selected.Models);
     }
 
     private async Task FetchModelsAsync()
@@ -2508,11 +3529,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             ModelsText = string.Join(Environment.NewLine, result.Models.Select(ModelLine));
             EmbeddingModelId = result.Models.FirstOrDefault(IsEmbeddingModel)?.ModelId ?? string.Empty;
             ManualModelsVisible = false;
-            AvailableModels.Clear();
-            foreach (var model in result.Models)
-            {
-                AvailableModels.Add(CreateModelOption(model));
-            }
+            ApplyProviderModels(result.Models);
             UpdateDirtyState();
         }
         catch (OperationCanceledException) when (!_providerModelRefreshSession.IsCurrent(request))
@@ -2533,6 +3550,62 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
     }
 
+    private async Task TestProviderDraftAsync()
+    {
+        if (!CanTestProviderDraft())
+        {
+            return;
+        }
+
+        ProviderSettingsUpdate update;
+        try
+        {
+            update = BuildProviderSettingsUpdate();
+        }
+        catch (SettingsInputException ex)
+        {
+            SetValidationStatus(ex);
+            return;
+        }
+
+        var submittedProvider = SelectedProviderOption?.ProviderId;
+        var request = _providerModelRefreshSession.Begin();
+        try
+        {
+            var result = await _backend
+                .TestProviderDraftAsync(
+                    new ProviderDraftProbe(update, string.IsNullOrWhiteSpace(ApiKey) ? null : ApiKey),
+                    request.CancellationToken)
+                .ConfigureAwait(true);
+            if (!_providerModelRefreshSession.IsCurrent(request)
+                || !string.Equals(SelectedProviderOption?.ProviderId, submittedProvider, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            ProviderId = result.ProviderId;
+            ModelsText = string.Join(Environment.NewLine, result.Models.Select(ModelLine));
+            EmbeddingModelId = result.Models.FirstOrDefault(IsEmbeddingModel)?.ModelId ?? string.Empty;
+            ManualModelsVisible = false;
+            ApplyProviderModels(result.Models);
+            StatusText = _displayNames.Text("ui.settings.models.test_connection.succeeded");
+            UpdateDirtyState();
+        }
+        catch (OperationCanceledException) when (!_providerModelRefreshSession.IsCurrent(request))
+        {
+            // 仅忽略被新请求替代的临时探测，避免旧结果写回当前草稿。
+        }
+        catch (Exception ex)
+        {
+            if (!_providerModelRefreshSession.IsCurrent(request)
+                || !string.Equals(SelectedProviderOption?.ProviderId, submittedProvider, StringComparison.Ordinal))
+            {
+                return;
+            }
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+    }
+
     private Task<bool> SaveGeneralAsync()
     {
         var settings = BuildGeneralSectionSettings();
@@ -2540,13 +3613,129 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         return SaveGeneralAsync(settings, submitted);
     }
 
-    private Task<bool> SaveGeneralAsync(
+    private async Task<bool> SaveGeneralAsync(
         GeneralSectionSettings settings,
-        IReadOnlyDictionary<string, string> submitted) =>
-        RunSectionSaveAsync(GeneralSection, submitted, async () =>
+        IReadOnlyDictionary<string, string> submitted)
+    {
+        if (!await ConfirmDirectorySwitchIfNeededAsync(submitted).ConfigureAwait(true))
+        {
+            return false;
+        }
+
+        return await RunSectionSaveAsync(GeneralSection, submitted, async () =>
         {
             await _backend.SaveGeneralSectionSettingsAsync(settings).ConfigureAwait(true);
-        });
+        }).ConfigureAwait(true);
+    }
+
+    private async Task<bool> ConfirmDirectorySwitchIfNeededAsync(
+        IReadOnlyDictionary<string, string> submitted)
+    {
+        var changes = DirectorySwitchChanges(submitted);
+        if (changes.Count == 0)
+        {
+            return true;
+        }
+
+        var details = string.Join(Environment.NewLine, changes.Select(change =>
+            _displayNames.Format(
+                "ui.dialog.settings.directory_switch.change",
+                new Dictionary<string, string>
+                {
+                    ["label"] = change.Label,
+                    ["old"] = change.OldPath,
+                    ["new"] = change.NewPath,
+                    ["status"] = change.TargetStatus,
+                })));
+        var result = await DialogService.Current.ConfirmAsync(new ConfirmDialogViewModel(
+            _displayNames.Text("ui.dialog.settings.directory_switch.title"),
+            _displayNames.Format(
+                "ui.dialog.settings.directory_switch.message",
+                new Dictionary<string, string> { ["changes"] = details }),
+            new[]
+            {
+                new DialogButton(
+                    _displayNames.Text("ui.dialog.settings.directory_switch.confirm"),
+                    DialogButtonVariant.Primary,
+                    0),
+                new DialogButton(_displayNames.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
+            })
+        {
+            Severity = DialogSeverity.Warning,
+            ConfirmResultIndex = 0,
+            CancelResultIndex = 1,
+        }.SealKeyboardRoles()).ConfigureAwait(true);
+        return result == 0;
+    }
+
+    private IReadOnlyList<DirectorySwitchChange> DirectorySwitchChanges(
+        IReadOnlyDictionary<string, string> submitted)
+    {
+        var fields = new[]
+        {
+            (nameof(DocumentsDir), DocumentsDirLabel),
+            (nameof(WorkflowsDir), WorkflowsDirLabel),
+            (nameof(SkillsDir), SkillsDirLabel),
+            (nameof(ExportsDir), ExportsDirLabel),
+        };
+        var changes = new List<DirectorySwitchChange>();
+        foreach (var (field, label) in fields)
+        {
+            if (!submitted.TryGetValue(field, out var current)
+                || !_draftState.TryGetSavedValue(GeneralSection, field, out var saved)
+                || string.Equals(current.Trim(), saved.Trim(), StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            changes.Add(new DirectorySwitchChange(
+                label,
+                DisplayProjectDirectory(saved),
+                DisplayProjectDirectory(current),
+                DirectoryTargetStatus(current)));
+        }
+        return changes;
+    }
+
+    private string DisplayProjectDirectory(string path)
+    {
+        try
+        {
+            return Path.GetFullPath(Path.Combine(ProjectRoot, path.Trim()));
+        }
+        catch
+        {
+            return path.Trim();
+        }
+    }
+
+    private string DirectoryTargetStatus(string path)
+    {
+        try
+        {
+            var root = Path.GetFullPath(ProjectRoot);
+            var target = Path.GetFullPath(Path.Combine(root, path.Trim()));
+            var relative = Path.GetRelativePath(root, target);
+            if (Path.IsPathFullyQualified(path)
+                || relative == ".."
+                || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
+            {
+                return _displayNames.Text("ui.dialog.settings.directory_switch.status.invalid");
+            }
+            if (!Directory.Exists(target))
+            {
+                return _displayNames.Text("ui.dialog.settings.directory_switch.status.missing");
+            }
+            return Directory.EnumerateFileSystemEntries(target).Any()
+                ? _displayNames.Text("ui.dialog.settings.directory_switch.status.not_empty")
+                : _displayNames.Text("ui.dialog.settings.directory_switch.status.empty");
+        }
+        catch
+        {
+            return _displayNames.Text("ui.dialog.settings.directory_switch.status.unavailable");
+        }
+    }
 
     private GeneralSectionSettings BuildGeneralSectionSettings() => new(
         new AppSettings(new AppConfig(
@@ -2564,9 +3753,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         try
         {
             var update = BuildProviderSettingsUpdate();
+            var defaultModels = BuildProviderDefaultModelRoutes();
             var apiKey = ApiKey;
             var submitted = CurrentSectionValues(ModelsSection);
-            return SaveModelAsync(update, apiKey, submitted);
+            return SaveModelAsync(update, defaultModels, apiKey, submitted);
         }
         catch (SettingsInputException ex)
         {
@@ -2582,6 +3772,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     private Task<bool> SaveModelAsync(
         ProviderSettingsUpdate update,
+        ProviderDefaultModelRoutes defaultModels,
         string apiKey,
         IReadOnlyDictionary<string, string> submitted)
     {
@@ -2596,7 +3787,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 var status = await _backend.SaveProviderSectionSettingsAsync(
                     new ProviderSectionSettings(
                         update,
-                        string.IsNullOrWhiteSpace(apiKey) ? null : apiKey)).ConfigureAwait(true);
+                        string.IsNullOrWhiteSpace(apiKey) ? null : apiKey,
+                        defaultModels)).ConfigureAwait(true);
                 var canonicalProviderId = NormalizeProviderId(update.ProviderId);
                 var saved = status.Providers.First(provider =>
                     string.Equals(provider.Provider, canonicalProviderId, StringComparison.Ordinal));
@@ -2649,6 +3841,14 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     private ProviderSettingsUpdate BuildProviderSettingsUpdate()
     {
+        if (!ValidateProviderModelRows())
+        {
+            var firstInvalid = ProviderModels.First(row =>
+                row.HasModelIdError || row.HasCapabilityError || row.HasMaxContextTokensError
+                || row.HasInputCostError || row.HasOutputCostError);
+            throw new SettingsInputException(SettingsInputFailure.ModelLine, "ui.settings.models.models")
+                .WithFocusItem(firstInvalid);
+        }
         return new ProviderSettingsUpdate(
             ProviderId,
             ProviderType,
@@ -2656,13 +3856,116 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             ProviderEnabled,
             string.IsNullOrWhiteSpace(ProviderBaseUrl) ? null : ProviderBaseUrl,
             MergeEmbeddingModel(
-                SettingsInputValidation.Models(ModelsText, "ui.settings.models.models"),
+                SettingsInputValidation.Models(ProviderModelsText(), "ui.settings.models.models"),
                 EmbeddingModelId),
-            MakeDefaultLlm,
-            MakeDefaultEmbedding,
-            MakeDefaultReranker,
-            MakeDefaultSearch);
+            string.Equals(SelectedDefaultLlmRoute?.ProviderId, ProviderId, StringComparison.Ordinal),
+            string.Equals(SelectedDefaultEmbeddingRoute?.ProviderId, ProviderId, StringComparison.Ordinal),
+            string.Equals(SelectedDefaultRerankerRoute?.ProviderId, ProviderId, StringComparison.Ordinal),
+            string.Equals(SelectedDefaultSearchRoute?.ProviderId, ProviderId, StringComparison.Ordinal));
     }
+
+    private void ApplyProviderModels(IEnumerable<ModelConfig> models)
+    {
+        ProviderModels.Clear();
+        AvailableModels.Clear();
+        foreach (var model in models)
+        {
+            ProviderModels.Add(new ProviderModelEditorRow(
+                model.ModelId,
+                model.Capability,
+                model.MaxContextTokens?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+                model.InputCostPerMillionTokens is { } input ? StableNumber(input) : string.Empty,
+                model.OutputCostPerMillionTokens is { } output ? StableNumber(output) : string.Empty,
+                OnProviderModelsChanged,
+                RemoveProviderModelRow));
+            AvailableModels.Add(CreateModelOption(model));
+        }
+        ValidateProviderModelRows();
+        ModelsText = ProviderModelsText();
+        RebuildProviderDefaultModelRoutes();
+    }
+
+    private void AddProviderModelRow()
+    {
+        ProviderModels.Add(new ProviderModelEditorRow(
+            string.Empty,
+            "llm",
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            OnProviderModelsChanged,
+            RemoveProviderModelRow));
+        OnProviderModelsChanged();
+    }
+
+    private void RemoveProviderModelRow(ProviderModelEditorRow row)
+    {
+        if (ProviderModels.Remove(row))
+        {
+            OnProviderModelsChanged();
+        }
+    }
+
+    private void OnProviderModelsChanged()
+    {
+        ValidateProviderModelRows();
+        ModelsText = ProviderModelsText();
+        RebuildProviderDefaultModelRoutes();
+        UpdateDirtyState();
+    }
+
+    private bool ValidateProviderModelRows()
+    {
+        var duplicateIds = ProviderModels
+            .Select(row => row.ModelId.Trim())
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .GroupBy(id => id, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.Ordinal);
+        var messages = new ProviderModelValidationMessages(
+            ValidationMessage("ui.settings.validation.required", ModelIdColumnLabel),
+            ValidationMessage("ui.settings.validation.duplicate", ModelIdColumnLabel),
+            ValidationMessage("ui.settings.validation.required", ModelCapabilityColumnLabel),
+            ValidationMessage("ui.settings.validation.positive", ModelContextColumnLabel),
+            ValidationMessage("ui.settings.validation.non_negative", ModelInputCostColumnLabel),
+            ValidationMessage("ui.settings.validation.non_negative", ModelOutputCostColumnLabel));
+        // Validate 会写入每行的错误文案（有副作用），必须逐行执行；
+        // All 在首个失败行就短路，会让它之后的行残留上一轮已修好的过期报错。
+        var valid = true;
+        foreach (var row in ProviderModels)
+        {
+            valid &= row.Validate(duplicateIds, messages);
+        }
+
+        return valid;
+    }
+
+    private string ValidationMessage(string key, string field) => _displayNames.Format(
+        key,
+        new Dictionary<string, string> { ["field"] = field });
+
+    private string ProviderModelsText() => string.Join(
+        Environment.NewLine,
+        ProviderModels.Select(row => string.Join(",", new[]
+        {
+            row.ModelId.Trim(),
+            row.Capability,
+            row.MaxContextTokens.Trim(),
+            row.InputCost.Trim(),
+            row.OutputCost.Trim(),
+        })));
+
+    private ProviderDefaultModelRoutes BuildProviderDefaultModelRoutes() => new(
+        RouteTarget(SelectedDefaultLlmRoute),
+        RouteTarget(SelectedDefaultEmbeddingRoute),
+        RouteTarget(SelectedDefaultRerankerRoute),
+        RouteTarget(SelectedDefaultSearchRoute));
+
+    private static ModelAliasTarget? RouteTarget(ProviderModelRouteOption? option) =>
+        option is null || string.IsNullOrWhiteSpace(option.ProviderId) || string.IsNullOrWhiteSpace(option.ModelId)
+            ? null
+            : new ModelAliasTarget(option.ProviderId, option.ModelId);
 
     /// <summary>
     /// 用服务端状态更新 _providerConfig 与列表元数据；不重载当前编辑表单，不抹掉草稿快照。
@@ -2718,6 +4021,138 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 ["count"] = status.Providers.Count.ToString(),
             });
         RebuildAvailableLlmModelOptions();
+        RebuildProviderDefaultModelRoutes();
+    }
+
+    private void RebuildProviderDefaultModelRoutes()
+    {
+        // 直接留存选项本身而不是 RouteTarget()：占位「无」项的 ProviderId 为空，
+        // 经 RouteTarget 会变成 null，随后被 ?? 回落到已保存的默认路由，
+        // 用户「清空默认路由」的选择就会在下一次重建时被静默还原。
+        var previousLlm = SelectedDefaultLlmRoute;
+        var previousEmbedding = SelectedDefaultEmbeddingRoute;
+        var previousReranker = SelectedDefaultRerankerRoute;
+        var previousSearch = SelectedDefaultSearchRoute;
+        var none = _displayNames.Text("ui.common.none");
+        ResetRouteOptions(DefaultLlmRouteOptions, "llm", none);
+        ResetRouteOptions(DefaultEmbeddingRouteOptions, "embedding", none);
+        ResetRouteOptions(DefaultRerankerRouteOptions, "reranker", none);
+        ResetRouteOptions(DefaultSearchRouteOptions, "search", none);
+        if (_providerConfig is not null)
+        {
+            foreach (var provider in _providerConfig.Providers
+                         .Where(item => item.Configured)
+                         .OrderBy(item => item.DisplayName, StringComparer.Ordinal))
+            {
+                var isCurrent = string.Equals(provider.Provider, ProviderId, StringComparison.Ordinal);
+                if (isCurrent ? !ProviderEnabled : !provider.Enabled)
+                {
+                    continue;
+                }
+                var models = isCurrent ? ProviderModelsForRouting() : provider.Models;
+                foreach (var model in models.OrderBy(item => item.ModelId, StringComparer.Ordinal))
+                {
+                    var option = new ProviderModelRouteOption(
+                        provider.Provider,
+                        model.ModelId,
+                        $"{provider.DisplayName} / {model.ModelId}",
+                        model.Capability);
+                    if (string.Equals(model.Capability, "llm", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(model.Capability, "tool_use", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DefaultLlmRouteOptions.Add(option);
+                    }
+                    if (string.Equals(model.Capability, "embedding", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DefaultEmbeddingRouteOptions.Add(option);
+                    }
+                    if (string.Equals(model.Capability, "reranker", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DefaultRerankerRouteOptions.Add(option);
+                    }
+                    if (string.Equals(model.Capability, "search", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DefaultSearchRouteOptions.Add(option);
+                    }
+                }
+            }
+        }
+
+        _selectedDefaultLlmRoute = ResolveRoute(
+            DefaultLlmRouteOptions,
+            previousLlm?.ProviderId ?? _providerConfig?.DefaultLlmProviderId,
+            previousLlm?.ModelId ?? _providerConfig?.DefaultLlmModelId);
+        _selectedDefaultEmbeddingRoute = ResolveRoute(
+            DefaultEmbeddingRouteOptions,
+            previousEmbedding?.ProviderId ?? _providerConfig?.DefaultEmbeddingProviderId,
+            previousEmbedding?.ModelId ?? _providerConfig?.DefaultEmbeddingModelId);
+        _selectedDefaultRerankerRoute = ResolveRoute(
+            DefaultRerankerRouteOptions,
+            previousReranker?.ProviderId ?? _providerConfig?.DefaultRerankerProviderId,
+            previousReranker?.ModelId ?? _providerConfig?.DefaultRerankerModelId);
+        _selectedDefaultSearchRoute = ResolveRoute(
+            DefaultSearchRouteOptions,
+            previousSearch?.ProviderId ?? _providerConfig?.DefaultSearchProviderId,
+            previousSearch?.ModelId ?? _providerConfig?.DefaultSearchModelId);
+        OnPropertyChanged(nameof(SelectedDefaultLlmRoute));
+        OnPropertyChanged(nameof(SelectedDefaultEmbeddingRoute));
+        OnPropertyChanged(nameof(SelectedDefaultRerankerRoute));
+        OnPropertyChanged(nameof(SelectedDefaultSearchRoute));
+    }
+
+    // 能力集合必须与下方路由分派（以及后端 validate_default_provider）保持一致：
+    // tool_use 同样是合法的默认 LLM 路由，漏掉它会让已保存的默认路由解析成「无」并在保存时被清空。
+    private IReadOnlyList<ModelConfig> ProviderModelsForRouting() => ProviderModels
+        .Where(row => !string.IsNullOrWhiteSpace(row.ModelId))
+        .Where(row => row.Capability is "llm" or "tool_use" or "embedding" or "reranker" or "search")
+        .Select(row => new ModelConfig(row.ModelId.Trim(), row.Capability, null, null, null))
+        .ToArray();
+
+    private static void ResetRouteOptions(
+        ObservableCollection<ProviderModelRouteOption> options,
+        string capability,
+        string none)
+    {
+        options.Clear();
+        options.Add(new ProviderModelRouteOption(string.Empty, string.Empty, none, capability));
+    }
+
+    private static ProviderModelRouteOption ResolveRoute(
+        IEnumerable<ProviderModelRouteOption> options,
+        string? providerId,
+        string? modelId) =>
+        options.FirstOrDefault(option =>
+            string.Equals(option.ProviderId, providerId, StringComparison.Ordinal)
+            && (string.IsNullOrWhiteSpace(modelId)
+                || string.Equals(option.ModelId, modelId, StringComparison.Ordinal)))
+        ?? options.First();
+
+    private void ClearDefaultRoutesForProvider(string providerId)
+    {
+        if (string.IsNullOrWhiteSpace(providerId))
+        {
+            return;
+        }
+        if (string.Equals(SelectedDefaultLlmRoute?.ProviderId, providerId, StringComparison.Ordinal))
+        {
+            SelectedDefaultLlmRoute = DefaultLlmRouteOptions.FirstOrDefault();
+        }
+        if (string.Equals(SelectedDefaultEmbeddingRoute?.ProviderId, providerId, StringComparison.Ordinal))
+        {
+            SelectedDefaultEmbeddingRoute = DefaultEmbeddingRouteOptions.FirstOrDefault();
+        }
+        if (string.Equals(SelectedDefaultRerankerRoute?.ProviderId, providerId, StringComparison.Ordinal))
+        {
+            SelectedDefaultRerankerRoute = DefaultRerankerRouteOptions.FirstOrDefault();
+        }
+        if (string.Equals(SelectedDefaultSearchRoute?.ProviderId, providerId, StringComparison.Ordinal))
+        {
+            SelectedDefaultSearchRoute = DefaultSearchRouteOptions.FirstOrDefault();
+        }
+        MakeDefaultLlm = false;
+        MakeDefaultEmbedding = false;
+        MakeDefaultReranker = false;
+        MakeDefaultSearch = false;
     }
 
     private Task<bool> SaveProviderKeyAsync()
@@ -2739,6 +4174,58 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         {
             [nameof(ApiKey)] = string.Empty,
         });
+    }
+
+    private bool CanRevokeProviderKey()
+    {
+        var providerId = SelectedProviderOption?.ProviderId;
+        return CanUsePersistedProvider()
+            && _providerConfig?.Providers.Any(provider =>
+                string.Equals(provider.Provider, providerId, StringComparison.Ordinal)
+                && provider.HasKey) == true;
+    }
+
+    private async Task RevokeProviderKeyAsync()
+    {
+        var providerId = SelectedProviderOption?.ProviderId;
+        if (string.IsNullOrWhiteSpace(providerId) || !CanRevokeProviderKey())
+        {
+            return;
+        }
+        var providerName = _providerConfig?.Providers
+            .FirstOrDefault(provider => string.Equals(provider.Provider, providerId, StringComparison.Ordinal))
+            ?.DisplayName ?? ProviderDisplayName;
+        var confirmed = await DialogService.Current.ConfirmAsync(new ConfirmDialogViewModel(
+            _displayNames.Text("ui.dialog.settings.revoke_key.title"),
+            _displayNames.Format("ui.dialog.settings.revoke_key.message", new Dictionary<string, string>
+            {
+                ["provider"] = providerName,
+            }),
+            new[]
+            {
+                new DialogButton(_displayNames.Text("ui.settings.models.revoke_key"), DialogButtonVariant.Danger, 0),
+                new DialogButton(_displayNames.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
+            })
+        {
+            Severity = DialogSeverity.Danger,
+            ConfirmResultIndex = 0,
+            CancelResultIndex = 1,
+        }.SealKeyboardRoles()).ConfigureAwait(true);
+        if (confirmed != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var status = await _backend.RevokeProviderKeyAsync(providerId).ConfigureAwait(true);
+            MergeProviderConfigCache(status, preserveFormSnapshots: true);
+            StatusText = _displayNames.Text("ui.settings.models.key_revoked");
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
     }
 
     private async Task RemoveProviderAsync()
@@ -2888,13 +4375,16 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         var key = reference.ReferenceType switch
         {
             "node_preset" => "ui.dialog.settings.remove_provider.reference.node_preset",
+            "model_alias" => "ui.dialog.settings.remove_provider.reference.model_alias",
             "workflow" => "ui.dialog.settings.remove_provider.reference.workflow",
             "active_run" => "ui.dialog.settings.remove_provider.reference.active_run",
             _ => "ui.dialog.settings.remove_provider.reference.unknown",
         };
         return _displayNames.Format(key, new Dictionary<string, string>
         {
-            ["owner"] = reference.OwnerId,
+            ["owner"] = reference.ReferenceType == "model_alias"
+                ? _displayNames.Text($"ui.settings.presets.alias.{reference.OwnerId}")
+                : reference.OwnerId,
             ["node"] = reference.NodeId ?? _displayNames.Text("ui.common.none"),
             ["model"] = reference.ModelId ?? _displayNames.Text("ui.common.none"),
         });
@@ -2907,6 +4397,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             var request = BuildNodePresetSettings();
             var submitted = PickValues(
                 PresetsSection,
+                nameof(DefaultModelAlias),
+                nameof(ModelAliases),
                 nameof(DefaultProviderId),
                 nameof(DefaultModelId),
                 nameof(DefaultTimeoutMs),
@@ -2931,14 +4423,27 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             return RunSectionSaveAsync(PresetsSection, submitted, async () =>
             {
                 var saved = await _backend.SaveNodePresetSettingsAsync(request).ConfigureAwait(true);
+                ApplyCanonicalText(submitted, persisted, nameof(DefaultModelAlias), saved.DefaultModelAlias ?? string.Empty,
+                    value => ApplyDefaultModelIdentity(saved.DefaultModelAlias, saved.DefaultProviderId, saved.DefaultModelId));
                 ApplyCanonicalText(submitted, persisted, nameof(DefaultProviderId), saved.DefaultProviderId,
-                    value => ApplyDefaultModelIdentity(value, saved.DefaultModelId));
+                    value => ApplyDefaultModelIdentity(saved.DefaultModelAlias, value, saved.DefaultModelId));
                 ApplyCanonicalText(submitted, persisted, nameof(DefaultModelId), saved.DefaultModelId,
-                    value => ApplyDefaultModelIdentity(saved.DefaultProviderId, value));
+                    value => ApplyDefaultModelIdentity(saved.DefaultModelAlias, saved.DefaultProviderId, value));
                 ApplyCanonicalText(submitted, persisted, nameof(DefaultTimeoutMs),
                     SecondsFromStoredMs(saved.DefaultTimeoutMs), value => DefaultTimeoutMs = value);
                 ApplyCanonicalText(submitted, persisted, nameof(DefaultBudgetUsd),
                     StableNumber(saved.DefaultBudgetUsd), value => DefaultBudgetUsd = value);
+                if (CurrentSectionValues(PresetsSection).TryGetValue(nameof(ModelAliases), out var currentAliases)
+                    && submitted.TryGetValue(nameof(ModelAliases), out var submittedAliases)
+                    && string.Equals(currentAliases, submittedAliases, StringComparison.Ordinal))
+                {
+                    ApplyModelAliases(saved.ModelAliases);
+                    persisted[nameof(ModelAliases)] = CurrentSectionValues(PresetsSection)[nameof(ModelAliases)];
+                }
+                else if (submitted.TryGetValue(nameof(ModelAliases), out var submittedAliasSnapshot))
+                {
+                    persisted[nameof(ModelAliases)] = submittedAliasSnapshot;
+                }
                 if (CurrentSectionValues(PresetsSection).TryGetValue(nameof(NodePresets), out var current)
                     && submitted.TryGetValue(nameof(NodePresets), out var submittedPresets)
                     && string.Equals(current, submittedPresets, StringComparison.Ordinal))
@@ -2960,31 +4465,76 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
     }
 
-    private NodePresetSettings BuildNodePresetSettings() => new(
-        NodePresets.Select(item => new NodeTypePreset(
-            item.NodeType,
-            item.DisplayNameKey,
-            item.ModelId,
+    private NodePresetSettings BuildNodePresetSettings()
+    {
+        var aliases = ModelAliases
+            .Where(alias => alias.IsConfigured)
+            .ToDictionary(
+                alias => alias.AliasId,
+                alias => new ModelAliasTarget(alias.TargetProviderId, alias.TargetModelId),
+                StringComparer.Ordinal);
+        foreach (var alias in ModelAliases.Where(alias => alias.IsConfigured && alias.SelectedTargetOption is null))
+        {
+            throw new SettingsInputException(SettingsInputFailure.Required, alias.DisplayNameKey)
+                .WithFocusItem(alias);
+        }
+        foreach (var referencedAlias in NodePresets.Select(item => item.ModelAlias)
+                     .Append(DefaultModelAlias)
+                     .Where(alias => !string.IsNullOrWhiteSpace(alias))
+                     .Distinct(StringComparer.Ordinal))
+        {
+            if (!aliases.ContainsKey(referencedAlias!))
+            {
+                var exception = new SettingsInputException(
+                    SettingsInputFailure.Required,
+                    $"ui.settings.presets.alias.{referencedAlias}");
+                var alias = ModelAliases.FirstOrDefault(item =>
+                    string.Equals(item.AliasId, referencedAlias, StringComparison.Ordinal));
+                throw alias is null ? exception : exception.WithFocusItem(alias);
+            }
+        }
+
+        return new NodePresetSettings(
+            NodePresets.Select(BuildNodeTypePreset).ToArray(),
+            DefaultModelId,
             SettingsInputValidation.PositiveLong(
-                SecondsUiToMsString(item.TimeoutMs, "ui.settings.presets.node_timeout_ms"),
-                "ui.settings.presets.node_timeout_ms"),
+                SecondsUiToMsString(DefaultTimeoutMs, "ui.settings.presets.default_timeout_ms"),
+                "ui.settings.presets.default_timeout_ms"),
             SettingsInputValidation.NonNegativeDouble(
-                item.BudgetUsd,
-                "ui.settings.presets.node_budget_usd"),
-            item.Permissions.InheritGlobal ? null : item.Permissions.ToPolicy(),
-            item.ToolControls.ToDictionary(
-                tool => tool.ToolId,
-                tool => tool.IsEnabled,
-                StringComparer.Ordinal),
-            item.ProviderId)).ToArray(),
-        DefaultModelId,
-        SettingsInputValidation.PositiveLong(
-            SecondsUiToMsString(DefaultTimeoutMs, "ui.settings.presets.default_timeout_ms"),
-            "ui.settings.presets.default_timeout_ms"),
-        SettingsInputValidation.NonNegativeDouble(
-            DefaultBudgetUsd,
-            "ui.settings.presets.default_budget_usd"),
-        DefaultProviderId);
+                DefaultBudgetUsd,
+                "ui.settings.presets.default_budget_usd"),
+            DefaultProviderId,
+            aliases,
+            DefaultModelAlias);
+    }
+
+    private static NodeTypePreset BuildNodeTypePreset(NodeTypePresetViewModel item)
+    {
+        try
+        {
+            return new NodeTypePreset(
+                item.NodeType,
+                item.DisplayNameKey,
+                item.ModelId,
+                SettingsInputValidation.PositiveLong(
+                    SecondsUiToMsString(item.TimeoutMs, "ui.settings.presets.node_timeout_ms"),
+                    "ui.settings.presets.node_timeout_ms"),
+                SettingsInputValidation.NonNegativeDouble(
+                    item.BudgetUsd,
+                    "ui.settings.presets.node_budget_usd"),
+                item.Permissions.InheritGlobal ? null : item.Permissions.ToPolicy(),
+                item.ToolControls.ToDictionary(
+                    tool => tool.ToolId,
+                    tool => tool.IsEnabled,
+                    StringComparer.Ordinal),
+                item.ProviderId,
+                item.ModelAlias);
+        }
+        catch (SettingsInputException exception)
+        {
+            throw exception.WithFocusItem(item);
+        }
+    }
 
     private Task<bool> SaveTemplateRepositoryAsync()
     {
@@ -3067,6 +4617,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     private AutomationSectionSettings BuildAutomationSectionSettings()
     {
+        foreach (var item in ConfirmationPolicies)
+        {
+            item.SetApprovalPromptError(string.Empty);
+        }
         var automation = new AutomationSettings(
             new BudgetStatus(
                 SettingsInputValidation.NonNegativeDouble(
@@ -3081,9 +4635,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             {
                 if (item.AutoModeAutoApproval && string.IsNullOrWhiteSpace(item.ApprovalPrompt))
                 {
+                    item.SetApprovalPromptError(ValidationMessage(
+                        "ui.settings.validation.required",
+                        ApprovalPromptLabel));
                     throw new SettingsInputException(
                         SettingsInputFailure.Required,
-                        "ui.settings.automation.confirmation.approval_prompt");
+                        "ui.settings.automation.confirmation.approval_prompt")
+                        .WithFocusItem(item);
                 }
 
                 return new ConfirmationPolicySetting(
@@ -3143,8 +4701,18 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
     }
 
-    private PermissionsSettings BuildPermissionsSettings() => new(
-        new PermissionPolicy(
+    private PermissionsSettings BuildPermissionsSettings()
+    {
+        var scopedPolicies = new Dictionary<string, PermissionPolicy?>(
+            _compatibilityScopedPolicies,
+            StringComparer.Ordinal);
+        foreach (var profile in ScopedPermissionProfiles)
+        {
+            scopedPolicies[profile.Scope] = profile.InheritGlobal ? null : profile.ToPolicy();
+        }
+
+        return new PermissionsSettings(
+            new PermissionPolicy(
             AllowNetwork,
             AllowWebSearch,
             AllowHttpSkill,
@@ -3152,15 +4720,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             AllowSecretRead,
             SettingsInputValidation.AbsolutePaths(
                 WritableRootsText,
-                "ui.settings.permissions.writable_roots"),
+                "ui.settings.permissions.write_roots"),
             SettingsInputValidation.AbsolutePaths(
                 ReadableRootsText,
-                "ui.settings.permissions.readable_roots")),
-        ScopedPermissionProfiles.ToDictionary(
-            profile => profile.Scope,
-            profile => profile.InheritGlobal ? null : profile.ToPolicy(),
-            StringComparer.Ordinal),
-        ToToolControls());
+                "ui.settings.permissions.read_roots")),
+            scopedPolicies,
+            ToToolControls());
+    }
 
     private Task<bool> SavePersonalizationAsync()
     {
@@ -3255,13 +4821,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             QdrantStartupTimeoutMs,
             "ui.settings.misc.qdrant_startup_timeout"));
 
-    private Task<bool> SaveMiscAsync()
+    private Task<bool> SaveRetrievalAsync()
     {
         try
         {
-            var request = BuildMiscSectionSettings();
-            var submitted = CurrentSectionValues(MiscSection);
-            return SaveMiscAsync(request, submitted);
+            var request = BuildRagSettings();
+            var submitted = CurrentSectionValues(RetrievalSection);
+            return SaveRetrievalAsync(request, submitted);
         }
         catch (SettingsInputException ex)
         {
@@ -3270,22 +4836,30 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
     }
 
-    private Task<bool> SaveMiscAsync(
-        MiscSectionSettings request,
+    private Task<bool> SaveRetrievalAsync(
+        RagSettings request,
         IReadOnlyDictionary<string, string> submitted)
     {
         try
         {
             var persisted = new Dictionary<string, string>(submitted, StringComparer.Ordinal);
-            return RunSectionSaveAsync(MiscSection, submitted, async () =>
+            return RunSectionSaveAsync(RetrievalSection, submitted, async () =>
             {
-                var saved = await _backend.SaveMiscSectionSettingsAsync(
+                var saved = await _backend.SaveRagSettingsAsync(
                     request).ConfigureAwait(true);
-                var savedRag = saved.Rag.Rag;
+                var savedRag = saved.Rag;
                 ApplyCanonicalText(submitted, persisted, nameof(VectorDimensions),
                     savedRag.VectorStore.VectorDimensions.ToString(CultureInfo.InvariantCulture), value => VectorDimensions = value);
                 ApplyCanonicalText(submitted, persisted, nameof(QdrantPort),
                     savedRag.VectorStore.Sidecar.Port.ToString(CultureInfo.InvariantCulture), value => QdrantPort = value);
+                ApplyCanonicalText(submitted, persisted, nameof(QdrantUseTls),
+                    savedRag.VectorStore.Sidecar.UseTls.ToString(), value => QdrantUseTls = bool.Parse(value));
+                ApplyCanonicalText(submitted, persisted, nameof(QdrantAuthMode),
+                    savedRag.VectorStore.Sidecar.AuthMode, value => QdrantAuthMode = value);
+                ApplyCanonicalText(submitted, persisted, nameof(QdrantApiKey),
+                    string.Empty, value => QdrantApiKey = value);
+                persisted[nameof(HasQdrantApiKey)] = saved.HasQdrantApiKey.ToString();
+                HasQdrantApiKey = saved.HasQdrantApiKey;
                 ApplyCanonicalText(submitted, persisted, nameof(ChunkSizeChars),
                     savedRag.ChunkSizeChars.ToString(CultureInfo.InvariantCulture), value => ChunkSizeChars = value);
                 ApplyCanonicalText(submitted, persisted, nameof(ChunkOverlapChars),
@@ -3299,19 +4873,33 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
     }
 
-    private MiscSectionSettings BuildMiscSectionSettings()
+    private RagSettings BuildRagSettings()
     {
-        var vectorDimensions = SettingsInputValidation.PositiveInt(
-            VectorDimensions,
-            "ui.settings.misc.vector_dimensions");
-        var qdrantPort = SettingsInputValidation.PositiveInt(
-            QdrantPort,
-            "ui.settings.misc.qdrant_port");
-        if (qdrantPort > ushort.MaxValue)
+        var vectorDimensions = VectorEnabled
+            ? SettingsInputValidation.PositiveInt(VectorDimensions, "ui.settings.misc.vector_dimensions")
+            : ParseInactiveInt(VectorDimensions, 1536);
+        var qdrantPort = VectorEnabled && IsExternalQdrantBackend
+            ? SettingsInputValidation.PositiveInt(QdrantPort, "ui.settings.misc.qdrant_port")
+            : ParseInactiveInt(QdrantPort, 0);
+        if (VectorEnabled && IsExternalQdrantBackend && qdrantPort > ushort.MaxValue)
         {
             throw new SettingsInputException(
                 SettingsInputFailure.Positive,
                 "ui.settings.misc.qdrant_port");
+        }
+        if (VectorEnabled && IsExternalQdrantBackend && string.IsNullOrWhiteSpace(QdrantHost))
+        {
+            throw new SettingsInputException(
+                SettingsInputFailure.Required,
+                "ui.settings.misc.qdrant_host");
+        }
+        if (VectorEnabled && IsQdrantApiKeyAuth
+            && string.IsNullOrWhiteSpace(QdrantApiKey)
+            && !HasQdrantApiKeyForCurrentEndpoint())
+        {
+            throw new SettingsInputException(
+                SettingsInputFailure.Required,
+                "ui.settings.misc.qdrant_api_key");
         }
         var chunkSize = SettingsInputValidation.PositiveInt(
             ChunkSizeChars,
@@ -3325,7 +4913,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 SettingsInputFailure.Number,
                 "ui.settings.misc.chunk_overlap");
         }
-        var rag = new RagSettings(new RagConfig(
+        return new RagSettings(new RagConfig(
             _ragSchemaVersion,
             new VectorStoreConfig(
                 VectorEnabled,
@@ -3337,12 +4925,47 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     qdrantPort,
                     QdrantDataDir,
                     "qdrant",
-                    30_000)),
+                    30_000,
+                    QdrantUseTls,
+                    QdrantAuthMode)),
             new FullTextStoreConfig(_fullTextBackend, _fullTextIndexDir),
             RerankerEnabled,
             chunkSize,
-            chunkOverlap));
-        var git = new GitSettings(new GitConfig(
+            chunkOverlap),
+            string.IsNullOrWhiteSpace(QdrantApiKey) ? null : QdrantApiKey.Trim(),
+            false,
+            false);
+    }
+
+    internal RagSettings BuildRagSettingsForTests() => BuildRagSettings();
+
+    internal AutomationSectionSettings BuildAutomationSectionSettingsForTests() =>
+        BuildAutomationSectionSettings();
+
+    private Task<bool> SaveGitAsync()
+    {
+        try
+        {
+            var request = BuildGitSettings();
+            var submitted = CurrentSectionValues(GitSection);
+            return SaveGitAsync(request, submitted);
+        }
+        catch (SettingsInputException ex)
+        {
+            SetValidationStatus(ex);
+            return Task.FromResult(false);
+        }
+    }
+
+    private Task<bool> SaveGitAsync(
+        GitSettings request,
+        IReadOnlyDictionary<string, string> submitted) =>
+        RunSectionSaveAsync(GitSection, submitted, async () =>
+        {
+            await _backend.SaveGitSettingsAsync(request).ConfigureAwait(true);
+        });
+
+    private GitSettings BuildGitSettings() => new(new GitConfig(
             _gitSchemaVersion,
             TrackDocuments,
             TrackWorkflows,
@@ -3351,8 +4974,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             SettingsInputValidation.RelativePaths(
                 IgnoredPathsText,
                 "ui.settings.misc.ignored_paths")));
-        return new MiscSectionSettings(rag, git);
-    }
+
+    private static int ParseInactiveInt(string value, int fallback) =>
+        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : fallback;
 
     private void ApplyAutomation(AutomationSettings automation)
     {
@@ -3379,10 +5005,69 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 item.NormalPolicy,
                 item.AutoModePolicy,
                 item.ApprovalPrompt,
-                UpdateDirtyState));
+                OnConfirmationPolicyChanged));
         }
 
         RebuildConfirmationGroups();
+        RefreshConfirmationProfile();
+    }
+
+    private void OnConfirmationPolicyChanged()
+    {
+        RefreshConfirmationProfile();
+        UpdateDirtyState();
+    }
+
+    private void ApplyConfirmationProfile(string? profile)
+    {
+        if (string.Equals(profile, "custom", StringComparison.Ordinal) || string.IsNullOrWhiteSpace(profile))
+        {
+            return;
+        }
+
+        var (normalAllow, autoApprove) = profile switch
+        {
+            "conservative" => ((bool?)false, (bool?)false),
+            "recommended" => ((bool?)false, (bool?)true),
+            "automated" => ((bool?)true, (bool?)true),
+            _ => (null, null),
+        };
+        if (normalAllow is null || autoApprove is null)
+        {
+            return;
+        }
+
+        foreach (var policy in ConfirmationPolicies)
+        {
+            policy.NormalAllowByDefault = normalAllow.Value;
+            policy.AutoModeAutoApproval = autoApprove.Value;
+            if (autoApprove.Value && string.IsNullOrWhiteSpace(policy.ApprovalPrompt))
+            {
+                policy.ApprovalPrompt = DefaultAutoApprovalPrompt;
+            }
+        }
+        RefreshConfirmationProfile();
+        UpdateDirtyState();
+    }
+
+    private void RefreshConfirmationProfile()
+    {
+        var profile = ConfirmationPolicies.Count == 0
+            ? "custom"
+            : ConfirmationPolicies.All(item => !item.NormalAllowByDefault && !item.AutoModeAutoApproval)
+                ? "conservative"
+                : ConfirmationPolicies.All(item => !item.NormalAllowByDefault && item.AutoModeAutoApproval)
+                    ? "recommended"
+                    : ConfirmationPolicies.All(item => item.NormalAllowByDefault && item.AutoModeAutoApproval)
+                        ? "automated"
+                        : "custom";
+        var option = ConfirmationProfileOptions.FirstOrDefault(item => item.Value == profile)
+            ?? ConfirmationProfileOptions.Last();
+        if (!ReferenceEquals(_selectedConfirmationProfile, option))
+        {
+            _selectedConfirmationProfile = option;
+            OnPropertyChanged(nameof(SelectedConfirmationProfile));
+        }
     }
 
     private void RebuildConfirmationGroups()
@@ -3452,12 +5137,22 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         WritableRootsText = string.Join(Environment.NewLine, settings.Policy.WritableFileRoots);
         ApplyScopedPermissionProfiles(settings);
         ApplyToolControls(settings.ToolControls);
+        RefreshPermissionProfile();
     }
 
     private void ApplyScopedPermissionProfiles(PermissionsSettings settings)
     {
+        _compatibilityScopedPolicies.Clear();
         ScopedPermissionProfiles.Clear();
-        foreach (var scope in new[] { "workflow_nodes", "project_ai" })
+        var supportedScopes = new[] { "workflow_nodes", "project_ai" };
+        foreach (var (scope, policy) in settings.ScopedPolicies)
+        {
+            if (!supportedScopes.Contains(scope, StringComparer.Ordinal))
+            {
+                _compatibilityScopedPolicies[scope] = policy;
+            }
+        }
+        foreach (var scope in supportedScopes)
         {
             settings.ScopedPolicies.TryGetValue(scope, out var policy);
             ScopedPermissionProfiles.Add(new PermissionScopeProfileViewModel(
@@ -3465,8 +5160,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 PermissionScopeLabel(scope),
                 policy,
                 settings.Policy,
-                () => OnScopedPermissionProfileChanged(scope)));
+                () => OnScopedPermissionProfileChanged(scope),
+                assign => BrowseIntoAsync(assign)));
         }
+        OnPropertyChanged(nameof(HasCompatibilityPermissionScopes));
+        OnPropertyChanged(nameof(CompatibilityPermissionScopesText));
     }
 
     private void OnScopedPermissionProfileChanged(string scope)
@@ -3474,6 +5172,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         if (string.Equals(scope, "workflow_nodes", StringComparison.Ordinal))
         {
             RebindNodePresetPermissionParents();
+        }
+        if (_applyingPermissionProfile)
+        {
+            return;
         }
         UpdateDirtyState();
     }
@@ -3492,7 +5194,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     enabled,
                     ToolControlItemViewModel.IsDangerToolId(tool),
                     canInherit: scope != "global",
-                    markDirty: UpdateDirtyState));
+                    markDirty: OnPermissionDetailChanged));
             }
             group.RefreshPartitions();
             ToolControlGroups.Add(group);
@@ -3508,6 +5210,119 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 item => item.IsEnabled,
                 StringComparer.Ordinal),
             StringComparer.Ordinal);
+    }
+
+    private void OnPermissionDetailChanged()
+    {
+        if (!_applyingPermissionProfile)
+        {
+            UpdateDirtyState();
+        }
+    }
+
+    private void ApplyPermissionProfile(string? profile)
+    {
+        if (string.IsNullOrWhiteSpace(profile) || string.Equals(profile, "custom", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var recommended = string.Equals(profile, "recommended", StringComparison.Ordinal);
+        if (!recommended && !string.Equals(profile, "restricted", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _applyingPermissionProfile = true;
+        try
+        {
+            AllowNetwork = recommended;
+            AllowWebSearch = recommended;
+            AllowHttpSkill = false;
+            AllowWasmNetwork = false;
+            AllowSecretRead = false;
+
+            var projectRoot = PermissionProfileProjectRoot();
+            ReadableRootsText = projectRoot;
+            WritableRootsText = recommended ? projectRoot : string.Empty;
+
+            foreach (var scoped in ScopedPermissionProfiles)
+            {
+                scoped.InheritGlobal = true;
+            }
+            foreach (var group in ToolControlGroups)
+            {
+                foreach (var control in group.Controls)
+                {
+                    control.IsEnabled = control.CanInherit ? null : !control.IsDangerous;
+                }
+            }
+        }
+        finally
+        {
+            _applyingPermissionProfile = false;
+        }
+
+        RebindPermissionInheritance();
+        RefreshPermissionProfile();
+        UpdateDirtyState();
+    }
+
+    private void RefreshPermissionProfile()
+    {
+        if (_applyingPermissionProfile)
+        {
+            return;
+        }
+
+        var profile = MatchesPermissionProfile(recommended: false)
+            ? "restricted"
+            : MatchesPermissionProfile(recommended: true)
+                ? "recommended"
+                : "custom";
+        var option = PermissionProfileOptions.FirstOrDefault(item => item.Value == profile)
+            ?? PermissionProfileOptions.Last();
+        if (!ReferenceEquals(_selectedPermissionProfile, option))
+        {
+            _selectedPermissionProfile = option;
+            OnPropertyChanged(nameof(SelectedPermissionProfile));
+        }
+    }
+
+    private bool MatchesPermissionProfile(bool recommended)
+    {
+        if (AllowNetwork != recommended
+            || AllowWebSearch != recommended
+            || AllowHttpSkill
+            || AllowWasmNetwork
+            || AllowSecretRead
+            || ScopedPermissionProfiles.Any(item => !item.InheritGlobal))
+        {
+            return false;
+        }
+
+        var projectRoot = PermissionProfileProjectRoot();
+        if (!PathLinesEqual(ReadableRootsText, projectRoot)
+            || !PathLinesEqual(WritableRootsText, recommended ? projectRoot : string.Empty))
+        {
+            return false;
+        }
+
+        return ToolControlGroups
+            .SelectMany(group => group.Controls)
+            .All(control => control.IsEnabled == (control.CanInherit ? null : !control.IsDangerous));
+    }
+
+    private string PermissionProfileProjectRoot() =>
+        Path.IsPathFullyQualified(ProjectRoot) ? Path.GetFullPath(ProjectRoot) : string.Empty;
+
+    private static bool PathLinesEqual(string left, string right)
+    {
+        static string[] Lines(string value) => (value ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        return Lines(left).SequenceEqual(Lines(right), SettingsInputValidation.PathComparer);
     }
 
     private void ApplyNodePresets(
@@ -3531,9 +5346,37 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 inheritedPermissionPolicy,
                 preset.ToolControls,
                 tool => ToolLabel("global", tool),
-                UpdateDirtyState));
+                UpdateDirtyState,
+                preset.ModelAlias));
         }
         RebindPresetModelOptions();
+    }
+
+    private void ApplyModelAliases(IReadOnlyDictionary<string, ModelAliasTarget>? aliases)
+    {
+        ModelAliases.Clear();
+        var configured = aliases ?? new Dictionary<string, ModelAliasTarget>(StringComparer.Ordinal);
+        foreach (var (aliasId, displayNameKey) in ModelAliasDefinitions)
+        {
+            configured.TryGetValue(aliasId, out var target);
+            ModelAliases.Add(new ModelAliasViewModel(
+                aliasId,
+                displayNameKey,
+                _displayNames.Text(displayNameKey),
+                target?.ProviderId ?? string.Empty,
+                target?.ModelId ?? string.Empty,
+                OnModelAliasChanged));
+        }
+        RebuildAvailableLlmModelOptions();
+    }
+
+    private void OnModelAliasChanged()
+    {
+        RebuildAvailableLlmModelOptions();
+        if (!_suppressDirtyTracking)
+        {
+            UpdateDirtyState();
+        }
     }
 
     private static PermissionPolicy ResolveWorkflowNodePermissionPolicy(PermissionsSettings settings)
@@ -3613,18 +5456,23 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
 
         StatusText = _displayNames.Text("ui.settings.status.saving");
+        RecoveryText = string.Empty;
         NotifySectionStateChanged();
         try
         {
             await action().ConfigureAwait(true);
             _draftState.CompleteSave(attempt, persistedValues);
+            if (string.Equals(section, RetrievalSection, StringComparison.Ordinal))
+            {
+                OnPropertyChanged(nameof(QdrantApiKeyStatusText));
+            }
             UpdateDirtyState();
             return true;
         }
         catch (Exception ex)
         {
             _draftState.FailSave(attempt);
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            HandleSettingsFailure(ex, section);
             UpdateDirtyState(updateStatus: false);
             return false;
         }
@@ -3715,7 +5563,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             "prudent" => _displayNames.Text("agent.prudent"),
             "polisher" => _displayNames.Text("agent.polisher"),
             "summarizer" => _displayNames.Text("agent.summarizer"),
-            _ => scope,
+            _ => _displayNames.Format("ui.settings.permissions.unknown_scope", new Dictionary<string, string>
+            {
+                ["scope"] = scope,
+            }),
         };
     }
 
@@ -3723,7 +5574,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     {
         "workflow_nodes" => _displayNames.Text("ui.settings.permissions.scope.workflow_nodes"),
         "project_ai" => _displayNames.Text("ui.settings.permissions.scope.project_ai"),
-        _ => scope,
+        _ => _displayNames.Format("ui.settings.permissions.unknown_scope", new Dictionary<string, string>
+        {
+            ["scope"] = scope,
+        }),
     };
 
     private string ToolLabel(string scope, string tool)
@@ -3746,7 +5600,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             "insert-lines" => _displayNames.Text("ui.settings.permissions.tool.insert_lines"),
             "replace-lines" => _displayNames.Text("ui.settings.permissions.tool.replace_lines"),
             "rewrite-file" => _displayNames.Text("ui.settings.permissions.tool.rewrite_file"),
-            _ => tool,
+            _ => _displayNames.Format("ui.settings.permissions.unknown_tool", new Dictionary<string, string>
+            {
+                ["tool"] = tool,
+            }),
         };
     }
 
@@ -3799,7 +5656,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     private void RebuildAvailableLlmModelOptions()
     {
-        AvailableLlmModelOptions.Clear();
+        var concreteOptions = new List<WorkflowModelOption>();
         if (_providerConfig is not null)
         {
             foreach (var provider in _providerConfig.Providers
@@ -3813,7 +5670,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                              .Where(model => !string.IsNullOrWhiteSpace(model.ModelId))
                              .OrderBy(model => model.ModelId, StringComparer.Ordinal))
                 {
-                    AvailableLlmModelOptions.Add(new WorkflowModelOption(
+                    concreteOptions.Add(new WorkflowModelOption(
                         provider.Provider,
                         model.ModelId,
                         string.IsNullOrWhiteSpace(provider.DisplayName)
@@ -3823,12 +5680,50 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             }
         }
 
+        AvailableLlmModelTargetOptions.Clear();
+        AvailableLlmModelTargetOptions.Add(
+            WorkflowModelOption.Unconfigured(_displayNames.Text("ui.settings.presets.model_alias_unconfigured")));
+        foreach (var option in concreteOptions)
+        {
+            AvailableLlmModelTargetOptions.Add(option);
+        }
+
+        AvailableLlmModelOptions.Clear();
+        foreach (var alias in ModelAliases)
+        {
+            var target = alias.IsConfigured
+                ? $"{alias.TargetProviderId} · {alias.TargetModelId}"
+                : _displayNames.Text("ui.settings.presets.model_alias_unconfigured");
+            AvailableLlmModelOptions.Add(WorkflowModelOption.Alias(
+                alias.AliasId,
+                _displayNames.Format("ui.settings.presets.model_alias_option", new Dictionary<string, string>
+                {
+                    ["alias"] = alias.DisplayName,
+                    ["target"] = target,
+                })));
+        }
+        foreach (var option in concreteOptions)
+        {
+            AvailableLlmModelOptions.Add(option);
+        }
+
+        RebindModelAliasTargetOptions();
         RebindDefaultModelOption();
         RebindPresetModelOptions();
     }
 
-    private void ApplyDefaultModelIdentity(string providerId, string modelId)
+    private void RebindModelAliasTargetOptions()
     {
+        var options = AvailableLlmModelTargetOptions;
+        foreach (var alias in ModelAliases)
+        {
+            alias.RebindTargetOptions(options);
+        }
+    }
+
+    private void ApplyDefaultModelIdentity(string? modelAlias, string providerId, string modelId)
+    {
+        SetProperty(ref _defaultModelAlias, string.IsNullOrWhiteSpace(modelAlias) ? null : modelAlias.Trim(), nameof(DefaultModelAlias));
         SetProperty(ref _defaultProviderId, providerId?.Trim() ?? string.Empty, nameof(DefaultProviderId));
         SetProperty(ref _defaultModelId, modelId?.Trim() ?? string.Empty, nameof(DefaultModelId));
         RebindDefaultModelOption();
@@ -3840,10 +5735,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             .Where(option => string.Equals(option.ModelId, _defaultModelId, StringComparison.Ordinal))
             .Take(2)
             .ToArray();
-        var selected = string.IsNullOrWhiteSpace(_defaultProviderId)
-            ? (candidates.Length == 1 ? candidates[0] : null)
-            : candidates.FirstOrDefault(option =>
-                string.Equals(option.ProviderId, _defaultProviderId, StringComparison.Ordinal));
+        var selected = !string.IsNullOrWhiteSpace(_defaultModelAlias)
+            ? AvailableLlmModelOptions.FirstOrDefault(option =>
+                string.Equals(option.AliasId, _defaultModelAlias, StringComparison.Ordinal))
+            : string.IsNullOrWhiteSpace(_defaultProviderId)
+                ? (candidates.Length == 1 ? candidates[0] : null)
+                : candidates.FirstOrDefault(option =>
+                    string.Equals(option.ProviderId, _defaultProviderId, StringComparison.Ordinal));
         SetProperty(ref _selectedDefaultModelOption, selected, nameof(SelectedDefaultModelOption));
     }
 
@@ -4082,15 +5980,18 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         if (_draftState.IsSectionDirty(ModelsSection, CurrentSectionValues(ModelsSection)))
         {
             var request = BuildProviderSettingsUpdate();
+            var defaultModels = BuildProviderDefaultModelRoutes();
             var apiKey = ApiKey;
             var submitted = CurrentSectionValues(ModelsSection);
-            commits.Add(new(ModelsSection, () => SaveModelAsync(request, apiKey, submitted)));
+            commits.Add(new(ModelsSection, () => SaveModelAsync(request, defaultModels, apiKey, submitted)));
         }
         if (_draftState.IsSectionDirty(PresetsSection, CurrentSectionValues(PresetsSection)))
         {
             var request = BuildNodePresetSettings();
             var submitted = PickValues(
                 PresetsSection,
+                nameof(DefaultModelAlias),
+                nameof(ModelAliases),
                 nameof(DefaultProviderId),
                 nameof(DefaultModelId),
                 nameof(DefaultTimeoutMs),
@@ -4132,11 +6033,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             var submitted = CurrentSectionValues(AppRuntimeSection);
             commits.Add(new(AppRuntimeSection, () => SaveAppRuntimeAsync(request, submitted)));
         }
-        if (_draftState.IsSectionDirty(MiscSection, CurrentSectionValues(MiscSection)))
+        if (_draftState.IsSectionDirty(RetrievalSection, CurrentSectionValues(RetrievalSection)))
         {
-            var request = BuildMiscSectionSettings();
-            var submitted = CurrentSectionValues(MiscSection);
-            commits.Add(new(MiscSection, () => SaveMiscAsync(request, submitted)));
+            var request = BuildRagSettings();
+            var submitted = CurrentSectionValues(RetrievalSection);
+            commits.Add(new(RetrievalSection, () => SaveRetrievalAsync(request, submitted)));
+        }
+        if (_draftState.IsSectionDirty(GitSection, CurrentSectionValues(GitSection)))
+        {
+            var request = BuildGitSettings();
+            var submitted = CurrentSectionValues(GitSection);
+            commits.Add(new(GitSection, () => SaveGitAsync(request, submitted)));
         }
         return commits;
     }
@@ -4154,7 +6061,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                      PermissionsSection,
                      PersonalizationSection,
                      AppRuntimeSection,
-                     MiscSection,
+                     RetrievalSection,
+                     GitSection,
                  })
         {
             var values = CurrentSectionValues(section);
@@ -4259,10 +6167,27 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             });
         }
 
+        foreach (var option in QdrantAuthModeOptions)
+        {
+            option.Label = _displayNames.Text($"ui.settings.misc.qdrant_auth.{option.Value}");
+        }
+
         foreach (var option in ProviderTypeOptions)
         {
             option.Label = _displayNames.Text($"ui.settings.models.provider_type.{option.Value}");
         }
+        foreach (var option in ConfirmationProfileOptions)
+        {
+            option.Label = _displayNames.Text($"ui.settings.automation.confirmation.profile.{option.Value}");
+        }
+        foreach (var option in PermissionProfileOptions)
+        {
+            option.Label = _displayNames.Text($"ui.settings.permissions.profile.{option.Value}");
+        }
+        ConfirmationNormalPolicyOptions[0].Label = PolicyReviewText;
+        ConfirmationNormalPolicyOptions[1].Label = PolicyAllowText;
+        ConfirmationAutoModePolicyOptions[0].Label = PolicyAutoOffText;
+        ConfirmationAutoModePolicyOptions[1].Label = PolicyAutoOnText;
         foreach (var model in AvailableModels)
         {
             model.CapabilityLabel = ModelCapabilityLabel(model.Capability);
@@ -4304,6 +6229,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             preset.DisplayName = _displayNames.Text(preset.DisplayNameKey);
         }
 
+        foreach (var alias in ModelAliases)
+        {
+            alias.DisplayName = _displayNames.Text(alias.DisplayNameKey);
+        }
+        RebuildAvailableLlmModelOptions();
+
         foreach (var group in ToolControlGroups)
         {
             group.DisplayName = ToolScopeLabel(group.Scope);
@@ -4315,6 +6246,16 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         foreach (var profile in ScopedPermissionProfiles)
         {
             profile.DisplayName = PermissionScopeLabel(profile.Scope);
+        }
+
+        if (_diagnosticsReport is not null)
+        {
+            ApplyDiagnostics(_diagnosticsReport);
+        }
+
+        foreach (var section in _failedSectionRetries.Keys.ToArray())
+        {
+            RegisterSectionLoadFailure(section, _failedSectionRetries[section]);
         }
 
     }
@@ -4349,10 +6290,16 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             [nameof(ApiKey)] = ApiKey,
             [nameof(ModelsText)] = ModelsText,
             [nameof(EmbeddingModelId)] = EmbeddingModelId,
+            [nameof(SelectedDefaultLlmRoute)] = RouteSnapshot(SelectedDefaultLlmRoute),
+            [nameof(SelectedDefaultEmbeddingRoute)] = RouteSnapshot(SelectedDefaultEmbeddingRoute),
+            [nameof(SelectedDefaultRerankerRoute)] = RouteSnapshot(SelectedDefaultRerankerRoute),
+            [nameof(SelectedDefaultSearchRoute)] = RouteSnapshot(SelectedDefaultSearchRoute),
+            [nameof(DefaultModelAlias)] = DefaultModelAlias ?? string.Empty,
             [nameof(DefaultProviderId)] = DefaultProviderId,
             [nameof(DefaultModelId)] = DefaultModelId,
             [nameof(DefaultTimeoutMs)] = DefaultTimeoutMs,
             [nameof(DefaultBudgetUsd)] = DefaultBudgetUsd,
+            [nameof(ModelAliases)] = string.Join("|", ModelAliases.Select(alias => alias.Snapshot)),
             [nameof(NodePresets)] = string.Join("|", NodePresets.Select(preset => preset.Snapshot)),
             [nameof(TemplateRepositoryBaseUrl)] = TemplateRepositoryBaseUrl,
             [nameof(BudgetUsd)] = BudgetUsd,
@@ -4391,6 +6338,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             [nameof(VectorDimensions)] = VectorDimensions,
             [nameof(QdrantHost)] = QdrantHost,
             [nameof(QdrantPort)] = QdrantPort,
+            [nameof(QdrantUseTls)] = QdrantUseTls.ToString(),
+            [nameof(QdrantAuthMode)] = QdrantAuthMode,
+            [nameof(QdrantApiKey)] = QdrantApiKey,
+            [nameof(HasQdrantApiKey)] = HasQdrantApiKey.ToString(),
             [nameof(QdrantDataDir)] = QdrantDataDir,
             [nameof(QdrantBinaryPath)] = QdrantBinaryPath,
             [nameof(QdrantStartupTimeoutMs)] = QdrantStartupTimeoutMs,
@@ -4411,6 +6362,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         return $"{value.Length}:{value}";
     }
 
+    private static string RouteSnapshot(ProviderModelRouteOption? option) =>
+        option is null
+            ? string.Empty
+            : $"{SnapshotPart(option.ProviderId)}{SnapshotPart(option.ModelId)}";
+
     private IReadOnlyDictionary<string, string> CurrentSectionValues(string section)
     {
         var fields = section switch
@@ -4426,10 +6382,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 nameof(ProviderBaseUrl), nameof(ProviderEnabled), nameof(MakeDefaultLlm),
                 nameof(MakeDefaultEmbedding), nameof(MakeDefaultReranker), nameof(MakeDefaultSearch), nameof(ApiKey),
                 nameof(ModelsText), nameof(EmbeddingModelId),
+                nameof(SelectedDefaultLlmRoute), nameof(SelectedDefaultEmbeddingRoute),
+                nameof(SelectedDefaultRerankerRoute), nameof(SelectedDefaultSearchRoute),
             },
             PresetsSection => new[]
             {
-                nameof(DefaultProviderId), nameof(DefaultModelId), nameof(DefaultTimeoutMs), nameof(DefaultBudgetUsd),
+                nameof(DefaultModelAlias), nameof(DefaultProviderId), nameof(DefaultModelId), nameof(DefaultTimeoutMs), nameof(DefaultBudgetUsd),
+                nameof(ModelAliases),
                 nameof(NodePresets),
             },
             TemplateRepositorySection => new[] { nameof(TemplateRepositoryBaseUrl) },
@@ -4458,12 +6417,16 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             {
                 nameof(QdrantBinaryPath), nameof(QdrantStartupTimeoutMs),
             },
-            MiscSection => new[]
+            RetrievalSection => new[]
             {
                 nameof(VectorEnabled), nameof(VectorBackend), nameof(VectorCollection),
                 nameof(VectorDimensions), nameof(QdrantHost), nameof(QdrantPort),
-                nameof(QdrantDataDir),
+                nameof(QdrantUseTls), nameof(QdrantAuthMode), nameof(QdrantApiKey),
+                nameof(HasQdrantApiKey), nameof(QdrantDataDir),
                 nameof(RerankerEnabled), nameof(ChunkSizeChars), nameof(ChunkOverlapChars),
+            },
+            GitSection => new[]
+            {
                 nameof(TrackDocuments), nameof(TrackWorkflows), nameof(TrackSkills),
                 nameof(TrackNonSensitiveConfig), nameof(IgnoredPathsText),
             },
@@ -4502,10 +6465,29 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 && string.Equals(provider.Provider, selected.ProviderId, StringComparison.Ordinal)) == true;
     }
 
+    private bool CanTestProviderDraft() =>
+        CanSave(ModelsSection)
+        && SelectedProviderOption is not null
+        && !IsLegacyOtherProvider;
+
+    private void EnsureLegacyOtherProviderTypeOption(string providerType)
+    {
+        if (!string.Equals(providerType, "other", StringComparison.Ordinal)
+            || ProviderTypeOptions.Any(option => string.Equals(option.Value, "other", StringComparison.Ordinal)))
+        {
+            return;
+        }
+        ProviderTypeOptions.Add(new SettingsValueOption(
+            "other",
+            _displayNames.Text("ui.settings.models.provider_type.other")));
+    }
+
     private void NotifyProviderCommands()
     {
         RefreshModelsCommand?.NotifyCanExecuteChanged();
+        TestProviderDraftCommand?.NotifyCanExecuteChanged();
         SaveProviderKeyCommand?.NotifyCanExecuteChanged();
+        RevokeProviderKeyCommand?.NotifyCanExecuteChanged();
         RemoveProviderCommand?.NotifyCanExecuteChanged();
     }
 
@@ -4513,8 +6495,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     private void UpdateDirtyState(bool updateStatus)
     {
+        RefreshPermissionProfile();
         var current = CurrentValues();
         HasUnsavedChanges = _draftState.IsDirty(current);
+        RestoreCurrentTabCommand?.NotifyCanExecuteChanged();
         if (!updateStatus)
         {
             return;
@@ -4562,7 +6546,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         AddIfDirty(PermissionsSection, PermissionsTitle);
         AddIfDirty(PersonalizationSection, PersonalizationTitle);
         AddIfDirty(AppRuntimeSection, AppRuntimeSectionTitle);
-        AddIfDirty(MiscSection, MiscTitle);
+        AddIfDirty(RetrievalSection, RetrievalTitle);
+        AddIfDirty(GitSection, VersionControlTitle);
         return titles;
     }
 
@@ -4583,6 +6568,139 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             ["field"] = field,
             ["line"] = exception.Line?.ToString() ?? string.Empty,
         });
+        RecoveryText = _displayNames.Text("ui.settings.recovery.edit_field");
+        if (exception.FieldKey == "ui.settings.misc.qdrant_api_key")
+        {
+            HasQdrantApiKeyError = true;
+        }
+        RequestValidationFieldFocus(exception.FieldKey, exception.FocusItem, null);
+    }
+
+    internal void ReportValidationForTests(SettingsInputException exception) =>
+        SetValidationStatus(exception);
+
+    internal void ReportBackendFailureForTests(BackendException exception, string section) =>
+        HandleSettingsFailure(exception, section);
+
+    private void HandleSettingsFailure(Exception exception, string fallbackSection)
+    {
+        StatusText = UserFacingError.Format(exception, _displayNames);
+        RecoveryText = string.Empty;
+        if (exception is not BackendException backend)
+        {
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(backend.RecoveryAction))
+        {
+            var recoveryKey = $"ui.settings.recovery.{backend.RecoveryAction}";
+            var localized = _displayNames.Text(recoveryKey);
+            RecoveryText = localized.StartsWith('[') ? string.Empty : localized;
+        }
+        if (!string.IsNullOrWhiteSpace(backend.Field))
+        {
+            if (backend.Field == "qdrant_api_key")
+            {
+                HasQdrantApiKeyError = true;
+            }
+            RequestValidationFieldFocus(
+                BackendFieldDisplayKey(backend.Field),
+                null,
+                backend.Section ?? fallbackSection);
+        }
+    }
+
+    private string BackendFieldDisplayKey(string field) => field switch
+    {
+        "vector_backend" => "ui.settings.misc.vector_backend",
+        "qdrant_host" => "ui.settings.misc.qdrant_host",
+        "qdrant_port" => "ui.settings.misc.qdrant_port",
+        "qdrant_auth_mode" => "ui.settings.misc.qdrant_auth",
+        "qdrant_api_key" => "ui.settings.misc.qdrant_api_key",
+        _ => field.StartsWith("ui.", StringComparison.Ordinal)
+            ? field
+            : $"ui.settings.field.{field}",
+    };
+
+    private void RequestValidationFieldFocus(
+        string fieldKey,
+        object? focusItem,
+        string? sectionHint)
+    {
+        var sectionId = ValidationSectionId(fieldKey, sectionHint);
+        var section = SectionIndexItems.FirstOrDefault(item =>
+            string.Equals(item.Id, sectionId, StringComparison.Ordinal));
+        if (section is not null)
+        {
+            var tab = Tabs.First(item => string.Equals(item.Id, section.TabId, StringComparison.Ordinal));
+            CommitNavigation(new PendingSettingsNavigation(tab, section));
+        }
+
+        if (sectionId == "confirmations")
+        {
+            AreAdvancedConfirmationPoliciesExpanded = true;
+            if (focusItem is ConfirmationPolicyViewModel confirmation)
+            {
+                confirmation.IsApprovalPromptExpanded = true;
+            }
+        }
+        else if (sectionId == "paths")
+        {
+            AreAdvancedPermissionsExpanded = true;
+        }
+        else if (sectionId == "retrieval"
+                 && fieldKey is "ui.settings.misc.vector_dimensions"
+                     or "ui.settings.misc.vector_collection"
+                     or "ui.settings.misc.chunk_size"
+                     or "ui.settings.misc.chunk_overlap"
+                     or "ui.settings.misc.qdrant_data_dir")
+        {
+            AreAdvancedRetrievalSettingsExpanded = true;
+        }
+        else if (sectionId == "app_runtime")
+        {
+            AreAdvancedAppRuntimeSettingsExpanded = true;
+        }
+
+        var accessibleName = focusItem is ProviderModelEditorRow row
+            ? row.HasModelIdError
+                ? ModelIdColumnLabel
+                : row.HasCapabilityError
+                    ? ModelCapabilityColumnLabel
+                    : row.HasMaxContextTokensError
+                        ? ModelContextColumnLabel
+                        : row.HasInputCostError
+                            ? ModelInputCostColumnLabel
+                            : ModelOutputCostColumnLabel
+            : _displayNames.Text(fieldKey);
+        FocusValidationFieldRequested?.Invoke(
+            this,
+            new SettingsFieldFocusRequest(accessibleName, focusItem));
+    }
+
+    private static string ValidationSectionId(string fieldKey, string? sectionHint)
+    {
+        if (fieldKey.StartsWith("ui.settings.models", StringComparison.Ordinal)) return "available_models";
+        if (fieldKey.StartsWith("ui.settings.presets.alias", StringComparison.Ordinal)) return "model_aliases";
+        if (fieldKey.Contains("node_", StringComparison.Ordinal)) return "node_presets";
+        if (fieldKey.StartsWith("ui.settings.presets.default", StringComparison.Ordinal)) return "defaults";
+        if (fieldKey is "ui.settings.automation.global_budget" or "ui.settings.automation.preauthorized_budget") return "budget";
+        if (fieldKey.StartsWith("ui.settings.automation.confirmation", StringComparison.Ordinal)) return "confirmations";
+        if (fieldKey.StartsWith("ui.settings.automation", StringComparison.Ordinal)) return "runtime";
+        if (fieldKey.StartsWith("ui.settings.permissions", StringComparison.Ordinal)) return "paths";
+        if (fieldKey is "ui.settings.misc.ignored_paths") return "git";
+        if (fieldKey is "ui.settings.misc.qdrant_binary_path" or "ui.settings.misc.qdrant_startup_timeout") return "app_runtime";
+        if (fieldKey.StartsWith("ui.settings.misc.", StringComparison.Ordinal)) return "retrieval";
+        return sectionHint switch
+        {
+            ModelsSection => "provider",
+            PresetsSection or TemplateRepositorySection => "defaults",
+            AutomationSection => "runtime",
+            PermissionsSection => "paths",
+            AppRuntimeSection => "app_runtime",
+            RetrievalSection => "retrieval",
+            GitSection => "git",
+            _ => "project",
+        };
     }
 
     private void NotifySectionStateChanged()
@@ -4595,7 +6713,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         OnPropertyChanged(nameof(IsPermissionsEditable));
         OnPropertyChanged(nameof(IsPersonalizationEditable));
         OnPropertyChanged(nameof(IsAppRuntimeEditable));
-        OnPropertyChanged(nameof(IsMiscEditable));
+        OnPropertyChanged(nameof(IsRetrievalEditable));
+        OnPropertyChanged(nameof(IsGitEditable));
         NotifySaveCommands();
     }
 
@@ -4603,17 +6722,23 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     {
         SaveGeneralCommand?.NotifyCanExecuteChanged();
         RefreshModelsCommand?.NotifyCanExecuteChanged();
+        TestProviderDraftCommand?.NotifyCanExecuteChanged();
         SaveModelCommand?.NotifyCanExecuteChanged();
         SaveProviderKeyCommand?.NotifyCanExecuteChanged();
+        RevokeProviderKeyCommand?.NotifyCanExecuteChanged();
         RemoveProviderCommand?.NotifyCanExecuteChanged();
         AddProviderCommand?.NotifyCanExecuteChanged();
+        AddProviderModelCommand?.NotifyCanExecuteChanged();
         SavePresetsCommand?.NotifyCanExecuteChanged();
         SaveTemplateRepositoryCommand?.NotifyCanExecuteChanged();
+        RestoreRecommendedDefaultsCommand?.NotifyCanExecuteChanged();
+        RestoreOfficialTemplateRepositoryCommand?.NotifyCanExecuteChanged();
         SaveAutomationCommand?.NotifyCanExecuteChanged();
         SavePermissionsCommand?.NotifyCanExecuteChanged();
         SavePersonalizationCommand?.NotifyCanExecuteChanged();
         SaveAppRuntimeCommand?.NotifyCanExecuteChanged();
-        SaveMiscCommand?.NotifyCanExecuteChanged();
+        SaveRetrievalCommand?.NotifyCanExecuteChanged();
+        SaveGitCommand?.NotifyCanExecuteChanged();
     }
 
     private static bool IsTrackedDirtyProperty(string? propertyName)
@@ -4625,7 +6750,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             or nameof(MakeDefaultLlm) or nameof(MakeDefaultEmbedding) or nameof(MakeDefaultReranker)
             or nameof(MakeDefaultSearch)
             or nameof(ModelsText) or nameof(EmbeddingModelId) or nameof(ApiKey)
-            or nameof(DefaultProviderId) or nameof(DefaultModelId)
+            or nameof(SelectedDefaultLlmRoute) or nameof(SelectedDefaultEmbeddingRoute)
+            or nameof(SelectedDefaultRerankerRoute) or nameof(SelectedDefaultSearchRoute)
+            or nameof(DefaultModelAlias) or nameof(DefaultProviderId) or nameof(DefaultModelId)
             or nameof(DefaultTimeoutMs) or nameof(DefaultBudgetUsd) or nameof(TemplateRepositoryBaseUrl)
             or nameof(BudgetUsd) or nameof(PreauthorizedUsd)
             or nameof(WorkflowDefaultTimeoutMs) or nameof(MaxLoopIterations) or nameof(MaxToolRounds)
@@ -4639,7 +6766,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             or nameof(ProjectPanelVisible) or nameof(ReduceMotion) or nameof(SelectedLanguage)
             or nameof(VectorEnabled)
             or nameof(VectorBackend) or nameof(VectorCollection) or nameof(VectorDimensions)
-            or nameof(QdrantHost) or nameof(QdrantPort) or nameof(QdrantDataDir)
+            or nameof(QdrantHost) or nameof(QdrantPort) or nameof(QdrantUseTls)
+            or nameof(QdrantAuthMode) or nameof(QdrantApiKey) or nameof(QdrantDataDir)
             or nameof(QdrantBinaryPath) or nameof(QdrantStartupTimeoutMs) or nameof(RerankerEnabled)
             or nameof(ChunkSizeChars) or nameof(ChunkOverlapChars) or nameof(TrackDocuments)
             or nameof(TrackWorkflows) or nameof(TrackSkills) or nameof(TrackNonSensitiveConfig)
@@ -4819,6 +6947,7 @@ public sealed class ToolControlItemViewModel : ViewModelBase
 public sealed class PermissionScopeProfileViewModel : ViewModelBase
 {
     private readonly Action _markDirty;
+    private readonly Func<Action<string>, Task>? _browse;
     private PermissionPolicy _inheritedPolicy;
     private string _displayName;
     private bool _inheritGlobal;
@@ -4835,7 +6964,8 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
         string displayName,
         PermissionPolicy? policy,
         PermissionPolicy fallback,
-        Action markDirty)
+        Action markDirty,
+        Func<Action<string>, Task>? browse = null)
     {
         Scope = scope;
         _displayName = displayName;
@@ -4850,10 +6980,19 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
         _readableRootsText = string.Join(Environment.NewLine, resolved.ReadableFileRoots);
         _writableRootsText = string.Join(Environment.NewLine, resolved.WritableFileRoots);
         _markDirty = markDirty;
+        _browse = browse;
+        BrowseReadableRootsCommand = new RelayCommand(
+            () => _ = BrowseRootAsync(writable: false),
+            () => _browse is not null);
+        BrowseWritableRootsCommand = new RelayCommand(
+            () => _ = BrowseRootAsync(writable: true),
+            () => _browse is not null);
     }
 
     public string Scope { get; }
     public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
+    public RelayCommand BrowseReadableRootsCommand { get; }
+    public RelayCommand BrowseWritableRootsCommand { get; }
     public bool IsOverrideEnabled => !InheritGlobal;
     public bool InheritGlobal
     {
@@ -4906,10 +7045,10 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
         AllowSecretRead,
         SettingsInputValidation.AbsolutePaths(
             WritableRootsText,
-            "ui.settings.permissions.writable_roots"),
+            "ui.settings.permissions.write_roots"),
         SettingsInputValidation.AbsolutePaths(
             ReadableRootsText,
-            "ui.settings.permissions.readable_roots"));
+            "ui.settings.permissions.read_roots"));
 
     public string Snapshot => InheritGlobal
         ? $"{Scope}:inherit"
@@ -4964,6 +7103,26 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
         return false;
     }
 
+    private async Task BrowseRootAsync(bool writable)
+    {
+        if (_browse is null)
+        {
+            return;
+        }
+
+        await _browse(path =>
+        {
+            if (writable)
+            {
+                WritableRootsText = SettingsPageViewModel.AppendPathLine(WritableRootsText, path);
+            }
+            else
+            {
+                ReadableRootsText = SettingsPageViewModel.AppendPathLine(ReadableRootsText, path);
+            }
+        }).ConfigureAwait(true);
+    }
+
     private static IReadOnlyList<string> Lines(string text) => text
         .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
         .Where(line => !string.IsNullOrWhiteSpace(line))
@@ -4976,6 +7135,8 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
     private bool _normalAllowByDefault;
     private bool _autoModeAutoApproval;
     private string _approvalPrompt;
+    private string _approvalPromptError = string.Empty;
+    private bool _isApprovalPromptExpanded;
 
     private readonly Action _markDirty;
 
@@ -4993,6 +7154,16 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
     public string Label { get => _label; set => SetProperty(ref _label, value); }
     public string NormalPolicy => NormalAllowByDefault ? "allow_by_default" : "manual_review";
     public string AutoModePolicy => AutoModeAutoApproval ? "auto_approval" : "allow_by_default";
+    public string NormalPolicySelection
+    {
+        get => NormalPolicy;
+        set => NormalAllowByDefault = string.Equals(value, "allow_by_default", StringComparison.Ordinal);
+    }
+    public string AutoModePolicySelection
+    {
+        get => AutoModePolicy;
+        set => AutoModeAutoApproval = string.Equals(value, "auto_approval", StringComparison.Ordinal);
+    }
     public string ApprovalPrompt
     {
         get => _approvalPrompt;
@@ -5000,9 +7171,30 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
         {
             if (SetProperty(ref _approvalPrompt, value ?? string.Empty))
             {
+                SetApprovalPromptError(string.Empty);
                 _markDirty();
             }
         }
+    }
+    public string ApprovalPromptError
+    {
+        get => _approvalPromptError;
+        private set
+        {
+            if (SetProperty(ref _approvalPromptError, value))
+            {
+                OnPropertyChanged(nameof(HasApprovalPromptError));
+            }
+        }
+    }
+    public bool HasApprovalPromptError => !string.IsNullOrWhiteSpace(ApprovalPromptError);
+
+    internal void SetApprovalPromptError(string value) =>
+        ApprovalPromptError = value ?? string.Empty;
+    public bool IsApprovalPromptExpanded
+    {
+        get => _isApprovalPromptExpanded;
+        set => SetProperty(ref _isApprovalPromptExpanded, value);
     }
 
     public bool NormalAllowByDefault
@@ -5013,6 +7205,7 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
             if (SetProperty(ref _normalAllowByDefault, value))
             {
                 OnPropertyChanged(nameof(NormalPolicy));
+                OnPropertyChanged(nameof(NormalPolicySelection));
                 _markDirty();
             }
         }
@@ -5026,10 +7219,54 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
             if (SetProperty(ref _autoModeAutoApproval, value))
             {
                 OnPropertyChanged(nameof(AutoModePolicy));
+                OnPropertyChanged(nameof(AutoModePolicySelection));
                 _markDirty();
             }
         }
     }
+}
+
+public sealed class SettingsDiagnosticItemViewModel
+{
+    public SettingsDiagnosticItemViewModel(
+        string component,
+        string status,
+        string reason,
+        string recoveryAction)
+    {
+        Component = component;
+        Status = status;
+        Reason = reason;
+        RecoveryAction = recoveryAction;
+    }
+
+    public string Component { get; }
+    public string Status { get; }
+    public string Reason { get; }
+    public string RecoveryAction { get; }
+}
+
+public sealed class SettingsSectionLoadFailureViewModel
+{
+    public SettingsSectionLoadFailureViewModel(
+        string section,
+        string title,
+        string message,
+        string retryText,
+        Action retry)
+    {
+        Section = section;
+        Title = title;
+        Message = message;
+        RetryText = retryText;
+        RetryCommand = new RelayCommand(retry);
+    }
+
+    public string Section { get; }
+    public string Title { get; }
+    public string Message { get; }
+    public string RetryText { get; }
+    public RelayCommand RetryCommand { get; }
 }
 
 public sealed class SettingsTabViewModel : ViewModelBase
@@ -5082,6 +7319,18 @@ public sealed class SettingsSectionNavigationRequest : EventArgs
 
     public string AnchorName { get; }
     public string SectionTitle { get; }
+}
+
+public sealed class SettingsFieldFocusRequest : EventArgs
+{
+    public SettingsFieldFocusRequest(string accessibleName, object? item)
+    {
+        AccessibleName = accessibleName;
+        Item = item;
+    }
+
+    public string AccessibleName { get; }
+    public object? Item { get; }
 }
 
 /// <summary>确认项策略分组。</summary>

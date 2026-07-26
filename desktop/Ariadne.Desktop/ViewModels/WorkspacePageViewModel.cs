@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
 using Ariadne.Desktop.Backend;
@@ -32,7 +33,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _focusRestoreLibraryOpen;
     private bool _focusRestoreRightPanelOpen;
     private bool _isExecutionPanel;
-    private bool _isProjectAiTab = true;
+    private WorkspaceRightPanelTab _rightPanelTab = WorkspaceRightPanelTab.ProjectAi;
     private readonly CanvasViewportSession _canvasViewport = new();
     private string _statusText = string.Empty;
     private bool _hasUnsavedChanges;
@@ -97,12 +98,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         });
         ShowProjectAiCommand = new RelayCommand(() =>
         {
-            IsProjectAiTab = true;
+            SetRightPanelTab(WorkspaceRightPanelTab.ProjectAi);
             IsRightPanelOpen = true;
         });
         ShowNodeDetailsCommand = new RelayCommand(() =>
         {
-            IsProjectAiTab = false;
+            SetRightPanelTab(WorkspaceRightPanelTab.NodeDetails);
+            IsRightPanelOpen = true;
+        });
+        ShowEdgeDetailsCommand = new RelayCommand(() =>
+        {
+            SetRightPanelTab(WorkspaceRightPanelTab.EdgeDetails);
             IsRightPanelOpen = true;
         });
         ReloadProjectCanvasCommand = new RelayCommand(() => _ = ReloadProjectCanvasWithUnsavedCheckAsync());
@@ -298,6 +304,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string OptionalPlaceholder => _displayNames.Text("ui.common.optional");
     public string SecondsUnitText => _displayNames.Text("ui.common.unit.seconds");
     public string BreakpointText => _displayNames.Text("ui.workspace.breakpoint");
+    public string SaveBreakpointText => _displayNames.Text("ui.workspace.breakpoint.save");
     public string ApplyNodeConfigText => _displayNames.Text("ui.workspace.apply_node_config");
     public string ExportSelectionText => _displayNames.Text("ui.workspace.export_selection");
     public string AddAnnotationText => _displayNames.Text("ui.workspace.add_annotation");
@@ -367,7 +374,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SummarizerChapterTextAliasLabel => _displayNames.Text("ui.workspace.summarizer.chapter_text_alias");
     public string SummarizerChapterTextAliasHint => _displayNames.Text("ui.workspace.summarizer.chapter_text_alias_hint");
     public string SummarizerAutoModeText => _displayNames.Text("ui.workspace.summarizer.auto_mode");
-    public string DataInPinsLabel => _displayNames.Text("ui.workspace.port.data_in");
+    public string DataInPinsLabel => _displayNames.Text("ui.workspace.pin.data_inputs_label");
     public string AddDataInPinText => _displayNames.Text("ui.workspace.pin.add_data_in");
     public string RemoveDataInPinText => _displayNames.Text("ui.workspace.pin.remove_data_in");
     public string ZoomInText => _displayNames.Text("ui.workspace.zoom_in");
@@ -610,19 +617,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public bool IsProjectAiTab
     {
-        get => _isProjectAiTab;
-        set
-        {
-            if (SetProperty(ref _isProjectAiTab, value))
-            {
-                OnPropertyChanged(nameof(IsNodeDetailsTab));
-            }
-        }
+        get => _rightPanelTab == WorkspaceRightPanelTab.ProjectAi;
+        set => SetRightPanelTab(value
+            ? WorkspaceRightPanelTab.ProjectAi
+            : WorkspaceRightPanelTab.NodeDetails);
     }
 
-    public bool IsNodeDetailsTab => !_isProjectAiTab;
+    public bool IsNodeDetailsTab => _rightPanelTab == WorkspaceRightPanelTab.NodeDetails;
+    public bool IsEdgeDetailsTab => _rightPanelTab == WorkspaceRightPanelTab.EdgeDetails;
     public RelayCommand ShowProjectAiCommand { get; }
     public RelayCommand ShowNodeDetailsCommand { get; }
+    public RelayCommand ShowEdgeDetailsCommand { get; }
     public RelayCommand ReloadProjectCanvasCommand { get; }
     public RelayCommand ExportCommand { get; }
     public RelayCommand SaveCommand { get; }
@@ -3534,7 +3539,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             item.IsSelected = item == edge;
         }
         SelectedEdge = edge;
-        IsProjectAiTab = false;
+        SetRightPanelTab(WorkspaceRightPanelTab.EdgeDetails);
         IsRightPanelOpen = true;
 
         // 点边时同步选中一个端点节点，右栏才显示「相关边」配置（符合直觉）
@@ -3556,6 +3561,26 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         RefreshRelatedEdges();
         NotifySelectionCommands();
+    }
+
+    private void SetRightPanelTab(WorkspaceRightPanelTab tab)
+    {
+        if (_rightPanelTab == tab)
+        {
+            return;
+        }
+
+        _rightPanelTab = tab;
+        OnPropertyChanged(nameof(IsProjectAiTab));
+        OnPropertyChanged(nameof(IsNodeDetailsTab));
+        OnPropertyChanged(nameof(IsEdgeDetailsTab));
+    }
+
+    private enum WorkspaceRightPanelTab
+    {
+        ProjectAi,
+        NodeDetails,
+        EdgeDetails,
     }
 
     private void SaveSelectedEdgeConfig()
@@ -4134,6 +4159,28 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     private static readonly IBrush TypeUtilityBrush = new SolidColorBrush(Color.Parse("#7C3AED"));
     private static readonly IBrush TypeControlBrush = new SolidColorBrush(Color.Parse("#D97706"));
     private static readonly IBrush TypeDefaultBrush = new SolidColorBrush(Color.Parse("#8B939D"));
+
+    // 头部晕染：类型色由上而下淡出的竖向渐变，给每个节点标题栏一层专属"色气质"，比纯灰更通透精致。
+    private static readonly IBrush TypeStartWashBrush = BuildHeaderWash("#0F9D63");
+    private static readonly IBrush TypeLlmWashBrush = BuildHeaderWash("#2563EB");
+    private static readonly IBrush TypeAgentWashBrush = BuildHeaderWash("#2E726B");
+    private static readonly IBrush TypeUtilityWashBrush = BuildHeaderWash("#7C3AED");
+    private static readonly IBrush TypeControlWashBrush = BuildHeaderWash("#D97706");
+    private static readonly IBrush TypeDefaultWashBrush = BuildHeaderWash("#8B939D");
+
+    // 构造"类型色顶部淡出"竖向渐变：顶端约 20% 不透明，底端全透明。
+    private static IBrush BuildHeaderWash(string hex)
+    {
+        var color = Color.Parse(hex);
+        var brush = new LinearGradientBrush
+        {
+            StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+            EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
+        };
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(0x33, color.R, color.G, color.B), 0));
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(0x08, color.R, color.G, color.B), 1));
+        return brush.ToImmutable();
+    }
     private readonly WorkflowNodeCatalogEntry _descriptor;
 
     private readonly Action _markDirty;
@@ -4502,6 +4549,20 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
             if (_descriptor.HasModelExecution) return TypeLlmBrush;
             if (_descriptor.LibraryGroup == "utility") return TypeUtilityBrush;
             return TypeDefaultBrush;
+        }
+    }
+
+    /// <summary>节点标题栏的类型色晕染刷：顶部淡出的竖向渐变，给每个节点专属色气质。</summary>
+    public IBrush TypeHeaderWashBrush
+    {
+        get
+        {
+            if (_descriptor.ConfigKind == "start") return TypeStartWashBrush;
+            if (_descriptor.LibraryGroup == "writing") return TypeAgentWashBrush;
+            if (_descriptor.ConfigKind is "condition" or "loop" or "approval") return TypeControlWashBrush;
+            if (_descriptor.HasModelExecution) return TypeLlmWashBrush;
+            if (_descriptor.LibraryGroup == "utility") return TypeUtilityWashBrush;
+            return TypeDefaultWashBrush;
         }
     }
 
@@ -4937,12 +4998,12 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     public bool ShowHandleFields => IsData;
     public bool ShowLabelField => true;
     public bool ShowCommunicationFields => IsCommunication;
-    /// <summary>W14：选中边加粗；通信边默认略粗。</summary>
+    /// <summary>W14：选中边加粗；通信边默认略粗。点阵背景上略加粗/加不透明以保住可读性。</summary>
     public double StrokeThickness =>
-        IsSelected ? 3.4 : (IsCommunication ? 2.2 : 1.6);
+        IsSelected ? 3.4 : (IsCommunication ? 2.6 : 2.0);
 
     /// <summary>W14：选中边不透明，未选中略淡。</summary>
-    public double StrokeOpacity => IsSelected ? 1.0 : 0.88;
+    public double StrokeOpacity => IsSelected ? 1.0 : 0.95;
     public Geometry EdgePath { get; private set; } = new PathGeometry();
     public double LabelX { get; private set; }
     public double LabelY { get; private set; }

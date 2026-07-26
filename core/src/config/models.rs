@@ -256,11 +256,19 @@ pub struct ProvidersConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_llm_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_llm_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_embedding_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_embedding_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reranker_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reranker_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_search_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_search_model_id: Option<String>,
 }
 
 impl Default for ProvidersConfig {
@@ -271,9 +279,13 @@ impl Default for ProvidersConfig {
             providers: Vec::new(),
             authorized_provider_ids: BTreeSet::new(),
             default_llm_provider_id: None,
+            default_llm_model_id: None,
             default_embedding_provider_id: None,
+            default_embedding_model_id: None,
             default_reranker_provider_id: None,
+            default_reranker_model_id: None,
             default_search_provider_id: None,
+            default_search_model_id: None,
         }
     }
 }
@@ -303,24 +315,72 @@ impl ProvidersConfig {
         self.validate_default_provider(
             "llm",
             self.default_llm_provider_id.as_deref(),
+            self.default_llm_model_id.as_deref(),
             ProviderCapability::Llm,
         )?;
         self.validate_default_provider(
             "embedding",
             self.default_embedding_provider_id.as_deref(),
+            self.default_embedding_model_id.as_deref(),
             ProviderCapability::Embedding,
         )?;
         self.validate_default_provider(
             "reranker",
             self.default_reranker_provider_id.as_deref(),
+            self.default_reranker_model_id.as_deref(),
             ProviderCapability::Reranker,
         )?;
         self.validate_default_provider(
             "search",
             self.default_search_provider_id.as_deref(),
+            self.default_search_model_id.as_deref(),
             ProviderCapability::Search,
         )?;
 
+        Ok(())
+    }
+
+    /// U109：某个能力被显式启用时，默认路由必须结构可解析（Provider 存在、启用、
+    /// 且清单里有该能力的模型），与运行时 `select_capability_provider` 的结构条件一致。
+    /// 只做配置层结构校验；secret 与端点连通性仍由运行时健康项证明。
+    pub fn ensure_capability_route_resolvable(
+        &self,
+        role: &str,
+        provider_id: Option<&str>,
+        model_id: Option<&str>,
+        capability: ProviderCapability,
+    ) -> CoreResult<()> {
+        let provider_id = provider_id.ok_or_else(|| {
+            CoreError::validation(format!(
+                "{role} is enabled but no default {role} provider is configured"
+            ))
+        })?;
+        let provider = self
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == provider_id)
+            .filter(|provider| provider.enabled)
+            .ok_or_else(|| {
+                CoreError::validation(format!(
+                    "default {role} provider is missing or disabled: {provider_id}"
+                ))
+            })?;
+        let resolved = match model_id {
+            Some(model_id) => provider
+                .models
+                .iter()
+                .any(|model| model.model_id == model_id && model.capability == capability),
+            None => provider
+                .models
+                .iter()
+                .any(|model| model.capability == capability),
+        };
+        if !resolved {
+            return Err(CoreError::validation(format!(
+                "default {role} route has no {role}-capable model: {provider_id}/{}",
+                model_id.unwrap_or("<first-capable>")
+            )));
+        }
         Ok(())
     }
 
@@ -328,9 +388,15 @@ impl ProvidersConfig {
         &self,
         role: &str,
         provider_id: Option<&str>,
+        model_id: Option<&str>,
         required_capability: ProviderCapability,
     ) -> CoreResult<()> {
         let Some(provider_id) = provider_id else {
+            if model_id.is_some() {
+                return Err(CoreError::validation(format!(
+                    "default {role} model requires a provider"
+                )));
+            }
             return Ok(());
         };
         let provider = self
@@ -347,13 +413,38 @@ impl ProvidersConfig {
                 "default {role} provider must be enabled: {provider_id}"
             )));
         }
-        if !provider
-            .models
-            .iter()
-            .any(|model| model.capability == required_capability)
-        {
+        let selected_model = model_id
+            .map(|model_id| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.model_id == model_id)
+                    .ok_or_else(|| {
+                        CoreError::validation(format!(
+                            "default {role} model is missing: {provider_id}/{model_id}"
+                        ))
+                    })
+            })
+            .transpose()?;
+        // LLM execution accepts both plain chat models and tool-use models. Keep the
+        // saved default-route contract aligned with the runtime and desktop candidates.
+        let supports_role = |capability: &ProviderCapability| {
+            *capability == required_capability
+                || (required_capability == ProviderCapability::Llm
+                    && *capability == ProviderCapability::ToolUse)
+        };
+        let has_capability = selected_model
+            .map(|model| supports_role(&model.capability))
+            .unwrap_or_else(|| {
+                provider
+                    .models
+                    .iter()
+                    .any(|model| supports_role(&model.capability))
+            });
+        if !has_capability {
             return Err(CoreError::validation(format!(
-                "default {role} provider lacks required model capability: {provider_id}"
+                "default {role} route lacks required model capability: {provider_id}/{}",
+                model_id.unwrap_or("<legacy-first>")
             )));
         }
         Ok(())
@@ -381,12 +472,6 @@ impl ProviderConfig {
     pub fn validate(&self) -> CoreResult<()> {
         if self.provider_id.trim().is_empty() {
             return Err(CoreError::validation("provider_id cannot be empty"));
-        }
-
-        if self.enabled && matches!(self.provider_type, ProviderType::Other) {
-            return Err(CoreError::validation(
-                "enabled provider must use an executable provider type",
-            ));
         }
 
         if matches!(
@@ -479,12 +564,16 @@ impl ModelConfig {
         Ok(())
     }
 
-    /// Provider 模型清单中的 capability 是可路由角色，不承载流式或工具调用特性。
-    /// 该校验仅用于新写入边界，旧配置仍可读取并由用户显式迁移。
+    /// Provider 模型清单中的 capability 必须是可路由的执行角色。
+    /// `ToolUse` 是 LLM 角色的可路由变体：`validate_default_provider` 与运行时
+    /// `select_llm_model` 均把它当作合法 LLM 模型消费，设置页能力下拉也正式开放该选项，
+    /// 因此保存边界必须放行，否则选中即保存失败（U107）。
+    /// `Streaming` 才是纯特性标记——它没有任何路由消费点，也不在能力下拉中，继续拒绝。
     pub fn validate_provider_model_role(&self) -> CoreResult<()> {
         if matches!(
             self.capability,
             ProviderCapability::Llm
+                | ProviderCapability::ToolUse
                 | ProviderCapability::Embedding
                 | ProviderCapability::Reranker
                 | ProviderCapability::Search
@@ -728,6 +817,13 @@ impl Default for VectorStoreConfig {
 impl VectorStoreConfig {
     /// 仅在显式启用时要求 Qdrant 和 embedding 维度配置完整。
     pub fn validate(&self) -> CoreResult<()> {
+        if matches!(self.backend, VectorStoreBackend::QdrantSidecar)
+            && (self.sidecar.use_tls || self.sidecar.auth_mode != QdrantAuthMode::None)
+        {
+            return Err(CoreError::validation(
+                "managed qdrant sidecar cannot use external TLS or authentication settings",
+            ));
+        }
         if !self.enabled {
             return Ok(());
         }
@@ -758,10 +854,22 @@ impl VectorStoreConfig {
                     "qdrant sidecar startup_timeout_ms must be positive",
                 ));
             }
-        } else if self.sidecar.port == 0 {
-            return Err(CoreError::validation(
-                "external qdrant port must be positive",
-            ));
+        } else {
+            if self.sidecar.port == 0 {
+                return Err(CoreError::validation(
+                    "external qdrant port must be positive",
+                ));
+            }
+            let host = self.sidecar.host.trim();
+            if host.contains("//")
+                || host.contains('/')
+                || host.contains('\\')
+                || host.chars().any(char::is_whitespace)
+            {
+                return Err(CoreError::validation(
+                    "external qdrant host must be a host name or IP address without a scheme or path",
+                ));
+            }
         }
         Ok(())
     }
@@ -782,6 +890,15 @@ impl Default for VectorStoreBackend {
     }
 }
 
+/// 外部 Qdrant 的认证方式。凭据值保存在项目作用域 SecretStore，不进入项目配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QdrantAuthMode {
+    #[default]
+    None,
+    ApiKey,
+}
+
 /// sidecar 基础配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidecarConfig {
@@ -789,6 +906,10 @@ pub struct SidecarConfig {
     pub host: String,
     #[serde(default = "default_qdrant_port")]
     pub port: u16,
+    #[serde(default)]
+    pub use_tls: bool,
+    #[serde(default)]
+    pub auth_mode: QdrantAuthMode,
     #[serde(default = "default_qdrant_data_dir")]
     pub data_dir: String,
     /// 旧项目兼容输入；正式持久化和运行时事实源位于 app-state。
@@ -805,11 +926,37 @@ impl Default for SidecarConfig {
         Self {
             host: default_qdrant_host(),
             port: default_qdrant_port(),
+            use_tls: false,
+            auth_mode: QdrantAuthMode::None,
             data_dir: default_qdrant_data_dir(),
             binary_path: default_qdrant_binary_path(),
             startup_timeout_ms: default_qdrant_startup_timeout_ms(),
         }
     }
+}
+
+/// 生成外部 Qdrant 的规范化端点；同一文本同时用于请求地址和端点绑定凭据派生。
+pub fn external_qdrant_endpoint(config: &SidecarConfig) -> CoreResult<String> {
+    let raw_host = config.host.trim();
+    if raw_host.is_empty() || config.port == 0 {
+        return Err(CoreError::validation(
+            "external qdrant endpoint requires a host and positive port",
+        ));
+    }
+    let unwrapped = raw_host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(raw_host);
+    let host = match unwrapped.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(address)) => format!("[{address}]"),
+        Ok(std::net::IpAddr::V4(address)) => address.to_string(),
+        Err(_) if unwrapped.contains(':') => {
+            return Err(CoreError::validation("external qdrant host is invalid"));
+        }
+        Err(_) => unwrapped.to_ascii_lowercase(),
+    };
+    let scheme = if config.use_tls { "https" } else { "http" };
+    Ok(format!("{scheme}://{host}:{}", config.port))
 }
 
 /// 全文存储配置。

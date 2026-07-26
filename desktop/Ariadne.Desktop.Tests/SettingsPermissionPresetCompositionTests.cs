@@ -127,6 +127,192 @@ public sealed class SettingsPermissionPresetCompositionTests
         Assert.Equal(0, proxy.SavePresetsCalls);
     }
 
+    [Fact]
+    public async Task UnknownScopedPolicies_ArePreservedWhenKnownPermissionsAreSaved()
+    {
+        var backend = PermissionPresetBackend.Create(out var proxy);
+        var global = Policy(network: true, root: "/global");
+        proxy.Enqueue(
+            Task.FromResult(Presets("project-a", permissionPolicy: null)),
+            Task.FromResult(new PermissionsSettings(
+                global,
+                new Dictionary<string, PermissionPolicy?>
+                {
+                    ["workflow_nodes"] = null,
+                    ["project_ai"] = null,
+                    ["future_scope"] = Policy(network: false, root: "/future"),
+                },
+                new Dictionary<string, IReadOnlyDictionary<string, bool?>>())));
+        var vm = new SettingsPageViewModel(DisplayNameService.LoadDefault(), backend);
+
+        Assert.True(await vm.ReloadPermissionPresetProjectionForTestsAsync());
+        Assert.True(vm.HasCompatibilityPermissionScopes);
+
+        vm.AllowNetwork = false;
+        Assert.True(await vm.SaveUnsavedChangesAsync());
+        Assert.NotNull(proxy.SavedPermissions);
+        Assert.False(proxy.SavedPermissions!.ScopedPolicies["future_scope"]!.AllowNetwork);
+        Assert.Equal(new[] { "/future" }, proxy.SavedPermissions.ScopedPolicies["future_scope"]!.ReadableFileRoots);
+    }
+
+    [Fact]
+    public async Task PermissionProfiles_ApplyRealPoliciesAndManualChangesBecomeCustom()
+    {
+        var backend = PermissionPresetBackend.Create(out var proxy);
+        proxy.Enqueue(
+            Task.FromResult(Presets("project-a", permissionPolicy: null)),
+            Task.FromResult(Permissions(globalNetwork: false, workflowNetwork: true)));
+        var vm = new SettingsPageViewModel(DisplayNameService.LoadDefault(), backend);
+
+        Assert.True(await vm.ReloadPermissionPresetProjectionForTestsAsync());
+        typeof(SettingsPageViewModel)
+            .GetField("_projectRoot", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(vm, "/project");
+        vm.SelectedPermissionProfile = Assert.Single(
+            vm.PermissionProfileOptions,
+            option => option.Value == "recommended");
+
+        Assert.True(vm.AllowNetwork);
+        Assert.True(vm.AllowWebSearch);
+        Assert.False(vm.AllowHttpSkill);
+        Assert.False(vm.AllowWasmNetwork);
+        Assert.False(vm.AllowSecretRead);
+        Assert.Equal("/project", vm.ReadableRootsText);
+        Assert.Equal("/project", vm.WritableRootsText);
+        Assert.All(vm.ScopedPermissionProfiles, profile => Assert.True(profile.InheritGlobal));
+        Assert.Equal("recommended", vm.SelectedPermissionProfile?.Value);
+
+        vm.AllowSecretRead = true;
+
+        Assert.Equal("custom", vm.SelectedPermissionProfile?.Value);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public async Task ScopedPermissionRoots_CanBeAddedWithFolderPicker()
+    {
+        var backend = PermissionPresetBackend.Create(out var proxy);
+        proxy.Enqueue(
+            Task.FromResult(Presets("project-a", permissionPolicy: null)),
+            Task.FromResult(Permissions(globalNetwork: false, workflowNetwork: true)));
+        var vm = new SettingsPageViewModel(DisplayNameService.LoadDefault(), backend);
+        vm.SetFolderPicker(_ => Task.FromResult<string?>("/selected"));
+
+        Assert.True(await vm.ReloadPermissionPresetProjectionForTestsAsync());
+        var workflow = Assert.Single(vm.ScopedPermissionProfiles, item => item.Scope == "workflow_nodes");
+        workflow.InheritGlobal = false;
+        workflow.BrowseReadableRootsCommand.Execute(null);
+        for (var attempt = 0; attempt < 50 && !workflow.ReadableRootsText.Contains("/selected", StringComparison.Ordinal); attempt++)
+        {
+            await Task.Delay(1);
+        }
+
+        Assert.Contains("/selected", workflow.ReadableRootsText, StringComparison.Ordinal);
+        Assert.True(vm.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public async Task FailedPermissionProjection_OffersLocalRetryWithoutStartingANewLoad()
+    {
+        var backend = PermissionPresetBackend.Create(out var proxy);
+        proxy.Enqueue(
+            Task.FromResult(Presets("project-a", permissionPolicy: null)),
+            Task.FromException<PermissionsSettings>(new InvalidOperationException("temporary failure")));
+        proxy.Enqueue(
+            Task.FromResult(Presets("project-b", permissionPolicy: null)),
+            Task.FromResult(Permissions(globalNetwork: true, workflowNetwork: true)));
+        var vm = new SettingsPageViewModel(DisplayNameService.LoadDefault(), backend);
+
+        Assert.False(await vm.ReloadPermissionPresetProjectionForTestsAsync());
+        Assert.Contains(vm.SectionLoadFailures, item => item.Section == "permissions");
+
+        var retry = Assert.Single(vm.SectionLoadFailures, item => item.Section == "permissions");
+        retry.RetryCommand.Execute(null);
+        for (var attempt = 0; attempt < 100 && vm.HasSectionLoadFailures; attempt++)
+        {
+            await Task.Delay(1);
+        }
+
+        Assert.False(vm.HasSectionLoadFailures);
+        Assert.True(vm.IsPermissionsEditable);
+        Assert.True(vm.IsPresetsEditable);
+        Assert.Equal("project-b", Assert.Single(vm.NodePresets).ModelId);
+    }
+
+    [Fact]
+    public async Task ModelAliases_AppearWithConcreteModelsAndRemapWithoutRewritingReferences()
+    {
+        var backend = PermissionPresetBackend.Create(out var proxy);
+        var presets = new NodePresetSettings(
+            new[]
+            {
+                new NodeTypePreset(
+                    "llm",
+                    "node.type.llm",
+                    string.Empty,
+                    30_000,
+                    1,
+                    null,
+                    new Dictionary<string, bool?>(),
+                    string.Empty,
+                    "planning"),
+            },
+            string.Empty,
+            30_000,
+            1,
+            string.Empty,
+            new Dictionary<string, ModelAliasTarget>
+            {
+                ["planning"] = new("provider-a", "model-a"),
+            },
+            "planning");
+        proxy.Enqueue(
+            Task.FromResult(presets),
+            Task.FromResult(Permissions(globalNetwork: false, workflowNetwork: false)));
+        var vm = new SettingsPageViewModel(DisplayNameService.LoadDefault(), backend);
+        vm.ApplyProviderConfigForTests(new ProviderConfigStatus(
+            false,
+            false,
+            false,
+            "provider-a",
+            null,
+            null,
+            null,
+            new[]
+            {
+                Provider("provider-a", "model-a"),
+                Provider("provider-b", "model-b"),
+            }));
+
+        Assert.True(await vm.ReloadPermissionPresetProjectionForTestsAsync());
+        Assert.Equal(3, vm.ModelAliases.Count);
+        var planning = Assert.Single(vm.ModelAliases, alias => alias.AliasId == "planning");
+        Assert.Equal("provider-a", planning.SelectedTargetOption?.ProviderId);
+        var aliasOptions = vm.AvailableLlmModelOptions.Where(option => option.IsAlias).ToArray();
+        Assert.Equal(new[] { "planning", "writing", "review" }, aliasOptions.Select(option => option.AliasId));
+        Assert.All(aliasOptions, option =>
+            Assert.True(vm.AvailableLlmModelOptions.IndexOf(option) < vm.AvailableLlmModelOptions.Count - 2));
+        Assert.Contains(aliasOptions, option =>
+            option.AliasId == "writing" && option.DisplayName.Contains("未配置", StringComparison.Ordinal));
+        Assert.Contains(aliasOptions, option =>
+            option.AliasId == "review" && option.DisplayName.Contains("未配置", StringComparison.Ordinal));
+        Assert.Contains(vm.AvailableLlmModelOptions, option =>
+            option.ProviderId == "provider-a" && option.ModelId == "model-a");
+        Assert.Equal("planning", vm.SelectedDefaultModelOption?.AliasId);
+        Assert.Equal("planning", Assert.Single(vm.NodePresets).SelectedModelOption?.AliasId);
+
+        planning.SelectedTargetOption = Assert.Single(
+            vm.AvailableLlmModelTargetOptions,
+            option => option.ProviderId == "provider-b" && option.ModelId == "model-b");
+
+        Assert.True(vm.HasUnsavedChanges);
+        Assert.True(await vm.SaveUnsavedChangesAsync());
+        Assert.NotNull(proxy.SavedPresets);
+        Assert.Equal("provider-b", proxy.SavedPresets.ModelAliases!["planning"].ProviderId);
+        Assert.Equal("planning", proxy.SavedPresets.DefaultModelAlias);
+        Assert.Equal("planning", Assert.Single(proxy.SavedPresets.Presets).ModelAlias);
+    }
+
     private static TaskCompletionSource<T> NewSource<T>() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -168,6 +354,16 @@ public sealed class SettingsPermissionPresetCompositionTests
         new[] { root },
         new[] { root });
 
+    private static ProviderKeyStatus Provider(string id, string model) => new(
+        id,
+        id,
+        "open_ai_compatible",
+        true,
+        true,
+        "https://example.invalid",
+        new[] { new ModelConfig(model, "llm", null, null, null) },
+        false);
+
     private class PermissionPresetBackend : DispatchProxy
     {
         private readonly Queue<Task<NodePresetSettings>> _presets = new();
@@ -176,6 +372,7 @@ public sealed class SettingsPermissionPresetCompositionTests
         public int SavePermissionsCalls { get; private set; }
         public int SavePresetsCalls { get; private set; }
         public NodePresetSettings? SavedPresets { get; private set; }
+        public PermissionsSettings? SavedPermissions { get; private set; }
 
         public static IAriadneBackendClient Create(out PermissionPresetBackend proxy)
         {
@@ -210,6 +407,7 @@ public sealed class SettingsPermissionPresetCompositionTests
         private Task<PermissionsSettings> SavePermissions(PermissionsSettings settings)
         {
             SavePermissionsCalls++;
+            SavedPermissions = settings;
             return Task.FromResult(settings);
         }
 

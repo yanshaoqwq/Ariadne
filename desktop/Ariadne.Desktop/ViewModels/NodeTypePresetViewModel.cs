@@ -9,6 +9,7 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
     private string _displayName;
     private string _providerId;
     private string _modelId;
+    private string? _modelAlias;
     private WorkflowModelOption? _selectedModelOption;
     private string _timeoutMs;
     private string _budgetUsd;
@@ -25,13 +26,15 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
         PermissionPolicy inheritedPermissionPolicy,
         IReadOnlyDictionary<string, bool?> toolControls,
         Func<string, string> toolLabel,
-        Action onChange)
+        Action onChange,
+        string? modelAlias = null)
     {
         NodeType = nodeType;
         DisplayNameKey = displayNameKey;
         _displayName = displayName;
         _providerId = providerId;
         _modelId = modelId;
+        _modelAlias = string.IsNullOrWhiteSpace(modelAlias) ? null : modelAlias;
         _timeoutMs = timeoutMs;
         _budgetUsd = budgetUsd;
         _onChange = onChange;
@@ -64,6 +67,7 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
     public ObservableCollection<ToolControlItemViewModel> ToolControls { get; }
 
     public string ProviderId => _providerId;
+    public string? ModelAlias => _modelAlias;
 
     public string ModelId
     {
@@ -81,8 +85,10 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
                 return;
             }
 
-            _providerId = value.ProviderId;
-            _modelId = value.ModelId;
+            _modelAlias = value.IsAlias ? value.AliasId : null;
+            _providerId = value.IsAlias ? string.Empty : value.ProviderId;
+            _modelId = value.IsAlias ? string.Empty : value.ModelId;
+            OnPropertyChanged(nameof(ModelAlias));
             OnPropertyChanged(nameof(ProviderId));
             OnPropertyChanged(nameof(ModelId));
             _onChange();
@@ -91,14 +97,25 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
 
     public void RebindModelOptions(IEnumerable<WorkflowModelOption> options)
     {
-        var candidates = options
-            .Where(option => string.Equals(option.ModelId, _modelId, StringComparison.Ordinal))
-            .Take(2)
-            .ToArray();
-        var selected = string.IsNullOrWhiteSpace(_providerId)
-            ? (candidates.Length == 1 ? candidates[0] : null)
-            : candidates.FirstOrDefault(option =>
-                string.Equals(option.ProviderId, _providerId, StringComparison.Ordinal));
+        var optionArray = options.ToArray();
+        WorkflowModelOption? selected;
+        if (!string.IsNullOrWhiteSpace(_modelAlias))
+        {
+            selected = optionArray.FirstOrDefault(option =>
+                string.Equals(option.AliasId, _modelAlias, StringComparison.Ordinal));
+        }
+        else
+        {
+            var candidates = optionArray
+                .Where(option => !option.IsAlias
+                                 && string.Equals(option.ModelId, _modelId, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            selected = string.IsNullOrWhiteSpace(_providerId)
+                ? (candidates.Length == 1 ? candidates[0] : null)
+                : candidates.FirstOrDefault(option =>
+                    string.Equals(option.ProviderId, _providerId, StringComparison.Ordinal));
+        }
         SetProperty(ref _selectedModelOption, selected, nameof(SelectedModelOption));
     }
 
@@ -117,6 +134,7 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
     public string Snapshot => string.Join("|", new[]
     {
         NodeType,
+        ModelAlias ?? string.Empty,
         ProviderId,
         ModelId,
         TimeoutMs,

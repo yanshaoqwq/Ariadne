@@ -25,13 +25,21 @@ internal sealed class SettingsInputException : Exception
     public SettingsInputFailure Failure { get; }
     public string FieldKey { get; }
     public int? Line { get; }
+
+    public object? FocusItem { get; private set; }
+
+    public SettingsInputException WithFocusItem(object item)
+    {
+        FocusItem = item;
+        return this;
+    }
 }
 
 internal static class SettingsInputValidation
 {
     private static readonly HashSet<string> ModelCapabilities = new(StringComparer.Ordinal)
     {
-        "llm", "embedding", "reranker", "search",
+        "llm", "embedding", "reranker", "search", "tool_use",
     };
 
     internal static StringComparer PathComparer { get; } =

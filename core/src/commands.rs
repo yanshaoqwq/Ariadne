@@ -20,11 +20,12 @@ use crate::config::LocalFileSecretStore;
 #[cfg(feature = "system-keychain")]
 use crate::config::SystemKeychainSecretStore;
 use crate::config::{
-    default_permission_tool_controls, policies_from_policy_code, policy_code_from_dual_policy,
-    read_confirmation_policy_settings, AppConfig, AppPermissionsStore, AppRuntimeSettings,
-    AppRuntimeSettingsStore, ApprovalPromptConfig, ConfigStore, GitConfig, ModelConfig,
-    PermissionsConfig, ProjectConfig, ProjectCredentialScope, ProviderCatalogStore, ProviderConfig,
-    RagConfig, SecretStore, SecretValue, WorkflowConfig,
+    default_permission_tool_controls, external_qdrant_endpoint, policies_from_policy_code,
+    policy_code_from_dual_policy, read_confirmation_policy_settings, AppConfig,
+    AppPermissionsStore, AppRuntimeSettings, AppRuntimeSettingsStore, ApprovalPromptConfig,
+    ConfigStore, GitConfig, ModelConfig, PermissionsConfig, ProjectConfig, ProjectCredentialScope,
+    ProviderCatalogStore, ProviderConfig, QdrantAuthMode, RagConfig, SecretStore, SecretValue,
+    VectorStoreBackend, WorkflowConfig,
 };
 use crate::contracts::{
     ensure_path_under_root, ApprovalPolicy, ArtifactKind, CoreError, CoreResult, Edge, EdgeId,
@@ -868,6 +869,11 @@ pub struct PermissionsSettings {
 pub struct NodePresetSettings {
     #[serde(default)]
     pub presets: Vec<NodeTypePreset>,
+    /// 固定创作角色别名到具体模型身份的全局映射。
+    #[serde(default)]
+    pub model_aliases: BTreeMap<String, ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model_alias: Option<String>,
     /// 空值只用于兼容旧配置，表示沿用项目默认 LLM Provider。
     #[serde(default)]
     pub default_provider_id: String,
@@ -883,6 +889,8 @@ impl Default for NodePresetSettings {
     fn default() -> Self {
         Self {
             presets: default_node_type_presets(),
+            model_aliases: BTreeMap::new(),
+            default_model_alias: None,
             default_provider_id: String::new(),
             default_model_id: default_node_preset_model_id(),
             default_timeout_ms: default_node_preset_timeout_ms(),
@@ -891,10 +899,18 @@ impl Default for NodePresetSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAliasTarget {
+    pub provider_id: String,
+    pub model_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeTypePreset {
     pub node_type: String,
     pub display_name_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_alias: Option<String>,
     /// Provider 与 model_id 共同构成模型身份；空值兼容旧版默认 Provider 语义。
     #[serde(default)]
     pub provider_id: String,
@@ -914,6 +930,10 @@ struct AppNodeDefaults {
     #[serde(default)]
     presets: Vec<AppNodeTypeDefault>,
     #[serde(default)]
+    model_aliases: BTreeMap<String, ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_model_alias: Option<String>,
+    #[serde(default)]
     default_provider_id: String,
     #[serde(default = "default_node_preset_model_id")]
     default_model_id: String,
@@ -925,6 +945,8 @@ struct AppNodeDefaults {
 struct AppNodeTypeDefault {
     node_type: String,
     display_name_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_alias: Option<String>,
     #[serde(default)]
     provider_id: String,
     model_id: String,
@@ -959,11 +981,14 @@ impl AppNodeDefaults {
                 .map(|preset| AppNodeTypeDefault {
                     node_type: preset.node_type.clone(),
                     display_name_key: preset.display_name_key.clone(),
+                    model_alias: preset.model_alias.clone(),
                     provider_id: preset.provider_id.clone(),
                     model_id: preset.model_id.clone(),
                     timeout_ms: preset.timeout_ms,
                 })
                 .collect(),
+            model_aliases: settings.model_aliases.clone(),
+            default_model_alias: settings.default_model_alias.clone(),
             default_provider_id: settings.default_provider_id.clone(),
             default_model_id: settings.default_model_id.clone(),
             default_timeout_ms: settings.default_timeout_ms,
@@ -971,11 +996,18 @@ impl AppNodeDefaults {
     }
 
     fn validate(&self) -> CommandResult<()> {
-        if self.default_model_id.trim().is_empty() {
-            return Err(CommandError::validation(
-                "default node model id cannot be empty",
-            ));
-        }
+        validate_model_alias_map_shape(&self.model_aliases)?;
+        validate_model_reference_shape(
+            self.default_model_alias.as_deref(),
+            &self.default_provider_id,
+            &self.default_model_id,
+            "default node model",
+        )?;
+        validate_alias_reference(
+            &self.model_aliases,
+            self.default_model_alias.as_deref(),
+            "default node model",
+        )?;
         if self.default_timeout_ms == 0 {
             return Err(CommandError::validation(
                 "default node timeout must be positive",
@@ -985,13 +1017,23 @@ impl AppNodeDefaults {
         for preset in &self.presets {
             if preset.node_type.trim().is_empty()
                 || preset.display_name_key.trim().is_empty()
-                || preset.model_id.trim().is_empty()
                 || preset.timeout_ms == 0
             {
                 return Err(CommandError::validation(
                     "global node defaults contain an incomplete preset",
                 ));
             }
+            validate_model_reference_shape(
+                preset.model_alias.as_deref(),
+                &preset.provider_id,
+                &preset.model_id,
+                &format!("global node default {}", preset.node_type),
+            )?;
+            validate_alias_reference(
+                &self.model_aliases,
+                preset.model_alias.as_deref(),
+                &format!("global node default {}", preset.node_type),
+            )?;
             if !node_types.insert(preset.node_type.as_str()) {
                 return Err(CommandError::validation(format!(
                     "duplicate global node default: {}",
@@ -1035,6 +1077,7 @@ impl ProjectNodePresetOverrides {
                     NodeTypePreset {
                         node_type: preset.node_type,
                         display_name_key: preset.display_name_key,
+                        model_alias: preset.model_alias,
                         provider_id: preset.provider_id,
                         model_id: preset.model_id,
                         timeout_ms: preset.timeout_ms,
@@ -1046,6 +1089,8 @@ impl ProjectNodePresetOverrides {
                     }
                 })
                 .collect(),
+            model_aliases: app.model_aliases,
+            default_model_alias: app.default_model_alias,
             default_provider_id: app.default_provider_id,
             default_model_id: app.default_model_id,
             default_timeout_ms: app.default_timeout_ms,
@@ -1073,6 +1118,15 @@ pub struct AppSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RagSettings {
     pub rag: RagConfig,
+    /// 仅作为本次保存输入；响应与项目配置不会回显明文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qdrant_api_key: Option<String>,
+    /// 显式撤销当前端点的项目作用域凭据。
+    #[serde(default)]
+    pub clear_qdrant_api_key: bool,
+    /// 只读状态：当前端点是否已有凭据。
+    #[serde(default)]
+    pub has_qdrant_api_key: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1140,11 +1194,19 @@ pub struct ProviderConfigStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_llm_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_llm_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_embedding_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_embedding_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reranker_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reranker_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_search_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_search_model_id: Option<String>,
     #[serde(default)]
     pub providers: Vec<ProviderKeyStatus>,
 }
@@ -1183,11 +1245,33 @@ pub struct ProviderSettingsUpdate {
     pub make_default_search: bool,
 }
 
+/// 仅用于连接测试的临时 Provider 表单。它绝不能写入项目配置或凭据仓库。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderDraftProbe {
+    pub provider: ProviderSettingsUpdate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderSectionSettings {
     pub provider: ProviderSettingsUpdate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_models: Option<ProviderDefaultModelRoutes>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDefaultModelRoutes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ModelAliasTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1446,6 +1530,20 @@ pub fn list_recent_projects(state: &AriadneAppState) -> CommandResult<Vec<Recent
         .map_err(error_to_string)
 }
 
+pub fn forget_recent_project(
+    state: &AriadneAppState,
+    project_root: String,
+) -> CommandResult<Vec<RecentProjectEntry>> {
+    let _activation = state.lock_project_activation()?;
+    let project_root = project_root.trim();
+    if project_root.is_empty() {
+        return Err(CommandError::validation("project root cannot be empty"));
+    }
+    recent_project_store(state.app_state_root())
+        .forget(project_root)
+        .map_err(error_to_string)
+}
+
 pub fn create_project(
     state: &AriadneAppState,
     project_root: String,
@@ -1561,6 +1659,37 @@ pub fn open_project(
         }
     };
     Ok(current)
+}
+
+pub fn relocate_recent_project(
+    state: &AriadneAppState,
+    previous_project_root: String,
+    project_root: String,
+) -> CommandResult<CurrentProjectStatus> {
+    let _activation = state.lock_project_activation()?;
+    let previous_root = state.project_root()?;
+    let replaced_root = PathBuf::from(previous_project_root.trim());
+    if replaced_root.as_os_str().is_empty() {
+        return Err(CommandError::validation(
+            "previous project root cannot be empty",
+        ));
+    }
+    let project_root = canonicalize_initialized_project_root(Path::new(&project_root))?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "project_open")?;
+    match activate_initialized_project_replacing_recent(
+        state,
+        &project_root,
+        None,
+        &replaced_root,
+    ) {
+        Ok(current) => Ok(current),
+        Err(error) => Err(rollback_existing_project_activation(
+            state,
+            &previous_root,
+            &project_root,
+            error,
+        )),
+    }
 }
 
 pub fn close_project(state: &AriadneAppState) -> CommandResult<()> {
@@ -1722,6 +1851,29 @@ fn activate_initialized_project(
     project_root: &Path,
     name: Option<&str>,
 ) -> CommandResult<CurrentProjectStatus> {
+    activate_initialized_project_inner(state, project_root, name, None)
+}
+
+fn activate_initialized_project_replacing_recent(
+    state: &AriadneAppState,
+    project_root: &Path,
+    name: Option<&str>,
+    replaced_project_root: &Path,
+) -> CommandResult<CurrentProjectStatus> {
+    activate_initialized_project_inner(
+        state,
+        project_root,
+        name,
+        Some(replaced_project_root),
+    )
+}
+
+fn activate_initialized_project_inner(
+    state: &AriadneAppState,
+    project_root: &Path,
+    name: Option<&str>,
+    replaced_project_root: Option<&Path>,
+) -> CommandResult<CurrentProjectStatus> {
     let project_root = canonicalize_initialized_project_root(project_root)?;
     crate::config::bind_project_app_state(&project_root, state.app_state_root())
         .map_err(error_to_string)?;
@@ -1784,7 +1936,11 @@ fn activate_initialized_project(
             candidate_config.app.project_name.clone()
         },
     };
-    if let Err(error) = record_current_project(state.app_state_root(), &current) {
+    if let Err(error) = record_current_project_replacing(
+        state.app_state_root(),
+        &current,
+        replaced_project_root,
+    ) {
         let mut diagnostic = error_to_string(error).diagnostic_text().to_owned();
         if config_changed {
             if let Err(rollback_error) = config_store.save(&original_config) {
@@ -2787,7 +2943,10 @@ pub fn save_general_section_settings(
 
 pub fn get_rag_settings(state: &AriadneAppState) -> CommandResult<RagSettings> {
     let project_root = project_root_from_state(state, None)?;
-    get_rag_settings_impl(&project_root)
+    let mut settings = get_rag_settings_impl(&project_root)?;
+    settings.has_qdrant_api_key =
+        has_external_qdrant_api_key(&project_root, state.secret_store.as_ref(), &settings.rag)?;
+    Ok(settings)
 }
 
 pub fn save_rag_settings(
@@ -2797,16 +2956,55 @@ pub fn save_rag_settings(
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "rag_settings_update")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
-    settings.rag.validate().map_err(error_to_string)?;
+    let RagSettings {
+        rag,
+        qdrant_api_key,
+        clear_qdrant_api_key,
+        has_qdrant_api_key: _,
+    } = settings;
+    rag.validate().map_err(error_to_string)?;
     let expected = ConfigStore::new(&project_root)
         .load_or_create()
         .map_err(error_to_string)?;
     let mut candidate = expected.clone();
-    candidate.rag = settings.rag;
+    candidate.rag = rag;
+    candidate.validate().map_err(error_to_string)?;
+
+    let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
+        .map_err(error_to_string)?;
+    let credential_mutation = prepare_external_qdrant_credential_mutation(
+        &credentials,
+        &candidate.rag,
+        qdrant_api_key,
+        clear_qdrant_api_key,
+    )?;
     let saved = candidate.rag.clone();
-    state.commit_retrieval_config(&expected, candidate)?;
+    if let Err(error) = state.commit_retrieval_config(&expected, candidate) {
+        if let Some((endpoint, previous)) = credential_mutation {
+            restore_external_qdrant_secret(&credentials, &endpoint, previous).map_err(
+                |rollback| CommandError::internal(format!(
+                    "failed to apply retrieval settings: {error}; credential rollback failed: {rollback}"
+                )),
+            )?;
+            state.reload_retrieval_runtime().map_err(|rollback| {
+                CommandError::internal(format!(
+                    "failed to apply retrieval settings: {error}; runtime rollback failed: {rollback}"
+                ))
+            })?;
+        }
+        return Err(error);
+    }
     spawn_indexing_worker_for_state(state)?;
-    Ok(RagSettings { rag: saved })
+    Ok(RagSettings {
+        rag: saved.clone(),
+        qdrant_api_key: None,
+        clear_qdrant_api_key: false,
+        has_qdrant_api_key: has_external_qdrant_api_key(
+            &project_root,
+            state.secret_store.as_ref(),
+            &saved,
+        )?,
+    })
 }
 
 pub fn get_workflow_settings(state: &AriadneAppState) -> CommandResult<WorkflowSettings> {
@@ -2848,6 +3046,7 @@ pub fn save_misc_section_settings(
     let _project_mutation = acquire_project_mutation_guard(&project_root, "misc_settings_update")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
     settings.rag.rag.validate().map_err(error_to_string)?;
+    ensure_no_external_qdrant_credential_input(&settings.rag)?;
     let expected = ConfigStore::new(&project_root)
         .load_or_create()
         .map_err(error_to_string)?;
@@ -2862,6 +3061,9 @@ pub fn save_misc_section_settings(
     let saved = MiscSectionSettings {
         rag: RagSettings {
             rag: candidate.rag.clone(),
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
         },
         git: GitSettings {
             git: candidate.git.clone(),
@@ -3014,11 +3216,11 @@ pub fn save_node_preset_settings_impl(
 fn save_node_preset_settings_with_app_state(
     project_root: &Path,
     app_state_root: &Path,
-    settings: NodePresetSettings,
+    mut settings: NodePresetSettings,
 ) -> CommandResult<NodePresetSettings> {
     let _project_mutation = acquire_project_mutation_guard(project_root, "node_preset_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
-    write_node_preset_settings(project_root, app_state_root, &settings)?;
+    write_node_preset_settings(project_root, app_state_root, &mut settings)?;
     Ok(settings)
 }
 
@@ -3045,6 +3247,31 @@ pub fn fetch_provider_models_with_cancellation(
         provider_id,
         cancellation,
     )
+}
+
+/// 使用未保存的 Provider 表单测试连通性并读取模型目录。
+///
+/// API key 只在本次请求中保留在内存，调用路径不获取写锁、不保存配置，也不触碰
+/// `SecretStore`，以便设置页在保存前安全验证新 Provider。
+pub fn test_provider_draft_with_cancellation(
+    probe: ProviderDraftProbe,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<ProviderModelsResult> {
+    cancellation.check().map_err(CommandError::from)?;
+    let selected = provider_config_from_update(&probe.provider)?;
+    let protocol =
+        ProviderProtocol::from_provider_type(&selected.provider_type).map_err(error_to_string)?;
+    let api_key = probe
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    let fetched = fetch_remote_provider_models(&selected, protocol, api_key, cancellation)?;
+    Ok(ProviderModelsResult {
+        provider_id: selected.provider_id.clone(),
+        models: merge_remote_model_metadata(fetched, &selected.models),
+    })
 }
 
 pub fn fetch_provider_models_with_secrets_impl(
@@ -3701,6 +3928,68 @@ pub fn save_provider_key(
     }
 }
 
+pub fn revoke_provider_key(
+    state: &AriadneAppState,
+    provider: String,
+) -> CommandResult<ProviderConfigStatus> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "provider_key_revoke")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    let _global_settings = state.lock_global_settings()?;
+    let provider = normalize_provider(&provider)?;
+    let config = ConfigStore::with_app_state(&project_root, state.app_state_root())
+        .load_or_create_for_credential_rebind()
+        .map_err(error_to_string)?;
+    if !config
+        .providers
+        .providers
+        .iter()
+        .any(|configured| configured.provider_id == provider)
+    {
+        return Err(CommandError::not_found(format!(
+            "provider is not configured: {provider}"
+        )));
+    }
+    let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
+        .map_err(error_to_string)?;
+    let previous_secret = credentials
+        .get_provider_secret(&provider)
+        .map_err(error_to_string)?;
+    credentials
+        .delete_provider_secret(&provider)
+        .map_err(error_to_string)?;
+    // 凭据已删除：此后任何一步失败都必须先把它放回去，否则一次失败的撤销会把
+    // 用户的 key 永久销毁，而调用方只看到一个错误、以为什么都没发生。
+    let revoked = provider_config_status_from_config_with_app_state(
+        &project_root,
+        config,
+        state.secret_store.as_ref(),
+        state.app_state_root(),
+    )
+    .and_then(|status| {
+        state.reload_retrieval_runtime()?;
+        Ok(status)
+    });
+    match revoked {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            restore_provider_secret(&credentials, &provider, previous_secret).map_err(
+                |rollback| {
+                    CommandError::internal(format!(
+                        "{error}; provider key revoke rollback failed: {rollback}"
+                    ))
+                },
+            )?;
+            state.reload_retrieval_runtime().map_err(|rollback| {
+                CommandError::internal(format!(
+                    "{error}; provider runtime rollback failed: {rollback}"
+                ))
+            })?;
+            Err(error)
+        }
+    }
+}
+
 /// 为尚不能正常打开的导入/旧项目显式重新绑定 Provider 凭据。
 ///
 /// 该入口不把目标项目设为当前项目，也不会启动任何网络或后台任务。
@@ -3726,7 +4015,7 @@ pub fn save_provider_settings(
         acquire_project_mutation_guard(&project_root, "provider_settings_update")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
     let _global_settings = state.lock_global_settings()?;
-    save_global_provider_settings_under_guards(state, &project_root, update)
+    save_global_provider_settings_under_guards(state, &project_root, update, None)
 }
 
 pub fn save_provider_section_settings(
@@ -3761,6 +4050,7 @@ pub fn save_provider_section_settings(
         state,
         &project_root,
         settings.provider,
+        settings.default_models,
     ) {
         Ok(status) => status,
         Err(error) => {
@@ -3783,6 +4073,7 @@ fn save_global_provider_settings_under_guards(
     state: &AriadneAppState,
     project_root: &Path,
     update: ProviderSettingsUpdate,
+    default_models: Option<ProviderDefaultModelRoutes>,
 ) -> CommandResult<ProviderConfigStatus> {
     crate::config::bind_project_app_state(project_root, state.app_state_root())
         .map_err(error_to_string)?;
@@ -3806,6 +4097,10 @@ fn save_global_provider_settings_under_guards(
             .map_err(error_to_string)?;
         let mut candidate = expected.clone();
         apply_provider_settings_update(&mut candidate, update)?;
+        if let Some(routes) = default_models {
+            apply_provider_default_model_routes(&mut candidate, routes)?;
+        }
+        candidate.validate().map_err(error_to_string)?;
         let status = provider_config_status_from_config_with_app_state(
             project_root,
             candidate.clone(),
@@ -4313,7 +4608,9 @@ fn provider_config_diagnostic_items(
         }),
     }
 
-    match select_llm_provider(providers).and_then(|provider| select_llm_model(&provider)) {
+    match select_llm_provider(providers)
+        .and_then(|provider| select_llm_model(&provider, providers.default_llm_model_id.as_deref()))
+    {
         Ok(model) => items.push(DiagnosticItem {
             component: "providers.llm.default".to_owned(),
             status: DiagnosticStatus::Healthy,
@@ -6359,6 +6656,13 @@ fn compile_workflow_llm_execution_plan(
 ) -> CommandResult<WorkflowLlmExecutionPlan> {
     let mut node_routes = BTreeMap::new();
     let mut providers = BTreeMap::new();
+    let default_model_reference = resolve_model_reference(
+        &node_presets.model_aliases,
+        node_presets.default_model_alias.as_deref(),
+        &node_presets.default_provider_id,
+        &node_presets.default_model_id,
+        "default node model",
+    )?;
 
     for node in workflow
         .nodes
@@ -6385,11 +6689,19 @@ fn compile_workflow_llm_execution_plan(
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let preset = node_type_preset(node_presets, &node.type_name);
-        let preset_provider_id = preset
-            .map(|preset| preset.provider_id.trim())
-            .filter(|value| !value.is_empty());
-        let default_provider_id = (!node_presets.default_provider_id.trim().is_empty())
-            .then(|| node_presets.default_provider_id.trim());
+        let preset_model_reference = preset
+            .map(|preset| {
+                resolve_model_reference(
+                    &node_presets.model_aliases,
+                    preset.model_alias.as_deref(),
+                    &preset.provider_id,
+                    &preset.model_id,
+                    &format!("preset {}", preset.node_type),
+                )
+            })
+            .transpose()?;
+        let preset_provider_id = preset_model_reference.and_then(|reference| reference.0);
+        let default_provider_id = default_model_reference.0;
         // 任一节点级字段出现即进入显式覆盖层；缺失的另一半只从项目默认补齐，
         // 不能再拼入可能属于其它 Provider 的节点类型预设。
         let preferred_provider_id = configured_provider_id.or_else(|| {
@@ -6430,11 +6742,8 @@ fn compile_workflow_llm_execution_plan(
             )));
         }
 
-        let preset_model_id = preset
-            .map(|preset| preset.model_id.trim())
-            .filter(|value| !value.is_empty());
-        let default_model_id = (!node_presets.default_model_id.trim().is_empty())
-            .then(|| node_presets.default_model_id.trim());
+        let preset_model_id = preset_model_reference.and_then(|reference| reference.1);
+        let default_model_id = default_model_reference.1;
         let preferred_model_id = configured_model_id.or_else(|| {
             if configured_provider_id.is_some() {
                 None
@@ -6458,7 +6767,13 @@ fn compile_workflow_llm_execution_plan(
                 })?
                 .clone()
         } else {
-            select_llm_model(&provider_config)?
+            select_llm_model(
+                &provider_config,
+                default_llm_model_id_for(
+                    &project_config.providers,
+                    &provider_config.provider_id,
+                ),
+            )?
         };
         if !matches!(
             model_config.capability,
@@ -6763,16 +7078,26 @@ pub fn get_rag_settings_impl(project_root: &Path) -> CommandResult<RagSettings> 
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
-    Ok(RagSettings { rag: config.rag })
+    Ok(RagSettings {
+        rag: config.rag,
+        qdrant_api_key: None,
+        clear_qdrant_api_key: false,
+        has_qdrant_api_key: false,
+    })
 }
 
 pub fn save_rag_settings_impl(project_root: &Path, settings: RagSettings) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "rag_settings_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
+    ensure_no_external_qdrant_credential_input(&settings)?;
     settings.rag.validate().map_err(error_to_string)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    // U109：reranker/向量是跨分区字段——开关在 RAG 配置里，路由在 Provider 配置里。
+    // 只在「本次保存把它打开」时前置校验，用户才能在勾选当下就看到缺失的默认路由；
+    // 已经开着的历史配置不因这次保存被追加阻断（避免锁死设置页）。
+    ensure_enabled_retrieval_routes_resolvable(&config, &settings.rag)?;
     config.rag = settings.rag;
     config_store.save(&config).map_err(error_to_string)
 }
@@ -6969,12 +7294,8 @@ pub fn update_budget_config_impl(
     validate_money("preauthorized_usd", preauthorized_usd)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
-    // 0.0 表示无限制（映射为 None），避免 exceeds(Some(0.0), positive) 阻断所有调用
-    config.auto_mode.preauthorized_budget_usd = if preauthorized_usd > 0.0 {
-        Some(preauthorized_usd)
-    } else {
-        None
-    };
+    // 0 是明确的零自动支出额度；缺失值仅保留给尚未保存过该设置的旧配置。
+    config.auto_mode.preauthorized_budget_usd = Some(preauthorized_usd);
     config_store.save(&config).map_err(error_to_string)?;
     write_budget_config(project_root, &BudgetConfigFile { budget_usd })
 }
@@ -7052,11 +7373,8 @@ fn save_automation_settings_impl_with_app_state_and_workflow(
         workflow.validate().map_err(error_to_string)?;
         config.workflow = workflow;
     }
-    config.auto_mode.preauthorized_budget_usd = if settings.budget.preauthorized_usd > 0.0 {
-        Some(settings.budget.preauthorized_usd)
-    } else {
-        None
-    };
+    // 不使用 0 作为“无限”哨兵，避免一次普通数值输入解除自动支出上限。
+    config.auto_mode.preauthorized_budget_usd = Some(settings.budget.preauthorized_usd);
     config.auto_mode.enabled_by_default = settings.budget.auto_mode_enabled;
 
     let mut normalized_settings = Vec::new();
@@ -7911,9 +8229,13 @@ fn provider_config_status_from_config_with_app_state(
             .iter()
             .any(|provider| provider.provider == "gemini" && provider.has_key),
         default_llm_provider_id: config.providers.default_llm_provider_id,
+        default_llm_model_id: config.providers.default_llm_model_id,
         default_embedding_provider_id: config.providers.default_embedding_provider_id,
+        default_embedding_model_id: config.providers.default_embedding_model_id,
         default_reranker_provider_id: config.providers.default_reranker_provider_id,
+        default_reranker_model_id: config.providers.default_reranker_model_id,
         default_search_provider_id: config.providers.default_search_provider_id,
+        default_search_model_id: config.providers.default_search_model_id,
         providers,
     })
 }
@@ -8014,6 +8336,16 @@ fn provider_preset_references(
         .collect::<HashSet<_>>();
     let settings = read_node_preset_settings(project_root)?;
     let mut references = Vec::new();
+    for (alias, target) in &settings.model_aliases {
+        if target.provider_id == provider_id {
+            references.push(ProviderRemovalReference {
+                reference_type: "model_alias".to_owned(),
+                owner_id: alias.clone(),
+                node_id: None,
+                model_id: Some(target.model_id.clone()),
+            });
+        }
+    }
     let mut add_reference = |owner_id: String, configured_provider: &str, model_id: &str| {
         let exact_provider = configured_provider.trim() == provider_id;
         let legacy_unique_model = configured_provider.trim().is_empty()
@@ -8136,16 +8468,36 @@ fn collect_workflow_provider_references(
 }
 
 fn clear_provider_defaults(config: &mut ProjectConfig, provider_id: &str) {
-    for configured in [
-        &mut config.providers.default_llm_provider_id,
-        &mut config.providers.default_embedding_provider_id,
-        &mut config.providers.default_reranker_provider_id,
-        &mut config.providers.default_search_provider_id,
-    ] {
-        if configured.as_deref() == Some(provider_id) {
-            *configured = None;
+    fn clear(
+        configured_provider: &mut Option<String>,
+        configured_model: &mut Option<String>,
+        provider_id: &str,
+    ) {
+        if configured_provider.as_deref() == Some(provider_id) {
+            *configured_provider = None;
+            *configured_model = None;
         }
     }
+    clear(
+        &mut config.providers.default_llm_provider_id,
+        &mut config.providers.default_llm_model_id,
+        provider_id,
+    );
+    clear(
+        &mut config.providers.default_embedding_provider_id,
+        &mut config.providers.default_embedding_model_id,
+        provider_id,
+    );
+    clear(
+        &mut config.providers.default_reranker_provider_id,
+        &mut config.providers.default_reranker_model_id,
+        provider_id,
+    );
+    clear(
+        &mut config.providers.default_search_provider_id,
+        &mut config.providers.default_search_model_id,
+        provider_id,
+    );
 }
 
 fn clear_removed_provider_key_status(status: &mut ProviderConfigStatus, provider_id: &str) {
@@ -8222,6 +8574,7 @@ pub fn save_provider_settings_impl(
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     apply_provider_settings_update(&mut config, update)?;
+    config.validate().map_err(error_to_string)?;
     config_store.save(&config).map_err(error_to_string)
 }
 
@@ -8259,12 +8612,173 @@ fn restore_provider_secret(
     }
 }
 
+/// U109：检索能力开关一旦从关变开，其默认 Provider 路由必须当场可解析。
+/// 保存边界拒绝，用户就能在设置页立刻定位问题，而不是等到运行工作流才失败。
+fn ensure_enabled_retrieval_routes_resolvable(
+    current: &ProjectConfig,
+    next: &RagConfig,
+) -> CommandResult<()> {
+    let providers = &current.providers;
+    if next.reranker_enabled && !current.rag.reranker_enabled {
+        providers
+            .ensure_capability_route_resolvable(
+                "reranker",
+                providers.default_reranker_provider_id.as_deref(),
+                providers.default_reranker_model_id.as_deref(),
+                ProviderCapability::Reranker,
+            )
+            .map_err(error_to_string)?;
+    }
+    if next.vector_store.enabled && !current.rag.vector_store.enabled {
+        providers
+            .ensure_capability_route_resolvable(
+                "embedding",
+                providers.default_embedding_provider_id.as_deref(),
+                providers.default_embedding_model_id.as_deref(),
+                ProviderCapability::Embedding,
+            )
+            .map_err(error_to_string)?;
+    }
+    Ok(())
+}
+
+fn ensure_no_external_qdrant_credential_input(settings: &RagSettings) -> CommandResult<()> {
+    if settings.qdrant_api_key.is_some() || settings.clear_qdrant_api_key {
+        return Err(CommandError::validation(
+            "external qdrant credentials require the application secret store",
+        ));
+    }
+    Ok(())
+}
+
+fn has_external_qdrant_api_key(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    rag: &RagConfig,
+) -> CommandResult<bool> {
+    if rag.vector_store.backend != VectorStoreBackend::ExternalQdrant
+        || rag.vector_store.sidecar.auth_mode != QdrantAuthMode::ApiKey
+    {
+        return Ok(false);
+    }
+    let endpoint = external_qdrant_endpoint(&rag.vector_store.sidecar).map_err(error_to_string)?;
+    let credentials =
+        ProjectCredentialScope::new(project_root, secrets).map_err(error_to_string)?;
+    credentials
+        .get_external_qdrant_secret(&endpoint)
+        .map(|secret| secret.is_some())
+        .map_err(error_to_string)
+}
+
+/// 在候选运行时创建前准备端点凭据；返回值用于提交失败后的精确恢复。
+fn prepare_external_qdrant_credential_mutation(
+    credentials: &ProjectCredentialScope<'_>,
+    rag: &RagConfig,
+    qdrant_api_key: Option<String>,
+    clear_qdrant_api_key: bool,
+) -> CommandResult<Option<(String, Option<SecretValue>)>> {
+    if qdrant_api_key.is_some() && clear_qdrant_api_key {
+        return Err(CommandError::validation(
+            "external qdrant API key cannot be replaced and removed in one request",
+        )
+        .with_context("qdrant_api_key", "retrieval", "replace_credential"));
+    }
+    if rag.vector_store.backend != VectorStoreBackend::ExternalQdrant {
+        if qdrant_api_key.is_some() || clear_qdrant_api_key {
+            return Err(CommandError::validation(
+                "external qdrant credentials require the external qdrant backend",
+            )
+            .with_context("vector_backend", "retrieval", "edit_field"));
+        }
+        return Ok(None);
+    }
+
+    let endpoint = external_qdrant_endpoint(&rag.vector_store.sidecar).map_err(|error| {
+        error_to_string(error).with_context("qdrant_host", "retrieval", "edit_field")
+    })?;
+    let previous = credentials
+        .get_external_qdrant_secret(&endpoint)
+        .map_err(error_to_string)?;
+    let mut mutation = None;
+
+    if let Some(api_key) = qdrant_api_key {
+        if rag.vector_store.sidecar.auth_mode != QdrantAuthMode::ApiKey {
+            return Err(CommandError::validation(
+                "external qdrant API key requires API key authentication mode",
+            )
+            .with_context("qdrant_auth_mode", "retrieval", "edit_field"));
+        }
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err(
+                CommandError::validation("external qdrant API key cannot be empty").with_context(
+                    "qdrant_api_key",
+                    "retrieval",
+                    "replace_credential",
+                ),
+            );
+        }
+        credentials
+            .set_external_qdrant_secret(&endpoint, SecretValue::new(api_key))
+            .map_err(error_to_string)?;
+        mutation = Some((endpoint.clone(), previous.clone()));
+    } else if clear_qdrant_api_key {
+        if rag.vector_store.sidecar.auth_mode == QdrantAuthMode::ApiKey {
+            return Err(CommandError::validation(
+                "external qdrant API key cannot be removed while API key authentication is enabled",
+            )
+            .with_context("qdrant_auth_mode", "retrieval", "edit_field"));
+        }
+        if previous.is_some() {
+            credentials
+                .delete_external_qdrant_secret(&endpoint)
+                .map_err(error_to_string)?;
+            mutation = Some((endpoint.clone(), previous.clone()));
+        }
+    }
+
+    if rag.vector_store.sidecar.auth_mode == QdrantAuthMode::ApiKey
+        && credentials
+            .get_external_qdrant_secret(&endpoint)
+            .map_err(error_to_string)?
+            .is_none()
+    {
+        return Err(CommandError::validation(
+            "external qdrant API key is not configured for this endpoint",
+        )
+        .with_context("qdrant_api_key", "retrieval", "replace_credential"));
+    }
+    Ok(mutation)
+}
+
+fn restore_external_qdrant_secret(
+    credentials: &ProjectCredentialScope<'_>,
+    endpoint: &str,
+    previous: Option<SecretValue>,
+) -> CommandResult<()> {
+    match previous {
+        Some(secret) => credentials
+            .set_external_qdrant_secret(endpoint, secret)
+            .map_err(error_to_string),
+        None => credentials
+            .delete_external_qdrant_secret(endpoint)
+            .map_err(error_to_string),
+    }
+}
+
 fn apply_provider_settings_update(
     config: &mut ProjectConfig,
     update: ProviderSettingsUpdate,
 ) -> CommandResult<()> {
     let provider_config = provider_config_from_update(&update)?;
     let provider_id = provider_config.provider_id.clone();
+    // U107：LLM 默认路由与运行时 `select_llm_model` 一样先取 Llm、再回落 ToolUse，
+    // 否则只有 tool_use 模型的 Provider 勾选「设为默认 LLM」会留下空的默认模型。
+    let default_llm_model = first_model_id(&provider_config, ProviderCapability::Llm)
+        .or_else(|| first_model_id(&provider_config, ProviderCapability::ToolUse));
+    let default_embedding_model = first_model_id(&provider_config, ProviderCapability::Embedding);
+    let default_reranker_model = first_model_id(&provider_config, ProviderCapability::Reranker);
+    let default_search_model = first_model_id(&provider_config, ProviderCapability::Search);
     if let Some(index) = config
         .providers
         .providers
@@ -8281,40 +8795,106 @@ fn apply_provider_settings_update(
         .insert(provider_id.clone());
     apply_provider_default_choice(
         &mut config.providers.default_llm_provider_id,
+        &mut config.providers.default_llm_model_id,
         &provider_id,
+        default_llm_model,
         update.make_default_llm,
     );
     apply_provider_default_choice(
         &mut config.providers.default_embedding_provider_id,
+        &mut config.providers.default_embedding_model_id,
         &provider_id,
+        default_embedding_model,
         update.make_default_embedding,
     );
     apply_provider_default_choice(
         &mut config.providers.default_reranker_provider_id,
+        &mut config.providers.default_reranker_model_id,
         &provider_id,
+        default_reranker_model,
         update.make_default_reranker,
     );
     apply_provider_default_choice(
         &mut config.providers.default_search_provider_id,
+        &mut config.providers.default_search_model_id,
         &provider_id,
+        default_search_model,
         update.make_default_search,
     );
-    config.validate().map_err(error_to_string)
+    Ok(())
+}
+
+fn apply_provider_default_model_routes(
+    config: &mut ProjectConfig,
+    routes: ProviderDefaultModelRoutes,
+) -> CommandResult<()> {
+    fn apply(
+        provider_id: &mut Option<String>,
+        model_id: &mut Option<String>,
+        target: Option<ModelAliasTarget>,
+    ) {
+        if let Some(target) = target {
+            *provider_id = Some(target.provider_id);
+            *model_id = Some(target.model_id);
+        } else {
+            *provider_id = None;
+            *model_id = None;
+        }
+    }
+
+    apply(
+        &mut config.providers.default_llm_provider_id,
+        &mut config.providers.default_llm_model_id,
+        routes.llm,
+    );
+    apply(
+        &mut config.providers.default_embedding_provider_id,
+        &mut config.providers.default_embedding_model_id,
+        routes.embedding,
+    );
+    apply(
+        &mut config.providers.default_reranker_provider_id,
+        &mut config.providers.default_reranker_model_id,
+        routes.reranker,
+    );
+    apply(
+        &mut config.providers.default_search_provider_id,
+        &mut config.providers.default_search_model_id,
+        routes.search,
+    );
+    Ok(())
 }
 
 fn apply_provider_default_choice(
     configured: &mut Option<String>,
+    configured_model: &mut Option<String>,
     provider_id: &str,
+    model_id: Option<String>,
     selected: bool,
 ) {
     if selected {
         *configured = Some(provider_id.to_owned());
+        *configured_model = model_id;
     } else if configured.as_deref() == Some(provider_id) {
         *configured = None;
+        *configured_model = None;
     }
 }
 
+fn first_model_id(provider: &ProviderConfig, capability: ProviderCapability) -> Option<String> {
+    provider
+        .models
+        .iter()
+        .find(|model| model.capability == capability)
+        .map(|model| model.model_id.clone())
+}
+
 fn provider_config_from_update(update: &ProviderSettingsUpdate) -> CommandResult<ProviderConfig> {
+    if matches!(update.provider_type, ProviderType::Other) {
+        return Err(CommandError::validation(
+            "provider_type other is retained for legacy migration only and cannot be saved",
+        ));
+    }
     let provider_config = ProviderConfig {
         provider_id: normalize_provider(&update.provider_id)?,
         provider_type: update.provider_type.clone(),
@@ -9611,12 +10191,17 @@ pub fn recent_project_store(app_state_root: &Path) -> ProjectRegistryStore {
     ProjectRegistryStore::new(app_state_root.join(RECENT_PROJECTS_FILE))
 }
 
-fn record_current_project(
+fn record_current_project_replacing(
     app_state_root: &Path,
     current: &CurrentProjectStatus,
+    replaced_project_root: Option<&Path>,
 ) -> CommandResult<Vec<RecentProjectEntry>> {
     recent_project_store(app_state_root)
-        .record_opened(current.project_name.clone(), current.project_root.clone())
+        .record_opened_replacing(
+            current.project_name.clone(),
+            current.project_root.clone(),
+            replaced_project_root,
+        )
         .map_err(error_to_string)
 }
 
@@ -9863,19 +10448,14 @@ fn read_app_node_defaults_unlocked(
 fn write_node_preset_settings(
     project_root: &Path,
     app_state_root: &Path,
-    settings: &NodePresetSettings,
+    settings: &mut NodePresetSettings,
 ) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let configured_models = configured_models_for_presets(project_root)?;
-    for preset in &settings.presets {
+    validate_and_normalize_model_aliases(&configured_models, &mut settings.model_aliases)?;
+    for preset in &mut settings.presets {
         if preset.node_type.trim().is_empty() {
             return Err(CommandError::validation("node_type cannot be empty"));
-        }
-        if preset.model_id.trim().is_empty() {
-            return Err(CommandError::validation(format!(
-                "model_id cannot be empty for node_type {}",
-                preset.node_type
-            )));
         }
         if preset.timeout_ms == 0 {
             return Err(CommandError::validation(format!(
@@ -9884,20 +10464,21 @@ fn write_node_preset_settings(
             )));
         }
         validate_money("budget_usd", preset.budget_usd)?;
-        ensure_preset_model_is_configured(
+        normalize_model_reference(
             &configured_models,
-            &preset.provider_id,
-            &preset.model_id,
+            &settings.model_aliases,
+            &mut preset.model_alias,
+            &mut preset.provider_id,
+            &mut preset.model_id,
             &format!("preset {}", preset.node_type),
         )?;
     }
-    if settings.default_model_id.trim().is_empty() {
-        return Err(CommandError::validation("default_model_id cannot be empty"));
-    }
-    ensure_preset_model_is_configured(
+    normalize_model_reference(
         &configured_models,
-        &settings.default_provider_id,
-        &settings.default_model_id,
+        &settings.model_aliases,
+        &mut settings.default_model_alias,
+        &mut settings.default_provider_id,
+        &mut settings.default_model_id,
         "default_model_id",
     )?;
     if settings.default_timeout_ms == 0 {
@@ -9954,12 +10535,19 @@ fn configured_models_for_presets(
         .providers
         .providers
         .into_iter()
+        .filter(|provider| provider.enabled)
         .map(|provider| {
             (
                 provider.provider_id,
                 provider
                     .models
                     .into_iter()
+                    .filter(|model| {
+                        matches!(
+                            model.capability,
+                            ProviderCapability::Llm | ProviderCapability::ToolUse
+                        )
+                    })
                     .map(|model| model.model_id)
                     .collect(),
             )
@@ -9972,9 +10560,9 @@ fn ensure_preset_model_is_configured(
     provider_id: &str,
     model_id: &str,
     field: &str,
-) -> CommandResult<()> {
+) -> CommandResult<Option<String>> {
     if configured_models.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let provider_id = provider_id.trim();
     let model_id = model_id.trim();
@@ -9985,7 +10573,7 @@ fn ensure_preset_model_is_configured(
             ))
         })?;
         if models.contains(model_id) {
-            return Ok(());
+            return Ok(Some(provider_id.to_owned()));
         }
         return Err(CommandError::validation(format!(
             "{field} references a model that is not configured for Provider {provider_id}: {model_id}"
@@ -9998,7 +10586,7 @@ fn ensure_preset_model_is_configured(
         .map(|(provider, _)| provider.as_str())
         .collect::<Vec<_>>();
     if matches.len() == 1 {
-        return Ok(());
+        return Ok(Some(matches[0].to_owned()));
     }
     if matches.len() > 1 {
         return Err(CommandError::validation(format!(
@@ -10008,6 +10596,162 @@ fn ensure_preset_model_is_configured(
     Err(CommandError::validation(format!(
         "{field} references a model that is not configured in model settings: {model_id}"
     )))
+}
+
+const FIXED_MODEL_ALIAS_IDS: [&str; 3] = ["planning", "writing", "review"];
+
+fn is_fixed_model_alias(alias: &str) -> bool {
+    FIXED_MODEL_ALIAS_IDS.contains(&alias)
+}
+
+fn validate_model_alias_map_shape(
+    model_aliases: &BTreeMap<String, ModelAliasTarget>,
+) -> CommandResult<()> {
+    for (alias, target) in model_aliases {
+        if !is_fixed_model_alias(alias) {
+            return Err(CommandError::validation(format!(
+                "unsupported model alias: {alias}"
+            )));
+        }
+        if alias.trim() != alias
+            || target.provider_id.trim().is_empty()
+            || target.model_id.trim().is_empty()
+        {
+            return Err(CommandError::validation(format!(
+                "model alias {alias} must reference a provider and model"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_model_reference_shape(
+    model_alias: Option<&str>,
+    provider_id: &str,
+    model_id: &str,
+    field: &str,
+) -> CommandResult<()> {
+    match model_alias {
+        Some(alias) if alias.trim().is_empty() || !is_fixed_model_alias(alias) => Err(
+            CommandError::validation(format!("{field} references an unsupported model alias")),
+        ),
+        Some(_) if !provider_id.trim().is_empty() || !model_id.trim().is_empty() => {
+            Err(CommandError::validation(format!(
+                "{field} cannot reference a model alias and a concrete model at the same time"
+            )))
+        }
+        Some(_) => Ok(()),
+        None if model_id.trim().is_empty() => Err(CommandError::validation(format!(
+            "{field} model id cannot be empty"
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn validate_alias_reference(
+    model_aliases: &BTreeMap<String, ModelAliasTarget>,
+    model_alias: Option<&str>,
+    field: &str,
+) -> CommandResult<()> {
+    if let Some(alias) = model_alias {
+        if !model_aliases.contains_key(alias) {
+            return Err(CommandError::validation(format!(
+                "{field} references an unconfigured model alias: {alias}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_and_normalize_model_aliases(
+    configured_models: &BTreeMap<String, HashSet<String>>,
+    model_aliases: &mut BTreeMap<String, ModelAliasTarget>,
+) -> CommandResult<()> {
+    validate_model_alias_map_shape(model_aliases)?;
+    if !model_aliases.is_empty() && configured_models.is_empty() {
+        return Err(CommandError::validation(
+            "model aliases require at least one enabled LLM-capable provider model",
+        ));
+    }
+    for (alias, target) in model_aliases {
+        let provider_id = target.provider_id.trim().to_owned();
+        let model_id = target.model_id.trim().to_owned();
+        let configured_provider = ensure_preset_model_is_configured(
+            configured_models,
+            &provider_id,
+            &model_id,
+            &format!("model alias {alias}"),
+        )?
+        .ok_or_else(|| {
+            CommandError::validation(format!(
+                "model alias {alias} requires an enabled LLM-capable provider model"
+            ))
+        })?;
+        target.provider_id = configured_provider;
+        target.model_id = model_id;
+    }
+    Ok(())
+}
+
+fn normalize_model_reference(
+    configured_models: &BTreeMap<String, HashSet<String>>,
+    model_aliases: &BTreeMap<String, ModelAliasTarget>,
+    model_alias: &mut Option<String>,
+    provider_id: &mut String,
+    model_id: &mut String,
+    field: &str,
+) -> CommandResult<()> {
+    if let Some(alias) = model_alias.as_deref() {
+        validate_model_reference_shape(Some(alias), provider_id, model_id, field)?;
+        validate_alias_reference(model_aliases, Some(alias), field)?;
+        *model_alias = Some(alias.trim().to_owned());
+        provider_id.clear();
+        model_id.clear();
+        return Ok(());
+    }
+
+    validate_model_reference_shape(None, provider_id, model_id, field)?;
+    let normalized_model_id = model_id.trim().to_owned();
+    let configured_provider = ensure_preset_model_is_configured(
+        configured_models,
+        provider_id,
+        &normalized_model_id,
+        field,
+    )?;
+    if provider_id.trim().is_empty() {
+        if let Some(provider) = configured_provider {
+            *provider_id = provider;
+        }
+    } else {
+        *provider_id = provider_id.trim().to_owned();
+    }
+    *model_id = normalized_model_id;
+    Ok(())
+}
+
+fn resolve_model_reference<'a>(
+    model_aliases: &'a BTreeMap<String, ModelAliasTarget>,
+    model_alias: Option<&str>,
+    provider_id: &'a str,
+    model_id: &'a str,
+    field: &str,
+) -> CommandResult<(Option<&'a str>, Option<&'a str>)> {
+    validate_model_reference_shape(model_alias, provider_id, model_id, field)?;
+    if let Some(alias) = model_alias {
+        let target = model_aliases.get(alias).ok_or_else(|| {
+            CommandError::validation(format!(
+                "{field} references an unconfigured model alias: {alias}"
+            ))
+        })?;
+        return Ok((
+            Some(target.provider_id.trim()),
+            Some(target.model_id.trim()),
+        ));
+    }
+    Ok((
+        (!provider_id.trim().is_empty()).then_some(provider_id.trim()),
+        Some(model_id.trim()),
+    ))
 }
 
 fn default_node_preset_model_id() -> String {
@@ -10024,6 +10768,7 @@ fn default_node_type_presets() -> Vec<NodeTypePreset> {
         .map(|entry| NodeTypePreset {
             node_type: entry.preset_type.clone(),
             display_name_key: entry.display_name_key.clone(),
+            model_alias: None,
             provider_id: String::new(),
             model_id: default_node_preset_model_id(),
             timeout_ms: default_node_preset_timeout_ms(),
@@ -11156,7 +11901,10 @@ fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<
         .load_or_create()
         .map_err(error_to_string)?;
     let provider_config = select_llm_provider(&project_config.providers)?;
-    let model_config = select_llm_model(&provider_config)?;
+    let model_config = select_llm_model(
+        &provider_config,
+        default_llm_model_id_for(&project_config.providers, &provider_config.provider_id),
+    )?;
     if provider_config.api_key.is_some() {
         return Err(CommandError::permission(format!(
             "provider '{}' contains an untrusted project SecretRef; re-enter the credential before LLM use",
@@ -11214,11 +11962,53 @@ fn select_llm_provider(
         .ok_or_else(|| CommandError::not_found("no enabled LLM provider is configured"))
 }
 
-fn select_llm_model(provider: &ProviderConfig) -> CommandResult<ModelConfig> {
-    provider
-        .models
-        .iter()
-        .find(|model| model.capability == ProviderCapability::Llm)
+/// 默认模型 id 只对项目默认 LLM Provider 生效。
+///
+/// 节点显式指定了别的 Provider 时，若仍把默认 Provider 的 model_id 传进
+/// `select_llm_model`，会被当成该 Provider 的必选模型而直接报 not_found，
+/// 失去「回退到该 Provider 首个 LLM 模型」的语义。
+fn default_llm_model_id_for<'a>(
+    providers: &'a crate::config::ProvidersConfig,
+    provider_id: &str,
+) -> Option<&'a str> {
+    providers
+        .default_llm_provider_id
+        .as_deref()
+        .filter(|default_provider| *default_provider == provider_id)
+        .and_then(|_| providers.default_llm_model_id.as_deref())
+}
+
+fn select_llm_model(
+    provider: &ProviderConfig,
+    configured_model_id: Option<&str>,
+) -> CommandResult<ModelConfig> {
+    let configured = configured_model_id
+        .map(|model_id| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.model_id == model_id)
+                .filter(|model| {
+                    matches!(
+                        model.capability,
+                        ProviderCapability::Llm | ProviderCapability::ToolUse
+                    )
+                })
+                .ok_or_else(|| {
+                    CommandError::not_found(format!(
+                        "default LLM model is missing or not LLM-capable: {}/{}",
+                        provider.provider_id, model_id
+                    ))
+                })
+        })
+        .transpose()?;
+    configured
+        .or_else(|| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.capability == ProviderCapability::Llm)
+        })
         .or_else(|| {
             provider
                 .models
@@ -12420,6 +13210,7 @@ mod permission_and_preset_resolution_tests {
         let preset = NodeTypePreset {
             node_type: "writer".to_owned(),
             display_name_key: "agent.writer".to_owned(),
+            model_alias: None,
             provider_id: "preset-provider".to_owned(),
             model_id: "preset-model".to_owned(),
             timeout_ms: 456_000,
@@ -12463,6 +13254,113 @@ mod permission_and_preset_resolution_tests {
         assert_eq!(explicit.config["model_id"], "node-model");
         assert_eq!(explicit.config["timeout_ms"], 12_000);
         assert_eq!(explicit.config["budget_usd"], 0.2);
+    }
+
+    #[test]
+    fn model_alias_routes_are_resolved_at_plan_compile_and_then_frozen() {
+        let project = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(project.path()).unwrap();
+        let provider = |provider_id: &str, model_id: &str| ProviderConfig {
+            provider_id: provider_id.to_owned(),
+            provider_type: ProviderType::Local,
+            display_name: provider_id.to_owned(),
+            enabled: true,
+            base_url: Some("http://127.0.0.1:9".to_owned()),
+            api_key: None,
+            models: vec![ModelConfig {
+                model_id: model_id.to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+        };
+        let mut project_config = ProjectConfig::default();
+        project_config.providers.providers = vec![
+            provider("planning-v1", "plan-model-v1"),
+            provider("planning-v2", "plan-model-v2"),
+        ];
+        project_config.providers.default_llm_provider_id = Some("planning-v1".to_owned());
+        let workflow = WorkflowDefinition {
+            id: WorkflowId::from("alias-route"),
+            name: "Alias route".to_owned(),
+            nodes: vec![NodeInstance {
+                id: NodeId::from("ask"),
+                type_name: "llm".to_owned(),
+                label: None,
+                config: json!({"prompt_template":"plan"}),
+                position: None,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        };
+        let mut presets = NodePresetSettings {
+            presets: Vec::new(),
+            default_model_alias: Some("planning".to_owned()),
+            default_provider_id: String::new(),
+            default_model_id: String::new(),
+            ..NodePresetSettings::default()
+        };
+        presets.model_aliases.insert(
+            "planning".to_owned(),
+            ModelAliasTarget {
+                provider_id: "planning-v1".to_owned(),
+                model_id: "plan-model-v1".to_owned(),
+            },
+        );
+        let secrets = crate::config::MemorySecretStore::default();
+
+        let first = compile_workflow_llm_execution_plan(
+            project.path(),
+            &secrets,
+            &workflow,
+            &project_config,
+            &presets,
+        )
+        .unwrap();
+        assert_eq!(first.node_routes["ask"].provider_id, "planning-v1");
+        assert_eq!(first.node_routes["ask"].model_id, "plan-model-v1");
+
+        presets.model_aliases.insert(
+            "planning".to_owned(),
+            ModelAliasTarget {
+                provider_id: "planning-v2".to_owned(),
+                model_id: "plan-model-v2".to_owned(),
+            },
+        );
+        let second = compile_workflow_llm_execution_plan(
+            project.path(),
+            &secrets,
+            &workflow,
+            &project_config,
+            &presets,
+        )
+        .unwrap();
+        assert_eq!(second.node_routes["ask"].provider_id, "planning-v2");
+        assert_eq!(second.node_routes["ask"].model_id, "plan-model-v2");
+        assert_eq!(first.node_routes["ask"].provider_id, "planning-v1");
+
+        let explicit_workflow = WorkflowDefinition {
+            nodes: vec![NodeInstance {
+                config: json!({
+                    "provider_id":"planning-v1",
+                    "model_id":"plan-model-v1",
+                    "prompt_template":"explicit"
+                }),
+                ..workflow.nodes[0].clone()
+            }],
+            ..workflow
+        };
+        let explicit = compile_workflow_llm_execution_plan(
+            project.path(),
+            &secrets,
+            &explicit_workflow,
+            &project_config,
+            &presets,
+        )
+        .unwrap();
+        assert_eq!(explicit.node_routes["ask"].provider_id, "planning-v1");
+        assert_eq!(explicit.node_routes["ask"].model_id, "plan-model-v1");
     }
 
     #[test]
@@ -12770,7 +13668,8 @@ mod permission_and_preset_resolution_tests {
         crate::frontend::initialize_project(temp.path()).unwrap();
         let baseline = ConfigStore::new(temp.path()).load().unwrap();
 
-        for capability in [ProviderCapability::Streaming, ProviderCapability::ToolUse] {
+        // Streaming 没有任何路由消费点，也不在设置页能力下拉中，继续按纯特性标记拒绝。
+        for capability in [ProviderCapability::Streaming] {
             let error = save_provider_settings_impl(
                 temp.path(),
                 ProviderSettingsUpdate {
@@ -12795,6 +13694,118 @@ mod permission_and_preset_resolution_tests {
             .expect_err("feature flags must not be persisted as singular model roles");
             assert!(error.diagnostic_text().contains("executable provider role"));
             assert_eq!(ConfigStore::new(temp.path()).load().unwrap(), baseline);
+        }
+    }
+
+    /// U107：`tool_use` 是设置页正式开放的能力选项，保存边界必须接受，
+    /// 且保存后要能真正充当 LLM 默认路由被运行时解析。
+    #[test]
+    fn provider_updates_accept_tool_use_capability_as_llm_route() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(temp.path()).unwrap();
+
+        save_provider_settings_impl(
+            temp.path(),
+            ProviderSettingsUpdate {
+                provider_id: "tool-use-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Tool Use Provider".to_owned(),
+                enabled: true,
+                base_url: Some("https://example.invalid/v1".to_owned()),
+                models: vec![ModelConfig {
+                    model_id: "tool-use-model".to_owned(),
+                    capability: ProviderCapability::ToolUse,
+                    max_context_tokens: None,
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                }],
+                make_default_llm: true,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+        )
+        .expect("tool_use is an executable LLM role and must persist");
+
+        let config = ConfigStore::new(temp.path()).load().unwrap();
+        let provider = config
+            .providers
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "tool_use_provider")
+            .expect("saved provider must be readable back");
+        assert_eq!(provider.models[0].capability, ProviderCapability::ToolUse);
+        assert_eq!(
+            config.providers.default_llm_provider_id.as_deref(),
+            Some("tool_use_provider")
+        );
+        // tool_use 独占的 Provider 也必须钉住真实默认模型，不能留空路由。
+        assert_eq!(
+            config.providers.default_llm_model_id.as_deref(),
+            Some("tool-use-model")
+        );
+        // 默认路由校验与运行时模型解析都必须把 ToolUse 当作合法 LLM 模型。
+        config
+            .providers
+            .validate()
+            .expect("tool_use model must satisfy the default LLM route contract");
+        let model = select_llm_model(provider, config.providers.default_llm_model_id.as_deref())
+            .expect("runtime must resolve a tool_use model for LLM calls");
+        assert_eq!(model.model_id, "tool-use-model");
+
+        // 存量 tool_use 模型不得锁死该 Provider 的后续任何编辑（U107 衍生后果）。
+        save_provider_settings_impl(
+            temp.path(),
+            ProviderSettingsUpdate {
+                provider_id: "tool-use-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Tool Use Provider Renamed".to_owned(),
+                enabled: true,
+                base_url: Some("https://example.invalid/v1".to_owned()),
+                models: provider.models.clone(),
+                make_default_llm: false,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+        )
+        .expect("existing tool_use models must not lock the provider out of later edits");
+    }
+
+    /// U107：保存边界接受的能力集合必须与设置页下拉选项集合逐项一致，
+    /// 防止任一侧新增/删除选项后再次出现「可选但存不下」的漂移。
+    #[test]
+    fn provider_model_role_acceptance_matches_settings_capability_options() {
+        // 与 SettingsPageViewModel.ProviderCapabilityOptions 的 5 个值一一对应。
+        let dropdown = [
+            ProviderCapability::Llm,
+            ProviderCapability::ToolUse,
+            ProviderCapability::Embedding,
+            ProviderCapability::Reranker,
+            ProviderCapability::Search,
+        ];
+        let all = [
+            ProviderCapability::Llm,
+            ProviderCapability::ToolUse,
+            ProviderCapability::Embedding,
+            ProviderCapability::Reranker,
+            ProviderCapability::Search,
+            ProviderCapability::Streaming,
+        ];
+        for capability in all {
+            let model = ModelConfig {
+                model_id: "probe".to_owned(),
+                capability: capability.clone(),
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            };
+            let accepted = model.validate_provider_model_role().is_ok();
+            let offered = dropdown.contains(&capability);
+            assert_eq!(
+                accepted, offered,
+                "capability {capability:?} acceptance ({accepted}) must match settings dropdown membership ({offered})"
+            );
         }
     }
 }

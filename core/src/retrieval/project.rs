@@ -5,8 +5,9 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::config::{
-    AppRuntimeSettingsStore, ConfigStore, ProjectConfig, ProjectCredentialScope, ProviderConfig,
-    SecretStore, VectorStoreBackend, VectorStoreConfig,
+    external_qdrant_endpoint, AppRuntimeSettingsStore, ConfigStore, ProjectConfig,
+    ProjectCredentialScope, ProviderConfig, QdrantAuthMode, SecretStore, VectorStoreBackend,
+    VectorStoreConfig,
 };
 use crate::contracts::{
     ensure_path_under_root, CoreError, CoreResult, ExternalDispatchOutcome, ProviderCapability,
@@ -48,8 +49,12 @@ pub struct ProjectRetrievalRuntime {
     vector: Option<Arc<dyn VectorStore>>,
     embedder: Option<Arc<dyn TextEmbedder>>,
     reranker: Option<ProjectReranker>,
+    /// U109：`reranker_enabled` 为真但重排序装配失败时的原因。检索继续按无重排序运行，
+    /// 该原因由 `health_check` 上报为 degraded，不静默丢弃。
+    reranker_unavailable: Option<String>,
     knowledge_index: KnowledgeIndexSynchronizer,
     vector_signature: Option<String>,
+    qdrant_credential_generation: Option<String>,
     sidecar: Option<Arc<QdrantSidecarSupervisor>>,
     chunk_size_chars: usize,
     chunk_overlap_chars: usize,
@@ -113,11 +118,21 @@ impl ProjectRetrievalRuntime {
             };
         let ledger: Arc<dyn CostLedger> = Arc::new(SqliteCostLedger::open(&project_root)?);
         let credentials = ProjectCredentialScope::new(&project_root, secrets)?;
+        let qdrant_credential_generation = if config.rag.vector_store.enabled
+            && config.rag.vector_store.backend == VectorStoreBackend::ExternalQdrant
+            && config.rag.vector_store.sidecar.auth_mode == QdrantAuthMode::ApiKey
+        {
+            let endpoint = external_qdrant_endpoint(&config.rag.vector_store.sidecar)?;
+            Some(credentials.external_qdrant_secret_generation(&endpoint)?)
+        } else {
+            None
+        };
 
         let embedder = if config.rag.vector_store.enabled {
             let (provider_config, model_id) = select_capability_provider(
                 &config.providers,
                 config.providers.default_embedding_provider_id.as_deref(),
+                config.providers.default_embedding_model_id.as_deref(),
                 ProviderCapability::Embedding,
                 "embedding",
             )?;
@@ -134,36 +149,33 @@ impl ProjectRetrievalRuntime {
             None
         };
 
+        // U109：重排序只是检索结果的质量叠加层，不是检索能力本身。它的装配失败
+        // 必须降级为「重排序不可用」，绝不能通过 `?` 把整个组合根（含全文与向量）
+        // 一起击穿——否则一个质量开关会让全部检索停摆，且错误与「重排序」毫无表面关联。
+        // 降级原因记入运行时状态，由 health_check 显式上报，不做静默吞掉。
+        let mut reranker_unavailable = None;
         let reranker = if config.rag.reranker_enabled {
-            let (provider_config, model_id) = select_capability_provider(
-                &config.providers,
-                config.providers.default_reranker_provider_id.as_deref(),
-                ProviderCapability::Reranker,
-                "reranker",
-            )?;
-            let api_key = resolve_provider_secret(&credentials, &provider_config, false)?;
-            let provider: Arc<dyn RerankerProvider> =
-                Arc::new(HttpRerankerProvider::new(provider_config, api_key)?);
-            let provider_id = provider.definition().provider_id;
-            Some(ProjectReranker {
-                provider,
-                ledger: Arc::clone(&ledger),
-                provider_id,
-                model_id,
-            })
+            match Self::build_reranker(&config, &credentials, &ledger) {
+                Ok(reranker) => Some(reranker),
+                Err(error) => {
+                    reranker_unavailable = Some(error.to_string());
+                    None
+                }
+            }
         } else {
             None
         };
 
-        let (vector, sidecar) = if reusable
-            .is_some_and(|runtime| runtime.config.rag.vector_store == config.rag.vector_store)
-        {
+        let (vector, sidecar) = if reusable.is_some_and(|runtime| {
+            runtime.config.rag.vector_store == config.rag.vector_store
+                && runtime.qdrant_credential_generation == qdrant_credential_generation
+        }) {
             let runtime = reusable.expect("reusable runtime checked above");
             (runtime.vector.clone(), runtime.sidecar.clone())
         } else if config.rag.vector_store.enabled {
             let mut sidecar = None;
             let vector_config = &config.rag.vector_store;
-            let endpoint = match vector_config.backend {
+            let (endpoint, qdrant_api_key) = match vector_config.backend {
                 VectorStoreBackend::QdrantSidecar => {
                     let data_dir = resolve_project_path(
                         &project_root,
@@ -197,18 +209,30 @@ impl ProjectRetrievalRuntime {
                         CoreError::validation("running qdrant sidecar did not expose an endpoint")
                     })?;
                     sidecar = Some(supervisor);
-                    endpoint
+                    (endpoint, None)
                 }
-                VectorStoreBackend::ExternalQdrant => format!(
-                    "http://{}:{}",
-                    vector_config.sidecar.host.trim(),
-                    vector_config.sidecar.port
-                ),
+                VectorStoreBackend::ExternalQdrant => {
+                    let endpoint = external_qdrant_endpoint(&vector_config.sidecar)?;
+                    let api_key = match vector_config.sidecar.auth_mode {
+                        QdrantAuthMode::None => None,
+                        QdrantAuthMode::ApiKey => Some(
+                            credentials
+                                .get_external_qdrant_secret(&endpoint)?
+                                .ok_or_else(|| {
+                                    CoreError::validation(
+                                        "external qdrant API key is not configured for this endpoint",
+                                    )
+                                })?,
+                        ),
+                    };
+                    (endpoint, api_key)
+                }
             };
-            let store = QdrantVectorStore::new(
+            let store = QdrantVectorStore::new_with_api_key(
                 endpoint,
                 vector_config.collection.clone(),
                 vector_config.vector_dimensions as usize,
+                qdrant_api_key.as_ref().map(|value| value.expose_secret()),
             )?
             .with_rebuild_marker(
                 project_root
@@ -257,16 +281,48 @@ impl ProjectRetrievalRuntime {
             vector,
             embedder,
             reranker,
+            reranker_unavailable,
             knowledge_index,
             vector_signature,
+            qdrant_credential_generation,
             sidecar,
             chunk_size_chars,
             chunk_overlap_chars,
         })
     }
 
+    /// U109：把重排序装配单独收成一个可失败的构造，让调用方能选择降级而不是击穿。
+    fn build_reranker(
+        config: &ProjectConfig,
+        credentials: &ProjectCredentialScope<'_>,
+        ledger: &Arc<dyn CostLedger>,
+    ) -> CoreResult<ProjectReranker> {
+        let (provider_config, model_id) = select_capability_provider(
+            &config.providers,
+            config.providers.default_reranker_provider_id.as_deref(),
+            config.providers.default_reranker_model_id.as_deref(),
+            ProviderCapability::Reranker,
+            "reranker",
+        )?;
+        let api_key = resolve_provider_secret(credentials, &provider_config, false)?;
+        let provider: Arc<dyn RerankerProvider> =
+            Arc::new(HttpRerankerProvider::new(provider_config, api_key)?);
+        let provider_id = provider.definition().provider_id;
+        Ok(ProjectReranker {
+            provider,
+            ledger: Arc::clone(ledger),
+            provider_id,
+            model_id,
+        })
+    }
+
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    /// U109：重排序已启用但当前不可用时的原因；检索本身仍然可用。
+    pub fn reranker_unavailable_reason(&self) -> Option<&str> {
+        self.reranker_unavailable.as_deref()
     }
 
     pub fn vector_enabled(&self) -> bool {
@@ -518,6 +574,14 @@ impl ProjectRetrievalRuntime {
                 &reranker.provider_id,
                 reranker.provider.health_check()?,
             ));
+        } else if self.reranker_unavailable.is_some() {
+            // U109：开关开着但装配失败——必须显式暴露为降级项，不能表现为「没配重排序」。
+            // reason 保持纯 display_name key（前端 DiagnosticReasonLabel 只本地化 `diagnostics.` 前缀键），
+            // 具体失败原因由 `reranker_unavailable_reason()` 提供给诊断详情。
+            health.push(StoreHealth::degraded(
+                "reranker_provider",
+                "diagnostics.retrieval.reranker.unavailable",
+            ));
         }
         health.push(
             self.knowledge_index
@@ -541,6 +605,7 @@ impl ProjectRetrievalRuntime {
 fn select_capability_provider(
     providers: &crate::config::ProvidersConfig,
     default_provider_id: Option<&str>,
+    default_model_id: Option<&str>,
     capability: ProviderCapability,
     label: &str,
 ) -> CoreResult<(ProviderConfig, String)> {
@@ -566,10 +631,20 @@ fn select_capability_provider(
             provider.provider_id
         )));
     }
-    let model_id = provider
-        .models
-        .iter()
-        .find(|model| model.capability == capability)
+    let model_id = default_model_id
+        .map(|model_id| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.model_id == model_id && model.capability == capability)
+                .ok_or_else(|| {
+                    CoreError::validation(format!(
+                        "default {label} model is missing or has the wrong capability: {provider_id}/{model_id}"
+                    ))
+                })
+        })
+        .transpose()?
+        .or_else(|| provider.models.iter().find(|model| model.capability == capability))
         .map(|model| model.model_id.clone())
         .ok_or_else(|| {
             CoreError::validation(format!(

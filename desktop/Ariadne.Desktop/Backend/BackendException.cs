@@ -20,13 +20,42 @@ public sealed class BackendException : Exception
     /// Optional engineer/diagnostic detail (paths, provider text). Not author primary copy.
     public string? Diagnostic { get; }
 
-    public static BackendException FromIpcPayload(string? errorCode, string? errorMessage, string? errorKey = null)
+    public IReadOnlyDictionary<string, string> Parameters { get; init; } =
+        new Dictionary<string, string>(StringComparer.Ordinal);
+
+    public string? Field { get; init; }
+
+    public string? Section { get; init; }
+
+    public string? RecoveryAction { get; init; }
+
+    public string? CorrelationId { get; init; }
+
+    public static BackendException FromIpcPayload(
+        string? errorCode,
+        string? errorMessage,
+        string? errorKey = null,
+        IReadOnlyDictionary<string, string>? errorParams = null,
+        string? errorField = null,
+        string? errorSection = null,
+        string? recoveryAction = null,
+        string? correlationId = null)
     {
         var diagnostic = string.IsNullOrWhiteSpace(errorMessage) ? null : errorMessage.Trim();
         // U1: product path consumes server error_code only. Legacy missing code → unknown
         // (legacy free-form classification lives solely in core IPC adapter, not here).
         var code = string.IsNullOrWhiteSpace(errorCode) ? "unknown" : errorCode.Trim();
-        var ex = new BackendException(code, diagnostic) { MessageKey = string.IsNullOrWhiteSpace(errorKey) ? null : errorKey.Trim() };
+        var ex = new BackendException(code, diagnostic)
+        {
+            MessageKey = string.IsNullOrWhiteSpace(errorKey) ? null : errorKey.Trim(),
+            Parameters = errorParams is null
+                ? new Dictionary<string, string>(StringComparer.Ordinal)
+                : errorParams.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal),
+            Field = string.IsNullOrWhiteSpace(errorField) ? null : errorField.Trim(),
+            Section = string.IsNullOrWhiteSpace(errorSection) ? null : errorSection.Trim(),
+            RecoveryAction = string.IsNullOrWhiteSpace(recoveryAction) ? null : recoveryAction.Trim(),
+            CorrelationId = string.IsNullOrWhiteSpace(correlationId) ? null : correlationId.Trim(),
+        };
         return ex;
     }
 

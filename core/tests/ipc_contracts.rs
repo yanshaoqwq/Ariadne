@@ -8,7 +8,8 @@ use ariadne::commands::{
     WorkflowGraphData,
 };
 use ariadne::config::{
-    ConfigStore, MemorySecretStore, ProviderConfig, SecretRef, PROVIDERS_CONFIG_FILE,
+    ConfigStore, MemorySecretStore, ProviderConfig, QdrantAuthMode, SecretRef, VectorStoreBackend,
+    PROVIDERS_CONFIG_FILE,
 };
 use ariadne::contracts::{
     NodeId, PermissionPolicy, ProviderType, RunId, RunStatus, WorkflowEdgeKind, WorkflowId,
@@ -142,6 +143,48 @@ fn ipc_project_lifecycle_creates_enters_and_closes_a_complete_project() {
     );
     assert!(status.ok, "{:?}", status.error);
     assert_eq!(status.data.unwrap()["current_project"]["project_root"], "");
+}
+
+#[test]
+fn ipc_recent_project_forget_and_relocate_are_explicit_registry_operations() {
+    let app_state = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(first.path()).unwrap();
+    ariadne::frontend::initialize_project(second.path()).unwrap();
+    let state = AriadneAppState::new("", app_state.path(), Arc::new(MemorySecretStore::default()));
+
+    let opened = handle_request(
+        &state,
+        IpcRequest {
+            method: "open_project".to_owned(),
+            params: json!({ "project_root": first.path() }),
+        },
+    );
+    assert!(opened.ok, "{:?}", opened.error);
+    let first_root = first.path().canonicalize().unwrap();
+
+    let relocated = handle_request(
+        &state,
+        IpcRequest {
+            method: "relocate_recent_project".to_owned(),
+            params: json!({
+                "previous_project_root": first_root,
+                "project_root": second.path(),
+            }),
+        },
+    );
+    assert!(relocated.ok, "{:?}", relocated.error);
+
+    let forgotten = handle_request(
+        &state,
+        IpcRequest {
+            method: "forget_recent_project".to_owned(),
+            params: json!({ "project_root": second.path().canonicalize().unwrap() }),
+        },
+    );
+    assert!(forgotten.ok, "{:?}", forgotten.error);
+    assert!(forgotten.data.unwrap().as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -1238,6 +1281,50 @@ fn ipc_error_response_includes_stable_error_code() {
         response.error.as_ref().is_some_and(|e| !e.is_empty()),
         "diagnostic error string still present for tools"
     );
+}
+
+#[test]
+fn ipc_settings_error_preserves_field_recovery_and_correlation_context() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let mut config = ConfigStore::new(project.path()).load_or_create().unwrap();
+    config.rag.vector_store.backend = VectorStoreBackend::ExternalQdrant;
+    config.rag.vector_store.sidecar.host = "qdrant.example".to_owned();
+    config.rag.vector_store.sidecar.auth_mode = QdrantAuthMode::ApiKey;
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "save_rag_settings".to_owned(),
+            params: json!({
+                "settings": {
+                    "rag": config.rag,
+                    "qdrant_api_key": null,
+                    "clear_qdrant_api_key": false,
+                    "has_qdrant_api_key": false
+                }
+            }),
+        },
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error_code.as_deref(), Some("validation"));
+    assert_eq!(response.error_field.as_deref(), Some("qdrant_api_key"));
+    assert_eq!(response.error_section.as_deref(), Some("retrieval"));
+    assert_eq!(
+        response.recovery_action.as_deref(),
+        Some("replace_credential")
+    );
+    assert!(response
+        .correlation_id
+        .as_deref()
+        .is_some_and(|value| value.starts_with("err-")));
 }
 
 #[test]

@@ -18,7 +18,7 @@
     </Style>
   </UserControl.Styles>
   <!-- 作品页：中阅读/修改器 + 右栏（顶部标签切换 导航树/项目 AI，可收起）。无左栏。 -->
-  <Grid Background="{DynamicResource Ariadne.BackgroundMain}">
+  <Grid Background="Transparent">
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="*" />
       <ColumnDefinition Width="{Binding RightPanelSplitterWidth}" />
@@ -29,15 +29,20 @@
     <Panel Grid.Column="0">
       <DockPanel>
       <!-- 顶部工具条 -->
-      <Border DockPanel.Dock="Top" Background="{DynamicResource Ariadne.BackgroundSurface}" BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,0,0,1" Padding="16,8">
-        <Grid ColumnDefinitions="*,Auto">
-          <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-            <TextBlock Text="{Binding CurrentDocumentText}" Classes="body secondary" VerticalAlignment="Center" />
+      <Border DockPanel.Dock="Top" Classes="page-header" Padding="18,10" MinHeight="58">
+        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+          <Border Grid.Column="0" Classes="page-header-mark" MinHeight="30" />
+          <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+            <TextBlock Text="{Binding CurrentDocumentText}" Classes="subtitle" VerticalAlignment="Center" />
             <TextBlock Text="{Binding DocumentSaveStateText}" Classes="caption" IsVisible="{Binding HasCurrentDocument}" VerticalAlignment="Center" />
           </StackPanel>
-          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
-            <Button Classes="subtle" ctl:SelectedClass.IsSelected="{Binding !IsEditMode}" Padding="10,5" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
-            <Button Classes="subtle" ctl:SelectedClass.IsSelected="{Binding IsEditMode}" Padding="10,5" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
+          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
+            <Border Classes="segmented-control">
+              <StackPanel Orientation="Horizontal" Spacing="2">
+                <Button Classes="segment-button" ctl:SelectedClass.IsSelected="{Binding !IsEditMode}" Content="{Binding ReadModeText}" Command="{Binding ReadModeCommand}" />
+                <Button Classes="segment-button" ctl:SelectedClass.IsSelected="{Binding IsEditMode}" Content="{Binding EditModeText}" Command="{Binding EditModeCommand}" />
+              </StackPanel>
+            </Border>
             <ComboBox ItemsSource="{Binding ExportFormats}"
                       SelectedValue="{Binding ExportFormat, Mode=TwoWay}"
                       SelectedValueBinding="{Binding Value}"
@@ -129,50 +134,62 @@
             </StackPanel>
           </Border>
 
-          <Border Grid.Row="0"
-                  Classes="document-header"
-                  Padding="28,18"
-                  IsVisible="{Binding ShowDocumentChrome}">
-            <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto" RowSpacing="8" ColumnSpacing="18">
-              <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding DocumentTitle}" Classes="title" TextWrapping="Wrap" />
-              <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CharacterCountText}" Classes="caption" VerticalAlignment="Center" />
-              <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Text="{Binding DocumentInfoText}" Classes="caption" TextWrapping="Wrap" />
-              <TextBlock Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Text="{Binding StatusText}" Classes="caption" TextWrapping="Wrap" />
-            </Grid>
-          </Border>
-
-          <Border Grid.Row="1"
+          <!-- 一张稿纸：原先「标题卡 + 正文卡」是两张分离的圆角卡（且标题与顶栏
+               CurrentDocumentText 重复渲染）。现在合成单张纸——刊头在纸上方，
+               一道发丝横线分隔，正文衬线排版，纸缘一层柔投影。像真正的书页。 -->
+          <Border Grid.Row="0" Grid.RowSpan="2"
                   Classes="document-surface"
-                  Padding="64,52"
+                  Padding="72,56,72,52"
                   IsVisible="{Binding ShowDocumentChrome}">
-            <Grid RowDefinitions="*,Auto" RowSpacing="24" MinHeight="640">
-              <TextBlock Grid.Row="0"
+            <Grid RowDefinitions="Auto,*,Auto" RowSpacing="0" MinHeight="640">
+              <!-- 刊头：章节名 + 元信息，底部发丝线收口 -->
+              <StackPanel Grid.Row="0" Spacing="7" Margin="0,0,0,34">
+                <TextBlock Text="{Binding DocumentTitle}"
+                           Classes="reading"
+                           FontSize="27"
+                           LineHeight="38"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource Ariadne.TextHeading}" />
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
+                  <TextBlock Grid.Column="0" Text="{Binding DocumentInfoText}" Classes="caption" TextWrapping="Wrap" />
+                  <TextBlock Grid.Column="1" Text="{Binding CharacterCountText}" Classes="caption" VerticalAlignment="Center" />
+                </Grid>
+                <TextBlock Text="{Binding StatusText}" Classes="subtle" TextWrapping="Wrap" />
+                <!-- 刊头分隔：中间实、两端淡出的渐变细线，比一条硬直线雅致 -->
+                <Border Height="1" Margin="0,9,0,0">
+                  <Border.Background>
+                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                      <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+                      <GradientStop Offset="0.14" Color="{DynamicResource Ariadne.Color.BorderDefault}" />
+                      <GradientStop Offset="1" Color="Transparent" />
+                    </LinearGradientBrush>
+                  </Border.Background>
+                </Border>
+              </StackPanel>
+              <TextBlock Grid.Row="1"
                          Text="{Binding DocumentBodyText}"
                          Classes="reading"
                          IsVisible="{Binding ShowReadModeEmptyDocument}"
                          HorizontalAlignment="Center"
                          VerticalAlignment="Center" />
-              <ListBox Grid.Row="0"
-                       ItemsSource="{Binding DocumentBlocks}"
-                       IsVisible="{Binding !IsEditMode}"
-                       Background="Transparent"
-                       BorderThickness="0"
-                       SelectionMode="Single">
-                <ListBox.ItemsPanel>
+              <ItemsControl Grid.Row="1"
+                            ItemsSource="{Binding DocumentBlocks}"
+                            IsVisible="{Binding !IsEditMode}">
+                <ItemsControl.ItemsPanel>
                   <ItemsPanelTemplate>
                     <VirtualizingStackPanel />
                   </ItemsPanelTemplate>
-                </ListBox.ItemsPanel>
-                <ListBox.ItemTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
                   <DataTemplate DataType="{x:Type vm:DocumentBlockViewModel}">
                     <SelectableTextBlock Text="{Binding Text}"
                                          Classes="reading"
                                          Margin="0,0,0,18" />
                   </DataTemplate>
-                </ListBox.ItemTemplate>
-              </ListBox>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
               <ae:TextEditor x:Name="DocumentEditor"
-                             Grid.Row="0"
+                             Grid.Row="1"
                              Document="{Binding EditorDocument}"
                              IsVisible="{Binding IsEditMode}"
                              IsReadOnly="False"
@@ -190,7 +207,14 @@
                              Foreground="{DynamicResource Ariadne.TextPrimary}"
                              FontFamily="{DynamicResource Ariadne.Font.Reading}"
                              FontSize="16" />
-              <Border Grid.Row="1" Classes="soft-panel" Padding="16" IsVisible="{Binding IsEditMode}">
+              <!-- 快速编辑：去掉纸上又贴一张卡（card-in-card），
+                   改为纸面下缘的一道工作区——顶部发丝线分隔即可。 -->
+              <Border Grid.Row="2"
+                      BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                      BorderThickness="0,1,0,0"
+                      Margin="0,28,0,0"
+                      Padding="0,20,0,0"
+                      IsVisible="{Binding IsEditMode}">
                 <StackPanel Spacing="12">
                   <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
                     <TextBlock Grid.Column="0" Text="{Binding QuickEditTitle}" Classes="subtitle" VerticalAlignment="Center" />
@@ -237,25 +261,26 @@
           BorderThickness="1,0,0,0"
           IsVisible="{Binding IsRightPanelVisible}">
       <DockPanel>
-        <!-- 右上标签切换 + 收起键 -->
-        <Grid DockPanel.Dock="Top" ColumnDefinitions="*"
-              Background="{DynamicResource Ariadne.BackgroundSurface}"
-              Margin="12,8,8,0">
-          <StackPanel Grid.Column="0" Orientation="Horizontal">
-            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsNavTreeTab}"
+        <!-- 右上标签切换：原为「填色条 → 描边分段控件 → 按钮」三层套盒。
+             改为 Win11 pivot（底部下划线），与工作空间检查器同一语汇。 -->
+        <Border DockPanel.Dock="Top"
+                BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                BorderThickness="0,0,0,1"
+                Padding="10,8,10,0">
+          <Grid ColumnDefinitions="*,*" ColumnSpacing="2">
+            <Button Grid.Column="0" Classes="inspector-tab" ctl:SelectedClass.IsSelected="{Binding IsNavTreeTab}"
                     Content="{Binding NavTreeText}" Command="{Binding ShowNavTreeCommand}" />
-            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsProjectAiTab}"
+            <Button Grid.Column="1" Classes="inspector-tab" ctl:SelectedClass.IsSelected="{Binding IsProjectAiTab}"
                     Content="{Binding ProjectAiText}" Command="{Binding ShowProjectAiCommand}" />
-          </StackPanel>
-        </Grid>
-        <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
+          </Grid>
+        </Border>
 
         <!-- 标签内容区：Grid 叠层（天然 Stretch），隐藏的标签不占空间 -->
         <Grid>
           <!-- 标签内容 1：导航树（章节树 + 大纲入口）-->
           <DockPanel IsVisible="{Binding IsNavTreeTab}">
-            <Border DockPanel.Dock="Top" Padding="10,10,10,4">
-              <StackPanel Spacing="8">
+            <!-- 原为无任何视觉属性的空 Border（纯 padding 壳），改回 StackPanel + Margin -->
+            <StackPanel DockPanel.Dock="Top" Margin="10,10,10,4" Spacing="8">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                   <Button Classes="subtle" Padding="10,6" ToolTip.Tip="{Binding OutlineText}" AutomationProperties.Name="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
                     <StackPanel Orientation="Horizontal" Spacing="7">
@@ -266,7 +291,11 @@
                   </Button>
                   <Button Classes="subtle" Padding="10,6" Content="{Binding ImportText}" Command="{Binding ToggleImportPanelCommand}" />
                 </StackPanel>
-                <Border Classes="layer" Padding="12" IsVisible="{Binding IsImportPanelOpen}">
+                <!-- 导入表单：去掉描边盒，改为左缘强调脊的「展开工作区」 -->
+                <Border Classes="detail-row accent"
+                        Margin="0,4,0,2"
+                        Padding="13,3,0,3"
+                        IsVisible="{Binding IsImportPanelOpen}">
                   <StackPanel Spacing="8">
                     <TextBlock Text="{Binding ImportTitle}" Classes="subtitle" />
                     <StackPanel Spacing="4">
@@ -344,22 +373,25 @@
                     <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
                   </StackPanel>
                 </Border>
-              </StackPanel>
-            </Border>
+            </StackPanel>
             <ScrollViewer Margin="8,4">
               <StackPanel Spacing="8">
-                <!-- F19：正式总结投影。加载失败与合法空态分开，确认历史不混入正式知识。 -->
-                <Border Classes="layer" Padding="12" IsVisible="{Binding HasSummaryContext}">
-                  <StackPanel Spacing="10">
+                <!-- F19：正式总结投影。加载失败与合法空态分开，确认历史不混入正式知识。
+                     去盒：外层 layer 盒 + 内部 4 个 soft-panel 盒（共 5 层描边）
+                     统一改为标题 + 明细竖脊行，只靠留白与竖线分层。 -->
+                <StackPanel Spacing="10" Margin="2,6,2,4" IsVisible="{Binding HasSummaryContext}">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                       <TextBlock Grid.Column="0" Text="{Binding SummaryTitle}" Classes="subtitle" />
-                      <TextBlock Grid.Column="1" Text="{Binding SummaryChapterHeading}" Classes="subtle" />
+                      <TextBlock Grid.Column="1" Text="{Binding SummaryChapterHeading}" Classes="subtle" VerticalAlignment="Center" />
                     </Grid>
 
                     <TextBlock Text="{Binding SummaryLoadingText}"
                                Classes="caption"
                                IsVisible="{Binding IsSummaryLoading}" />
-                    <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasSummaryError}">
+                    <!-- 错误：竖脊转错误色（色 + 位置双通道，不只靠颜色） -->
+                    <Border Classes="detail-row"
+                            BorderBrush="{DynamicResource Ariadne.StatusError}"
+                            IsVisible="{Binding HasSummaryError}">
                       <TextBlock Text="{Binding SummaryErrorText}" Classes="caption" TextWrapping="Wrap" />
                     </Border>
                     <TextBlock Text="{Binding SummaryEmptyText}"
@@ -367,19 +399,19 @@
                                TextWrapping="Wrap"
                                IsVisible="{Binding ShowSummaryEmpty}" />
 
-                    <StackPanel Spacing="8" IsVisible="{Binding ShowSummaryContent}">
-                      <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasActiveSummarySegment}">
+                    <StackPanel Spacing="2" IsVisible="{Binding ShowSummaryContent}">
+                      <Border Classes="detail-row" IsVisible="{Binding HasActiveSummarySegment}">
                         <TextBlock Text="{Binding ActiveSummarySegmentText}" Classes="caption" TextWrapping="Wrap" />
                       </Border>
 
-                      <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasChapterSummary}">
+                      <Border Classes="detail-row accent" IsVisible="{Binding HasChapterSummary}">
                         <StackPanel Spacing="4">
                           <TextBlock Text="{Binding ChapterSummaryLabel}" Classes="caption" FontWeight="SemiBold" />
                           <TextBlock Text="{Binding ChapterSummaryText}" TextWrapping="Wrap" />
                         </StackPanel>
                       </Border>
 
-                      <Border Classes="soft-panel" Padding="10" IsVisible="{Binding HasStageSummary}">
+                      <Border Classes="detail-row accent" IsVisible="{Binding HasStageSummary}">
                         <StackPanel Spacing="4">
                           <TextBlock Text="{Binding StageSummaryLabel}" Classes="caption" FontWeight="SemiBold" />
                           <TextBlock Text="{Binding SummaryStageHeading}" Classes="subtle" />
@@ -421,7 +453,7 @@
                         <ItemsControl ItemsSource="{Binding SummaryEvents}" Margin="0,6,0,0">
                           <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type vm:WorksSummaryDetailItemViewModel}">
-                              <Border Classes="soft-panel" Padding="9" Margin="0,0,0,4">
+                              <Border Classes="detail-row">
                                 <StackPanel Spacing="3">
                                   <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                     <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
@@ -441,7 +473,7 @@
                         <ItemsControl ItemsSource="{Binding SummaryChanges}" Margin="0,6,0,0">
                           <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type vm:WorksSummaryDetailItemViewModel}">
-                              <Border Classes="soft-panel" Padding="9" Margin="0,0,0,4">
+                              <Border Classes="detail-row">
                                 <StackPanel Spacing="3">
                                   <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                     <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
@@ -461,7 +493,7 @@
                         <ItemsControl ItemsSource="{Binding SummaryForeshadowing}" Margin="0,6,0,0">
                           <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type vm:WorksSummaryDetailItemViewModel}">
-                              <Border Classes="soft-panel" Padding="9" Margin="0,0,0,4">
+                              <Border Classes="detail-row">
                                 <StackPanel Spacing="3">
                                   <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                     <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
@@ -481,7 +513,7 @@
                         <ItemsControl ItemsSource="{Binding SummaryConfirmations}" Margin="0,6,0,0">
                           <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type vm:WorksSummaryDetailItemViewModel}">
-                              <Border Classes="soft-panel" Padding="9" Margin="0,0,0,4">
+                              <Border Classes="detail-row">
                                 <StackPanel Spacing="3">
                                   <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                     <TextBlock Grid.Column="0" Text="{Binding Title}" Classes="caption" FontWeight="SemiBold" />
@@ -495,19 +527,24 @@
                         </ItemsControl>
                       </Expander>
                     </StackPanel>
-                  </StackPanel>
-                </Border>
+                </StackPanel>
 
                 <StackPanel Spacing="8" IsVisible="{Binding IsWorksTreeContent}">
-                  <Border Classes="soft-panel" Padding="8">
-                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="7">
+                  <!-- 搜索：原为 soft-panel 盒里再套一个自带边框的 TextBox（双层描边）。
+                       改用与其他页一致的一体搜索壳，图标内嵌、只有一层边。 -->
+                  <Border Classes="search-shell">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="2">
                       <Path Grid.Column="0"
                             Classes="icon"
                             Width="14"
                             Height="14"
+                            Margin="9,0,0,0"
+                            Opacity="0.55"
                             VerticalAlignment="Center"
+                            IsHitTestVisible="False"
                             Data="{StaticResource Ariadne.Icon.Search}" />
                       <TextBox Grid.Column="1"
+                               Classes="search-input"
                                Text="{Binding WorksTreeSearchText, Mode=TwoWay}"
                                PlaceholderText="{Binding WorksTreeSearchPlaceholder}"
                                AutomationProperties.Name="{Binding WorksTreeSearchName}" />

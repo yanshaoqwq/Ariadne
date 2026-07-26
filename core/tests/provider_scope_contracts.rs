@@ -4,7 +4,7 @@ use ariadne::commands::{
     get_permissions_settings, get_provider_config, save_permissions_settings, save_provider_key,
     save_provider_settings, AriadneAppState, ProviderSettingsUpdate,
 };
-use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, SecretStore};
+use ariadne::config::{ConfigStore, MemorySecretStore, ModelConfig, ProvidersConfig, SecretStore};
 use ariadne::contracts::{ProviderCapability, ProviderType};
 
 fn provider_update(
@@ -57,9 +57,19 @@ fn provider_profiles_are_global_while_authorization_defaults_and_keys_remain_pro
 
     let project_a_yaml =
         std::fs::read_to_string(project_a.path().join(".config/providers.yaml")).unwrap();
-    assert!(project_a_yaml.contains("authorized_provider_ids"));
-    assert!(!project_a_yaml.contains("Shared OpenAI"));
-    assert!(!project_a_yaml.contains("gpt-global-v1"));
+    let project_a_projection: ProvidersConfig = yaml_serde::from_str(&project_a_yaml).unwrap();
+    assert!(project_a_projection
+        .authorized_provider_ids
+        .contains(canonical_provider_id));
+    assert!(project_a_projection.providers.is_empty());
+    assert_eq!(
+        project_a_projection.default_llm_provider_id.as_deref(),
+        Some(canonical_provider_id)
+    );
+    assert_eq!(
+        project_a_projection.default_llm_model_id.as_deref(),
+        Some("gpt-global-v1")
+    );
     let catalog = std::fs::read_to_string(app_state.path().join("provider_catalog.json")).unwrap();
     assert!(catalog.contains("Shared OpenAI"));
     assert!(catalog.contains("gpt-global-v1"));
@@ -75,11 +85,15 @@ fn provider_profiles_are_global_while_authorization_defaults_and_keys_remain_pro
     assert!(!available.has_key);
     assert_eq!(before_authorization.default_llm_provider_id, None);
 
-    save_provider_settings(
-        &state,
-        provider_update("Shared OpenAI v2", "gpt-global-v2", false),
-    )
-    .unwrap();
+    let mut global_update = provider_update("Shared OpenAI v2", "gpt-global-v2", false);
+    global_update.models.push(ModelConfig {
+        model_id: "gpt-global-v1".to_owned(),
+        capability: ProviderCapability::Llm,
+        max_context_tokens: Some(32_000),
+        input_cost_per_million_tokens: None,
+        output_cost_per_million_tokens: None,
+    });
+    save_provider_settings(&state, global_update).unwrap();
     let project_b_status = get_provider_config(&state).unwrap();
     assert!(project_b_status
         .providers
@@ -101,6 +115,10 @@ fn provider_profiles_are_global_while_authorization_defaults_and_keys_remain_pro
     assert_eq!(
         project_a_status.default_llm_provider_id.as_deref(),
         Some(canonical_provider_id)
+    );
+    assert_eq!(
+        project_a_status.default_llm_model_id.as_deref(),
+        Some("gpt-global-v1")
     );
 }
 

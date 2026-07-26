@@ -7,105 +7,138 @@
     x:Name="Root"
     x:DataType="vm:WelcomeViewModel">
 
-  <!-- 欢迎页：氛围底 + 左主操作 + 右最近项目，桌面感、大留白 -->
+  <!-- 创作首页：编辑排版式骨架 + 生成式叙事轨迹，操作与最近项目仍保持高密度可扫描。 -->
   <Panel>
-    <!-- 中性底；欢迎页内容承担视觉主次，不用装饰光斑抢焦点。 -->
-    <Border Background="{DynamicResource Ariadne.WindowBase}" />
+    <Border Background="{DynamicResource Ariadne.BackgroundMain}" />
+    <ctl:StudioBackdrop Opacity="0.92" />
 
-    <ScrollViewer Grid.Row="0"
-                  HorizontalScrollBarVisibility="Disabled"
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                   VerticalScrollBarVisibility="Auto">
-    <Grid Margin="0">
-      <Grid
-          MaxWidth="1080"
-          Margin="48,40"
-          HorizontalAlignment="Center"
-          VerticalAlignment="Center"
-          ColumnDefinitions="*,36,1.15*"
-          MinHeight="420">
+      <Grid MaxWidth="1180"
+            MinHeight="540"
+            Margin="54,38"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            RowDefinitions="Auto,30,*"
+            ColumnDefinitions="1.08*,48,0.92*">
 
-        <!-- 左：品牌 + 主操作卡片 -->
-        <StackPanel Grid.Column="0" Spacing="28" VerticalAlignment="Center">
-          <!-- 品牌区：竖向层次，避免 logo 与标题挤成一行 -->
-          <StackPanel Spacing="16">
-            <!-- Logo：斜钢笔 + 波浪线；纸底 + 个性化强调色笔画 -->
-            <ctl:BrandLogo Width="64" Height="64" OnAccent="False" HorizontalAlignment="Left" />
-            <StackPanel Spacing="8">
+        <!-- 品牌首屏信号：真正的产品名，而不是说明性大标题。 -->
+        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="16" VerticalAlignment="Top">
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="18">
+            <!-- 品牌徽记：去掉「灰底描边小卡」，改成强调色渐变圆牌 +
+                 一圈极淡光环。Logo 反白落在实色上，对比度足够，
+                 也让整页有一个真正的视觉焦点（而不是一块灰补丁）。 -->
+            <Panel Grid.Column="0" Width="80" Height="80" VerticalAlignment="Center">
+              <Ellipse Width="80" Height="80" Opacity="0.16">
+                <Ellipse.Fill>
+                  <RadialGradientBrush GradientOrigin="50%,50%" Center="50%,50%" RadiusX="50%" RadiusY="50%">
+                    <GradientStop Offset="0.55" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+                    <GradientStop Offset="1" Color="Transparent" />
+                  </RadialGradientBrush>
+                </Ellipse.Fill>
+              </Ellipse>
+              <Border Width="62" Height="62" CornerRadius="18"
+                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                      BoxShadow="{DynamicResource Ariadne.Shadow.Card}">
+                <Border.Background>
+                  <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                    <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentHover}" />
+                    <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.AccentPressed}" />
+                  </LinearGradientBrush>
+                </Border.Background>
+                <ctl:BrandLogo Width="40" Height="40" OnAccent="True"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </Border>
+            </Panel>
+            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+              <!-- 强调色短横改用主题色（原硬编码橙与青绿强调色系互斥） -->
+              <Border Width="34" Height="4" CornerRadius="2"
+                      Background="{DynamicResource Ariadne.AccentPrimary}"
+                      HorizontalAlignment="Left" />
               <TextBlock Text="{Binding BrandName}"
-                         FontSize="34"
+                         FontSize="46"
                          FontWeight="SemiBold"
                          Foreground="{DynamicResource Ariadne.TextHeading}"
                          LetterSpacing="0" />
-              <TextBlock Text="{Binding Subtitle}"
-                         Classes="secondary"
-                         FontSize="15"
-                         LineHeight="24"
-                         TextWrapping="Wrap"
-                         MaxWidth="400" />
-              <Border Classes="chip" HorizontalAlignment="Left" Margin="0,4,0,0"
-                      Background="{DynamicResource Ariadne.AccentLight}"
-                      BorderBrush="{DynamicResource Ariadne.AccentBorder}">
-                <TextBlock Text="{Binding HeroTagline}"
-                           Classes="caption"
-                           Foreground="{DynamicResource Ariadne.AccentPrimary}"
-                           FontWeight="SemiBold" />
-              </Border>
             </StackPanel>
-          </StackPanel>
+          </Grid>
 
-          <!-- 主操作：双卡，图标 + 标题 + 说明 -->
-          <StackPanel Spacing="12">
-            <Button Classes="welcome-action primary-action"
-                    Command="{Binding CreateProjectCommand}"
-                    IsEnabled="{Binding CanStartProjectAction}"
-                    HorizontalAlignment="Stretch"
-                    HorizontalContentAlignment="Stretch">
-              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14" Margin="4,2">
-                <Border Grid.Column="0" Width="40" Height="40" CornerRadius="11"
-                        Background="#33FFFFFF" VerticalAlignment="Center">
-                  <Path Classes="icon" Width="18" Height="18"
-                        Stroke="{DynamicResource Ariadne.TextOnAccent}"
-                        Data="M12,5 L12,19 M5,12 L19,12" />
-                </Border>
-                <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                  <TextBlock Text="{Binding CreateProjectText}"
-                             FontWeight="SemiBold"
-                             FontSize="15"
-                             Foreground="{DynamicResource Ariadne.TextOnAccent}" />
-                  <TextBlock Text="{Binding CreateProjectHint}"
-                             FontSize="12"
-                             Opacity="0.88"
-                             TextWrapping="Wrap"
-                             Foreground="{DynamicResource Ariadne.TextOnAccent}" />
-                </StackPanel>
-              </Grid>
-            </Button>
+          <TextBlock Text="{Binding Subtitle}"
+                     Classes="secondary"
+                     FontSize="16"
+                     LineHeight="25"
+                     TextWrapping="Wrap"
+                     MaxWidth="510" />
 
-            <Button Classes="welcome-action secondary-action"
-                    Command="{Binding OpenProjectCommand}"
-                    IsEnabled="{Binding CanStartProjectAction}"
-                    HorizontalAlignment="Stretch"
-                    HorizontalContentAlignment="Stretch">
-              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14" Margin="4,2">
-                <Border Grid.Column="0" Width="40" Height="40" CornerRadius="11"
-                        Background="{DynamicResource Ariadne.AccentLight}"
-                        VerticalAlignment="Center">
-                  <Path Classes="icon" Width="18" Height="18"
-                        Stroke="{DynamicResource Ariadne.AccentPrimary}"
-                        Data="M4,6 L10,6 L12,8 L20,8 L20,18 L4,18 Z" />
-                </Border>
-                <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                  <TextBlock Text="{Binding OpenProjectText}"
-                             FontWeight="SemiBold"
-                             FontSize="15"
-                             Foreground="{DynamicResource Ariadne.TextPrimary}" />
-                  <TextBlock Text="{Binding OpenProjectHint}"
-                             Classes="caption"
-                             TextWrapping="Wrap" />
-                </StackPanel>
-              </Grid>
-            </Button>
-          </StackPanel>
+          <!-- 引言：左缘强调脊 + 极淡强调底，与全局「受光左缘」语汇一致 -->
+          <Border HorizontalAlignment="Left"
+                  Background="{DynamicResource Ariadne.AccentLight}"
+                  BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
+                  BorderThickness="3,0,0,0"
+                  CornerRadius="0,4,4,0"
+                  Padding="12,7">
+            <TextBlock Text="{Binding HeroTagline}"
+                       Classes="caption"
+                       Foreground="{DynamicResource Ariadne.TextPrimary}"
+                       FontWeight="SemiBold"
+                       TextWrapping="Wrap" />
+          </Border>
+        </StackPanel>
+
+        <!-- 左下：进入创作流的两条主路径。 -->
+        <StackPanel Grid.Row="2" Grid.Column="0" Spacing="12" VerticalAlignment="Top">
+          <Button Classes="welcome-action primary-action"
+                  Command="{Binding CreateProjectCommand}"
+                  IsEnabled="{Binding CanStartProjectAction}"
+                  HorizontalAlignment="Stretch"
+                  HorizontalContentAlignment="Stretch">
+            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14" Margin="2">
+              <Border Grid.Column="0" Width="42" Height="42" CornerRadius="8"
+                      Background="#1FFFFFFF" VerticalAlignment="Center">
+                <Path Classes="icon" Width="18" Height="18"
+                      Stroke="{StaticResource Ariadne.ShellRailText}"
+                      Data="{StaticResource Ariadne.Icon.Add}" />
+              </Border>
+              <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                <TextBlock Text="{Binding CreateProjectText}"
+                           FontWeight="SemiBold" FontSize="15"
+                           Foreground="{StaticResource Ariadne.ShellRailText}" />
+                <TextBlock Text="{Binding CreateProjectHint}"
+                           FontSize="12" Opacity="0.78" TextWrapping="Wrap"
+                           Foreground="{StaticResource Ariadne.ShellRailText}" />
+              </StackPanel>
+              <Path Grid.Column="2" Classes="icon" Width="15" Height="15"
+                    Stroke="{StaticResource Ariadne.ShellRailText}"
+                    Data="{StaticResource Ariadne.Icon.ChevronRight}"
+                    VerticalAlignment="Center" />
+            </Grid>
+          </Button>
+
+          <Button Classes="welcome-action secondary-action"
+                  Command="{Binding OpenProjectCommand}"
+                  IsEnabled="{Binding CanStartProjectAction}"
+                  HorizontalAlignment="Stretch"
+                  HorizontalContentAlignment="Stretch">
+            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14" Margin="2">
+              <Border Grid.Column="0" Width="42" Height="42" CornerRadius="8"
+                      Background="{DynamicResource Ariadne.AccentLight}"
+                      VerticalAlignment="Center">
+                <Path Classes="icon" Width="18" Height="18"
+                      Stroke="{DynamicResource Ariadne.AccentPrimary}"
+                      Data="M4,6 L10,6 L12,8 L20,8 L20,18 L4,18 Z" />
+              </Border>
+              <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                <TextBlock Text="{Binding OpenProjectText}"
+                           FontWeight="SemiBold" FontSize="15"
+                           Foreground="{DynamicResource Ariadne.TextPrimary}" />
+                <TextBlock Text="{Binding OpenProjectHint}"
+                           Classes="caption" TextWrapping="Wrap" />
+              </StackPanel>
+              <Path Grid.Column="2" Classes="icon" Width="15" Height="15"
+                    Data="{StaticResource Ariadne.Icon.ChevronRight}"
+                    VerticalAlignment="Center" />
+            </Grid>
+          </Button>
 
           <Border IsVisible="{Binding HasStatusText}"
                   Background="{DynamicResource Ariadne.BackgroundElevated}"
@@ -120,65 +153,66 @@
           </Border>
 
           <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,4,0,0">
-            <Button Classes="subtle" Padding="10,6" Content="{Binding TutorialText}" Command="{Binding TutorialCommand}" />
-            <Border Width="1" Height="14" Margin="6,0" Background="{DynamicResource Ariadne.BorderMuted}" VerticalAlignment="Center" />
-            <Button Classes="subtle" Padding="10,6" Content="{Binding FeedbackText}" Command="{Binding FeedbackCommand}" />
+            <Button Classes="subtle" Padding="10,6"
+                    Content="{Binding TutorialText}" Command="{Binding TutorialCommand}" />
+            <Border Width="1" Height="14" Margin="6,0"
+                    Background="{DynamicResource Ariadne.BorderMuted}" VerticalAlignment="Center" />
+            <Button Classes="subtle" Padding="10,6"
+                    Content="{Binding FeedbackText}" Command="{Binding FeedbackCommand}" />
           </StackPanel>
         </StackPanel>
 
-        <!-- 右：最近项目面板 -->
-        <Border Grid.Column="2"
+        <!-- 最近项目：轻量桌面清单（规范「不是网页卡片」）。
+             外壳退成一层安静纸面 + 发丝边（原来的 Flyout 重投影是本页最抢眼的噪点），
+             表头去掉与内容同色的重复底，条目去掉逐个描边盒——改成 hover 染色 + 分隔线。 -->
+        <Border Grid.Row="0" Grid.RowSpan="3" Grid.Column="2"
                 x:Name="RecentProjectsCard"
-                Classes="card welcome-recent"
+                Background="{DynamicResource Ariadne.BackgroundSurface}"
+                BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                BorderThickness="1"
+                CornerRadius="10"
+                BoxShadow="{DynamicResource Ariadne.Shadow.Card}"
                 Padding="0"
                 MaxHeight="520"
                 VerticalAlignment="Center"
                 ClipToBounds="True">
           <Grid RowDefinitions="Auto,*">
-            <Border Grid.Row="0"
-                    Padding="22,18"
-                    BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                    BorderThickness="0,0,0,1"
-                    Background="{DynamicResource Ariadne.BackgroundElevated}">
-              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                <TextBlock Grid.Column="0"
-                           Text="{Binding RecentProjectsTitle}"
-                           Classes="subtitle"
-                           VerticalAlignment="Center" />
-                <Border Grid.Column="1"
-                        Classes="chip"
-                        VerticalAlignment="Center"
-                        IsVisible="{Binding HasRecentProjects}"
-                        Background="{DynamicResource Ariadne.AccentLight}"
-                        BorderBrush="{DynamicResource Ariadne.AccentBorder}"
-                        Padding="10,3">
-                  <TextBlock FontSize="12"
-                             FontWeight="SemiBold"
-                             Foreground="{DynamicResource Ariadne.AccentPrimary}"
-                             Text="{Binding RecentCountText}" />
-                </Border>
-              </Grid>
-            </Border>
+            <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10"
+                  Margin="20,17">
+              <Border Grid.Column="0" Width="4" Height="22" CornerRadius="2"
+                      Background="{DynamicResource Ariadne.AccentPrimary}"
+                      VerticalAlignment="Center" />
+              <TextBlock Grid.Column="1"
+                         Text="{Binding RecentProjectsTitle}"
+                         Classes="subtitle"
+                         VerticalAlignment="Center" />
+              <!-- 计数：去掉描边胶囊，强调色文字自解释 -->
+              <TextBlock Grid.Column="2"
+                         Text="{Binding RecentCountText}"
+                         FontSize="12" FontWeight="SemiBold"
+                         Foreground="{DynamicResource Ariadne.AccentPrimary}"
+                         VerticalAlignment="Center"
+                         IsVisible="{Binding HasRecentProjects}" />
+            </Grid>
 
             <Panel Grid.Row="1">
               <ScrollViewer IsVisible="{Binding HasRecentProjects}"
                             IsEnabled="{Binding CanStartProjectAction}"
-                            Padding="14,12"
+                            Padding="8,4"
                             VerticalScrollBarVisibility="Auto">
                 <ItemsControl ItemsSource="{Binding RecentProjects}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:RecentProjectItemViewModel}">
-                      <Button Classes="welcome-recent-item"
-                              Command="{Binding OpenCommand}"
-                              Margin="0,0,0,8"
-                              HorizontalAlignment="Stretch"
-                              HorizontalContentAlignment="Stretch">
-                        <Border Classes="layer recent-item" Padding="14,12" CornerRadius="10">
+                      <!-- 一行 = 一条清单项：无边框盒，hover 时整行染色（recent-row 样式） -->
+                      <Grid Classes="recent-row" ColumnDefinitions="*,Auto">
+                        <Button Grid.Column="0"
+                                Classes="welcome-recent-item"
+                                Command="{Binding OpenCommand}"
+                                Padding="13,11"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Stretch">
                           <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
-                            <Border Grid.Column="0"
-                                    Width="36"
-                                    Height="36"
-                                    CornerRadius="10"
+                            <Border Grid.Column="0" Width="36" Height="36" CornerRadius="8"
                                     Background="{DynamicResource Ariadne.AccentLight}"
                                     VerticalAlignment="Center">
                               <Path Classes="icon" Width="16" Height="16"
@@ -186,45 +220,54 @@
                                     Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
                             </Border>
                             <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                              <TextBlock Text="{Binding Name}"
-                                         FontWeight="SemiBold"
-                                         FontSize="14"
+                              <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14"
                                          TextTrimming="CharacterEllipsis" />
-                              <TextBlock Text="{Binding ProjectRoot}"
-                                         Classes="mono"
+                              <TextBlock Text="{Binding ProjectRoot}" Classes="mono" FontSize="11"
+                                         Opacity="0.8" TextTrimming="CharacterEllipsis" />
+                              <TextBlock Text="{Binding LastOpenedText}"
+                                         Classes="caption"
                                          FontSize="11"
-                                         Opacity="0.8"
-                                         TextTrimming="CharacterEllipsis" />
+                                         IsVisible="{Binding HasLastOpened}" />
                             </StackPanel>
-                            <Path Grid.Column="2"
-                                  Classes="icon"
-                                  Width="14" Height="14"
-                                  Opacity="0.45"
-                                  VerticalAlignment="Center"
+                            <Path Grid.Column="2" Classes="icon" Width="14" Height="14"
+                                  Opacity="0.45" VerticalAlignment="Center"
                                   Data="{StaticResource Ariadne.Icon.ChevronRight}" />
                           </Grid>
-                        </Border>
-                      </Button>
+                        </Button>
+                        <Button Grid.Column="1"
+                                Classes="subtle"
+                                Width="36"
+                                MinWidth="36"
+                                Margin="0,8,8,8"
+                                Content="⋯"
+                                ToolTip.Tip="{Binding #Root.DataContext.RecentProjectActionsText}"
+                                AutomationProperties.Name="{Binding #Root.DataContext.RecentProjectActionsText}">
+                          <Button.Flyout>
+                            <MenuFlyout>
+                              <MenuItem Header="{Binding #Root.DataContext.RelocateRecentProjectText}"
+                                        Command="{Binding RelocateCommand}" />
+                              <MenuItem Header="{Binding #Root.DataContext.ForgetRecentProjectText}"
+                                        Command="{Binding ForgetCommand}"
+                                        Classes="danger" />
+                            </MenuFlyout>
+                          </Button.Flyout>
+                        </Button>
+                      </Grid>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
               </ScrollViewer>
 
               <Border Classes="empty-state" IsVisible="{Binding IsRecentLoading}" Padding="28,48">
-                <TextBlock Text="{Binding RecentLoadingText}"
-                           Classes="secondary"
-                           HorizontalAlignment="Center"
-                           TextAlignment="Center" />
+                <TextBlock Text="{Binding RecentLoadingText}" Classes="secondary"
+                           HorizontalAlignment="Center" TextAlignment="Center" />
               </Border>
 
               <Border Classes="empty-state" IsVisible="{Binding IsRecentError}" Padding="28,40">
                 <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="300">
-                  <TextBlock Text="{Binding RecentErrorText}"
-                             Classes="secondary"
-                             HorizontalAlignment="Center"
-                             TextAlignment="Center"
-                             TextWrapping="Wrap"
-                             AutomationProperties.LiveSetting="Assertive" />
+                  <TextBlock Text="{Binding RecentErrorText}" Classes="secondary"
+                             HorizontalAlignment="Center" TextAlignment="Center"
+                             TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
                   <Button Classes="secondary"
                           Content="{Binding RetryRecentProjectsText}"
                           Command="{Binding RetryRecentProjectsCommand}"
@@ -232,27 +275,20 @@
                 </StackPanel>
               </Border>
 
-              <Border Classes="empty-state" IsVisible="{Binding IsRecentEmpty}" Padding="28,48">
+              <Border Classes="empty-state" IsVisible="{Binding IsRecentEmpty}" Padding="28,44">
                 <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="280">
                   <ctl:EmptyStateArt Kind="WelcomeQuill" Width="140" Height="112" HorizontalAlignment="Center" />
-                  <TextBlock Text="{Binding EmptyRecentTitle}"
-                             Classes="subtitle"
-                             HorizontalAlignment="Center"
-                             TextAlignment="Center" />
-                  <TextBlock Text="{Binding EmptyRecentHint}"
-                             Classes="caption"
-                             HorizontalAlignment="Center"
-                             TextAlignment="Center"
-                             TextWrapping="Wrap"
-                             LineHeight="20" />
+                  <TextBlock Text="{Binding EmptyRecentTitle}" Classes="subtitle"
+                             HorizontalAlignment="Center" TextAlignment="Center" />
+                  <TextBlock Text="{Binding EmptyRecentHint}" Classes="caption"
+                             HorizontalAlignment="Center" TextAlignment="Center"
+                             TextWrapping="Wrap" LineHeight="20" />
                 </StackPanel>
               </Border>
             </Panel>
           </Grid>
         </Border>
       </Grid>
-
-    </Grid>
     </ScrollViewer>
   </Panel>
 </UserControl>

@@ -45,7 +45,23 @@ internal sealed class SettingsDraftState
 
     public bool IsCurrentLoad(long generation) => generation == _loadGeneration;
 
+    public long CurrentLoadGeneration => _loadGeneration;
+
     public bool IsLoaded(string section) => _loadedSections.Contains(section);
+
+    public bool TryGetSavedValue(string section, string field, out string value)
+    {
+        if (_fieldSections.TryGetValue(field, out var owner)
+            && string.Equals(owner, section, StringComparison.Ordinal)
+            && _savedValues.TryGetValue(field, out var saved))
+        {
+            value = saved;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
 
     public void SetBaseline(string section, IReadOnlyDictionary<string, string> values)
     {

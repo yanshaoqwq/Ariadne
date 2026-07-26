@@ -34,20 +34,21 @@ use ariadne::commands::{
     save_provider_section_settings, save_provider_settings_impl, save_rag_settings_impl,
     save_template_repository_settings, save_template_repository_settings_impl,
     save_workflow_graph_impl, save_workflow_settings_impl, search_project_documents_impl,
-    search_templates, set_project_root, start_workflow_with_request, stop_workflow,
-    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
-    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
+    relocate_recent_project, search_templates, set_project_root, start_workflow_with_request,
+    test_provider_draft_with_cancellation, update_budget_config_impl,
+    validate_display_name_language_pack, AppSettings, AriadneAppState, AutomationSettings,
+    CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
     ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, InDoubtDecision,
-    NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
-    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSectionSettings,
-    ProviderSettingsUpdate, QuickEditRequest, RagSettings, ResolveConfirmationRequest,
-    ResolveInDoubtOperationRequest, ResumeFromNodeRequest, RunLogQuery, TemplateRepositoryRequest,
-    TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
+    ModelAliasTarget, NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
+    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderDraftProbe,
+    ProviderSectionSettings, ProviderSettingsUpdate, QuickEditRequest, RagSettings,
+    ResolveConfirmationRequest, ResolveInDoubtOperationRequest, ResumeFromNodeRequest, RunLogQuery,
+    TemplateRepositoryRequest, TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{
     AppRuntimeSettings, ConfigStore, MemorySecretStore, ModelConfig, PathWriteLock, ProjectConfig,
-    ProjectCredentialScope, ProviderConfig, SecretRef, SecretStore, SecretValue,
-    PROVIDERS_CONFIG_FILE,
+    ProjectCredentialScope, ProviderConfig, QdrantAuthMode, SecretRef, SecretStore, SecretValue,
+    VectorStoreBackend, PROVIDERS_CONFIG_FILE,
 };
 use ariadne::contracts::{
     ExecutionCancellation, NodeId, NodeInstance, PermissionPolicy, PortValue, ProviderCapability,
@@ -199,7 +200,17 @@ fn project_indexing_worker_consumes_persisted_document_event() {
 
     assert_eq!(process_index_outbox_impl(temp.path()).unwrap(), 1);
 
-    let tantivy = TantivyFullTextStore::open(temp.path().join(".indexes/tantivy")).unwrap();
+    let tantivy_path = temp.path().join(".indexes/tantivy");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let tantivy = loop {
+        match TantivyFullTextStore::open(&tantivy_path) {
+            Ok(store) => break store,
+            Err(error) if error.to_string().contains("LockBusy") && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("failed to reopen Tantivy index: {error}"),
+        }
+    };
     let results = tantivy
         .search(FullTextSearchRequest::new("线索", 10))
         .unwrap();
@@ -896,6 +907,38 @@ fn project_create_and_open_persist_display_name_in_project_config() {
 
     let reopened = open_project(&state, project_root.to_string_lossy().into_owned(), None).unwrap();
     assert_eq!(reopened.project_name, "作品项目");
+}
+
+#[test]
+fn recent_project_relocation_activates_new_root_and_removes_stale_entry() {
+    let app_state = tempfile::tempdir().unwrap();
+    let old_project = tempfile::tempdir().unwrap();
+    let new_project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(old_project.path()).unwrap();
+    ariadne::frontend::initialize_project(new_project.path()).unwrap();
+    let state = AriadneAppState::new(
+        "",
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    open_project(
+        &state,
+        old_project.path().to_string_lossy().into_owned(),
+        Some("Old".to_owned()),
+    )
+    .unwrap();
+
+    let relocated = relocate_recent_project(
+        &state,
+        old_project.path().canonicalize().unwrap().to_string_lossy().into_owned(),
+        new_project.path().to_string_lossy().into_owned(),
+    )
+    .unwrap();
+
+    assert_eq!(relocated.project_root, new_project.path().canonicalize().unwrap());
+    let recent = ariadne::commands::list_recent_projects(&state).unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].path, new_project.path().canonicalize().unwrap());
 }
 
 #[test]
@@ -2882,6 +2925,7 @@ fn provider_section_secret_failure_leaves_config_unchanged() {
                 make_default_search: false,
             },
             api_key: Some("new-secret".to_owned()),
+            default_models: None,
         },
     )
     .unwrap_err();
@@ -3348,6 +3392,56 @@ fn moved_project_requires_explicit_provider_credential_rebind() {
             .unwrap()
             .has_openai_key
     );
+}
+
+#[test]
+fn provider_draft_probe_fetches_models_without_persisting_config_or_key() {
+    let project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let baseline = ConfigStore::new(project.path()).load().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        let body = r#"{"data":[{"id":"draft-model"}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let models = test_provider_draft_with_cancellation(
+        ProviderDraftProbe {
+            provider: ProviderSettingsUpdate {
+                provider_id: "draft-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Draft provider".to_owned(),
+                enabled: true,
+                base_url: Some(base_url),
+                models: Vec::new(),
+                make_default_llm: false,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+            api_key: Some("draft-only-key".to_owned()),
+        },
+        &ExecutionCancellation::new(),
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(models.provider_id, "draft_provider");
+    assert!(models
+        .models
+        .iter()
+        .any(|model| model.model_id == "draft-model"));
+    assert_eq!(ConfigStore::new(project.path()).load().unwrap(), baseline);
 }
 
 #[test]
@@ -3916,6 +4010,96 @@ fn node_preset_model_identity_rejects_ambiguous_ids_and_preserves_explicit_provi
 }
 
 #[test]
+fn model_aliases_round_trip_update_without_rewriting_preset_references() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    ariadne::config::bind_project_app_state(project.path(), app_state.path()).unwrap();
+    configure_removable_provider(project.path(), "planning", "plan-v1", false);
+    configure_removable_provider(project.path(), "openai", "gpt-4.1-mini", true);
+
+    let mut settings = NodePresetSettings::default();
+    settings.model_aliases.insert(
+        "planning".to_owned(),
+        ModelAliasTarget {
+            provider_id: "planning".to_owned(),
+            model_id: "plan-v1".to_owned(),
+        },
+    );
+    settings.default_model_alias = Some("planning".to_owned());
+    settings.default_provider_id.clear();
+    settings.default_model_id.clear();
+    let writer = settings
+        .presets
+        .iter_mut()
+        .find(|preset| preset.node_type == "writer")
+        .unwrap();
+    writer.model_alias = Some("planning".to_owned());
+    writer.provider_id.clear();
+    writer.model_id.clear();
+
+    save_node_preset_settings_impl(project.path(), settings).unwrap();
+    let loaded = get_node_preset_settings_impl(project.path()).unwrap();
+    assert_eq!(loaded.default_model_alias.as_deref(), Some("planning"));
+    let writer = loaded
+        .presets
+        .iter()
+        .find(|preset| preset.node_type == "writer")
+        .unwrap();
+    assert_eq!(writer.model_alias.as_deref(), Some("planning"));
+    assert!(writer.provider_id.is_empty());
+    assert!(writer.model_id.is_empty());
+
+    let mut updated = loaded.clone();
+    updated.model_aliases.insert(
+        "planning".to_owned(),
+        ModelAliasTarget {
+            provider_id: "openai".to_owned(),
+            model_id: "gpt-4.1-mini".to_owned(),
+        },
+    );
+    save_node_preset_settings_impl(project.path(), updated).unwrap();
+    let reread = get_node_preset_settings_impl(project.path()).unwrap();
+    assert_eq!(reread.model_aliases["planning"].provider_id, "openai");
+    assert_eq!(
+        reread
+            .presets
+            .iter()
+            .find(|preset| preset.node_type == "writer")
+            .unwrap()
+            .model_alias
+            .as_deref(),
+        Some("planning")
+    );
+
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let preview = preview_provider_removal(&state, "openai".to_owned()).unwrap();
+    assert!(preview.blocking_references.iter().any(|reference| {
+        reference.reference_type == "model_alias"
+            && reference.owner_id == "planning"
+            && reference.model_id.as_deref() == Some("gpt-4.1-mini")
+    }));
+}
+
+#[test]
+fn node_preset_settings_reject_unknown_model_alias() {
+    let project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "openai", "gpt-4.1-mini", true);
+
+    let mut settings = NodePresetSettings::default();
+    settings.default_model_alias = Some("brainstorm".to_owned());
+    settings.default_provider_id.clear();
+    settings.default_model_id.clear();
+    let error = save_node_preset_settings_impl(project.path(), settings).unwrap_err();
+    assert!(error.contains("unsupported model alias"));
+}
+
+#[test]
 fn node_authoring_defaults_are_global_while_budget_and_node_access_overrides_remain_project_scoped()
 {
     let project_a = tempfile::tempdir().unwrap();
@@ -4354,6 +4538,24 @@ fn automation_and_permission_settings_round_trip_config_files() {
 }
 
 #[test]
+fn zero_preauthorized_budget_is_persisted_as_zero_not_unlimited() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+
+    update_budget_config_impl(temp.path(), 10.0, 0.0).unwrap();
+
+    let config = ConfigStore::new(temp.path()).load_or_create().unwrap();
+    assert_eq!(config.auto_mode.preauthorized_budget_usd, Some(0.0));
+    assert_eq!(
+        get_budget_status_impl(temp.path())
+            .unwrap()
+            .preauthorized_usd,
+        0.0
+    );
+}
+
+#[test]
 fn automation_settings_reject_empty_prompt_for_auto_approval() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -4454,7 +4656,16 @@ fn module_settings_round_trip_config_files() {
     let mut rag = get_rag_settings_impl(temp.path()).unwrap().rag;
     rag.chunk_size_chars = 4096;
     rag.chunk_overlap_chars = 256;
-    save_rag_settings_impl(temp.path(), RagSettings { rag }).unwrap();
+    save_rag_settings_impl(
+        temp.path(),
+        RagSettings {
+            rag,
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
+        },
+    )
+    .unwrap();
     assert_eq!(
         get_rag_settings_impl(temp.path())
             .unwrap()
@@ -4744,7 +4955,16 @@ fn rag_settings_hot_reload_reuses_open_tantivy_generation() {
     rag.chunk_size_chars = 3072;
     rag.chunk_overlap_chars = 256;
 
-    let saved = ariadne::commands::save_rag_settings(&state, RagSettings { rag }).unwrap();
+    let saved = ariadne::commands::save_rag_settings(
+        &state,
+        RagSettings {
+            rag,
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
+        },
+    )
+    .unwrap();
 
     assert_eq!(saved.rag.chunk_size_chars, 3072);
     assert_eq!(
@@ -4798,7 +5018,16 @@ fn rag_index_configuration_change_is_rejected_while_runtime_arc_is_active() {
     let mut rag = get_rag_settings_impl(project.path()).unwrap().rag;
     rag.chunk_size_chars = 3072;
 
-    let error = ariadne::commands::save_rag_settings(&state, RagSettings { rag }).unwrap_err();
+    let error = ariadne::commands::save_rag_settings(
+        &state,
+        RagSettings {
+            rag,
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
+        },
+    )
+    .unwrap_err();
 
     assert!(error.contains("retrieval operations are active"));
     assert_eq!(
@@ -4809,6 +5038,44 @@ fn rag_index_configuration_change_is_rejected_while_runtime_arc_is_active() {
         2000
     );
     assert_eq!(active_runtime.config().rag.chunk_size_chars, 2000);
+}
+
+#[test]
+fn external_qdrant_api_key_mode_rejects_missing_endpoint_credential() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let mut rag = get_rag_settings_impl(project.path()).unwrap().rag;
+    rag.vector_store.backend = VectorStoreBackend::ExternalQdrant;
+    rag.vector_store.sidecar.host = "qdrant.example".to_owned();
+    rag.vector_store.sidecar.port = 6333;
+    rag.vector_store.sidecar.auth_mode = QdrantAuthMode::ApiKey;
+
+    let error = ariadne::commands::save_rag_settings(
+        &state,
+        RagSettings {
+            rag,
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("API key is not configured for this endpoint"));
+    assert_eq!(
+        get_rag_settings_impl(project.path())
+            .unwrap()
+            .rag
+            .vector_store
+            .backend,
+        VectorStoreBackend::QdrantSidecar
+    );
 }
 
 #[test]
@@ -4935,8 +5202,16 @@ fn failed_vector_enable_keeps_config_and_last_good_runtime() {
     rag.vector_store.enabled = true;
 
     for _ in 0..16 {
-        let error = ariadne::commands::save_rag_settings(&state, RagSettings { rag: rag.clone() })
-            .unwrap_err();
+        let error = ariadne::commands::save_rag_settings(
+            &state,
+            RagSettings {
+                rag: rag.clone(),
+                qdrant_api_key: None,
+                clear_qdrant_api_key: false,
+                has_qdrant_api_key: false,
+            },
+        )
+        .unwrap_err();
 
         assert!(
             error.contains("default_embedding_provider_id"),

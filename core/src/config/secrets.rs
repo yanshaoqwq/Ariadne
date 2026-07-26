@@ -121,6 +121,54 @@ impl<'a> ProjectCredentialScope<'a> {
             .delete_secret(&self.provider_key_id(provider_id)?)
     }
 
+    /// 读取与规范化外部 Qdrant 端点绑定的 API key。端点参与派生，配置改址后不会复用旧密钥。
+    pub fn get_external_qdrant_secret(
+        &self,
+        endpoint_identity: &str,
+    ) -> CoreResult<Option<SecretValue>> {
+        self.secrets
+            .get_secret(&self.external_qdrant_key_id(endpoint_identity)?)
+    }
+
+    /// 写入与外部 Qdrant 端点绑定的 API key。
+    pub fn set_external_qdrant_secret(
+        &self,
+        endpoint_identity: &str,
+        value: SecretValue,
+    ) -> CoreResult<()> {
+        self.secrets.set_secret(
+            &self.external_qdrant_generation_key_id(endpoint_identity)?,
+            SecretValue::new(new_secret_generation()),
+        )?;
+        self.secrets
+            .set_secret(&self.external_qdrant_key_id(endpoint_identity)?, value)
+    }
+
+    /// 删除与外部 Qdrant 端点绑定的 API key。
+    pub fn delete_external_qdrant_secret(&self, endpoint_identity: &str) -> CoreResult<()> {
+        self.secrets.set_secret(
+            &self.external_qdrant_generation_key_id(endpoint_identity)?,
+            SecretValue::new(new_secret_generation()),
+        )?;
+        self.secrets
+            .delete_secret(&self.external_qdrant_key_id(endpoint_identity)?)
+    }
+
+    /// 返回端点凭据代次，使运行时在密钥替换后拒绝复用旧请求客户端。
+    pub fn external_qdrant_secret_generation(&self, endpoint_identity: &str) -> CoreResult<String> {
+        let generation_key = self.external_qdrant_generation_key_id(endpoint_identity)?;
+        if let Some(generation) = self.secrets.get_secret(&generation_key)? {
+            let generation = generation.expose_secret().trim();
+            if !generation.is_empty() {
+                return Ok(generation.to_owned());
+            }
+        }
+        let generation = new_secret_generation();
+        self.secrets
+            .set_secret(&generation_key, SecretValue::new(generation.clone()))?;
+        Ok(generation)
+    }
+
     fn provider_key_id(&self, provider_id: &str) -> CoreResult<String> {
         self.scoped_key_id(provider_id, b"provider\0", "ariadne-credential-v1-")
     }
@@ -133,16 +181,32 @@ impl<'a> ProjectCredentialScope<'a> {
         )
     }
 
-    fn scoped_key_id(&self, provider_id: &str, domain: &[u8], prefix: &str) -> CoreResult<String> {
-        if provider_id.trim().is_empty() {
-            return Err(CoreError::validation("provider_id cannot be empty"));
+    fn external_qdrant_key_id(&self, endpoint_identity: &str) -> CoreResult<String> {
+        self.scoped_key_id(
+            endpoint_identity,
+            b"external-qdrant\0",
+            "ariadne-qdrant-credential-v1-",
+        )
+    }
+
+    fn external_qdrant_generation_key_id(&self, endpoint_identity: &str) -> CoreResult<String> {
+        self.scoped_key_id(
+            endpoint_identity,
+            b"external-qdrant-generation\0",
+            "ariadne-qdrant-credential-generation-v1-",
+        )
+    }
+
+    fn scoped_key_id(&self, identity: &str, domain: &[u8], prefix: &str) -> CoreResult<String> {
+        if identity.trim().is_empty() {
+            return Err(CoreError::validation("credential identity cannot be empty"));
         }
         let mut hasher = Sha256::new();
         hasher.update(b"ariadne-project-credential-v1\0");
         hasher.update(&self.project_identity);
         hasher.update(b"\0");
         hasher.update(domain);
-        hasher.update(provider_id.as_bytes());
+        hasher.update(identity.as_bytes());
         let digest = hasher.finalize();
         let mut encoded = String::with_capacity(digest.len() * 2);
         for byte in digest {

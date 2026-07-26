@@ -35,7 +35,22 @@ public partial class App : Application
             {
                 DataContext = viewModel,
             };
-            _ = viewModel.InitializeAsync();
+            var previewPage = Environment.GetEnvironmentVariable("ARIADNE_UI_START_PAGE");
+            if (string.IsNullOrWhiteSpace(previewPage))
+            {
+                _ = viewModel.InitializeAsync();
+            }
+            else
+            {
+                // 视觉验收必须稳定落在指定页面，不参与真实后端与会话恢复竞态。
+                viewModel.OpenPreviewNavigationItem(previewPage.Trim());
+                var previewSection = Environment.GetEnvironmentVariable("ARIADNE_UI_START_SECTION");
+                if (!string.IsNullOrWhiteSpace(previewSection)
+                    && viewModel.CurrentPage is SettingsPageViewModel settings)
+                {
+                    settings.OpenPreviewSection(previewSection.Trim());
+                }
+            }
         }
 
         base.OnFrameworkInitializationCompleted();

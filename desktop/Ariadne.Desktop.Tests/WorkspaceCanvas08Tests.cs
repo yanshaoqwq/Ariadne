@@ -208,6 +208,28 @@ public sealed class WorkspaceCanvas08Tests
     }
 
     [Fact]
+    public void CanvasNodePorts_KeepSemanticShapes_WithRoundedInteractiveGlyphs()
+    {
+        var axaml = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var theme = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("Resources", "Styles"),
+            "AriadneTheme.axaml"));
+
+        // 控制流仍为三角形，但三处尖角都由二次曲线收圆。
+        Assert.Contains("Q3,1.9", axaml, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"control-port\"", axaml, StringComparison.Ordinal);
+        // 数据端口保持圆形，通信端口使用圆角方芯，三类语义一眼可分。
+        Assert.Contains("Classes=\"data-port\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Ellipse.data-port.connected", axaml, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"communication-core\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Border.data-port", axaml, StringComparison.Ordinal);
+        Assert.Contains("Border.communication-port.connected Border.communication-core", axaml, StringComparison.Ordinal);
+        // 视觉反馈不改变 14/16px 的稳定命中盒，只在渲染层缩放。
+        Assert.Contains("Border.pin-glass:pointerover", theme, StringComparison.Ordinal);
+        Assert.Contains("RenderTransform\" Value=\"scale(1.16)\"", theme, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ReleaseUiProbe_UsesDraggedNodeDirtyRegion_AndScriptedReleaseEntry()
     {
         var probe = File.ReadAllText(ResolveDesktopSource("ReleaseUiProbe.cs"));
@@ -976,6 +998,27 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Single(vm.Nodes);
         Assert.True(vm.IsRightPanelOpen);
         Assert.True(vm.IsNodeDetailsTab);
+    }
+
+    [Fact]
+    public void RightPanelInspector_SeparatesAiNodeAndEdgeModes_InsideExistingDock()
+    {
+        var axaml = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var vm = CreateWorkspaceVm();
+
+        Assert.Contains("x:Name=\"RightPanelHost\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding ShowEdgeDetailsCommand}\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("IsVisible=\"{Binding IsEdgeDetailsTab}\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"inspector-edge-row\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsVisible=\"False\">\n                    <StackPanel Spacing=\"10\">", axaml, StringComparison.Ordinal);
+
+        Assert.True(vm.IsProjectAiTab);
+        Assert.True(vm.ShowNodeDetailsCommand.TryExecute());
+        Assert.True(vm.IsNodeDetailsTab);
+        Assert.True(vm.ShowEdgeDetailsCommand.TryExecute());
+        Assert.True(vm.IsEdgeDetailsTab);
+        Assert.True(vm.ShowProjectAiCommand.TryExecute());
+        Assert.True(vm.IsProjectAiTab);
     }
 
     [Fact]

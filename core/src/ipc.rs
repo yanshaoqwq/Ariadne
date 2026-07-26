@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,16 @@ pub struct IpcResponse {
     /// Localization key (`ui.error.*`). Desktop prefers this over inventing keys from diagnostics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_key: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub error_params: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_section: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 impl IpcResponse {
@@ -54,6 +66,11 @@ impl IpcResponse {
             error: None,
             error_code: None,
             error_key: None,
+            error_params: Default::default(),
+            error_field: None,
+            error_section: None,
+            recovery_action: None,
+            correlation_id: None,
         }
     }
 
@@ -65,6 +82,11 @@ impl IpcResponse {
             error: error.diagnostic.clone(),
             error_code: Some(error.code.as_str().to_owned()),
             error_key: Some(error.message_key),
+            error_params: error.params,
+            error_field: error.field,
+            error_section: error.section,
+            recovery_action: error.recovery_action,
+            correlation_id: Some(next_error_correlation_id()),
         }
     }
 
@@ -72,6 +94,16 @@ impl IpcResponse {
         self.request_id = request_id;
         self
     }
+}
+
+fn next_error_correlation_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("err-{timestamp:032x}-{sequence:016x}")
 }
 
 pub fn handle_request(state: &AriadneAppState, request: IpcRequest) -> IpcResponse {
@@ -118,7 +150,12 @@ where
         move |request: IpcRequest, cancellation: &crate::contracts::ExecutionCancellation| {
             let changes_project = matches!(
                 request.method.as_str(),
-                "create_project" | "open_project" | "close_project" | "set_project_root"
+                "create_project"
+                    | "open_project"
+                    | "relocate_recent_project"
+                    | "forget_recent_project"
+                    | "close_project"
+                    | "set_project_root"
             );
             let result = if changes_project {
                 project_gate
@@ -422,6 +459,18 @@ fn dispatch_request(
     cancellation.check().map_err(CommandError::from)?;
     match request.method.as_str() {
         "list_recent_projects" => ok(commands::list_recent_projects(state)?),
+        "forget_recent_project" => {
+            let params: ProjectRootParams = params(request.params)?;
+            ok(commands::forget_recent_project(state, params.project_root)?)
+        }
+        "relocate_recent_project" => {
+            let params: RelocateRecentProjectParams = params(request.params)?;
+            ok(commands::relocate_recent_project(
+                state,
+                params.previous_project_root,
+                params.project_root,
+            )?)
+        }
         "create_project" => {
             let params: ProjectSelectionParams = params(request.params)?;
             ok(commands::create_project(
@@ -751,6 +800,13 @@ fn dispatch_request(
                 cancellation,
             )?)
         }
+        "test_provider_draft" => {
+            let params: ProviderDraftProbeParams = params(request.params)?;
+            ok(commands::test_provider_draft_with_cancellation(
+                params.probe,
+                cancellation,
+            )?)
+        }
         "save_provider_section_settings" => {
             let params: SettingsParam<commands::ProviderSectionSettings> = params(request.params)?;
             ok(commands::save_provider_section_settings(
@@ -835,6 +891,10 @@ fn dispatch_request(
                 params.provider,
                 params.key,
             )?)
+        }
+        "revoke_provider_key" => {
+            let params: ProviderRemovalParams = params(request.params)?;
+            ok(commands::revoke_provider_key(state, params.provider)?)
         }
         "rebind_project_provider_key" => {
             let params: RebindProviderKeyParams = params(request.params)?;
@@ -979,6 +1039,12 @@ struct ProjectRootParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct RelocateRecentProjectParams {
+    previous_project_root: String,
+    project_root: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChapterIdParams {
     chapter_id: String,
 }
@@ -1053,6 +1119,11 @@ struct WorkflowIdParams {
 struct ProviderModelsParams {
     #[serde(default)]
     provider_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProviderDraftProbeParams {
+    probe: commands::ProviderDraftProbe,
 }
 
 #[derive(Debug, Deserialize)]

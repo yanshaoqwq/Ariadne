@@ -97,6 +97,12 @@ pub struct CommandError {
     pub diagnostic: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_action: Option<String>,
 }
 
 impl CommandError {
@@ -106,6 +112,9 @@ impl CommandError {
             message_key: code.message_key(),
             diagnostic: Some(diagnostic.into()),
             params: BTreeMap::new(),
+            field: None,
+            section: None,
+            recovery_action: None,
         }
     }
 
@@ -119,7 +128,27 @@ impl CommandError {
             message_key: message_key.into(),
             diagnostic: Some(diagnostic.into()),
             params: BTreeMap::new(),
+            field: None,
+            section: None,
+            recovery_action: None,
         }
+    }
+
+    pub fn with_param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.params.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn with_context(
+        mut self,
+        field: impl Into<String>,
+        section: impl Into<String>,
+        recovery_action: impl Into<String>,
+    ) -> Self {
+        self.field = Some(field.into());
+        self.section = Some(section.into());
+        self.recovery_action = Some(recovery_action.into());
+        self
     }
 
     pub fn validation(diagnostic: impl Into<String>) -> Self {
