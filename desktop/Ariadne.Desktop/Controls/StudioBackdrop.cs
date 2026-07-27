@@ -15,9 +15,7 @@ public sealed class StudioBackdrop : Control
     private bool _frameQueued;
     private double _phase;
 
-    // 画笔与标记刷只随主题变化，几何才随 _phase 变化。Render 跑在
-    // RequestAnimationFrame 循环里（显示器刷新率），若每帧新建这些不可变对象，
-    // 60Hz 下会产生数百个短命对象并迫使合成层整表重建。主题换色时置空重建。
+    // Render 跑在 RequestAnimationFrame 循环里，画笔只随主题变化，不必每帧重建。
     private Pen? _gridPen;
     private Pen? _axisPen;
     private Pen? _primaryPen;
@@ -66,14 +64,17 @@ public sealed class StudioBackdrop : Control
         var ink = AppIconPainter.ResolveColor(
             "Ariadne.TextPrimary",
             Color.FromRgb(0x18, 0x20, 0x20));
+        // 信号色同样从主题 Ariadne.Signal 解析，不再直接用硬编码常量作绘制色
+        // （常量仅在资源缺失时兜底，与全代码库 ResolveColor 模式一致）。
+        var signal = AppIconPainter.ResolveColor("Ariadne.Signal", SignalColor);
 
         _gridPen = new Pen(new SolidColorBrush(WithAlpha(ink, 0x0C)), 1);
         _axisPen = new Pen(new SolidColorBrush(WithAlpha(ink, 0x18)), 1);
         _primaryPen = new Pen(new SolidColorBrush(WithAlpha(accent, 0x44)), 1.4);
         _secondaryPen = new Pen(new SolidColorBrush(WithAlpha(ink, 0x20)), 1);
         _markPen = new Pen(new SolidColorBrush(WithAlpha(accent, 0x52)), 1);
-        _markerRingPen = new Pen(new SolidColorBrush(WithAlpha(SignalColor, 0x58)), 1);
-        _markerBrush = new SolidColorBrush(SignalColor);
+        _markerRingPen = new Pen(new SolidColorBrush(WithAlpha(signal, 0x58)), 1);
+        _markerBrush = new SolidColorBrush(signal);
     }
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)

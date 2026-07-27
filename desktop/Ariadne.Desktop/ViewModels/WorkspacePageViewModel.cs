@@ -328,6 +328,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string InsertForwardVariableText => _displayNames.Text("ui.workspace.edge.insert_forward_variable");
     public string InsertReverseVariableText => _displayNames.Text("ui.workspace.edge.insert_reverse_variable");
     public string TemplatePreviewText => _displayNames.Text("ui.workspace.edge.template_preview");
+    // 正/反向预览各自限定标签：同一面板里两处预览若都叫「预览」，无法区分是哪条。
+    public string ForwardTemplatePreviewLabel => _displayNames.Text("ui.workspace.edge.forward_template_preview");
+    public string ReverseTemplatePreviewLabel => _displayNames.Text("ui.workspace.edge.reverse_template_preview");
     public string PortControlInTip => _displayNames.Text("ui.workspace.port.control_in");
     public string PortControlOutTip => _displayNames.Text("ui.workspace.port.control_out");
     public string PortDataInTip => _displayNames.Text("ui.workspace.port.data_in");
@@ -4153,25 +4156,62 @@ public readonly record struct EdgePathSpec(
 
 public sealed class WorkflowNodeViewModel : ViewModelBase
 {
-    private static readonly IBrush TypeStartBrush = new SolidColorBrush(Color.Parse("#0F9D63"));
-    private static readonly IBrush TypeLlmBrush = new SolidColorBrush(Color.Parse("#2563EB"));
-    private static readonly IBrush TypeAgentBrush = new SolidColorBrush(Color.Parse("#2E726B"));
-    private static readonly IBrush TypeUtilityBrush = new SolidColorBrush(Color.Parse("#7C3AED"));
-    private static readonly IBrush TypeControlBrush = new SolidColorBrush(Color.Parse("#D97706"));
-    private static readonly IBrush TypeDefaultBrush = new SolidColorBrush(Color.Parse("#8B939D"));
+    // 节点类型色一律从主题 token 解析（青绿强调 / 状态色 / 通信色），
+    // 不再硬编码 hex —— 换主题 / 个性化强调色时节点头随之变化。
+    // 兜底 hex 仅在资源缺失时生效，与全代码库 AppIconPainter.ResolveColor 模式一致。
+    // 按主题代次缓存实体画笔，主题切换（IconColorsChanged）时清空重建。
+    private static readonly Dictionary<string, IBrush> AccentBrushCache = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, IBrush> WashBrushCache = new(StringComparer.Ordinal);
+    private static bool _typeBrushHookInstalled;
+
+    private static void EnsureTypeBrushHook()
+    {
+        if (_typeBrushHookInstalled)
+        {
+            return;
+        }
+
+        _typeBrushHookInstalled = true;
+        // 主题换色后清空缓存；下次取用即按新主题重建。
+        AppIconPainter.IconColorsChanged += () =>
+        {
+            AccentBrushCache.Clear();
+            WashBrushCache.Clear();
+        };
+    }
+
+    private static IBrush TypeAccentByKey(string themeKey, string fallbackHex)
+    {
+        EnsureTypeBrushHook();
+        if (AccentBrushCache.TryGetValue(themeKey, out var cached))
+        {
+            return cached;
+        }
+
+        var color = AppIconPainter.ResolveColor(themeKey, Color.Parse(fallbackHex));
+        var brush = new SolidColorBrush(color).ToImmutable();
+        AccentBrushCache[themeKey] = brush;
+        return brush;
+    }
 
     // 头部晕染：类型色由上而下淡出的竖向渐变，给每个节点标题栏一层专属"色气质"，比纯灰更通透精致。
-    private static readonly IBrush TypeStartWashBrush = BuildHeaderWash("#0F9D63");
-    private static readonly IBrush TypeLlmWashBrush = BuildHeaderWash("#2563EB");
-    private static readonly IBrush TypeAgentWashBrush = BuildHeaderWash("#2E726B");
-    private static readonly IBrush TypeUtilityWashBrush = BuildHeaderWash("#7C3AED");
-    private static readonly IBrush TypeControlWashBrush = BuildHeaderWash("#D97706");
-    private static readonly IBrush TypeDefaultWashBrush = BuildHeaderWash("#8B939D");
+    private static IBrush TypeWashByKey(string themeKey, string fallbackHex)
+    {
+        EnsureTypeBrushHook();
+        if (WashBrushCache.TryGetValue(themeKey, out var cached))
+        {
+            return cached;
+        }
+
+        var color = AppIconPainter.ResolveColor(themeKey, Color.Parse(fallbackHex));
+        var brush = BuildHeaderWash(color);
+        WashBrushCache[themeKey] = brush;
+        return brush;
+    }
 
     // 构造"类型色顶部淡出"竖向渐变：顶端约 20% 不透明，底端全透明。
-    private static IBrush BuildHeaderWash(string hex)
+    private static IBrush BuildHeaderWash(Color color)
     {
-        var color = Color.Parse(hex);
         var brush = new LinearGradientBrush
         {
             StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
@@ -4543,12 +4583,8 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     {
         get
         {
-            if (_descriptor.ConfigKind == "start") return TypeStartBrush;
-            if (_descriptor.LibraryGroup == "writing") return TypeAgentBrush;
-            if (_descriptor.ConfigKind is "condition" or "loop" or "approval") return TypeControlBrush;
-            if (_descriptor.HasModelExecution) return TypeLlmBrush;
-            if (_descriptor.LibraryGroup == "utility") return TypeUtilityBrush;
-            return TypeDefaultBrush;
+            var (key, fallback) = ResolveTypeColorKey();
+            return TypeAccentByKey(key, fallback);
         }
     }
 
@@ -4557,13 +4593,62 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     {
         get
         {
-            if (_descriptor.ConfigKind == "start") return TypeStartWashBrush;
-            if (_descriptor.LibraryGroup == "writing") return TypeAgentWashBrush;
-            if (_descriptor.ConfigKind is "condition" or "loop" or "approval") return TypeControlWashBrush;
-            if (_descriptor.HasModelExecution) return TypeLlmWashBrush;
-            if (_descriptor.LibraryGroup == "utility") return TypeUtilityWashBrush;
-            return TypeDefaultWashBrush;
+            var (key, fallback) = ResolveTypeColorKey();
+            return TypeWashByKey(key, fallback);
         }
+    }
+
+    /// <summary>
+    /// 按节点语义映射到主题色 token（附兜底 hex）：
+    /// start→成功绿、写作 Agent→青绿强调、控制流→警告橙、模型执行→信息蓝、
+    /// 工具→通信紫、其余→静默灰。全部走主题解析，无硬编码绘制色。
+    /// </summary>
+    private (string Key, string Fallback) ResolveTypeColorKey()
+    {
+        if (_descriptor.ConfigKind == "start") return ("Ariadne.Color.StatusSuccess", "#0F9D63");
+        if (_descriptor.LibraryGroup == "writing") return ("Ariadne.Color.AccentPrimary", "#2E726B");
+        if (_descriptor.ConfigKind is "condition" or "loop" or "approval") return ("Ariadne.Color.StatusWarning", "#D97706");
+        if (_descriptor.HasModelExecution) return ("Ariadne.Color.StatusInfo", "#2563EB");
+        if (_descriptor.LibraryGroup == "utility") return ("Ariadne.Color.EdgeCommunication", "#7C3AED");
+        return ("Ariadne.Color.RuntimeIdle", "#8B939D");
+    }
+
+    /// <summary>
+    /// 节点类型图标：按语义映射到矢量图标几何，让每类节点一眼可辨，
+    /// 取代此前全部节点共用同一个 Workspace 骰子图标的「千节点一面」。
+    /// 从主题几何资源解析（不硬编码路径数据），缺资源时回退到 Workspace。
+    /// </summary>
+    public Geometry? TypeIcon => ResolveGeometry(ResolveTypeIconKey(), "Ariadne.Icon.Workspace");
+
+    private string ResolveTypeIconKey()
+    {
+        if (_descriptor.ConfigKind == "start") return "Ariadne.Icon.Send";          // 起点 = 发射
+        if (_descriptor.LibraryGroup == "writing") return "Ariadne.Icon.Works";      // 写作 Agent = 书页
+        if (_descriptor.ConfigKind is "condition" or "loop" or "approval") return "Ariadne.Icon.Git"; // 控制流 = 分支
+        if (_descriptor.ConfigKind == "document") return "Ariadne.Icon.Import";      // 文档读入 = 导入
+        if (_descriptor.HasModelExecution) return "Ariadne.Icon.Feedback";           // 模型执行 = 对话气泡
+        if (_descriptor.LibraryGroup == "utility") return "Ariadne.Icon.Templates";  // 工具 = 方格
+        return "Ariadne.Icon.Workspace";
+    }
+
+    private static Geometry? ResolveGeometry(string key, string fallbackKey)
+    {
+        if (Application.Current is null)
+        {
+            return null;
+        }
+
+        if (Application.Current.TryGetResource(key, null, out var res) && res is Geometry g)
+        {
+            return g;
+        }
+
+        if (Application.Current.TryGetResource(fallbackKey, null, out var fb) && fb is Geometry fg)
+        {
+            return fg;
+        }
+
+        return null;
     }
 
     public double PortControlInOpacity { get => _portControlInOpacity; private set => SetProperty(ref _portControlInOpacity, value); }
