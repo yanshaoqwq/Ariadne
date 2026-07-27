@@ -303,6 +303,16 @@
       <SolidColorBrush x:Key="Ariadne.Signal" Color="#E8684A" />
       <SolidColorBrush x:Key="Ariadne.SignalLight" Color="#24E8684A" />
 
+      <!-- 输入填充：从主题强调色派生（Color 跟随 DynamicResource 强调色），
+           靠 Opacity 做定制偏移得到极淡的品牌色凹陷槽 —— 不硬编码任何颜色，
+           换主题 / 个性化强调色时输入槽自动跟随。零描边，一列输入不再是叠框。 -->
+      <SolidColorBrush x:Key="Ariadne.InputFill"
+                       Color="{DynamicResource Ariadne.Color.AccentPrimary}"
+                       Opacity="0.06" />
+      <SolidColorBrush x:Key="Ariadne.InputFillHover"
+                       Color="{DynamicResource Ariadne.Color.AccentPrimary}"
+                       Opacity="0.11" />
+
       <!-- ===== 与变体无关：圆角 / 间距 / 字体 / 字号 ===== -->
       <CornerRadius x:Key="Ariadne.Radius.Small">4</CornerRadius>
       <CornerRadius x:Key="Ariadne.Radius.Medium">6</CornerRadius>
@@ -650,6 +660,23 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
+  <!-- 对象行：检查器里可增删的条目（数据引脚等）。
+       不描边 —— 一列条目各自套一个圆角框会变成「小卡片阵」；
+       改为极淡底色块，hover 才加深，靠底色分条而不是靠线框。 -->
+  <Style Selector="Border.inspector-object-row">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="5" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.inspector-object-row:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
+
   <!-- 提示条：替代原来的 danger-panel「整块着色描边盒」。
        只在左缘立一道语义色脊 + 一层极淡同色底，比四面描边的色块克制得多，
        却更醒目（视线沿竖脊走）。语义仍是「色 + 位置 + 文字」三通道，
@@ -807,7 +834,63 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
-  <!-- ============================ 按钮 ============================ -->
+  <!-- ============================================================
+       「灵动」通用微交互：与左栏撬起纸片同一套缓动语言，扩散到全局可点元素。
+       - 悬停：轻微上抬（预告可交互）
+       - 按下：回压缩小（给出手感回馈）
+       统一走 TransformOperationsTransition + CubicEaseOut，克制（≤2px / 0.97）。
+       scope 到具体 class，避免影响窗口控制键 / 导航项等自带变换的控件。
+       ============================================================ -->
+  <Style Selector="Button.primary, Button.secondary, Button.chip-filter, Button.icon-btn, Button.btn-compact">
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.primary:pointerover, Button.secondary:pointerover, Button.chip-filter:pointerover, Button.btn-compact:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-1px) scale(1.0)" />
+  </Style>
+  <Style Selector="Button.primary:pressed, Button.secondary:pressed, Button.chip-filter:pressed, Button.icon-btn:pressed, Button.btn-compact:pressed">
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(0.965)" />
+  </Style>
+  <Style Selector="Button.icon-btn:pointerover">
+    <Setter Property="RenderTransform" Value="scale(1.08)" />
+  </Style>
+  <!-- 标签页：悬停/选中轻抬，切换时有「浮起」感 -->
+  <Style Selector="Button.inspector-tab">
+    <Setter Property="RenderTransformOrigin" Value="50%,100%" />
+    <Setter Property="RenderTransform" Value="translateY(0px)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <BrushTransition Property="Foreground" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.inspector-tab:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-1px)" />
+  </Style>
+  <!-- 设置页横向标签（Win11 pivot）：同一套灵动 -->
+  <Style Selector="ListBox.settings-tabs ListBoxItem">
+    <Setter Property="RenderTransformOrigin" Value="50%,100%" />
+    <Setter Property="RenderTransform" Value="translateY(0px)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ListBox.settings-tabs ListBoxItem:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-1px)" />
+  </Style>
   <Style Selector="Button">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
@@ -1649,20 +1732,38 @@
   </Style>
 
   <!-- ============================ 输入控件 ============================ -->
+  <!-- 输入控件：无边框·柔性填充槽（去盒子）。
+       旧法每个输入是一圈灰边的盒子，一列输入 = 一堆叠框。
+       改为半透明墨色填充 + 零描边：压在任何面板底上都自然凹陷成一处槽，
+       靠明暗而非边框区分，一整列输入读起来是安静的填充带，不再是叠框。
+       聚焦时才浮现青绿描边作为可编辑信号。单行/多行/代码框统一生效。 -->
   <Style Selector="TextBox">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="1" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
-    <Setter Property="CaretBrush" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="CaretBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="10,6" />
   </Style>
-  <!-- 禁止全局「纯蓝/强调色边」焦点：聚焦保持默认边，靠 CaretBrush 表示可编辑。
-       主题色描边仅允许 Border.ai-composer:focus-within（项目 AI 一体区）。 -->
+  <Style Selector="TextBox /template/ Border#PART_BorderElement">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="TextBox:pointerover /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFillHover}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <!-- 聚焦：青绿描边（现代输入的可编辑信号），填充回落到静态槽色 -->
   <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
   </Style>
   <Style Selector="TextBox.document-editor">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Reading}" />
@@ -1682,9 +1783,25 @@
 
   <Style Selector="ComboBox">
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="1" />
     <Setter Property="MinHeight" Value="32" />
+  </Style>
+  <Style Selector="ComboBox /template/ Border#Background">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ComboBox:pointerover /template/ Border#Background">
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFillHover}" />
+  </Style>
+  <Style Selector="ComboBox:focus /template/ Border#Background">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
   <!-- 分隔线 -->
@@ -1692,6 +1809,30 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="Height" Value="1" />
     <Setter Property="Margin" Value="0,6" />
+  </Style>
+
+  <!-- ============================================================
+       列表 / 下拉选中：全局改掉 Fluent 默认 SystemAccentColor 蓝，
+       统一到品牌青绿（AccentLight 淡底 + AccentPrimary 文字）。
+       之前设置页右侧索引「项目」是刺眼纯蓝，就是这个默认泄漏。
+       ============================================================ -->
+  <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <Style Selector="ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <Style Selector="ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <Style Selector="ComboBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
   <!-- 徽标（数字角标 / 标签 pill） -->
