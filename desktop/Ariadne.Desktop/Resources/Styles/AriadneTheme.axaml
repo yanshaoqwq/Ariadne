@@ -371,8 +371,9 @@
            用法：<Path Data="{StaticResource Ariadne.Icon.X}" .../>，
            Path Stretch=Uniform + Width/Height 控制显示尺寸。
            ============================================================ -->
-      <!-- 窗口控制（24 viewBox；Minimize 实心横条略低于几何中线，避免视觉上“偏高”） -->
-      <StreamGeometry x:Key="Ariadne.Icon.Minimize">M4.5,13.2 L19.5,13.2 L19.5,15.6 L4.5,15.6 Z</StreamGeometry>
+      <!-- 窗口控制（24 viewBox）。Minimize 横条居中于几何中线 y=12：
+           原先 13.2~15.6（中线 14.4）导致横条明显偏下，与最大化/关闭不在一条水平线上。 -->
+      <StreamGeometry x:Key="Ariadne.Icon.Minimize">M4.5,10.8 L19.5,10.8 L19.5,13.2 L4.5,13.2 Z</StreamGeometry>
       <StreamGeometry x:Key="Ariadne.Icon.Maximize">M5.5,5.5 L18.5,5.5 L18.5,18.5 L5.5,18.5 Z</StreamGeometry>
       <StreamGeometry x:Key="Ariadne.Icon.Restore">M8,9.5 L16.5,9.5 L16.5,18 L8,18 Z M9.5,7 L9.5,5.5 L18.5,5.5 L18.5,14.5 L17,14.5</StreamGeometry>
       <StreamGeometry x:Key="Ariadne.Icon.Close">M6.5,6.5 L17.5,17.5 M17.5,6.5 L6.5,17.5</StreamGeometry>
@@ -879,9 +880,7 @@
   <Style Selector="Button.primary:pressed, Button.secondary:pressed, Button.chip-filter:pressed, Button.icon-btn:pressed, Button.btn-compact:pressed">
     <Setter Property="RenderTransform" Value="translateY(0px) scale(0.965)" />
   </Style>
-  <Style Selector="Button.icon-btn:pointerover">
-    <Setter Property="RenderTransform" Value="scale(1.08)" />
-  </Style>
+  <!-- icon-btn 悬停不缩放整键（改为图标自转，见 icon-btn > Path.icon 旋转样式） -->
   <!-- 标签页：悬停/选中轻抬，切换时有「浮起」感 -->
   <Style Selector="Button.inspector-tab">
     <Setter Property="RenderTransformOrigin" Value="50%,100%" />
@@ -1226,15 +1225,17 @@
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
-    <Setter Property="Width" Value="44" />
-    <Setter Property="Height" Value="54" />
-    <Setter Property="MinWidth" Value="44" />
-    <Setter Property="MinHeight" Value="54" />
+    <!-- 40x36 而非 44x54：原先高 54 且 VerticalAlignment=Stretch，把键位拉满整条
+         标题栏高度，上下留白远大于左右，看着是三个瘦长条。 -->
+    <Setter Property="Width" Value="40" />
+    <Setter Property="Height" Value="36" />
+    <Setter Property="MinWidth" Value="40" />
+    <Setter Property="MinHeight" Value="36" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
-    <Setter Property="VerticalAlignment" Value="Stretch" />
+    <Setter Property="VerticalAlignment" Value="Center" />
     <Setter Property="RenderTransformOrigin" Value="50%,50%" />
     <Setter Property="RenderTransform" Value="none" />
     <Setter Property="Transitions">
@@ -1251,35 +1252,38 @@
     <Setter Property="StrokeLineCap" Value="Round" />
     <Setter Property="StrokeJoin" Value="Round" />
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="rotate(0deg)" />
     <Setter Property="Transitions">
       <Transitions>
         <DoubleTransition Property="StrokeThickness" Duration="0:0:0.14" />
         <BrushTransition Property="Stroke" Duration="0:0:0.14" />
         <DoubleTransition Property="Opacity" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.28" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
-  <!-- 最小化：实心主题色横条（比描边线更易辨认） -->
+  <!-- 最小化：实心主题色横条（比描边线更易辨认）。尺寸与其它窗口键图标一致（15），
+       否则 Stretch=Uniform 下横条会比最大化/关闭宽出一档。 -->
   <Style Selector="Button.window-control Path.icon.minimize">
-    <Setter Property="Width" Value="16" />
-    <Setter Property="Height" Value="16" />
+    <Setter Property="Width" Value="15" />
+    <Setter Property="Height" Value="15" />
     <Setter Property="StrokeThickness" Value="0" />
     <Setter Property="Stroke" Value="Transparent" />
     <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
-  <Style Selector="Button.window-control:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
-  </Style>
-  <Style Selector="Button.window-control:pointerover">
-    <Setter Property="RenderTransform" Value="scale(1.08)" />
-  </Style>
+  <!-- 窗口键悬停：不铺底色块（原先整键染 AccentLight，三个键逐个亮起很花），
+       改为图标自转 + 描边转强调色；关闭键保留红底（危险动作需要强信号）。 -->
   <Style Selector="Button.window-control:pointerover Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentHover}" />
     <Setter Property="StrokeThickness" Value="2.25" />
+    <Setter Property="RenderTransform" Value="rotate(180deg)" />
   </Style>
   <Style Selector="Button.window-control:pointerover Path.icon.minimize">
     <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentHover}" />
     <Setter Property="StrokeThickness" Value="0" />
+    <!-- 横条 180° 旋转后与原样重合，改用横向收窄表达「最小化」 -->
+    <Setter Property="RenderTransform" Value="scaleX(0.72)" />
   </Style>
   <Style Selector="Button.window-control:pressed">
     <Setter Property="RenderTransform" Value="scale(0.9)" />
@@ -1719,32 +1723,48 @@
   <Style Selector="Button.panel-collapse:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
   </Style>
-  <!-- 工具条图标按钮：正方形、透明底、悬停浅灰；hover 有过渡动效 -->
+  <!-- 工具条图标按钮：正方形、透明底。悬停不再给按钮铺一层灰底
+       （一排按钮逐个亮起色块很花），改为图标本身自转（见下方 Path 旋转样式）。 -->
   <Style Selector="Button.icon-btn">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Width" Value="32" />
-    <Setter Property="Height" Value="32" />
+    <Setter Property="Width" Value="30" />
+    <Setter Property="Height" Value="26" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+  </Style>
+  <!-- 图标自转：悬停时图标绕自身中心转小半圈，按钮底色保持透明。 -->
+  <Style Selector="Button.icon-btn > Path.icon">
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="rotate(0deg)" />
     <Setter Property="Transitions">
       <Transitions>
-        <BrushTransition Property="Background" Duration="0:0:0.10" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.28" Easing="CubicEaseOut" />
+        <BrushTransition Property="Stroke" Duration="0:0:0.14" />
       </Transitions>
     </Setter>
   </Style>
-  <Style Selector="Button.icon-btn:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  <Style Selector="Button.icon-btn:pointerover > Path.icon">
+    <Setter Property="RenderTransform" Value="rotate(180deg)" />
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
-  <!-- 三个工具条按钮（导入/导出/保存）保持统一的描边图标风格，
-       不用实色背景——避免保存按钮蓝色盖住图标。
-       保存用 accent 色描边区分，导入导出用普通 secondary 描边。 -->
-  <Style Selector="Button.icon-btn.save > Path.icon">
+  <!-- 图标包在 Panel 里的按钮（如带脏角标的保存）：转 Panel 整体 -->
+  <Style Selector="Button.icon-btn > Panel">
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="rotate(0deg)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.28" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.icon-btn:pointerover > Panel">
+    <Setter Property="RenderTransform" Value="rotate(180deg)" />
+  </Style>
+  <!-- 保存按钮：accent 描边区分，悬停同样只转图标，不铺底色 -->
+  <Style Selector="Button.icon-btn.save Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="StrokeThickness" Value="2" />
-  </Style>
-  <Style Selector="Button.icon-btn.save:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
   </Style>
 
   <!-- U60：页内表单在窄宽壳上拉满宽度、收紧网格间距（随 Window.compact 级联） -->

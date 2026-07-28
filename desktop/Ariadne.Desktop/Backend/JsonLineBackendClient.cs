@@ -726,7 +726,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     {
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
-            throw BackendException.Transport("ipc", "backend ipc command not found");
+            throw BackendException.Transport("ipc", BackendCommandMissingDiagnostic());
         }
         var data = await SendRequestAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
         return data is null
@@ -741,7 +741,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     {
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
-            throw BackendException.Transport("ipc", "backend ipc command not found");
+            throw BackendException.Transport("ipc", BackendCommandMissingDiagnostic());
         }
         await SendRequestAsync<object>(method, parameters, cancellationToken).ConfigureAwait(false);
     }
@@ -865,7 +865,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             ResetBackendProcessLocked();
             if (string.IsNullOrWhiteSpace(_backendCommand))
             {
-                throw BackendException.Transport("ipc", "backend ipc command not found");
+                throw BackendException.Transport("ipc", BackendCommandMissingDiagnostic());
             }
 
             var startInfo = new ProcessStartInfo
@@ -1043,13 +1043,32 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return DiscoverBackendCommand(AppContext.BaseDirectory, Environment.CurrentDirectory);
     }
 
+    /// <summary>
+    /// sidecar 未找到时的可诊断说明。
+    /// 「无法连接本地后端服务」这一句对排查毫无帮助——用户分不清是没编译 sidecar、
+    /// 启动目录不在源码树内，还是 Release 构建缺少打包。这里把搜索轨迹带出来。
+    /// </summary>
+    private static string BackendCommandMissingDiagnostic()
+    {
+        return LastDiscoveryReport ?? "backend ipc command not found";
+    }
+
+    /// <summary>
+    /// 记录最近一次 sidecar 查找过程，供「后端连不上」时给出可诊断原因。
+    /// 只保存路径，不含任何凭据。
+    /// </summary>
+    internal static string? LastDiscoveryReport { get; private set; }
+
     internal static string? DiscoverBackendCommand(string appBaseDirectory, string currentDirectory)
     {
+        var attempted = new List<string>();
         var packaged = FindPackagedBackendCommand(appBaseDirectory);
         if (packaged is not null)
         {
+            LastDiscoveryReport = null;
             return packaged;
         }
+        attempted.Add($"packaged under {appBaseDirectory}");
 
         var executableNames = OperatingSystem.IsWindows()
             ? new[] { "ariadne-ipc.exe", "ariadne-ipc" }
@@ -1059,21 +1078,38 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         {
             foreach (var executableName in executableNames)
             {
-                foreach (var relativePath in new[]
-                         {
-                             Path.Combine("target", "debug", executableName),
-                             Path.Combine("core", "target", "debug", executableName),
-                         })
+                // 同时搜 debug 与 release：只搜 debug 会让 release 构建必然找不到
+                // sidecar，表现为「所有按钮都连不上后端」。
+                foreach (var profile in new[] { "debug", "release" })
                 {
-                    var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
-                    if (seen.Add(candidate) && File.Exists(candidate))
+                    foreach (var relativePath in new[]
+                             {
+                                 Path.Combine("target", profile, executableName),
+                                 Path.Combine("core", "target", profile, executableName),
+                             })
                     {
-                        return candidate;
+                        var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
+                        if (!seen.Add(candidate))
+                        {
+                            continue;
+                        }
+                        if (File.Exists(candidate))
+                        {
+                            LastDiscoveryReport = null;
+                            return candidate;
+                        }
+                        attempted.Add(candidate);
                     }
                 }
             }
         }
 
+        // 找不到时保留完整搜索轨迹：否则用户只看到「无法连接本地后端服务」，
+        // 无从判断是没编译 sidecar、还是启动目录不在源码树内。
+        LastDiscoveryReport =
+            $"backend ipc executable not found. Set ARIADNE_BACKEND_IPC to its path, "
+            + $"or build it with `cargo build -p ariadne --bin ariadne-ipc`. "
+            + $"Searched {attempted.Count} location(s): {string.Join("; ", attempted.Take(12))}";
         return null;
     }
 

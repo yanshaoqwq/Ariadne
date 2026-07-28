@@ -15,6 +15,12 @@ public partial class WorkspacePageView : UserControl
 {
     private const double DragThreshold = 4.0;
 
+    /// <summary>拖动态脉动点浮层的边长（点本身半径 9，留足光环与呼吸放大的余量）。</summary>
+    private const double LibraryDragDotHostSize = 60;
+
+    /// <summary>松手后脉动点展开成卡片轮廓的时长。</summary>
+    private static readonly TimeSpan LibraryDropExpandDuration = TimeSpan.FromMilliseconds(190);
+
     private GridLength _savedLibraryHeight = new(220);
 
     // ---- 库底部 Pill（左右拖动） ----
@@ -874,8 +880,12 @@ public partial class WorkspacePageView : UserControl
                 if (CanvasOverlay is not null
                     && IsPointOver(CanvasOverlay, e.GetPosition(CanvasOverlay)))
                 {
+                    // 落点对准卡片中心：从 NodePortSpec 派生，跟随节点宽度变化。
                     var logical = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
-                    viewModel.AddNodeAt(_libraryDragItem.NodeType, logical.X - 101, logical.Y - 38);
+                    viewModel.AddNodeAt(
+                        _libraryDragItem.NodeType,
+                        logical.X - NodePortSpec.NodeWidth / 2.0,
+                        logical.Y - 38);
                 }
                 else
                 {
@@ -902,7 +912,9 @@ public partial class WorkspacePageView : UserControl
         finally
         {
             e.Pointer.Capture(null);
-            ResetLibraryGesture();
+            // 拖到落点松手：让脉动点展开成卡片轮廓再消失（非拖动/取消场景直接隐藏）。
+            var settle = _libraryDragging;
+            ResetLibraryGesture(settle);
         }
     }
 
@@ -914,23 +926,33 @@ public partial class WorkspacePageView : UserControl
                && localPoint.Y <= control.Bounds.Height;
     }
 
-    private void ResetLibraryGesture()
+    private void ResetLibraryGesture(bool settleGhost = false)
     {
         _libraryPointerDown = false;
         _libraryDragging = false;
         _libraryAddedThisGesture = false;
         _libraryDragItem = null;
-        HideLibraryDragGhost();
+        if (settleGhost)
+        {
+            SettleLibraryDragGhost();
+        }
+        else
+        {
+            HideLibraryDragGhost();
+        }
     }
 
     private void ShowLibraryDragGhost(string title, Point positionInView)
     {
-        if (LibraryDragGhost is null || LibraryDragGhostText is null)
+        if (LibraryDragGhost is null)
         {
             return;
         }
 
-        LibraryDragGhostText.Text = title;
+        // 脉动点不带文字（拖的是「一个即将落下的节点」，标题由落地后的卡片显示）。
+        _ = title;
+        LibraryDragGhost.ExpandProgress = 0;
+        LibraryDragGhost.ExpandedSize = new Size(NodePortSpec.NodeWidth, NodePortSpec.MinimumNodeHeight);
         LibraryDragGhost.IsVisible = true;
         MoveLibraryDragGhost(positionInView);
     }
@@ -942,8 +964,67 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        Canvas.SetLeft(LibraryDragGhost, positionInView.X + 12);
-        Canvas.SetTop(LibraryDragGhost, positionInView.Y + 12);
+        // 点居中跟随指针（原先是右下偏移 12px 的标签，脉动点应当落在指针正下方）。
+        Canvas.SetLeft(LibraryDragGhost, positionInView.X - LibraryDragGhost.Width / 2);
+        Canvas.SetTop(LibraryDragGhost, positionInView.Y - LibraryDragGhost.Height / 2);
+    }
+
+    /// <summary>
+    /// 松手落定：把脉动点在 <see cref="LibraryDropExpandDuration"/> 内展开成卡片轮廓，
+    /// 再隐藏交给真实节点。减少动态偏好下直接隐藏，不做展开。
+    /// </summary>
+    private void SettleLibraryDragGhost()
+    {
+        if (LibraryDragGhost is null || !LibraryDragGhost.IsVisible)
+        {
+            return;
+        }
+
+        if (MotionPreferences.ReduceMotion)
+        {
+            HideLibraryDragGhost();
+            return;
+        }
+
+        var ghost = LibraryDragGhost;
+        // 展开时把浮层放大到能容纳整张卡片轮廓，并保持中心不动。
+        var centerX = Canvas.GetLeft(ghost) + ghost.Width / 2;
+        var centerY = Canvas.GetTop(ghost) + ghost.Height / 2;
+        var hostWidth = NodePortSpec.NodeWidth + 24;
+        var hostHeight = NodePortSpec.MinimumNodeHeight + 24;
+        ghost.Width = hostWidth;
+        ghost.Height = hostHeight;
+        Canvas.SetLeft(ghost, centerX - hostWidth / 2);
+        Canvas.SetTop(ghost, centerY - hostHeight / 2);
+
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            HideLibraryDragGhost();
+            return;
+        }
+
+        var startedAt = TimeSpan.MinValue;
+        void Step(TimeSpan timestamp)
+        {
+            if (startedAt == TimeSpan.MinValue)
+            {
+                startedAt = timestamp;
+            }
+
+            var elapsed = timestamp - startedAt;
+            var progress = Math.Clamp(elapsed / LibraryDropExpandDuration, 0, 1);
+            ghost.ExpandProgress = progress;
+            if (progress >= 1)
+            {
+                HideLibraryDragGhost();
+                return;
+            }
+
+            topLevel.RequestAnimationFrame(Step);
+        }
+
+        topLevel.RequestAnimationFrame(Step);
     }
 
     private void HideLibraryDragGhost()
@@ -951,6 +1032,10 @@ public partial class WorkspacePageView : UserControl
         if (LibraryDragGhost is not null)
         {
             LibraryDragGhost.IsVisible = false;
+            LibraryDragGhost.ExpandProgress = 0;
+            // 复位成拖动态的小浮层尺寸，供下一次拖拽复用。
+            LibraryDragGhost.Width = LibraryDragDotHostSize;
+            LibraryDragGhost.Height = LibraryDragDotHostSize;
         }
     }
 

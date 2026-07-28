@@ -3833,8 +3833,10 @@ public enum NodePortDirection
 /// <summary>节点上的可视化端口定义，与后端 exec/data/communication 引脚对齐。</summary>
 public static class NodePortSpec
 {
-    /// <summary>节点外框宽（单卡片，引脚在内侧）。与 WorkspacePageView 节点模板一致。</summary>
-    public const double NodeWidth = 200;
+    /// <summary>节点外框宽（单卡片，引脚在内侧）。与 WorkspacePageView 节点模板一致。
+    /// 232 而非 200：200 宽时内容栏「数据入引脚列 + 加号 + 正文 + 数据出引脚」挤不开，
+    /// 加号会被裁掉一半。</summary>
+    public const double NodeWidth = 232;
     /// <summary>节点最小高度；多数据入按同一几何模型向下扩展。</summary>
     public const double MinimumNodeHeight = 96;
     /// <summary>内侧引脚中心到左右边的内缩（padding 6 + 半宽 7 ≈ 13）。</summary>
