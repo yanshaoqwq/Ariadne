@@ -757,6 +757,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     public ObservableCollection<SettingsTabViewModel> Tabs { get; }
     public ObservableCollection<SettingsSectionNavigationItemViewModel> SectionIndexItems { get; }
+
+    /// <summary>只列当前页签的节锚点（悬浮索引不再罗列全部页签的小节，跟随当前页）。</summary>
+    public IEnumerable<SettingsSectionNavigationItemViewModel> CurrentTabSectionIndexItems =>
+        SectionIndexItems.Where(item => string.Equals(item.TabId, SelectedTab.Id, StringComparison.Ordinal));
     public event EventHandler<SettingsSectionNavigationRequest>? ScrollToSectionRequested;
     public event EventHandler<SettingsFieldFocusRequest>? FocusValidationFieldRequested;
 
@@ -782,6 +786,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 OnPropertyChanged(nameof(IsVersionControlSelected));
                 OnPropertyChanged(nameof(IsSupportSelected));
                 OnPropertyChanged(nameof(NavigationSelection));
+                OnPropertyChanged(nameof(CurrentTabSectionIndexItems));
                 RestoreCurrentTabCommand.NotifyCanExecuteChanged();
                 RestoreRecommendedDefaultsCommand.NotifyCanExecuteChanged();
             }
@@ -1464,9 +1469,18 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 AllowHttpSkill = false;
                 AllowWasmNetwork = false;
             }
+            RefreshToolControlPolicyGates();
         }
     }
-    public bool AllowWebSearch { get => _allowWebSearch; set => SetProperty(ref _allowWebSearch, value); }
+    public bool AllowWebSearch
+    {
+        get => _allowWebSearch;
+        set
+        {
+            SetProperty(ref _allowWebSearch, value);
+            RefreshToolControlPolicyGates();
+        }
+    }
     public bool AllowHttpSkill { get => _allowHttpSkill; set => SetProperty(ref _allowHttpSkill, value); }
     public bool AllowWasmNetwork { get => _allowWasmNetwork; set => SetProperty(ref _allowWasmNetwork, value); }
     public bool AllowSecretRead { get => _allowSecretRead; set => SetProperty(ref _allowSecretRead, value); }
@@ -3930,8 +3944,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             ValidationMessage("ui.settings.validation.positive", ModelContextColumnLabel),
             ValidationMessage("ui.settings.validation.non_negative", ModelInputCostColumnLabel),
             ValidationMessage("ui.settings.validation.non_negative", ModelOutputCostColumnLabel));
-        // Validate 会写入每行的错误文案（有副作用），必须逐行执行；
-        // All 在首个失败行就短路，会让它之后的行残留上一轮已修好的过期报错。
+        // Validate 会写入每行错误文案，必须逐行执行，不能用 All 短路。
         var valid = true;
         foreach (var row in ProviderModels)
         {
@@ -4026,9 +4039,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     private void RebuildProviderDefaultModelRoutes()
     {
-        // 直接留存选项本身而不是 RouteTarget()：占位「无」项的 ProviderId 为空，
-        // 经 RouteTarget 会变成 null，随后被 ?? 回落到已保存的默认路由，
-        // 用户「清空默认路由」的选择就会在下一次重建时被静默还原。
+        // 留存选项本身而非 RouteTarget()：占位「无」项经 RouteTarget 会变成 null，
+        // 随后回落到已保存的默认路由，用户清空路由的选择就被还原了。
         var previousLlm = SelectedDefaultLlmRoute;
         var previousEmbedding = SelectedDefaultEmbeddingRoute;
         var previousReranker = SelectedDefaultRerankerRoute;
@@ -4100,8 +4112,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         OnPropertyChanged(nameof(SelectedDefaultSearchRoute));
     }
 
-    // 能力集合必须与下方路由分派（以及后端 validate_default_provider）保持一致：
-    // tool_use 同样是合法的默认 LLM 路由，漏掉它会让已保存的默认路由解析成「无」并在保存时被清空。
+    // 能力集合需与下方路由分派及后端 validate_default_provider 一致：tool_use 同样是合法的默认 LLM 路由。
     private IReadOnlyList<ModelConfig> ProviderModelsForRouting() => ProviderModels
         .Where(row => !string.IsNullOrWhiteSpace(row.ModelId))
         .Where(row => row.Capability is "llm" or "tool_use" or "embedding" or "reranker" or "search")
@@ -4913,6 +4924,14 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 SettingsInputFailure.Number,
                 "ui.settings.misc.chunk_overlap");
         }
+        // 密钥仅在 API key 认证下发送；切回其它认证方式时改为请求撤销端点上的遗留凭据。
+        // 两者互斥，不会触发后端「同一请求既替换又删除」的校验。
+        var qdrantApiKey = IsQdrantApiKeyAuth && !string.IsNullOrWhiteSpace(QdrantApiKey)
+            ? QdrantApiKey.Trim()
+            : null;
+        var clearQdrantApiKey = IsExternalQdrantBackend
+            && !IsQdrantApiKeyAuth
+            && HasQdrantApiKeyForCurrentEndpoint();
         return new RagSettings(new RagConfig(
             _ragSchemaVersion,
             new VectorStoreConfig(
@@ -4932,8 +4951,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             RerankerEnabled,
             chunkSize,
             chunkOverlap),
-            string.IsNullOrWhiteSpace(QdrantApiKey) ? null : QdrantApiKey.Trim(),
-            false,
+            qdrantApiKey,
+            clearQdrantApiKey,
             false);
     }
 
@@ -5137,6 +5156,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         WritableRootsText = string.Join(Environment.NewLine, settings.Policy.WritableFileRoots);
         ApplyScopedPermissionProfiles(settings);
         ApplyToolControls(settings.ToolControls);
+        RefreshToolControlPolicyGates();
         RefreshPermissionProfile();
     }
 
@@ -5173,6 +5193,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         {
             RebindNodePresetPermissionParents();
         }
+        RefreshToolControlPolicyGates();
         if (_applyingPermissionProfile)
         {
             return;
@@ -5394,6 +5415,43 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         return workflowProfile?.ToPolicy() ?? BuildGlobalPermissionPolicy();
     }
 
+    /// <summary>
+    /// U110：把工具开关分组的 Scope key 映射到生效的 <see cref="PermissionPolicy"/>，
+    /// 与后端 `permission_policy_for_node` / `permission_policy_for_scope`
+    /// （`core/src/commands.rs`）的映射规则一致：
+    /// project_ai 用自己的作用域覆盖，其余节点类作用域（含 global 近似）落到 workflow_nodes。
+    /// </summary>
+    private PermissionPolicy BuildEffectivePolicyForToolScope(string scope)
+    {
+        if (string.Equals(scope, "project_ai", StringComparison.Ordinal))
+        {
+            var projectAiProfile = ScopedPermissionProfiles.FirstOrDefault(profile =>
+                string.Equals(profile.Scope, "project_ai", StringComparison.Ordinal));
+            return projectAiProfile?.ToPolicy() ?? BuildGlobalPermissionPolicy();
+        }
+        if (string.Equals(scope, "global", StringComparison.Ordinal))
+        {
+            return BuildGlobalPermissionPolicy();
+        }
+        return BuildEffectiveWorkflowNodePermissionPolicy();
+    }
+
+    /// <summary>
+    /// U110：工具开关的有效状态 = tool_controls &amp;&amp; policy，与后端
+    /// `workflow_web_search_tool_enabled`（`core/src/commands.rs:6864`）判定 web-search
+    /// 的公式一致。开关本身仍然可交互，只叠加「已开但被策略否决」的提示。
+    /// </summary>
+    private void RefreshToolControlPolicyGates()
+    {
+        var hint = _displayNames.Text("ui.settings.permissions.tool.web_search_blocked_by_policy");
+        foreach (var group in ToolControlGroups)
+        {
+            var policy = BuildEffectivePolicyForToolScope(group.Scope);
+            var allowed = policy.AllowNetwork && policy.AllowWebSearch;
+            group.ApplyPolicyGate(allowed, hint);
+        }
+    }
+
     private void RebindPermissionInheritance()
     {
         var global = BuildGlobalPermissionPolicy();
@@ -5402,6 +5460,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             profile.RebindInheritedPolicy(global);
         }
         RebindNodePresetPermissionParents();
+        RefreshToolControlPolicyGates();
     }
 
     private void RebindNodePresetPermissionParents()
@@ -6243,6 +6302,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 control.DisplayName = ToolLabel(group.Scope, control.ToolId);
             }
         }
+        RefreshToolControlPolicyGates();
         foreach (var profile in ScopedPermissionProfiles)
         {
             profile.DisplayName = PermissionScopeLabel(profile.Scope);
@@ -6885,6 +6945,26 @@ public sealed class ToolControlGroupViewModel : ViewModelBase
         OnPropertyChanged(nameof(HasSafeControls));
         OnPropertyChanged(nameof(HasDangerControls));
     }
+
+    /// <summary>
+    /// U110：有效状态 = tool_controls &amp;&amp; policy（与后端 `workflow_web_search_tool_enabled`
+    /// 的判定公式一致）。当前只有 web-search 工具在 policy 层有对应的布尔门，
+    /// 其余工具动作（find/search/register/write）没有并联的 policy 判定，不叠加。
+    /// </summary>
+    public void ApplyPolicyGate(bool allowedByPolicy, string? hintWhenBlocked)
+    {
+        foreach (var item in Controls)
+        {
+            if (IsWebSearchToolId(item.ToolId))
+            {
+                item.ApplyPolicyGate(allowedByPolicy, hintWhenBlocked);
+            }
+        }
+    }
+
+    private static bool IsWebSearchToolId(string toolId) =>
+        string.Equals(toolId, "web-search", StringComparison.Ordinal)
+        || toolId.EndsWith("-web-search", StringComparison.Ordinal);
 }
 
 public sealed class ToolControlItemViewModel : ViewModelBase
@@ -6892,6 +6972,8 @@ public sealed class ToolControlItemViewModel : ViewModelBase
     private readonly Action _markDirty;
     private string _displayName;
     private bool? _isEnabled;
+    private bool _isBlockedByPolicy;
+    private string? _policyBlockedHint;
 
     public ToolControlItemViewModel(
         string toolId,
@@ -6913,6 +6995,24 @@ public sealed class ToolControlItemViewModel : ViewModelBase
     public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
     public bool IsDangerous { get; }
     public bool CanInherit { get; }
+
+    /// <summary>
+    /// U110：该工具在 tool_controls 里可能显示为「开」，但硬权限 policy（如 web-search
+    /// 需要 allow_network &amp;&amp; allow_web_search）否决了它，实际不生效。当前只对
+    /// web-search 工具计算这一层（唯一有对应布尔 policy 门的工具动作），见
+    /// <see cref="ToolControlGroupViewModel.ApplyPolicyGate"/>。
+    /// </summary>
+    public bool IsBlockedByPolicy { get => _isBlockedByPolicy; private set => SetProperty(ref _isBlockedByPolicy, value); }
+
+    /// <summary>被否决时展示给用户的提示；未被否决时为 null，ToolTip 不显示。</summary>
+    public string? PolicyBlockedHint { get => _policyBlockedHint; private set => SetProperty(ref _policyBlockedHint, value); }
+
+    /// <summary>由所属分组按 policy 判定结果调用；开关本身仍可交互，只叠加提示。</summary>
+    public void ApplyPolicyGate(bool allowedByPolicy, string? hintWhenBlocked)
+    {
+        IsBlockedByPolicy = !allowedByPolicy;
+        PolicyBlockedHint = IsBlockedByPolicy ? hintWhenBlocked : null;
+    }
 
     /// <summary>写盘/重写类工具视为危险，与权限页 warning 分组共用。</summary>
     public static bool IsDangerToolId(string toolId)

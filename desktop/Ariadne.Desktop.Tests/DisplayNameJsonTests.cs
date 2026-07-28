@@ -187,7 +187,7 @@ public sealed class DisplayNameJsonTests
         Assert.Contains("Text=\"{Binding SpentText}\"", view, StringComparison.Ordinal);
         // Tabs and the floating section index both use standard single-selection controls.
         Assert.Contains("<ListBox ItemsSource=\"{Binding Tabs}\"", view, StringComparison.Ordinal);
-        Assert.Contains("ItemsSource=\"{Binding SectionIndexItems}\"", view, StringComparison.Ordinal);
+        Assert.Contains("ItemsSource=\"{Binding CurrentTabSectionIndexItems}\"", view, StringComparison.Ordinal);
         Assert.Contains("Classes=\"settings-section-index\"", view, StringComparison.Ordinal);
         Assert.Contains("Setter Property=\"BorderThickness\" Value=\"0\"", view, StringComparison.Ordinal);
     }

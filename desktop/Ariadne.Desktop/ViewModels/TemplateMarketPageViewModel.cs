@@ -591,13 +591,37 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
     public Task ReloadProjectDataAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        // 本页跨项目保留实例，而仓库地址按项目配置，缓存目录属于上一个项目。
+        ResetCatalogCache();
         NotifyTemplateCommandsChanged();
         return Task.CompletedTask;
     }
 
     public void DeactivateProjectData()
     {
+        ResetCatalogCache();
         NotifyTemplateCommandsChanged();
+    }
+
+    /// <summary>
+    /// 丢弃与具体项目绑定的目录缓存，使下次进入本页重新按当前项目的仓库地址检索。
+    /// </summary>
+    private void ResetCatalogCache()
+    {
+        // 作废在途请求，避免旧项目的结果落进新项目的列表。
+        _searchGeneration++;
+        _requestGeneration++;
+        _requestCts?.Cancel();
+        _requestCts = null;
+        _initialCatalogLoadStarted = false;
+        _repositoryBaseUrl = string.Empty;
+        _page = -1;
+        _hasMore = false;
+        Templates.Clear();
+        SetState(SearchState.Idle);
+        StatusText = string.Empty;
+        OnPropertyChanged(nameof(CatalogSourceText));
+        OnPropertyChanged(nameof(CanLoadMore));
     }
 
     private string ResolveDisplayText(string value) => value.StartsWith("ui.", StringComparison.Ordinal)

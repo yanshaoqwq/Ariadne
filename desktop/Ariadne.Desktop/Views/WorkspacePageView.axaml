@@ -32,16 +32,20 @@
       <Setter Property="RenderTransform" Value="translate(0px,-3px) scale(1.015)" />
       <Setter Property="BoxShadow" Value="0 2 4 0 #1A000000, 0 12 26 -8 #34000000, 0 26 56 -20 #2C000000" />
     </Style>
-    <Style Selector="Grid.canvas-node Border.node-flow-ring">
-      <Setter Property="Opacity" Value="0" />
+    <!-- 选中环（自定义流动描边控件）与卡片共享同一撬起变换：
+         基础 = scale(1) + 变换过渡；悬停 = 与卡片一致的 translate(-3px)+scale(1.015)。
+         这样卡片抬起时选中环始终贴着它走（修复「选中框不跟节点悬浮」）。 -->
+    <Style Selector="Grid.canvas-node .node-flow-ring" x:SetterTargetType="Control">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
       <Setter Property="Transitions">
         <Transitions>
-          <DoubleTransition Property="Opacity" Duration="0:0:0.12" Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
         </Transitions>
       </Setter>
     </Style>
-    <Style Selector="Grid.canvas-node.selected Border.node-flow-ring">
-      <Setter Property="Opacity" Value="1" />
+    <Style Selector="Grid.canvas-node:pointerover .node-flow-ring" x:SetterTargetType="Control">
+      <Setter Property="RenderTransform" Value="translate(0px,-3px) scale(1.015)" />
     </Style>
     <Style Selector="Grid.canvas-node Border.node-card">
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
@@ -65,15 +69,11 @@
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.NodeSelected}" />
       <Setter Property="BoxShadow" Value="0 0 0 1 #4D2E726B, 0 2 4 0 #1C000000, 0 14 30 -8 #38000000, 0 30 64 -22 #30000000" />
     </Style>
-    <!-- 玻璃头：顶亮底沉的竖向微渐变，受光玻璃质感；底部一道极淡分隔线 -->
+    <!-- 玻璃头（毛玻璃）：透明底，让标题栏内那层「类型色磨砂晕染」透上来成形；
+         底部只留一道极淡发丝分隔线（token 派生，非硬编码）。不再叠竖向白渐变。 -->
     <Style Selector="Border.node-card-header">
-      <Setter Property="Background">
-        <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
-          <GradientStop Offset="0" Color="#33FFFFFF" />
-          <GradientStop Offset="1" Color="#0AFFFFFF" />
-        </LinearGradientBrush>
-      </Setter>
-      <Setter Property="BorderBrush" Value="#14000000" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BackgroundHover}" />
       <Setter Property="BorderThickness" Value="0,0,0,1" />
     </Style>
     <Style Selector="Ellipse.status-indicator">
@@ -238,7 +238,8 @@
       <Setter Property="RenderTransform" Value="scale(1)" />
       <Setter Property="Transitions"><Transitions /></Setter>
     </Style>
-    <Style Selector="UserControl.reduce-motion Grid.canvas-node Border.node-flow-ring">
+    <Style Selector="UserControl.reduce-motion Grid.canvas-node .node-flow-ring" x:SetterTargetType="Control">
+      <Setter Property="RenderTransform" Value="scale(1)" />
       <Setter Property="Transitions"><Transitions /></Setter>
     </Style>
     <Style Selector="UserControl.reduce-motion Button.zoom-readout">
@@ -278,6 +279,9 @@
             <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopySelectedNodeCommand}" />
             <MenuItem Header="{Binding CtxCutText}" Command="{Binding CutSelectedNodeCommand}" />
             <MenuItem Header="{Binding CtxPasteText}" Command="{Binding PasteNodeCommand}" />
+            <Separator />
+            <!-- 导出所选片段：选中操作，放右键语境（不再占用检查器底部按钮位） -->
+            <MenuItem Header="{Binding ExportSelectionText}" Command="{Binding ExportSelectionCommand}" />
             <Separator />
             <MenuItem Header="{Binding CtxFitViewText}" Command="{Binding FitViewCommand}" />
             <Separator />
@@ -437,18 +441,19 @@
                           VerticalAlignment="Center" />
                 </Border>
 
-                <!-- 选中环：外扩 = 描边宽 2.5，内侧贴紧卡片外缘 -->
-                <Border Grid.Row="1"
+                <!-- 选中环：贴卡片外缘的流动渐变描边（自定义控件，强调色衍生，零硬编码）。
+                     IsActive 绑选中态；悬停时随卡片一起撬起（见下方 node-flow-ring 变换样式）。 -->
+                <ctl:SelectionFlowRing Grid.Row="1"
                         Classes="node-flow-ring"
                         Margin="-2.5"
                         CornerRadius="12"
-                        IsHitTestVisible="False"
-                        IsVisible="True" />
+                        IsActive="{Binding IsSelected}" />
 
-                <!-- 整卡：磨砂玻璃底（点阵透出）+ 顶缘光边，标题/内容分层 -->
+                <!-- 整卡：顶部毛玻璃（点阵透出）→ 底部实心的竖向渐变 + 顶缘光边，标题/内容分层。
+                     节点不再带类型色，质感全部由这道「玻璃→实心」渐变承担（token 派生，非硬编码）。 -->
                 <Border x:Name="NodeKeyboardFocusHost"
                         Grid.Row="1"
-                        Background="{DynamicResource Ariadne.NodeGlass}"
+                        Background="{DynamicResource Ariadne.NodeGlassFill}"
                         BorderThickness="1"
                         CornerRadius="12"
                         ClipToBounds="True"
@@ -461,7 +466,7 @@
                     <!-- 顶缘玻璃光边：1px 受光亮线，取代旧色条；用玻璃高光 token（非硬编码） -->
                     <Border DockPanel.Dock="Top" Height="1" IsHitTestVisible="False"
                             Background="{DynamicResource Ariadne.GlassBorder}" />
-                    <!-- 标题栏：类型芯片 + 名称 + 运行；执行引脚在左右两端 -->
+                    <!-- 标题栏：名称 + 运行；执行引脚在左右两端（不放类型图标/类型色） -->
                     <Border DockPanel.Dock="Top"
                             Classes="node-card-header"
                             Padding="8,8"
@@ -471,11 +476,7 @@
                             PointerReleased="OnNodePointerReleased"
                             PointerCaptureLost="OnNodePointerCaptureLost">
                       <Panel>
-                        <!-- 类型色晕染：给标题栏一层专属色气质（顶部淡出） -->
-                        <Border IsHitTestVisible="False"
-                                Margin="-8"
-                                Background="{Binding TypeHeaderWashBrush}" />
-                        <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" ColumnSpacing="7">
+                        <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="7">
                         <Border Grid.Column="0"
                                 Width="16" Height="16"
                                 VerticalAlignment="Center"
@@ -501,27 +502,12 @@
                                 StrokeThickness="1.25"
                                 Data="M4.1,2.4 Q3,1.9 3,3.2 L3,10.8 Q3,12.1 4.1,11.6 L11.4,8.1 Q13.2,7 11.4,5.9 Z" />
                         </Border>
-                        <!-- 类型芯片：类型色圆角块 + 【按类型】描边图标，一眼扫读节点类别。
-                             图标为线稿几何，用描边而非填充；描边色走 TextOnAccent token（非硬编码）。 -->
-                        <Border Grid.Column="1" Width="20" Height="20" CornerRadius="6"
-                                VerticalAlignment="Center"
-                                Background="{Binding TypeAccentBrush}"
-                                BoxShadow="0 1 3 -1 #40000000">
-                          <Path Width="12" Height="12" Stretch="Uniform"
-                                HorizontalAlignment="Center" VerticalAlignment="Center"
-                                Fill="Transparent"
-                                Stroke="{DynamicResource Ariadne.TextOnAccent}"
-                                StrokeThickness="1.5"
-                                StrokeLineCap="Round"
-                                StrokeJoin="Round"
-                                Data="{Binding TypeIcon}" />
-                        </Border>
-                        <TextBlock Grid.Column="2"
+                        <TextBlock Grid.Column="1"
                                    Text="{Binding Label}"
                                    FontWeight="SemiBold" FontSize="12"
                                    Foreground="{DynamicResource Ariadne.TextPrimary}"
                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                        <StackPanel Grid.Column="3"
+                        <StackPanel Grid.Column="2"
                                     Orientation="Horizontal"
                                     Spacing="3"
                                     IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
@@ -541,7 +527,7 @@
                                   Data="M9,6 L18,12 L9,18 Z" />
                           </Button>
                         </StackPanel>
-                        <Border Grid.Column="4"
+                        <Border Grid.Column="3"
                                 Width="16" Height="16"
                                 VerticalAlignment="Center"
                                 Classes="pin-glass-soft keyboard-target"
@@ -717,6 +703,10 @@
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding RedoText}" AutomationProperties.Name="{Binding RedoText}" Command="{Binding RedoCommand}">
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Redo}" />
                 </Button>
+                <!-- 打包为子工作流：选中操作，放右上角画布工具条（不再占用检查器底部按钮位） -->
+                <Button Classes="icon-btn" ToolTip.Tip="{Binding SubworkflowText}" AutomationProperties.Name="{Binding SubworkflowText}" Command="{Binding PackSelectionCommand}">
+                  <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Pack}" />
+                </Button>
               </StackPanel>
               <Border Width="1" Margin="4,5" Background="{DynamicResource Ariadne.BorderMuted}" />
               <StackPanel x:Name="CanvasFileActions" Orientation="Horizontal" Spacing="2">
@@ -822,7 +812,7 @@
                   <Border Width="10"
                           Height="6"
                           CornerRadius="2"
-                          Background="{Binding TypeAccentBrush}"
+                          Background="{DynamicResource Ariadne.BorderStrong}"
                           BorderBrush="{DynamicResource Ariadne.BackgroundSurface}"
                           BorderThickness="1"
                           IsHitTestVisible="False" />
@@ -1561,40 +1551,43 @@
                                TextWrapping="Wrap"
                                MinHeight="128"
                                Classes="detail-editor" />
-                      <Grid ColumnDefinitions="1.2*,0.8*" ColumnSpacing="10">
-                        <StackPanel Grid.Column="0" Spacing="4">
-                          <TextBlock Text="{Binding ModelIdText}" Classes="caption" />
-                          <ComboBox ItemsSource="{Binding AvailableModelOptions}"
-                                    SelectedItem="{Binding SelectedNodeModelOption, Mode=TwoWay}"
-                                    PlaceholderText="{Binding ModelSelectorPlaceholder}"
-                                    HorizontalAlignment="Stretch">
-                            <ComboBox.ItemTemplate>
-                              <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
-                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
-                              </DataTemplate>
-                            </ComboBox.ItemTemplate>
-                          </ComboBox>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Spacing="4">
-                          <TextBlock Text="{Binding NodeBudgetText}" Classes="caption" />
-                          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="4">
-                            <TextBlock Grid.Column="0" Text="$" Classes="caption" VerticalAlignment="Center" />
-                            <TextBox Grid.Column="1" Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeBudgetText}"
-                                     PlaceholderText="{Binding OptionalPlaceholder}" />
-                          </Grid>
-                        </StackPanel>
+                      <!-- 模型/预算/超时/断点：拆掉两列挤压网格，改行内属性表（与其余检查器分区同一语汇），
+                           每项独占一行、键左值右，不再挤在一起。 -->
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Classes="k" Text="{Binding ModelIdText}" />
+                        <ComboBox Grid.Column="1" ItemsSource="{Binding AvailableModelOptions}"
+                                  SelectedItem="{Binding SelectedNodeModelOption, Mode=TwoWay}"
+                                  PlaceholderText="{Binding ModelSelectorPlaceholder}"
+                                  HorizontalAlignment="Stretch">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
+                              <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
                       </Grid>
-                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                        <StackPanel Grid.Column="0" Spacing="4">
-                          <TextBlock Text="{Binding NodeTimeoutText}" Classes="caption" />
-                          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                            <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}"  AutomationProperties.Name="{Binding NodeTimeoutText}" />
-                            <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
-                          </Grid>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Bottom">
-                          <CheckBox IsChecked="{Binding SelectedNode.BreakpointEnabled, Mode=TwoWay}" Content="{Binding BreakpointText}" />
-                          <Button Classes="secondary" Content="{Binding SaveBreakpointText}" Command="{Binding ToggleBreakpointCommand}" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Classes="k" Text="{Binding NodeBudgetText}" />
+                        <Grid Grid.Column="1" ColumnDefinitions="Auto,*" ColumnSpacing="4">
+                          <TextBlock Grid.Column="0" Text="$" Classes="caption" VerticalAlignment="Center" />
+                          <TextBox Grid.Column="1" Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeBudgetText}"
+                                   PlaceholderText="{Binding OptionalPlaceholder}" />
+                        </Grid>
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Classes="k" Text="{Binding NodeTimeoutText}" />
+                        <Grid Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                          <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeTimeoutText}" />
+                          <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
+                        </Grid>
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Classes="k" Text="{Binding BreakpointText}" />
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                          <CheckBox IsChecked="{Binding SelectedNode.BreakpointEnabled, Mode=TwoWay}"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.Name="{Binding BreakpointText}" />
+                          <Button Classes="secondary btn-compact" Content="{Binding SaveBreakpointText}" Command="{Binding ToggleBreakpointCommand}" VerticalAlignment="Center" />
                         </StackPanel>
                       </Grid>
                       <Button Classes="primary" Content="{Binding ApplyNodeConfigText}" HorizontalAlignment="Right" Command="{Binding ApplyNodeConfigCommand}" />
@@ -1606,14 +1599,8 @@
                           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
                           BorderThickness="0,1,0,0">
                     <StackPanel Spacing="9">
-                      <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
-                        <Button Grid.Column="0" Classes="secondary"
-                                Content="{Binding ExportSelectionText}"
-                                Command="{Binding ExportSelectionCommand}" />
-                        <Button Grid.Column="1" Classes="secondary"
-                                Content="{Binding SubworkflowText}"
-                                Command="{Binding PackSelectionCommand}" />
-                      </Grid>
+                      <!-- 导出所选片段已迁到画布右键菜单；子工作流已迁到右上角画布工具条，
+                           底部只留注解与删除，不再堆叠成串按钮。 -->
                       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <TextBox Grid.Column="0"
                                  Text="{Binding AnnotationTitle, Mode=TwoWay}"

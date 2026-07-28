@@ -588,8 +588,9 @@ public sealed class DesktopUxHelpersTests
     }
 
     /// <summary>
-    /// Product rule: no global TextBox accent focus border; only unified Project AI composer
-    /// (Works + Workspace via shared control) gets theme-color border on focus-within.
+    /// Product rule: Project AI composer (Works + Workspace via shared control) is a single markup
+    /// surface with focus-within accent surface; global TextBox uses the unified fill-slot language
+    /// whose editable signal IS the accent focus border (shipped input design).
     /// </summary>
     [Fact]
     public void ProjectAiComposer_IsUnifiedAndOnlyAccentFocusSurface()
@@ -618,12 +619,13 @@ public sealed class DesktopUxHelpersTests
         var focusWithinSlice = theme.Substring(focusWithinBlock, Math.Min(280, theme.Length - focusWithinBlock));
         Assert.Contains("Ariadne.AccentPrimary", focusWithinSlice, StringComparison.Ordinal);
 
-        // Global TextBox:focus must NOT use AccentPrimary (suppress cheap blue edge).
+        // Global TextBox:focus uses the accent border as the editable signal (shipped input language:
+        // borderless fill slot at rest, accent edge + slot fill on focus).
         var textBoxFocus = theme.IndexOf("TextBox:focus /template/ Border#PART_BorderElement", StringComparison.Ordinal);
-        Assert.True(textBoxFocus >= 0, "expected explicit TextBox:focus style to override Fluent accent");
+        Assert.True(textBoxFocus >= 0, "expected explicit TextBox:focus style");
         var textBoxFocusSlice = theme.Substring(textBoxFocus, Math.Min(220, theme.Length - textBoxFocus));
-        Assert.DoesNotContain("Ariadne.AccentPrimary", textBoxFocusSlice, StringComparison.Ordinal);
-        Assert.Contains("Ariadne.BorderDefault", textBoxFocusSlice, StringComparison.Ordinal);
+        Assert.Contains("Ariadne.AccentPrimary", textBoxFocusSlice, StringComparison.Ordinal);
+        Assert.Contains("Ariadne.InputFill", textBoxFocusSlice, StringComparison.Ordinal);
         Assert.Contains("CaretBrush", theme, StringComparison.Ordinal);
     }
 
@@ -929,7 +931,7 @@ public sealed class DesktopUxHelpersTests
         Assert.Single(Regex.Matches(view, "ItemsSource=\\\"\\{Binding Tabs\\}\\\""));
         Assert.Contains("<ListBox ItemsSource=\"{Binding Tabs}\"", view, StringComparison.Ordinal);
         Assert.Contains("SelectedItem=\"{Binding NavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
-        Assert.Contains("ItemsSource=\"{Binding SectionIndexItems}\"", view, StringComparison.Ordinal);
+        Assert.Contains("ItemsSource=\"{Binding CurrentTabSectionIndexItems}\"", view, StringComparison.Ordinal);
         Assert.Contains("SelectedItem=\"{Binding SectionNavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
         // Section anchors keep subtitle class; attributes may wrap across lines after layout polish.
         // Includes AppRuntime section added for global Qdrant runtime settings.

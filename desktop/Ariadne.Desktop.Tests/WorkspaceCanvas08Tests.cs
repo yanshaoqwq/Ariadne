@@ -93,11 +93,13 @@ public sealed class WorkspaceCanvas08Tests
         var motion = File.ReadAllText(Path.Combine(ResolveDesktopSource(), "MotionPreferences.cs"));
 
         Assert.Contains("Duration=\"0:0:0.10\"", axaml, StringComparison.Ordinal);
-        Assert.Contains("Duration=\"0:0:0.12\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Duration=\"0:0:0.14\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Duration=\"0:0:0.16\"", axaml, StringComparison.Ordinal);
         Assert.DoesNotContain("IterationCount=\"Infinite\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Grid.canvas-node:pointerover Border.node-card", axaml, StringComparison.Ordinal);
-        Assert.Contains("Grid.canvas-node.selected Border.node-flow-ring", axaml, StringComparison.Ordinal);
+        // 选中环（自定义 SelectionFlowRing，IsActive 绑选中）与卡片共享悬停撬起变换，跟随节点悬浮。
+        Assert.Contains("Grid.canvas-node:pointerover .node-flow-ring", axaml, StringComparison.Ordinal);
+        Assert.Contains("IsActive=\"{Binding IsSelected}\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Button.zoom-readout.motion-pulse", axaml, StringComparison.Ordinal);
         Assert.Contains("Border.viewport-frame.motion-settle", axaml, StringComparison.Ordinal);
         Assert.Contains("UserControl.reduce-motion", axaml, StringComparison.Ordinal);

@@ -364,7 +364,7 @@ public sealed class SettingsPermissionPresetCompositionTests
         new[] { new ModelConfig(model, "llm", null, null, null) },
         false);
 
-    private class PermissionPresetBackend : DispatchProxy
+    internal class PermissionPresetBackend : DispatchProxy
     {
         private readonly Queue<Task<NodePresetSettings>> _presets = new();
         private readonly Queue<Task<PermissionsSettings>> _permissions = new();

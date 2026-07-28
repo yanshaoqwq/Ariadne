@@ -516,8 +516,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
                 selected.Message,
                 selected.ContextText,
             }.Where(value => !string.IsNullOrWhiteSpace(value)));
-        // 命令以 fire-and-forget 方式调用本方法，抛出的异常无人观察；
-        // 剪贴板在 Linux/Wayland 下无属主时会失败，必须就地转成可见状态文案。
+        // 命令 fire-and-forget 调用本方法，剪贴板失败的异常无人观察，需就地转成状态文案。
         try
         {
             await RequestCopyText(text).ConfigureAwait(true);

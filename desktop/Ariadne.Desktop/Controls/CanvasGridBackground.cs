@@ -28,6 +28,11 @@ public sealed class CanvasGridBackground : Control
     private double _offsetY;
     private IBrush? _dotBrush;
 
+    // 平铺点阵刷：整片背景一次画完，免去按点发出成千上万次 DrawEllipse。
+    // 只随间距分档与主题换色重建。
+    private TileBrush? _tileBrush;
+    private double _tileSpacing;
+
     public CanvasGridBackground()
     {
         // 纯背景层：不拦截命中（画布指针事件要落到下面的节点/空白），并按宿主边界裁剪。
@@ -89,14 +94,50 @@ public sealed class CanvasGridBackground : Control
         // 首个可见点取 offset 对 screen 的正模，保证整片点阵随平移连续滚动、对齐逻辑原点。
         var startX = PositiveModulo(_offsetX, screen);
         var startY = PositiveModulo(_offsetY, screen);
-
-        for (var x = startX; x <= width; x += screen)
+        if (double.IsNaN(startX) || double.IsNaN(startY))
         {
-            for (var y = startY; y <= height; y += screen)
-            {
-                context.DrawEllipse(brush, null, new Point(x, y), DotRadius, DotRadius);
-            }
+            return;
         }
+
+        if (_tileBrush is null || Math.Abs(_tileSpacing - screen) > 1e-9)
+        {
+            _tileBrush = CreateTileBrush(brush, screen);
+            _tileSpacing = screen;
+        }
+
+        // 点画在 tile 正中心，故原点平移半格才能让点心落在 startX + k·screen 上；
+        // 四周各多铺一格覆盖边缘，溢出部分由 ClipToBounds 裁掉。
+        using (context.PushTransform(
+                   Matrix.CreateTranslation(startX - screen / 2, startY - screen / 2)))
+        {
+            context.DrawRectangle(
+                _tileBrush,
+                null,
+                new Rect(-screen, -screen, width + (screen * 3), height + (screen * 3)));
+        }
+    }
+
+    /// <summary>
+    /// 构造一个边长为 <paramref name="spacing"/>、中心含单个点的平铺刷。
+    /// </summary>
+    private static TileBrush CreateTileBrush(IBrush dotBrush, double spacing)
+    {
+        var center = spacing / 2;
+        return new DrawingBrush(new GeometryDrawing
+        {
+            Brush = dotBrush,
+            Geometry = new EllipseGeometry(new Rect(
+                center - DotRadius,
+                center - DotRadius,
+                DotRadius * 2,
+                DotRadius * 2)),
+        })
+        {
+            TileMode = TileMode.Tile,
+            Stretch = Stretch.None,
+            SourceRect = new RelativeRect(0, 0, spacing, spacing, RelativeUnit.Absolute),
+            DestinationRect = new RelativeRect(0, 0, spacing, spacing, RelativeUnit.Absolute),
+        };
     }
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
@@ -115,6 +156,7 @@ public sealed class CanvasGridBackground : Control
     {
         // 主题/个性化换色：丢弃旧刷，下一帧按新 token 重建。
         _dotBrush = null;
+        _tileBrush = null;
         InvalidateVisual();
     }
 

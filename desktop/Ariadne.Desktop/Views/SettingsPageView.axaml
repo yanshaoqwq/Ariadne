@@ -56,6 +56,10 @@
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
+    <!-- U110：工具开关虽已勾选，但被硬权限 policy 否决（目前只有 web-search 有此判定）。 -->
+    <Style Selector="CheckBox.policy-blocked">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusWarning}" />
+    </Style>
   </UserControl.Styles>
   <!-- 根容器透明：让 MainWindow 底层的径向光晕透上来 -->
   <Grid RowDefinitions="Auto,*" Background="Transparent">
@@ -820,7 +824,9 @@
                               <CheckBox Margin="0,0,18,8"
                                         IsThreeState="{Binding CanInherit}"
                                         IsChecked="{Binding IsEnabled, Mode=TwoWay}"
-                                        Content="{Binding DisplayName}" />
+                                        Content="{Binding DisplayName}"
+                                        Classes.policy-blocked="{Binding IsBlockedByPolicy}"
+                                        ToolTip.Tip="{Binding PolicyBlockedHint}" />
                             </DataTemplate>
                           </ItemsControl.ItemTemplate>
                         </ItemsControl>
@@ -844,7 +850,8 @@
                                             IsThreeState="{Binding CanInherit}"
                                             IsChecked="{Binding IsEnabled, Mode=TwoWay}"
                                             Content="{Binding DisplayName}"
-                                            Foreground="{DynamicResource Ariadne.StatusWarning}" />
+                                            Foreground="{DynamicResource Ariadne.StatusWarning}"
+                                            ToolTip.Tip="{Binding PolicyBlockedHint}" />
                                 </DataTemplate>
                               </ItemsControl.ItemTemplate>
                             </ItemsControl>
@@ -1251,8 +1258,8 @@
         </StackPanel>
       </ScrollViewer>
 
-      <!-- 悬浮索引本体：浮层材质（圆角 + 发丝边 + 浮层投影），贴右缘垂直居中。
-           保留 settings-index-rail 类名，窄窗（Window.compact）下仍会整块隐藏。 -->
+      <!-- 悬浮索引本体：纯浮层（圆角 + 浮层投影），贴右缘垂直居中。去掉描边——
+           浮层靠投影而非边框成形，视觉更干净。窄窗（Window.compact）下仍整块隐藏。 -->
       <Border Classes="settings-index-rail"
               HorizontalAlignment="Right"
               VerticalAlignment="Center"
@@ -1262,12 +1269,10 @@
               CornerRadius="10"
               Padding="7"
               Background="{DynamicResource Ariadne.BackgroundElevated}"
-              BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-              BorderThickness="1"
               BoxShadow="{DynamicResource Ariadne.Shadow.Flyout}">
         <ListBox x:Name="SettingsSectionIndex"
                  Classes="settings-section-index"
-                 ItemsSource="{Binding SectionIndexItems}"
+                 ItemsSource="{Binding CurrentTabSectionIndexItems}"
                  SelectedItem="{Binding SectionNavigationSelection, Mode=TwoWay}"
                  SelectionMode="Single"
                  HorizontalAlignment="Stretch"

@@ -80,10 +80,12 @@
           <!-- 磨砂玻璃节点底：半透明白，让画布点阵隐隐透出，营造玻璃悬浮感 -->
           <Color x:Key="Ariadne.Color.NodeGlass">#F2FBFCFD</Color>
           <Color x:Key="Ariadne.Color.NodeGlassHeader">#D6FFFFFF</Color>
+          <!-- 节点底渐变的实心端：与玻璃端同色相、全不透明，形成「上透下实」的纵深 -->
+          <Color x:Key="Ariadne.Color.NodeGlassSolid">#FFFBFCFD</Color>
           <Color x:Key="Ariadne.Color.NodeBorder">#C9D3DD</Color>
           <Color x:Key="Ariadne.Color.NodeSelected">#2E726B</Color>
           <Color x:Key="Ariadne.Color.EdgeData">#2E726B</Color>
-          <Color x:Key="Ariadne.Color.EdgeControl">#8C8366</Color>
+          <Color x:Key="Ariadne.Color.EdgeControl">#8A9490</Color>
           <Color x:Key="Ariadne.Color.EdgeCommunication">#7C3AED</Color>
           <!-- 编辑 / diff -->
           <Color x:Key="Ariadne.Color.EditorBackground">#FAFBFC</Color>
@@ -142,6 +144,12 @@
           <SolidColorBrush x:Key="Ariadne.NodeBackground" Color="{StaticResource Ariadne.Color.NodeBackground}" />
           <SolidColorBrush x:Key="Ariadne.NodeGlass" Color="{StaticResource Ariadne.Color.NodeGlass}" />
           <SolidColorBrush x:Key="Ariadne.NodeGlassHeader" Color="{StaticResource Ariadne.Color.NodeGlassHeader}" />
+          <!-- 节点卡片底：顶部毛玻璃（画布点阵透出）纵向过渡到底部实心，取代类型色晕染 -->
+          <LinearGradientBrush x:Key="Ariadne.NodeGlassFill" StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="{StaticResource Ariadne.Color.NodeGlass}" />
+            <GradientStop Offset="0.62" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+            <GradientStop Offset="1" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+          </LinearGradientBrush>
           <SolidColorBrush x:Key="Ariadne.NodeBorder" Color="{StaticResource Ariadne.Color.NodeBorder}" />
           <SolidColorBrush x:Key="Ariadne.NodeSelected" Color="{StaticResource Ariadne.Color.NodeSelected}" />
           <SolidColorBrush x:Key="Ariadne.EdgeData" Color="{StaticResource Ariadne.Color.EdgeData}" />
@@ -215,6 +223,8 @@
           <!-- 磨砂玻璃节点底（暗）：半透明深灰，画布点阵透出 -->
           <Color x:Key="Ariadne.Color.NodeGlass">#E62A2F33</Color>
           <Color x:Key="Ariadne.Color.NodeGlassHeader">#26FFFFFF</Color>
+          <!-- 节点底渐变的实心端（暗）：同色相全不透明 -->
+          <Color x:Key="Ariadne.Color.NodeGlassSolid">#FF2A2F33</Color>
           <Color x:Key="Ariadne.Color.NodeBorder">#4A5159</Color>
           <Color x:Key="Ariadne.Color.NodeSelected">#6FB9AD</Color>
           <Color x:Key="Ariadne.Color.EdgeData">#6FB9AD</Color>
@@ -275,6 +285,12 @@
           <SolidColorBrush x:Key="Ariadne.NodeBackground" Color="{StaticResource Ariadne.Color.NodeBackground}" />
           <SolidColorBrush x:Key="Ariadne.NodeGlass" Color="{StaticResource Ariadne.Color.NodeGlass}" />
           <SolidColorBrush x:Key="Ariadne.NodeGlassHeader" Color="{StaticResource Ariadne.Color.NodeGlassHeader}" />
+          <!-- 节点卡片底：顶部毛玻璃（画布点阵透出）纵向过渡到底部实心，取代类型色晕染 -->
+          <LinearGradientBrush x:Key="Ariadne.NodeGlassFill" StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="{StaticResource Ariadne.Color.NodeGlass}" />
+            <GradientStop Offset="0.62" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+            <GradientStop Offset="1" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+          </LinearGradientBrush>
           <SolidColorBrush x:Key="Ariadne.NodeBorder" Color="{StaticResource Ariadne.Color.NodeBorder}" />
           <SolidColorBrush x:Key="Ariadne.NodeSelected" Color="{StaticResource Ariadne.Color.NodeSelected}" />
           <SolidColorBrush x:Key="Ariadne.EdgeData" Color="{StaticResource Ariadne.Color.EdgeData}" />
@@ -399,6 +415,8 @@
       <StreamGeometry x:Key="Ariadne.Icon.Import">M12,3 L12,13 M8,9 L12,13 L16,9 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
       <!-- 导出（向上出托盘） -->
       <StreamGeometry x:Key="Ariadne.Icon.Export">M12,13 L12,3 M8,7 L12,3 L16,7 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
+      <!-- 打包为子工作流（等轴立方体 = 把所选收进一个包） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Pack">M12,3 L20,7.5 L20,16.5 L12,21 L4,16.5 L4,7.5 Z M4,7.5 L12,12 L20,7.5 M12,12 L12,21</StreamGeometry>
       <!-- 搜索（放大镜） -->
       <StreamGeometry x:Key="Ariadne.Icon.Search">M10.5,5 a5.5,5.5 0 1,0 0.01,0 M14.8,14.8 L19,19</StreamGeometry>
     </ResourceDictionary>
@@ -441,6 +459,11 @@
   <Style Selector="ToolTip /template/ Border">
     <Setter Property="BoxShadow" Value="0 2 6 -1 #2E000000, 0 8 20 -6 #33000000" />
     <Setter Property="CornerRadius" Value="6" />
+  </Style>
+  <!-- 全局 TextBlock 默认色（TextPrimary 深色）会直接盖掉 ToolTip 继承下来的反白，
+       导致深底胶囊上是黑字、看不清。用更具体的选择器把提示文字拉回 TooltipText。 -->
+  <Style Selector="ToolTip TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TooltipText}" />
   </Style>
 
   <!-- ============================ 细滚动条 ============================
@@ -1134,13 +1157,8 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.EdgeCommunication}" />
   </Style>
 
-  <!-- 选中节点：使用全局强调色；避免常驻动画并遵守减少动态效果偏好。 -->
-  <Style Selector="Border.node-flow-ring">
-    <Setter Property="Opacity" Value="1" />
-    <Setter Property="BorderThickness" Value="2.5" />
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.NodeSelected}" />
-  </Style>
+  <!-- 选中环已由自定义 SelectionFlowRing 控件承担（流动渐变描边，主题色衍生），
+       不再用 Border 平描边；此处不再保留 Border.node-flow-ring 样式。 -->
   <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentHover}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentHover}" />

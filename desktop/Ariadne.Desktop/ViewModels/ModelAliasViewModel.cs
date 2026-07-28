@@ -53,12 +53,26 @@ public sealed class ModelAliasViewModel : ViewModelBase
 
     public void RebindTargetOptions(IEnumerable<WorkflowModelOption> options)
     {
+        var candidates = options as IReadOnlyCollection<WorkflowModelOption> ?? options.ToArray();
         var selected = IsConfigured
-            ? options.FirstOrDefault(option =>
+            ? candidates.FirstOrDefault(option =>
                 !option.IsAlias
                 && string.Equals(option.ProviderId, _targetProviderId, StringComparison.Ordinal)
                 && string.Equals(option.ModelId, _targetModelId, StringComparison.Ordinal))
-            : options.FirstOrDefault(option => option.IsInherited);
+            : candidates.FirstOrDefault(option => option.IsInherited);
+
+        // 目标模型已从 Provider 配置里消失时一并清掉 id，避免留下
+        // IsConfigured 为真但无选中项的半状态。候选为空说明目录尚未加载，不做判定。
+        if (selected is null && IsConfigured && candidates.Count > 0)
+        {
+            _targetProviderId = string.Empty;
+            _targetModelId = string.Empty;
+            selected = candidates.FirstOrDefault(option => option.IsInherited);
+            OnPropertyChanged(nameof(TargetProviderId));
+            OnPropertyChanged(nameof(TargetModelId));
+            OnPropertyChanged(nameof(IsConfigured));
+        }
+
         SetProperty(ref _selectedTargetOption, selected, nameof(SelectedTargetOption));
     }
 

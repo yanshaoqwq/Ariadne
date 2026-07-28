@@ -203,8 +203,7 @@ public partial class SettingsPageView : UserControl
             }
             catch (Exception)
             {
-                // async void 处理器抛出的异常无人可捕，会直接掀掉 dispatcher；
-                // 剪贴板在 Linux/X11 下无属主时会抛错，这里必须自行兜住。
+                // async void 处理器的异常无人可捕，剪贴板不可用时只能就地吞掉。
             }
         }
     }
