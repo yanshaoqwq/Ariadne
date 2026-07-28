@@ -1,5 +1,6 @@
 <Styles xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls">
   <!--
     Ariadne 风格地基（Win11 / Fluent 方向）
     - 设计目标：轻盈、精致、桌面感、阅读舒适，扔掉网页感。
@@ -1224,6 +1225,7 @@
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="(ctl:HoverSpin.Enable)" Value="True" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <!-- 40x36 而非 44x54：原先高 54 且 VerticalAlignment=Stretch，把键位拉满整条
          标题栏高度，上下留白远大于左右，看着是三个瘦长条。 -->
@@ -1273,17 +1275,15 @@
     <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
   <!-- 窗口键悬停：不铺底色块（原先整键染 AccentLight，三个键逐个亮起很花），
-       改为图标自转 + 描边转强调色；关闭键保留红底（危险动作需要强信号）。 -->
+       改为图标自转 + 描边转强调色；旋转节奏由 HoverSpin 行为驱动（快转→停顿→慢转）。
+       关闭键保留红底（危险动作需要强信号）。 -->
   <Style Selector="Button.window-control:pointerover Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentHover}" />
     <Setter Property="StrokeThickness" Value="2.25" />
-    <Setter Property="RenderTransform" Value="rotate(180deg)" />
   </Style>
   <Style Selector="Button.window-control:pointerover Path.icon.minimize">
     <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentHover}" />
     <Setter Property="StrokeThickness" Value="0" />
-    <!-- 横条 180° 旋转后与原样重合，改用横向收窄表达「最小化」 -->
-    <Setter Property="RenderTransform" Value="scaleX(0.72)" />
   </Style>
   <Style Selector="Button.window-control:pressed">
     <Setter Property="RenderTransform" Value="scale(0.9)" />
@@ -1732,34 +1732,26 @@
     <Setter Property="Height" Value="26" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="(ctl:HoverSpin.Enable)" Value="True" />
   </Style>
-  <!-- 图标自转：悬停时图标绕自身中心转小半圈，按钮底色保持透明。 -->
+  <!-- 图标自转：悬停时图标绕自身中心转（先快转一圈→短暂停顿→持续慢转）。
+       节奏由 HoverSpin 行为在代码里逐帧驱动——Avalonia 的关键帧动画不支持
+       RenderTransform，且主题文件禁止 IterationCount=Infinite（守卫测试）。
+       此处只保留描边变色。 -->
   <Style Selector="Button.icon-btn > Path.icon">
     <Setter Property="RenderTransformOrigin" Value="50%,50%" />
-    <Setter Property="RenderTransform" Value="rotate(0deg)" />
     <Setter Property="Transitions">
       <Transitions>
-        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.28" Easing="CubicEaseOut" />
         <BrushTransition Property="Stroke" Duration="0:0:0.14" />
       </Transitions>
     </Setter>
   </Style>
   <Style Selector="Button.icon-btn:pointerover > Path.icon">
-    <Setter Property="RenderTransform" Value="rotate(180deg)" />
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
-  <!-- 图标包在 Panel 里的按钮（如带脏角标的保存）：转 Panel 整体 -->
+  <!-- 图标包在 Panel 里的按钮（如带脏角标的保存）：HoverSpin 转 Panel 整体 -->
   <Style Selector="Button.icon-btn > Panel">
     <Setter Property="RenderTransformOrigin" Value="50%,50%" />
-    <Setter Property="RenderTransform" Value="rotate(0deg)" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.28" Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
-  </Style>
-  <Style Selector="Button.icon-btn:pointerover > Panel">
-    <Setter Property="RenderTransform" Value="rotate(180deg)" />
   </Style>
   <!-- 保存按钮：accent 描边区分，悬停同样只转图标，不铺底色 -->
   <Style Selector="Button.icon-btn.save Path.icon">

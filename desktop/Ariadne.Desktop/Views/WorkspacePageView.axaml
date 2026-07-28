@@ -202,13 +202,22 @@
     </Style>
     <!-- 行内属性行：标签在左窄列、字段在右，取代「标签在上、输入在下」的竖堆。
          检查器从一列叠框变成紧凑的属性表（Blender/Figma 检查器语汇），竖向高度砍半。
-         键标签右对齐、弱色、垂直居中，与右侧字段基线对齐。 -->
+         键标签左对齐、弱色、垂直居中：右对齐会让长短不一的标签在左缘参差不齐，
+         一列读下来像锯齿；左对齐则所有键起点同一条竖线。 -->
     <Style Selector="Grid.prop-row > TextBlock.k">
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
       <Setter Property="FontSize" Value="12" />
       <Setter Property="VerticalAlignment" Value="Center" />
-      <Setter Property="TextAlignment" Value="Right" />
+      <Setter Property="TextAlignment" Value="Left" />
       <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <!-- 单位后缀（$ / 秒）：叠在字段内侧贴边，不再单独占一列。
+         原先它们各占一格网格列，把相邻行的输入框左右缘顶得长短不齐。 -->
+    <Style Selector="Grid.prop-row TextBlock.unit">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="IsHitTestVisible" Value="False" />
     </Style>
     <Style Selector="Expander.inspector-expander">
       <Setter Property="Background" Value="Transparent" />
@@ -250,21 +259,7 @@
       <Setter Property="Opacity" Value="1" />
       <Setter Property="Transitions"><Transitions /></Setter>
     </Style>
-    <!-- 工具条图标自转同样降级：保留悬停变色，去掉旋转插值 -->
-    <Style Selector="UserControl.reduce-motion Button.icon-btn > Path.icon">
-      <Setter Property="RenderTransform" Value="rotate(0deg)" />
-      <Setter Property="Transitions"><Transitions /></Setter>
-    </Style>
-    <Style Selector="UserControl.reduce-motion Button.icon-btn:pointerover > Path.icon">
-      <Setter Property="RenderTransform" Value="rotate(0deg)" />
-    </Style>
-    <Style Selector="UserControl.reduce-motion Button.icon-btn > Panel">
-      <Setter Property="RenderTransform" Value="rotate(0deg)" />
-      <Setter Property="Transitions"><Transitions /></Setter>
-    </Style>
-    <Style Selector="UserControl.reduce-motion Button.icon-btn:pointerover > Panel">
-      <Setter Property="RenderTransform" Value="rotate(0deg)" />
-    </Style>
+    <!-- 工具条图标自转由 HoverSpin 行为驱动，其内部已尊重减少动态偏好，无需样式降级 -->
   </UserControl.Styles>
   <!-- 根 Panel：拖库 ghost 叠在最上层且不裁剪 -->
   <Panel Background="{DynamicResource Ariadne.BackgroundMain}">
@@ -1584,29 +1579,34 @@
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Classes="k" Text="{Binding NodeBudgetText}" />
-                        <Grid Grid.Column="1" ColumnDefinitions="Auto,*" ColumnSpacing="4">
-                          <TextBlock Grid.Column="0" Text="$" Classes="caption" VerticalAlignment="Center" />
-                          <TextBox Grid.Column="1" Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeBudgetText}"
+                        <!-- $ 叠在输入框内左侧（不占网格列），字段左缘与上一行下拉框对齐 -->
+                        <Panel Grid.Column="1">
+                          <TextBox Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeBudgetText}"
+                                   Padding="22,5,10,5"
                                    PlaceholderText="{Binding OptionalPlaceholder}" />
-                        </Grid>
+                          <TextBlock Text="$" Classes="unit"
+                                     HorizontalAlignment="Left" Margin="10,0,0,0" />
+                        </Panel>
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Classes="k" Text="{Binding NodeTimeoutText}" />
-                        <Grid Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                          <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeTimeoutText}" />
-                          <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
-                        </Grid>
+                        <!-- 单位「秒」叠在输入框内右侧，字段右缘与其它行齐平 -->
+                        <Panel Grid.Column="1">
+                          <TextBox Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeTimeoutText}"
+                                   Padding="10,5,32,5" />
+                          <TextBlock Text="{Binding SecondsUnitText}" Classes="unit"
+                                     HorizontalAlignment="Right" Margin="0,0,10,0" />
+                        </Panel>
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Classes="k" Text="{Binding BreakpointText}" />
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                          <CheckBox IsChecked="{Binding SelectedNode.BreakpointEnabled, Mode=TwoWay}"
-                                    VerticalAlignment="Center"
-                                    AutomationProperties.Name="{Binding BreakpointText}" />
-                          <Button Classes="secondary btn-compact" Content="{Binding SaveBreakpointText}" Command="{Binding ToggleBreakpointCommand}" VerticalAlignment="Center" />
-                        </StackPanel>
+                        <!-- 「保存断点」按钮已并入下方「保存节点配置」：一行两个动作既挤又重复。 -->
+                        <CheckBox Grid.Column="1"
+                                  IsChecked="{Binding SelectedNode.BreakpointEnabled, Mode=TwoWay}"
+                                  VerticalAlignment="Center"
+                                  AutomationProperties.Name="{Binding BreakpointText}" />
                       </Grid>
-                      <Button Classes="primary" Content="{Binding ApplyNodeConfigText}" HorizontalAlignment="Right" Command="{Binding ApplyNodeConfigCommand}" />
+                      <Button Classes="primary" Content="{Binding ApplyNodeConfigText}" HorizontalAlignment="Stretch" Command="{Binding ApplyNodeConfigCommand}" />
                     </StackPanel>
                   </Border>
                   <!-- 导出所选片段 / 批注 / 删除全部迁到画布右键菜单，子工作流迁到右上角工具条；
