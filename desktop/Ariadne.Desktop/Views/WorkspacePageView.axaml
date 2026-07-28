@@ -280,8 +280,10 @@
             <MenuItem Header="{Binding CtxCutText}" Command="{Binding CutSelectedNodeCommand}" />
             <MenuItem Header="{Binding CtxPasteText}" Command="{Binding PasteNodeCommand}" />
             <Separator />
-            <!-- 导出所选片段：选中操作，放右键语境（不再占用检查器底部按钮位） -->
+            <!-- 导出所选片段 / 批注：都是对「当前选中」的操作，放右键语境
+                 （不再占用检查器底部按钮位）。批注标题留空时用默认标题。 -->
             <MenuItem Header="{Binding ExportSelectionText}" Command="{Binding ExportSelectionCommand}" />
+            <MenuItem Header="{Binding AddAnnotationText}" Command="{Binding AddAnnotationCommand}" />
             <Separator />
             <MenuItem Header="{Binding CtxFitViewText}" Command="{Binding FitViewCommand}" />
             <Separator />
@@ -1598,23 +1600,12 @@
                           Background="{DynamicResource Ariadne.BackgroundElevated}"
                           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
                           BorderThickness="0,1,0,0">
-                    <StackPanel Spacing="9">
-                      <!-- 导出所选片段已迁到画布右键菜单；子工作流已迁到右上角画布工具条，
-                           底部只留注解与删除，不再堆叠成串按钮。 -->
-                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <TextBox Grid.Column="0"
-                                 Text="{Binding AnnotationTitle, Mode=TwoWay}"
-                                 PlaceholderText="{Binding AnnotationTitlePlaceholder}"
-                                 AutomationProperties.Name="{Binding AnnotationTitlePlaceholder}" />
-                        <Button Grid.Column="1" Classes="secondary"
-                                Content="{Binding AddAnnotationText}"
-                                Command="{Binding AddAnnotationCommand}" />
-                      </Grid>
-                      <Button Classes="danger"
-                              Content="{Binding DeleteText}"
-                              HorizontalAlignment="Stretch"
-                              Command="{Binding DeleteSelectedNodeCommand}" />
-                    </StackPanel>
+                    <!-- 导出所选片段与批注已迁到画布右键菜单，子工作流已迁到右上角画布工具条；
+                         底部只留删除这一个终态动作，不再堆叠成串按钮。 -->
+                    <Button Classes="danger"
+                            Content="{Binding DeleteText}"
+                            HorizontalAlignment="Stretch"
+                            Command="{Binding DeleteSelectedNodeCommand}" />
                   </Border>
                   </StackPanel>
                 </ScrollViewer>

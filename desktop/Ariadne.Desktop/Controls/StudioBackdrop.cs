@@ -10,7 +10,6 @@ namespace Ariadne.Desktop.Controls;
 /// </summary>
 public sealed class StudioBackdrop : Control
 {
-    private static readonly Color SignalColor = Color.FromRgb(0xE8, 0x68, 0x4A);
     private bool _isAttached;
     private bool _frameQueued;
     private double _phase;
@@ -64,17 +63,24 @@ public sealed class StudioBackdrop : Control
         var ink = AppIconPainter.ResolveColor(
             "Ariadne.TextPrimary",
             Color.FromRgb(0x18, 0x20, 0x20));
-        // 信号色同样从主题 Ariadne.Signal 解析，不再直接用硬编码常量作绘制色
-        // （常量仅在资源缺失时兜底，与全代码库 ResolveColor 模式一致）。
-        var signal = AppIconPainter.ResolveColor("Ariadne.Signal", SignalColor);
+        // 轨迹标记点：从强调色派生（原先用硬编码橙 Ariadne.Signal，
+        // 在青绿主题的纸白页面上是一粒突兀的杂色）。压暗一档与轨迹线拉开层次。
+        var marker = Darken(accent, 0.18);
 
         _gridPen = new Pen(new SolidColorBrush(WithAlpha(ink, 0x0C)), 1);
         _axisPen = new Pen(new SolidColorBrush(WithAlpha(ink, 0x18)), 1);
         _primaryPen = new Pen(new SolidColorBrush(WithAlpha(accent, 0x44)), 1.4);
         _secondaryPen = new Pen(new SolidColorBrush(WithAlpha(ink, 0x20)), 1);
         _markPen = new Pen(new SolidColorBrush(WithAlpha(accent, 0x52)), 1);
-        _markerRingPen = new Pen(new SolidColorBrush(WithAlpha(signal, 0x58)), 1);
-        _markerBrush = new SolidColorBrush(signal);
+        _markerRingPen = new Pen(new SolidColorBrush(WithAlpha(marker, 0x58)), 1);
+        _markerBrush = new SolidColorBrush(WithAlpha(marker, 0xB0));
+    }
+
+    /// <summary>按比例压暗颜色，用于从强调色派生更沉的标记色（不引入新硬编码色）。</summary>
+    private static Color Darken(Color color, double amount)
+    {
+        byte Scale(byte channel) => (byte)Math.Clamp(channel * (1 - amount), 0, 255);
+        return Color.FromArgb(color.A, Scale(color.R), Scale(color.G), Scale(color.B));
     }
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)

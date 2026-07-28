@@ -316,8 +316,6 @@
       <SolidColorBrush x:Key="Ariadne.ShellRailText" Color="#F3F7F5" />
       <SolidColorBrush x:Key="Ariadne.ShellRailMuted" Color="#A7B3AF" />
       <SolidColorBrush x:Key="Ariadne.ShellRailBorder" Color="#26FFFFFF" />
-      <SolidColorBrush x:Key="Ariadne.Signal" Color="#E8684A" />
-      <SolidColorBrush x:Key="Ariadne.SignalLight" Color="#24E8684A" />
 
       <!-- 输入填充：从主题强调色派生（Color 跟随 DynamicResource 强调色），
            靠 Opacity 做定制偏移得到极淡的品牌色凹陷槽 —— 不硬编码任何颜色，
@@ -1017,14 +1015,31 @@
       </Transitions>
     </Setter>
   </Style>
+  <!-- 主操作卡：强调色实心（原来借用导轨石墨黑，糊在纸白页面上是一块黑补丁）。
+       用 AccentPrimary→AccentPressed 的斜向渐变，与首屏品牌徽记同一套语汇；
+       颜色全部从主题强调色 token 派生，个性化换色时按钮跟着走。 -->
   <Style Selector="Button.welcome-action.primary-action">
-    <Setter Property="Background" Value="{StaticResource Ariadne.ShellRail}" />
-    <Setter Property="BorderBrush" Value="{StaticResource Ariadne.ShellRail}" />
-    <Setter Property="Foreground" Value="{StaticResource Ariadne.ShellRailText}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPressed}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextOnAccent}" />
+    <Setter Property="Background">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.AccentPressed}" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style Selector="Button.welcome-action.primary-action:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource Ariadne.ShellRailElevated}" />
-    <Setter Property="BorderBrush" Value="{StaticResource Ariadne.Signal}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentHover}" />
+          <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style Selector="Button.welcome-action.secondary-action">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
