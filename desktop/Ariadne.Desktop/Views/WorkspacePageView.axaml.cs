@@ -2722,7 +2722,15 @@ public partial class WorkspacePageView : UserControl
 
         // 视觉树尚未完成测量时保留可绘制状态，但只使用同一个 VM 级兼容路径；
         // 一旦端口测量可用，下一帧会覆盖该临时结果。
-        edge.UpdateEdgePath(source.X, source.Y, target.X, target.Y);
+        // 镜像标志要一起传：循环节点的执行口左右互换，兜底算法按常量取坐标，
+        // 不传就会在首帧把边接到未镜像的一侧，等测量可用才跳回去。
+        edge.UpdateEdgePath(
+            source.X,
+            source.Y,
+            target.X,
+            target.Y,
+            source.MirrorExecPorts,
+            target.MirrorExecPorts);
     }
 
     private void LayoutEdgeLabels()

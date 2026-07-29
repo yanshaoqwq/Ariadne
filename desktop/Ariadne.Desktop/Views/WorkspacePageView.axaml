@@ -143,6 +143,12 @@
       <Setter Property="Fill" Value="{DynamicResource Ariadne.EdgeControl}" />
       <Setter Property="Opacity" Value="1" />
     </Style>
+    <!-- 循环节点的执行箭头水平镜像：几何本身朝右，循环节点左出右入（回流方向），
+         两端箭头都应朝左，才读得出「绕回去」而不是「继续往前」。 -->
+    <Style Selector="Path.control-port.flip-arrow">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scaleX(-1)" />
+    </Style>
     <Style Selector="Ellipse.data-port">
       <Setter Property="Fill" Value="{DynamicResource Ariadne.EdgeData}" />
       <Setter Property="Opacity" Value="0.45" />
@@ -507,8 +513,13 @@
                             PointerReleased="OnNodePointerReleased"
                             PointerCaptureLost="OnNodePointerCaptureLost">
                       <Panel>
-                        <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="7">
-                        <Border Grid.Column="0"
+                        <!-- 标题行固定高 20（= NodePortSpec.TitleRowHeight）：起始节点带「运行」
+                             按钮（20px），普通节点只有引脚（16px），不固定就差 4px，
+                             数据口 Y 便无法用单个常量表达，连线会按节点类型漂移。 -->
+                        <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="7" Height="20">
+                        <!-- 执行入口。列位置随 ExecInColumn：普通节点在左(0)，循环节点镜像到右(3)。
+                             箭头方向随 .flip-arrow（循环节点两个箭头都朝左，指出回流方向）。 -->
+                        <Border Grid.Column="{Binding ExecInColumn}"
                                 Width="16" Height="16"
                                 VerticalAlignment="Center"
                                 Classes="pin-glass-soft keyboard-target"
@@ -528,6 +539,7 @@
                           <Path Width="12" Height="12" Stretch="Uniform"
                                 Classes="control-port"
                                 Classes.connected="{Binding PortControlInConnected}"
+                                Classes.flip-arrow="{Binding MirrorExecPorts}"
                                 HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Stroke="{DynamicResource Ariadne.EdgeControl}"
                                 StrokeThickness="1.25"
@@ -558,7 +570,8 @@
                                   Data="M9,6 L18,12 L9,18 Z" />
                           </Button>
                         </StackPanel>
-                        <Border Grid.Column="3"
+                        <!-- 执行出口。列位置随 ExecOutColumn：普通节点在右(3)，循环节点镜像到左(0)。 -->
+                        <Border Grid.Column="{Binding ExecOutColumn}"
                                 Width="16" Height="16"
                                 VerticalAlignment="Center"
                                 Classes="pin-glass-soft keyboard-target"
@@ -578,6 +591,7 @@
                           <Path Width="12" Height="12" Stretch="Uniform"
                                 Classes="control-port"
                                 Classes.connected="{Binding PortControlOutConnected}"
+                                Classes.flip-arrow="{Binding MirrorExecPorts}"
                                 HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Stroke="{DynamicResource Ariadne.EdgeControl}"
                                 StrokeThickness="1.25"

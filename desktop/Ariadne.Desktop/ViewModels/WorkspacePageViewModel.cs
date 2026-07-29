@@ -3837,16 +3837,51 @@ public static class NodePortSpec
     /// 232 而非 200：200 宽时内容栏「数据入引脚列 + 加号 + 正文 + 数据出引脚」挤不开，
     /// 加号会被裁掉一半。</summary>
     public const double NodeWidth = 232;
-    /// <summary>节点最小高度；多数据入按同一几何模型向下扩展。</summary>
-    public const double MinimumNodeHeight = 96;
-    /// <summary>内侧引脚中心到左右边的内缩（padding 6 + 半宽 7 ≈ 13）。</summary>
-    public const double PinInsetX = 13;
+    /// <summary>
+    /// 节点最小高度 = 单个数据入引脚所需高度（首个引脚中心 + 底部安全间距）。
+    /// 原先写死 96，但几何修正后单引脚实际需要 98，写死值会比真实需要还矮，
+    /// 使「最小高」这个概念自相矛盾。改为由同一套几何派生，与
+    /// NodeHeightForDataInputCount(1) 恒等。
+    /// </summary>
+    public const double MinimumNodeHeight = DataPortY + DataPortBottomInset;
+
+    // ==================================================================
+    // 以下常量必须与 WorkspacePageView.axaml 的节点模板逐项对应。
+    // 一旦模板改了 padding / 引脚尺寸而这里没跟着改，连线端点就会与引脚
+    // 错开若干像素（表现为「节点边偏移」）—— 这正是加宽到 232 那次留下的
+    // 回归：模板把标题栏 padding 由 6,7 改成 8,8、执行引脚由 14 改成 16，
+    // 而这里仍按旧值算。因此改为由「有名字的组成部分」推导，不再写死结果，
+    // 并由 NodeEdgeGeometryTests 守住模板与常量的一致性。
+    // ==================================================================
+
+    /// <summary>卡片边框粗细（node-card BorderThickness）。</summary>
+    public const double CardBorderThickness = 1;
+    /// <summary>卡片顶缘 1px 受光亮线（DockPanel.Dock=Top 的玻璃高光）。</summary>
+    public const double CardTopLightLine = 1;
+    /// <summary>标题栏内边距（Border Padding="8,8"）。</summary>
+    public const double TitleBarPadding = 8;
+    /// <summary>执行引脚外框边长（标题栏两端的 pin-glass-soft，16x16）。</summary>
+    public const double ExecPinBox = 16;
+    /// <summary>内容栏左右内边距（Border Padding="6,8" 的水平分量）。</summary>
+    public const double ContentBarPaddingX = 6;
+
+    /// <summary>
+    /// 内侧引脚中心到节点左右边的内缩。
+    /// 执行引脚位于标题栏内：卡片边框 1 + 标题栏 padding 8 + 半个引脚 8 = 17。
+    /// </summary>
+    public const double PinInsetX = CardBorderThickness + TitleBarPadding + (ExecPinBox / 2.0);
     /// <summary>通信口中心 Y：顶行 10px 内、半出卡片上沿。</summary>
     public const double CommPortY = 7;
     /// <summary>卡片上沿（通信行高度）。</summary>
     public const double CardTopOffset = 10;
-    /// <summary>标题栏高度（含 padding 6,7 + 内容 ~16）。</summary>
-    public const double TitleBarHeight = 34;
+    /// <summary>
+    /// 标题行内容高度。模板给标题行设了固定高度，使起始节点（含「运行」按钮，
+    /// 原本 20px 行高）与普通节点（16px）保持一致——否则两类节点的标题栏差 4px，
+    /// 数据口 Y 就无法用单个常量表达。
+    /// </summary>
+    public const double TitleRowHeight = 20;
+    /// <summary>标题栏总高 = 上下 padding + 标题行高。</summary>
+    public const double TitleBarHeight = (TitleBarPadding * 2) + TitleRowHeight;
     /// <summary>内容栏上 padding。</summary>
     public const double ContentBarPaddingY = 8;
     /// <summary>数据引脚外框边长。</summary>
@@ -3856,13 +3891,22 @@ public static class NodePortSpec
     public const double DataPortSpacing = DataPinBox + DataPortGap; // 22
     /// <summary>最后一个数据入中心到节点底边的安全间距，包含列表下方无框添加按钮。</summary>
     public const double DataPortBottomInset = 35;
-    /// <summary>执行口中心 Y（标题行垂直中线）。</summary>
-    public const double ExecPortY = CardTopOffset + 7 + 8; // pad-top + half pin
     /// <summary>
-    /// 首个数据口中心 Y：卡片顶 + 标题栏 + 内容 pad-top + 半 pin。
+    /// 执行口中心 Y = 通信行 + 卡片边框 + 顶缘光边 + 标题栏 pad-top + 半个引脚。
+    /// </summary>
+    public const double ExecPortY =
+        CardTopOffset + CardBorderThickness + CardTopLightLine + TitleBarPadding + (ExecPinBox / 2.0);
+    /// <summary>
+    /// 首个数据口中心 Y：卡片顶 + 边框 + 顶缘光边 + 标题栏 + 内容 pad-top + 半 pin。
     /// 布局：内容栏 VerticalAlignment=Top，ItemsControl Spacing=DataPortGap。
     /// </summary>
-    public const double DataPortY = CardTopOffset + TitleBarHeight + ContentBarPaddingY + (DataPinBox / 2.0);
+    public const double DataPortY = CardTopOffset + CardBorderThickness + CardTopLightLine
+        + TitleBarHeight + ContentBarPaddingY + (DataPinBox / 2.0);
+    /// <summary>
+    /// 数据引脚中心到节点左右边的内缩：卡片边框 1 + 内容栏 padding 6 + 半个 pin 7 = 14。
+    /// 与执行引脚（在标题栏内，padding 8 + 半宽 8）不同，不能共用 PinInsetX。
+    /// </summary>
+    public const double DataPinInsetX = CardBorderThickness + ContentBarPaddingX + (DataPinBox / 2.0);
     public const double HitRadius = 16;
     public const double MiniMapContentWidth = CanvasMiniMapHelpers.ContentWidth;
     public const double MiniMapContentHeight = CanvasMiniMapHelpers.ContentHeight;
@@ -3889,8 +3933,8 @@ public static class NodePortSpec
         NodePortKind.Communication => (NodeWidth / 2.0, CommPortY),
         NodePortKind.Control when direction == NodePortDirection.In => (PinInsetX, ExecPortY),
         NodePortKind.Control => (NodeWidth - PinInsetX, ExecPortY),
-        NodePortKind.Data when direction == NodePortDirection.In => (PinInsetX, DataPortY),
-        _ => (NodeWidth - PinInsetX, DataPortY),
+        NodePortKind.Data when direction == NodePortDirection.In => (DataPinInsetX, DataPortY),
+        _ => (NodeWidth - DataPinInsetX, DataPortY),
     };
 
     /// <summary>按 handle 名解析中心（支持 data-in-N 多入）。</summary>
@@ -3904,15 +3948,34 @@ public static class NodePortSpec
         if (kind == NodePortKind.Data && direction == NodePortDirection.In)
         {
             var index = ParseDataInIndex(handle);
-            return (PinInsetX, DataPortY + (index * DataPortSpacing));
+            return (DataPinInsetX, DataPortY + (index * DataPortSpacing));
         }
 
         if (kind == NodePortKind.Data && direction == NodePortDirection.Out)
         {
-            return (NodeWidth - PinInsetX, DataPortY);
+            return (NodeWidth - DataPinInsetX, DataPortY);
         }
 
         return LocalCenter(kind, direction);
+    }
+
+    /// <summary>
+    /// 循环节点的执行引脚左右互换（出口在左、入口在右），把「回流」画成真正折返的形状。
+    /// 只镜像执行口：数据口与通信口位置不变。
+    /// </summary>
+    public static (double X, double Y) MirrorExecIfLoop(
+        (double X, double Y) center,
+        string? handle,
+        bool mirrored)
+    {
+        if (!mirrored
+            || !TryResolveKind(handle, out var kind, out _)
+            || kind != NodePortKind.Control)
+        {
+            return center;
+        }
+
+        return (NodeWidth - center.X, center.Y);
     }
 
     /// <summary>input → 0；data-in-1 → 1；data-in-N → N。</summary>
@@ -4269,6 +4332,18 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public bool IsSummarizerNode => _descriptor.ConfigKind == "summarizer";
     public bool IsUtilityNode => _descriptor.LibraryGroup == "utility";
     public bool IsAgentNode => _descriptor.HasModelExecution;
+    /// <summary>
+    /// 执行引脚左右互换（目前仅循环节点）。循环把流程送回上游，左右不换的话
+    /// 回流边要绕过整张卡片；换过来后「左出 → 上游、右入 ← 下游」正好顺着回流方向，
+    /// 两个箭头一起朝左，一眼能看出这是个往回走的环。
+    /// 连线端点走视觉树实测（TryGetPortCanvasCenter），所以模板换列即自动跟随；
+    /// 仅首帧未测量时的常量兜底需要同步（见 NodePortSpec.LocalCenter 的 mirrored 重载）。
+    /// </summary>
+    public bool MirrorExecPorts => IsLoopNode;
+    /// <summary>执行入引脚所在列：常规 0（左）、镜像 3（右）。</summary>
+    public int ExecInColumn => MirrorExecPorts ? 3 : 0;
+    /// <summary>执行出引脚所在列：常规 3（右）、镜像 0（左）。</summary>
+    public int ExecOutColumn => MirrorExecPorts ? 0 : 3;
     public bool ShowPromptEditor => IsAgentNode;
     public bool ShowDataInPinEditor => !IsStartNode;
     public ObservableCollection<NodeDataInPinViewModel> DataInPins { get; }
@@ -5010,7 +5085,15 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
         }
     }
 
-    public void UpdateEdgePath(double sourceX, double sourceY, double targetX, double targetY)
+    /// <param name="sourceMirrored">源节点是否镜像执行口（循环节点）。</param>
+    /// <param name="targetMirrored">目标节点是否镜像执行口。</param>
+    public void UpdateEdgePath(
+        double sourceX,
+        double sourceY,
+        double targetX,
+        double targetY,
+        bool sourceMirrored = false,
+        bool targetMirrored = false)
     {
         var sourceResolved = NodePortSpec.TryResolveKind(SourceHandle, out var sourceKind, out _);
         if (!sourceResolved)
@@ -5028,13 +5111,15 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
             targetKind = NodePortKind.Communication;
         }
 
-        // 按 handle 中心起止（支持多数据入索引）
+        // 按 handle 中心起止（支持多数据入索引）；循环节点执行口左右镜像。
         var (sx, sy) = sourceResolved
             ? NodePortSpec.LocalCenterForHandle(SourceHandle)
             : NodePortSpec.LocalCenter(sourceKind, NodePortDirection.Out);
         var (tx, ty) = targetResolved
             ? NodePortSpec.LocalCenterForHandle(TargetHandle)
             : NodePortSpec.LocalCenter(targetKind, NodePortDirection.In);
+        (sx, sy) = NodePortSpec.MirrorExecIfLoop((sx, sy), SourceHandle, sourceMirrored);
+        (tx, ty) = NodePortSpec.MirrorExecIfLoop((tx, ty), TargetHandle, targetMirrored);
 
         var startX = sourceX + sx;
         var startY = sourceY + sy;

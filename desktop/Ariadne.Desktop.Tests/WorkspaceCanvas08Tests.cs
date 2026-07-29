@@ -954,11 +954,11 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("TryGetControlCenter(sender as Control", view, StringComparison.Ordinal);
         Assert.Contains("TryGetPortCanvasCenter", view, StringComparison.Ordinal);
         Assert.Contains("SyncEdgePosition(edge, source, target)", view, StringComparison.Ordinal);
+        // 兜底（未测量时）路径只允许有一处调用：多处会让首帧与测量帧走不同几何。
+        // 匹配方法名而非整条字面量——调用已改为多行并带镜像标志，写死整行会误报。
         Assert.Equal(
             1,
-            view.Split(
-                "edge.UpdateEdgePath(source.X, source.Y, target.X, target.Y);",
-                StringSplitOptions.None).Length - 1);
+            view.Split("edge.UpdateEdgePath(", StringSplitOptions.None).Length - 1);
         Assert.Contains("string.IsNullOrWhiteSpace(handle)", view, StringComparison.Ordinal);
         Assert.DoesNotContain("else if (FindNodeAt", view, StringComparison.Ordinal);
         Assert.Contains("CancelKeyboardConnection(announce: true)", view, StringComparison.Ordinal);

@@ -151,8 +151,12 @@ public sealed class NodePinAndImportTests
         Assert.Equal(NodePortSpec.DataPortY, first.Y, 6);
         Assert.Equal(second.Y, first.Y + NodePortSpec.DataPortSpacing, 6);
         Assert.Equal(NodePortSpec.DataPortSpacing, NodePortSpec.DataPinBox + NodePortSpec.DataPortGap, 6);
-        // 首 pin 中心 = CardTop + Title + pad + half pin
-        var expected = NodePortSpec.CardTopOffset + NodePortSpec.TitleBarHeight
+        // 首 pin 中心 = CardTop + 卡片边框 + 顶缘光边 + Title + pad + half pin。
+        // 边框与光边这 2px 曾被漏算，正是「节点边偏移」的一部分。
+        var expected = NodePortSpec.CardTopOffset
+                       + NodePortSpec.CardBorderThickness
+                       + NodePortSpec.CardTopLightLine
+                       + NodePortSpec.TitleBarHeight
                        + NodePortSpec.ContentBarPaddingY + NodePortSpec.DataPinBox / 2.0;
         Assert.Equal(NodePortSpec.DataPortY, expected, 6);
     }
