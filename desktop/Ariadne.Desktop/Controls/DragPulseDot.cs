@@ -14,7 +14,7 @@ public sealed class DragPulseDot : Control
 {
     /// <summary>圆点静止半径（脉动在此半径上下摆动）。</summary>
     public static readonly StyledProperty<double> RadiusProperty =
-        AvaloniaProperty.Register<DragPulseDot, double>(nameof(Radius), 9d);
+        AvaloniaProperty.Register<DragPulseDot, double>(nameof(Radius), 5.5d);
 
     /// <summary>落定展开进度：0=纯圆点，1=完全展开成卡片轮廓。由 code-behind 逐帧推进。</summary>
     public static readonly StyledProperty<double> ExpandProgressProperty =
@@ -73,10 +73,13 @@ public sealed class DragPulseDot : Control
 
         if (progress <= 0.001)
         {
-            // 纯拖动态：脉动圆点 + 一圈更淡的光环，呼吸只改半径。
-            var breath = MotionPreferences.ReduceMotion ? 0 : Math.Sin(_phase * 4.2);
-            var radius = Radius * (1 + breath * 0.18);
-            context.DrawEllipse(_haloBrush, null, center, radius * 2.1, radius * 2.1);
+            // 纯拖动态：脉动圆点 + 一圈固定光环。
+            // 光环半径按静止半径算（不跟着呼吸）——外层底跟着缩放会让整团忽大忽小，
+            // 显得笨重；固定外圈才让人只看到中心那颗在跳。
+            var breath = MotionPreferences.ReduceMotion ? 0 : Math.Sin(_phase * 7.5);
+            var radius = Radius * (1 + breath * 0.22);
+            var halo = Radius * 1.75;
+            context.DrawEllipse(_haloBrush, null, center, halo, halo);
             context.DrawEllipse(_dotBrush, null, center, radius, radius);
             return;
         }

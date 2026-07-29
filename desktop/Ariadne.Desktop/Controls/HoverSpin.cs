@@ -22,7 +22,7 @@ public static class HoverSpin
     // 节奏参数：0~FastEnd 快转一整圈（CubicEaseOut），到 PauseEnd 停住，之后匀速慢转。
     private const double FastEndSeconds = 0.5;
     private const double PauseEndSeconds = 0.85;
-    private const double SlowDegreesPerSecond = 80;
+    private const double SlowDegreesPerSecond = 180;
 
     public static bool GetEnable(Control control) => control.GetValue(EnableProperty);
 

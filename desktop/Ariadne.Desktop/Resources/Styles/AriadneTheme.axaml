@@ -1327,27 +1327,21 @@
   <Style Selector="Button.window-control:pressed">
     <Setter Property="RenderTransform" Value="scale(0.9)" />
   </Style>
-  <Style Selector="Button.window-control:pressed /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentBorder}" />
-  </Style>
   <Style Selector="Button.window-control:pressed Path.icon">
     <Setter Property="Opacity" Value="0.92" />
   </Style>
-  <Style Selector="Button.window-control.close:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.StatusError}" />
-  </Style>
-  <Style Selector="Button.window-control.close:pointerover">
-    <Setter Property="RenderTransform" Value="scale(1.08)" />
-  </Style>
+  <!-- 关闭键：危险信号靠「图标变红」表达，不铺红底块。
+       悬停时描边转错误色并加粗，按下再压暗一档；最小化那根实心横条改 Fill。 -->
   <Style Selector="Button.window-control.close:pointerover Path.icon">
-    <Setter Property="Stroke" Value="White" />
-    <Setter Property="StrokeThickness" Value="2.2" />
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="StrokeThickness" Value="2.4" />
   </Style>
   <Style Selector="Button.window-control.close:pressed">
     <Setter Property="RenderTransform" Value="scale(0.9)" />
   </Style>
-  <Style Selector="Button.window-control.close:pressed /template/ ContentPresenter">
-    <Setter Property="Background" Value="#C62828" />
+  <Style Selector="Button.window-control.close:pressed Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="Opacity" Value="0.82" />
   </Style>
 
   <!-- 模板市场等：一体搜索壳（左侧图标 + 输入 + 右侧提交） -->
@@ -1762,8 +1756,9 @@
   <Style Selector="Button.panel-collapse:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
   </Style>
-  <!-- 工具条图标按钮：正方形、透明底。悬停不再给按钮铺一层灰底
-       （一排按钮逐个亮起色块很花），改为图标本身自转（见下方 Path 旋转样式）。 -->
+  <!-- 工具条图标按钮：正方形、透明底。悬停不给按钮铺灰底
+       （一排按钮逐个亮起色块很花），只做整键微抬 + 图标描边转强调色。
+       自转只留给窗口键三兄弟，功能键一排全转会很吵。 -->
   <Style Selector="Button.icon-btn">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
@@ -1771,14 +1766,12 @@
     <Setter Property="Height" Value="26" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="(ctl:HoverSpin.Enable)" Value="True" />
   </Style>
   <!-- 图标自转：悬停时图标绕自身中心转（先快转一圈→短暂停顿→持续慢转）。
        节奏由 HoverSpin 行为在代码里逐帧驱动——Avalonia 的关键帧动画不支持
        RenderTransform，且主题文件禁止 IterationCount=Infinite（守卫测试）。
        此处只保留描边变色。 -->
   <Style Selector="Button.icon-btn > Path.icon">
-    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Stroke" Duration="0:0:0.14" />
@@ -1788,11 +1781,7 @@
   <Style Selector="Button.icon-btn:pointerover > Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
-  <!-- 图标包在 Panel 里的按钮（如带脏角标的保存）：HoverSpin 转 Panel 整体 -->
-  <Style Selector="Button.icon-btn > Panel">
-    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
-  </Style>
-  <!-- 保存按钮：accent 描边区分，悬停同样只转图标，不铺底色 -->
+  <!-- 保存按钮：accent 描边区分，悬停不铺底色 -->
   <Style Selector="Button.icon-btn.save Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="StrokeThickness" Value="2" />

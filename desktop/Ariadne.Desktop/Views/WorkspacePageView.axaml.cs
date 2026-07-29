@@ -15,8 +15,8 @@ public partial class WorkspacePageView : UserControl
 {
     private const double DragThreshold = 4.0;
 
-    /// <summary>拖动态脉动点浮层的边长（点本身半径 9，留足光环与呼吸放大的余量）。</summary>
-    private const double LibraryDragDotHostSize = 60;
+    /// <summary>拖动态脉动点浮层的边长（点半径 5.5 + 固定光环 1.75 倍，留一点呼吸余量）。</summary>
+    private const double LibraryDragDotHostSize = 38;
 
     /// <summary>松手后脉动点展开成卡片轮廓的时长。</summary>
     private static readonly TimeSpan LibraryDropExpandDuration = TimeSpan.FromMilliseconds(190);
@@ -52,6 +52,13 @@ public partial class WorkspacePageView : UserControl
     private Point _marqueeOriginLogical;
     private Point _marqueeCurrentLogical;
     private bool _marqueeAdditive;
+
+    // ---- 右键拖动平移（左键长按=框选，右键长按=拖画布）----
+    private bool _rightPanPointerDown;
+    private bool _rightPanActive;
+    private Point _rightPanOrigin;
+    /// <summary>右键拖动过后要吞掉紧随其后的那次右键菜单（否则一松手就弹菜单）。</summary>
+    private bool _suppressNextContextMenu;
 
     // ---- W2：中键 / Alt+左键 / 空格+左键平移 ----
     private bool _spacePanMode;
@@ -1278,6 +1285,18 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
+        // 右键：按下先预备，移动超过阈值才转为平移（左键长按=框选，右键长按=拖画布）。
+        // 未超阈值就松手时不算平移，右键菜单照常弹出。
+        if (point.Properties.IsRightButtonPressed)
+        {
+            _rightPanPointerDown = true;
+            _rightPanActive = false;
+            _rightPanOrigin = e.GetPosition(CanvasOverlay);
+            e.Pointer.Capture(CanvasOverlay);
+            Focus();
+            return;
+        }
+
         if (!point.Properties.IsLeftButtonPressed)
         {
             return;
@@ -1315,6 +1334,19 @@ public partial class WorkspacePageView : UserControl
 
     public void OnCanvasBackgroundPointerMoved(object? sender, PointerEventArgs e)
     {
+        // 右键预备中：越过阈值即转为平移（并记住本次手势要吞掉右键菜单）。
+        if (_rightPanPointerDown && !_rightPanActive && CanvasOverlay is not null)
+        {
+            var current = e.GetPosition(CanvasOverlay);
+            var rdx = current.X - _rightPanOrigin.X;
+            var rdy = current.Y - _rightPanOrigin.Y;
+            if ((rdx * rdx + rdy * rdy) >= DragThreshold * DragThreshold)
+            {
+                _rightPanActive = true;
+                BeginPan(_rightPanOrigin);
+            }
+        }
+
         if (DataContext is WorkspacePageViewModel { CanvasViewport.IsPanning: true } panViewModel
             && CanvasOverlay is not null
             && NodesItemsControl is not null)
@@ -1348,6 +1380,24 @@ public partial class WorkspacePageView : UserControl
 
     public void OnCanvasBackgroundPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
+        // 右键手势收尾：拖过就是平移（吞掉本次右键菜单）；没拖动则放行让菜单弹出。
+        if (_rightPanPointerDown)
+        {
+            var wasPan = _rightPanActive;
+            _rightPanPointerDown = false;
+            _rightPanActive = false;
+            if (wasPan)
+            {
+                EndPan(e.Pointer);
+                _suppressNextContextMenu = true;
+                e.Handled = true;
+                return;
+            }
+
+            e.Pointer.Capture(null);
+            return;
+        }
+
         if (DataContext is WorkspacePageViewModel { CanvasViewport.IsPanning: true })
         {
             EndPan(e.Pointer);
@@ -1381,8 +1431,23 @@ public partial class WorkspacePageView : UserControl
 
     public void OnCanvasBackgroundCaptureLost(object? sender, PointerCaptureLostEventArgs e)
     {
+        _rightPanPointerDown = false;
+        _rightPanActive = false;
         EndPan(null);
         EndMarquee(null);
+    }
+
+    /// <summary>
+    /// 右键拖动平移后紧跟的那次 ContextMenu 请求要吞掉——否则拖完画布一松手就弹菜单。
+    /// 单纯右键单击（未越过拖动阈值）不受影响，菜单照常。
+    /// </summary>
+    private void OnCanvasContextRequested(object? sender, ContextRequestedEventArgs e)
+    {
+        if (_suppressNextContextMenu)
+        {
+            _suppressNextContextMenu = false;
+            e.Handled = true;
+        }
     }
 
     /// <summary>指针滚轮缩放：保持鼠标下的逻辑点固定。</summary>
@@ -1453,6 +1518,11 @@ public partial class WorkspacePageView : UserControl
         }
 
         viewModel.CanvasViewport.BeginPan(screen.X, screen.Y);
+        // 抓手光标：让「正在拖画布」有明确的手感反馈
+        if (CanvasOverlay is not null)
+        {
+            CanvasOverlay.Cursor = new Cursor(StandardCursorType.SizeAll);
+        }
     }
 
     private void EndPan(IPointer? pointer)
@@ -1460,6 +1530,10 @@ public partial class WorkspacePageView : UserControl
         if (DataContext is WorkspacePageViewModel viewModel)
         {
             viewModel.CanvasViewport.EndPan();
+        }
+        if (CanvasOverlay is not null)
+        {
+            CanvasOverlay.Cursor = Cursor.Default;
         }
         pointer?.Capture(null);
     }

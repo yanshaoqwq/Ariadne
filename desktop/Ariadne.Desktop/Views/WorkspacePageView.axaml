@@ -327,6 +327,7 @@
                 PointerMoved="OnCanvasBackgroundPointerMoved"
                 PointerReleased="OnCanvasBackgroundPointerReleased"
                 PointerCaptureLost="OnCanvasBackgroundCaptureLost"
+                ContextRequested="OnCanvasContextRequested"
                 PointerWheelChanged="OnCanvasPointerWheel">
         <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
           <ItemsControl.RenderTransform>
@@ -1830,9 +1831,9 @@
           ZIndex="200">
     <ctl:DragPulseDot x:Name="LibraryDragGhost"
                       IsVisible="False"
-                      Width="60"
-                      Height="60"
-                      Radius="9" />
+                      Width="38"
+                      Height="38"
+                      Radius="5.5" />
   </Canvas>
   </Panel>
 </UserControl>

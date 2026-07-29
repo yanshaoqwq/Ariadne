@@ -841,7 +841,14 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("x:Key=\"Ariadne.Icon.Close\"", theme, StringComparison.Ordinal);
         Assert.Contains("Button.window-control Path.icon", theme, StringComparison.Ordinal);
         Assert.Contains("Ariadne.AccentPrimary", theme, StringComparison.Ordinal);
-        Assert.Contains("scale(1.08)", theme, StringComparison.Ordinal);
+        // 窗口键悬停不再放大整键 / 不铺底色块：反馈全部落在图标本身
+        // （描边转强调色 + HoverSpin 自转；关闭键转错误色）。按下仍有 scale(0.9) 回馈。
+        Assert.Contains("Button.window-control:pressed", theme, StringComparison.Ordinal);
+        Assert.Contains("scale(0.9)", theme, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Button.window-control.close:pointerover /template/ ContentPresenter",
+            theme,
+            StringComparison.Ordinal);
         Assert.Contains("Path.icon.minimize", theme, StringComparison.Ordinal);
         Assert.Contains("Classes=\"window-control\"", main, StringComparison.Ordinal);
         Assert.Contains("icon minimize", main, StringComparison.Ordinal);
