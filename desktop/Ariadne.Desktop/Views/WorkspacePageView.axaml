@@ -232,9 +232,24 @@
       <Setter Property="CornerRadius" Value="6" />
       <Setter Property="Padding" Value="10,8" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <!-- 与最近项目行 / 检查器对象行同族：以右缘为铰链轻撬 -->
+      <Setter Property="RenderTransformOrigin" Value="100%,50%" />
+      <Setter Property="RenderTransform" Value="translateX(0px) rotate(0deg)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.inspector-edge-row:pointerover">
+      <Setter Property="RenderTransform" Value="translateX(-2px) rotate(-0.3deg)" />
     </Style>
     <Style Selector="Button.inspector-edge-row:pointerover /template/ ContentPresenter">
       <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    </Style>
+    <Style Selector="Button.inspector-edge-row.selected">
+      <!-- 选中：撬起幅度加大并留住，与导轨选中态同一读法 -->
+      <Setter Property="RenderTransform" Value="translateX(-4px) rotate(-0.6deg)" />
     </Style>
     <Style Selector="Button.inspector-edge-row.selected /template/ ContentPresenter">
       <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />

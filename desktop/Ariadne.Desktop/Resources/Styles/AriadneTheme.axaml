@@ -690,14 +690,19 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="CornerRadius" Value="5" />
+    <!-- 与最近项目行同族：悬停时以右缘为铰链轻撬（全局统一的列表行语汇） -->
+    <Setter Property="RenderTransformOrigin" Value="100%,50%" />
+    <Setter Property="RenderTransform" Value="translateX(0px) rotate(0deg)" />
     <Setter Property="Transitions">
       <Transitions>
-        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
   <Style Selector="Border.inspector-object-row:pointerover">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="RenderTransform" Value="translateX(-2px) rotate(-0.3deg)" />
   </Style>
 
   <!-- 提示条：替代原来的 danger-panel「整块着色描边盒」。
@@ -881,7 +886,10 @@
   <Style Selector="Button.primary:pressed, Button.secondary:pressed, Button.chip-filter:pressed, Button.icon-btn:pressed, Button.btn-compact:pressed">
     <Setter Property="RenderTransform" Value="translateY(0px) scale(0.965)" />
   </Style>
-  <!-- icon-btn 悬停不缩放整键（改为图标自转，见 icon-btn > Path.icon 旋转样式） -->
+  <!-- icon-btn 悬停：图标自转（HoverSpin）+ 整键微抬，与全局「悬停即离面」同族 -->
+  <Style Selector="Button.icon-btn:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-1px) scale(1.04)" />
+  </Style>
   <!-- 标签页：悬停/选中轻抬，切换时有「浮起」感 -->
   <Style Selector="Button.inspector-tab">
     <Setter Property="RenderTransformOrigin" Value="50%,100%" />
@@ -1007,11 +1015,13 @@
     <Setter Property="CornerRadius" Value="8" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Background" Duration="0:0:0.14" />
         <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
-        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
@@ -1050,8 +1060,12 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
   </Style>
+  <Style Selector="Button.welcome-action:pointerover">
+    <!-- 主操作卡悬停：整片离面抬升（原先只换底色/边色，卡片是死的） -->
+    <Setter Property="RenderTransform" Value="translateY(-3px) scale(1.008)" />
+  </Style>
   <Style Selector="Button.welcome-action:pressed">
-    <Setter Property="RenderTransform" Value="scale(0.985)" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(0.985)" />
   </Style>
   <Style Selector="Button.welcome-recent-item">
     <Setter Property="Background" Value="Transparent" />
@@ -1065,11 +1079,23 @@
   </Style>
   <!-- 最近项目行：不画盒子。默认透明，hover 整行染色 + 左缘透出强调脊，
        靠圆角染色块表达「这一行可点」，比逐个描边轻得多。 -->
+  <!-- 最近项目行：沿用导轨「以右缘为铰链撬起纸片」的语汇——
+       悬停时左端顶出、微上翘，底色染一层弱强调，左缘透出强调脊。
+       全局共用同一套物理隐喻，而不是各处各自发明一种 hover。 -->
   <Style Selector="Grid.recent-row">
     <Setter Property="Background" Value="Transparent" />
+    <Setter Property="RenderTransformOrigin" Value="100%,50%" />
+    <Setter Property="RenderTransform" Value="translateX(0px) rotate(0deg) scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="Grid.recent-row:pointerover">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="RenderTransform" Value="translateX(-3px) rotate(-0.4deg) scale(1.006)" />
   </Style>
 
   <!-- 节点库芯片：可拖到画布 -->
@@ -1101,16 +1127,29 @@
     <Setter Property="HorizontalContentAlignment" Value="Left" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="Padding" Value="12,8" />
+    <!-- 芯片是拖源：悬停时整片轻轻「被拈起」（中心为原点均匀抬升 + 微升投影），
+         预告它可以被拿走。与导轨的右缘铰链不同——这里没有固定边，是整片离面。 -->
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
     <Setter Property="Transitions">
       <Transitions>
-        <BrushTransition Property="Background" Duration="0:0:0.12" />
-        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
+  </Style>
+  <Style Selector="Button.library-chip:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-2px) scale(1.03)" />
+  </Style>
+  <Style Selector="Button.library-chip:pressed">
+    <!-- 按下：压回桌面，给出「捏住了」的手感 -->
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(0.97)" />
   </Style>
   <Style Selector="Button.library-chip:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Card}" />
   </Style>
   <Style Selector="Button.library-chip.entry">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
@@ -1969,16 +2008,23 @@
   <Style Selector="Button.segment-button.selected /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
   </Style>
-  <!-- 卡片/层悬停微抬升 -->
+  <!-- 卡片悬停微抬升：整片离面（中心原点），影子随之加深。
+       原先注释写「微抬升」但只换了边色，卡片其实是死的。 -->
   <Style Selector="Border.card">
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        <BoxShadowsTransition Property="BoxShadow" Duration="0:0:0.18" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
   <Style Selector="Border.card:pointerover">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="RenderTransform" Value="translateY(-2px) scale(1.004)" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
   </Style>
 
   <!-- ============ Win11 毛玻璃菜单：右键 ContextMenu + 标题栏 MenuFlyout ============ -->
