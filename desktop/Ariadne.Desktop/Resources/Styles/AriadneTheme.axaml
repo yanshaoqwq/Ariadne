@@ -947,7 +947,20 @@
   <Style Selector="Button.primary:pressed, Button.secondary:pressed, Button.chip-filter:pressed, Button.icon-btn:pressed, Button.btn-compact:pressed">
     <Setter Property="RenderTransform" Value="translateY(0px) scale(0.965)" />
   </Style>
-  <!-- icon-btn 悬停：图标自转（HoverSpin）+ 整键微抬，与全局「悬停即离面」同族 -->
+  <!-- icon-btn 悬停：整键微抬，与全局「悬停即离面」同族。
+       同样要按平模板内 ContentPresenter 的 FluentTheme 灰底，否则抬起时底下透出色块。 -->
+  <Style Selector="Button.icon-btn /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.icon-btn:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.icon-btn:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
   <Style Selector="Button.icon-btn:pointerover">
     <Setter Property="RenderTransform" Value="translateY(-1px) scale(1.04)" />
   </Style>
@@ -1355,13 +1368,15 @@
     <Setter Property="StrokeJoin" Value="Round" />
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="RenderTransformOrigin" Value="50%,50%" />
-    <Setter Property="RenderTransform" Value="rotate(0deg)" />
+    <!-- 这里**不能**再设 RenderTransform，也不能给它挂过渡：
+         自转由 HoverSpin 逐帧写 RenderTransform 驱动，而样式 Setter 的优先级高于
+         代码赋值 —— 一旦这里写死 rotate(0deg)，每帧算出的角度都会被盖回 0°，
+         图标就纹丝不动；补间过渡也会与逐帧驱动互相拖拽。 -->
     <Setter Property="Transitions">
       <Transitions>
         <DoubleTransition Property="StrokeThickness" Duration="0:0:0.14" />
         <BrushTransition Property="Stroke" Duration="0:0:0.14" />
         <DoubleTransition Property="Opacity" Duration="0:0:0.14" />
-        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.28" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
@@ -1377,6 +1392,21 @@
   <!-- 窗口键悬停：不铺底色块（原先整键染 AccentLight，三个键逐个亮起很花），
        改为图标自转 + 描边转强调色；旋转节奏由 HoverSpin 行为驱动（快转→停顿→慢转）。
        关闭键保留红底（危险动作需要强信号）。 -->
+  <!-- 关键：Button 的底真正画在模板内的 ContentPresenter 上，FluentTheme 对它自带
+       :pointerover / :pressed 灰底画刷。只在 Button 本身设 Background=Transparent
+       盖不住那一层，于是悬停仍会浮出一块灰底（看着像阴影）。这里把三种状态全部按平。 -->
+  <Style Selector="Button.window-control /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.window-control:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.window-control:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
   <Style Selector="Button.window-control:pointerover Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentHover}" />
     <Setter Property="StrokeThickness" Value="2.25" />
