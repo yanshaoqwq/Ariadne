@@ -396,6 +396,12 @@ public partial class WorkspacePageView : UserControl
         {
             ApplyRightPanelResponsiveLayout();
         }
+        // 右栏展开：与底栏同一套进场语汇（从停靠边滑入 + 淡入），不再硬切出现。
+        if (e.PropertyName is nameof(WorkspacePageViewModel.IsRightPanelOpen)
+            && sender is WorkspacePageViewModel { IsRightPanelOpen: true })
+        {
+            PlayRailEnter(RightPanelSurface);
+        }
         // W16：pill / ToggleLibraryCommand 均经 IsLibraryOpen 驱动布局与 glyph
         if (e.PropertyName is nameof(WorkspacePageViewModel.IsLibraryOpen)
             && sender is WorkspacePageViewModel vm)
@@ -644,6 +650,7 @@ public partial class WorkspacePageView : UserControl
             LibraryContent.IsVisible = true;
             LibrarySplitter.IsVisible = true;
             row.Height = _savedLibraryHeight;
+            PlayRailEnter(LibraryContent);
         }
         else
         {
@@ -657,6 +664,25 @@ public partial class WorkspacePageView : UserControl
         }
 
         PositionBottomPill();
+    }
+
+    /// <summary>
+    /// 停靠栏进场：先按下 rail-entering（从停靠边偏移 + 半透明），下一帧摘掉，
+    /// 让样式里的 Transform/Opacity 过渡把它滑进来。开合从硬切变成有方向的动作。
+    /// </summary>
+    private static void PlayRailEnter(Control rail)
+    {
+        if (MotionPreferences.ReduceMotion)
+        {
+            rail.Classes.Remove("rail-entering");
+            return;
+        }
+
+        rail.Classes.Add("rail-entering");
+        // 需要真正渲染一帧带初态的画面，否则同帧增删等于没加，过渡不会触发。
+        Dispatcher.UIThread.Post(
+            () => rail.Classes.Remove("rail-entering"),
+            DispatcherPriority.Render);
     }
 
     // ===================== 库底部 Pill 位置 =====================
@@ -1344,6 +1370,10 @@ public partial class WorkspacePageView : UserControl
             {
                 _rightPanActive = true;
                 BeginPan(_rightPanOrigin);
+                // 抑制标志必须在**这一刻**立起，不能等到 PointerReleased：
+                // Avalonia 的 ContextRequested 由右键**按下**触发，比松手早得多，
+                // 等到 Released 再置位时菜单早已弹出。
+                _suppressNextContextMenu = true;
             }
         }
 
@@ -1388,8 +1418,8 @@ public partial class WorkspacePageView : UserControl
             _rightPanActive = false;
             if (wasPan)
             {
+                // 抑制标志已在越过阈值时置位（见 PointerMoved），此处只收尾。
                 EndPan(e.Pointer);
-                _suppressNextContextMenu = true;
                 e.Handled = true;
                 return;
             }
@@ -1440,13 +1470,28 @@ public partial class WorkspacePageView : UserControl
     /// <summary>
     /// 右键拖动平移后紧跟的那次 ContextMenu 请求要吞掉——否则拖完画布一松手就弹菜单。
     /// 单纯右键单击（未越过拖动阈值）不受影响，菜单照常。
+    /// 标志在越过拖动阈值那一刻就置起（不能等到 PointerReleased：右键菜单在部分平台
+    /// 于 PointerPressed 阶段就已请求，那时再置位已经晚了）。
     /// </summary>
     private void OnCanvasContextRequested(object? sender, ContextRequestedEventArgs e)
     {
         if (_suppressNextContextMenu)
         {
-            _suppressNextContextMenu = false;
             e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// 第二道拦截：ContextRequested 的触发时机随平台而异（press / release），
+    /// 单靠它可能漏。菜单真正要打开前再判一次，并在此清标志——保证一次右键拖动
+    /// 只吞掉紧随其后的那一个菜单，不影响下一次正常右键。
+    /// </summary>
+    private void OnCanvasContextMenuOpening(object? sender, CancelEventArgs e)
+    {
+        if (_suppressNextContextMenu)
+        {
+            _suppressNextContextMenu = false;
+            e.Cancel = true;
         }
     }
 

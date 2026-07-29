@@ -352,6 +352,11 @@
       <!-- 导航纸片撬起投影：左缘抬起 → 影子偏向右下，克制不糊（任务书「阴影少」）。 -->
       <BoxShadows x:Key="Ariadne.Shadow.Lift">2 2 5 -1 #1F000000, 5 5 14 -4 #26000000</BoxShadows>
       <BoxShadows x:Key="Ariadne.Shadow.Flyout">0 2 4 0 #0F000000, 0 8 24 -4 #28000000, 0 24 48 -8 #1A000000</BoxShadows>
+      <!-- 停靠栏投影：取代 1px 硬边。栏是浮在画布之上的一块面，影子朝画布那一侧扩散，
+           于是「栏在上、画布在下」这件事由光影交代，不再需要一条线去切割。
+           负 spread 收住扩散，只在贴边处留一层薄暗，不糊到画布中央。 -->
+      <BoxShadows x:Key="Ariadne.Shadow.RailLeft">-2 0 6 -2 #1A000000, -8 0 20 -8 #22000000</BoxShadows>
+      <BoxShadows x:Key="Ariadne.Shadow.RailUp">0 -2 6 -2 #1A000000, 0 -8 20 -8 #22000000</BoxShadows>
       <BoxShadows x:Key="Ariadne.Shadow.Dialog">0 4 8 0 #12000000, 0 16 40 -4 #28000000, 0 32 64 -12 #18000000</BoxShadows>
 
       <!-- 毛玻璃材料：弹窗/菜单 Tint 用 Color key（ExperimentalAcrylicMaterial 吃 Color） -->
@@ -517,18 +522,20 @@
     <Setter Property="IsVisible" Value="False" />
   </Style>
 
-  <!-- 分栏拖杆：静止只是一道发丝线，悬停/拖动时转强调色。
-       让「这里可以拖」这件事在需要时才显形。 -->
+  <!-- 分栏拖杆：静止**完全隐形**（停靠栏的分层已由投影+高光承担，再画一道灰线
+       就又变成「小边」）；只在指针接近时淡入一道强调色细杆，告诉你这里能拖。
+       宽度不变（命中区恒定），显形靠透明度，所以不会推挤布局。 -->
   <Style Selector="GridSplitter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Opacity" Value="0" />
     <Setter Property="Transitions">
       <Transitions>
-        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <DoubleTransition Property="Opacity" Duration="0:0:0.16" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
   <Style Selector="GridSplitter:pointerover">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Opacity" Value="0.85" />
   </Style>
 
   <!-- 矢量图标：描边线条，统一 stroke。geometry 见资源区 Ariadne.Icon.* -->
@@ -658,6 +665,60 @@
   <Style Selector="Border.panel-section">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="BorderThickness" Value="0,0,0,1" />
+  </Style>
+
+  <!-- ============================================================
+       停靠栏（右侧检查器 / 底部节点库）：不画边。
+       原先每栏一道 1px BorderMuted 硬线，两栏交汇处还会叠成一个「十字接缝」，
+       整个工作区被切成田字格 —— 这就是那几道「小边」的来源。
+       改为「浮在画布之上的一块面」：
+         - 面本身抬到 Elevated（比画布亮一档，靠明度差自然分层）；
+         - 朝画布的那一侧投一道柔和阴影，暗示这块面离画布更近；
+         - 迎光的那道 1px 玻璃高光贴在同侧，给出「厚度」而非「边框」。
+       颜色全部走 token，深浅主题与个性化换色自动跟随。
+       ============================================================ -->
+  <Style Selector="Border.dock-rail">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <!-- 开合的灵动来源：面从停靠边滑入并淡入，而不是硬切出现。
+         停留态归零，进场初态由 .rail-entering 提供（见下）。 -->
+    <Setter Property="RenderTransform" Value="translateX(0px) translateY(0px)" />
+    <Setter Property="Opacity" Value="1" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.26" Easing="CubicEaseOut" />
+        <DoubleTransition Property="Opacity" Duration="0:0:0.2" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <!-- 右栏：阴影朝左（投向画布），高光沿左缘 -->
+  <Style Selector="Border.dock-rail.dock-rail-right">
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.RailLeft}" />
+  </Style>
+  <!-- 底栏：阴影朝上 -->
+  <Style Selector="Border.dock-rail.dock-rail-bottom">
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.RailUp}" />
+  </Style>
+  <!-- 进场初态：各自从停靠的那一侧偏出一点点（右栏向右、底栏向下），
+       打开时摘掉这个类，靠上面的过渡滑回原位。位移克制在 18px 内，
+       是「面滑进来」而不是「整块飞进来」。 -->
+  <Style Selector="Border.dock-rail.dock-rail-right.rail-entering">
+    <Setter Property="RenderTransform" Value="translateX(18px)" />
+    <Setter Property="Opacity" Value="0" />
+  </Style>
+  <Style Selector="Border.dock-rail.dock-rail-bottom.rail-entering">
+    <Setter Property="RenderTransform" Value="translateY(18px)" />
+    <Setter Property="Opacity" Value="0" />
+  </Style>
+  <!-- 停靠栏内的分区标题带：同样去掉硬线，靠一层更淡的底色分层 -->
+  <Style Selector="Border.dock-rail-header">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <!-- 迎光高光：1px 竖/横线，贴在朝画布那一侧，给面一点厚度 -->
+  <Style Selector="Border.rail-lightline">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="IsHitTestVisible" Value="False" />
   </Style>
 
   <!-- 明细行：不画盒子。左缘一道发丝竖脊 + 留白，多行堆叠时形成一列整齐的

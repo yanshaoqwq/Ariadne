@@ -290,11 +290,16 @@
 
     <Grid x:Name="WorkspaceGrid" Grid.Column="0" RowDefinitions="*,Auto,220">
       <!-- Grid 宿主：工具栏/空态始终可见；Canvas 只放节点层 -->
+      <!-- ContextRequested 挂在菜单宿主本层：Avalonia 在这一层消费该事件弹出
+           Grid.ContextMenu，挂到内层 CanvasOverlay 拦不住（见 OnCanvasContextRequested）。 -->
       <Grid x:Name="CanvasHost" Grid.Row="0"
             Background="{DynamicResource Ariadne.CanvasBackground}"
+            ContextRequested="OnCanvasContextRequested"
             ClipToBounds="True">
         <Grid.ContextMenu>
-          <ContextMenu Classes="ariadne">
+          <!-- Opening 是第二道闸：ContextRequested 在各平台触发时机不一（按下/抬起），
+               右键拖动平移后由 Opening 兜底取消，保证拖完不弹菜单。 -->
+          <ContextMenu Classes="ariadne" Opening="OnCanvasContextMenuOpening">
             <MenuItem Header="{Binding CtxAddNodeText}" Command="{Binding AddContextNodeCommand}" />
             <Separator />
             <MenuItem Header="{Binding UndoText}" Command="{Binding UndoCommand}" />
@@ -327,7 +332,6 @@
                 PointerMoved="OnCanvasBackgroundPointerMoved"
                 PointerReleased="OnCanvasBackgroundPointerReleased"
                 PointerCaptureLost="OnCanvasBackgroundCaptureLost"
-                ContextRequested="OnCanvasContextRequested"
                 PointerWheelChanged="OnCanvasPointerWheel">
         <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
           <ItemsControl.RenderTransform>
@@ -898,15 +902,18 @@
         </Canvas>
       </Grid>
 
+      <!-- 拖杆本体透明：分层信号由下栏自身的顶缘光边承担，不再多画一道灰线。 -->
       <GridSplitter x:Name="LibrarySplitter" Grid.Row="1" Height="5"
                     HorizontalAlignment="Stretch"
-                    Background="{DynamicResource Ariadne.BorderMuted}"
+                    Background="Transparent"
                     ResizeDirection="Rows" />
 
+      <!-- 下栏：去掉 1px 灰描边，改「浮起的台面」——顶缘一道受光亮边 + 向上的投影，
+           台面自身比画布亮一档。层次靠光影而非线框（与节点卡同一套语汇）。 -->
       <Border x:Name="LibraryContent" Grid.Row="2"
+              Classes="dock-rail dock-rail-bottom"
               Background="{DynamicResource Ariadne.BackgroundSurface}"
-              BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-              BorderThickness="0,1,0,0">
+              BorderThickness="0">
         <DockPanel>
           <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="2" Margin="14,5,14,0">
             <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsNodeLibraryPanel}"
@@ -1215,23 +1222,23 @@
       </Border>
     </Grid>
 
+    <!-- 拖杆透明：分层由右栏左缘的受光亮边承担（见 dock-rail-right）。 -->
     <GridSplitter x:Name="RightPanelSplitter" Grid.Column="1"
                   Width="4"
-                  Background="{DynamicResource Ariadne.BorderMuted}"
+                  Background="Transparent"
                   ResizeDirection="Columns"
                   IsVisible="{Binding IsRightPanelDocked}" />
 
     <Panel x:Name="RightPanelHost" Grid.Column="2">
+      <!-- 右栏：同下栏语汇——左缘受光亮边 + 向左的投影，取代 1px 灰描边。 -->
       <Border
-          Background="{DynamicResource Ariadne.BackgroundSurface}"
-          BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-          BorderThickness="1,0,0,0"
+          x:Name="RightPanelSurface"
+          Classes="dock-rail dock-rail-right"
           IsVisible="{Binding IsRightPanelOpen}">
         <DockPanel>
-          <!-- 去掉与父层同色的重复背景，只保留底部发丝线；pivot 下划线贴着它 -->
+          <!-- pivot 带：去掉底部硬线，靠一层更淡的底色分层（选中下划线自己承担定位信号） -->
           <Border DockPanel.Dock="Top"
-                  BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                  BorderThickness="0,0,0,1"
+                  Classes="dock-rail-header"
                   Padding="10,8,10,0">
             <Grid ColumnDefinitions="*,*,*" ColumnSpacing="2">
               <Button Grid.Column="0" Classes="inspector-tab"
@@ -1282,11 +1289,11 @@
                   </ItemsControl>
                 </StackPanel>
               </ScrollViewer>
+              <!-- 输入面：去掉顶部硬线，用一层更淡的底色把「输入区」从对话流里分出来 -->
               <Border Grid.Row="1"
+                      Classes="dock-rail-header"
                       Padding="12,10"
-                      HorizontalAlignment="Stretch"
-                      BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                      BorderThickness="0,1,0,0">
+                      HorizontalAlignment="Stretch">
                 <!-- 与作品页共用 ProjectAiComposer；输入面始终跟随实际对话栏宽度。 -->
                 <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
               </Border>
@@ -1633,8 +1640,7 @@
                 <ScrollViewer IsVisible="{Binding IsEdgeDetailsTab}">
                   <StackPanel IsVisible="{Binding HasSelectedNode}" Spacing="0">
                     <Border Padding="14,13"
-                            BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                            BorderThickness="0,0,0,1">
+                            Classes="dock-rail-header">
                       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
                         <StackPanel Grid.Column="0" Spacing="2">
                           <TextBlock Text="{Binding EdgeDetailsText}"
