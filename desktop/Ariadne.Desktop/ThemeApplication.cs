@@ -34,7 +34,12 @@ public static class ThemeApplication
 {
     private const string OverlayKey = "Ariadne.ThemeOverlay.Active";
 
-    private static readonly string[] OverlayBrushKeys =
+    /// <summary>
+    /// 运行时被主题覆盖的全部资源键。Apply 写入的键必须与这里一一对应，
+    /// 否则 Reset 会漏删（残留上一套主题色）或误删（清掉字典预设值）。
+    /// 由 ThemeOverlayKeysTests 守护两侧一致。
+    /// </summary>
+    internal static readonly string[] OverlayBrushKeys =
     {
         "Ariadne.WindowBase",
         "Ariadne.BackgroundMain",
@@ -59,6 +64,29 @@ public static class ThemeApplication
         "Ariadne.TextSecondary",
         "Ariadne.TextSubtle",
         "Ariadne.EditorSelection",
+        // Color（非 Brush）令牌：渐变刷的 GradientStop 只能吃 Color，不能吃 Brush，
+        // 所以主色按钮 / 欢迎页主操作卡 / 空态插画那类渐变绑的是 Ariadne.Color.*。
+        // 过去这里只覆盖 Brush 键，导致个性化换强调色时那些渐变面纹丝不动
+        // （始终是字典里写死的预设色）。这批键必须与上面的 Brush 键同生同灭。
+        // 这批必须与 Apply 中 SetColor 写入的键**逐一对应**：漏一个就在恢复预设时
+        // 留下一枚被改写的僵尸键，多一个则会删掉从未被覆盖的应用级条目。
+        "Ariadne.Color.BackgroundMain",
+        "Ariadne.Color.BackgroundSurface",
+        "Ariadne.Color.BackgroundElevated",
+        "Ariadne.Color.BackgroundSubtle",
+        "Ariadne.Color.AccentPrimary",
+        "Ariadne.Color.AccentHover",
+        "Ariadne.Color.AccentPressed",
+        "Ariadne.Color.AccentLight",
+        "Ariadne.Color.AccentBorder",
+        // U70 的状态色/日志底色同样由 Apply 按表面明暗派生写入，过去漏在 Reset 之外：
+        // 从自定义主题切回预设时，这 6 枚键会带着上一套派生色留在字典里。
+        "Ariadne.StatusError",
+        "Ariadne.StatusWarning",
+        "Ariadne.StatusInfo",
+        "Ariadne.LogErrorBg",
+        "Ariadne.LogWarningBg",
+        "Ariadne.LogInfoBg",
     };
 
     private static string? _lastTheme;
@@ -227,6 +255,19 @@ public static class ThemeApplication
         SetBrush(resources, "Ariadne.LogWarningBg", WithAlpha(tokens.StatusWarning, 0x28));
         SetBrush(resources, "Ariadne.LogInfoBg", WithAlpha(tokens.StatusInfo, 0x28));
 
+        // 颜色键（Ariadne.Color.*）：渐变笔刷（主操作按钮、欢迎页卡、空态插画）绑的是 Color
+        // 而非 Brush，只覆盖上面那批 Brush 时它们仍读字典里写死的预设色，于是个性化换色后
+        // 主按钮不跟着变。这里把同一批 token 同步写进 Color 键，两种绑定走同一个来源。
+        SetColor(resources, "Ariadne.Color.BackgroundMain", tokens.Main);
+        SetColor(resources, "Ariadne.Color.BackgroundSurface", tokens.Surface);
+        SetColor(resources, "Ariadne.Color.BackgroundElevated", tokens.Elevated);
+        SetColor(resources, "Ariadne.Color.BackgroundSubtle", tokens.Subtle);
+        SetColor(resources, "Ariadne.Color.AccentPrimary", tokens.AccentPrimary);
+        SetColor(resources, "Ariadne.Color.AccentHover", tokens.AccentHover);
+        SetColor(resources, "Ariadne.Color.AccentPressed", tokens.AccentPressed);
+        SetColor(resources, "Ariadne.Color.AccentLight", WithAlpha(tokens.AccentPrimary, 0x1F));
+        SetColor(resources, "Ariadne.Color.AccentBorder", WithAlpha(tokens.AccentPrimary, 0x66));
+
         resources[OverlayKey] = overlayId;
     }
 
@@ -319,6 +360,12 @@ public static class ThemeApplication
     private static void SetBrush(IResourceDictionary resources, string key, Color color)
     {
         resources[key] = new SolidColorBrush(color);
+    }
+
+    /// <summary>写入 Color 键（供 XAML 里的渐变 GradientStop 直接绑色值使用）。</summary>
+    private static void SetColor(IResourceDictionary resources, string key, Color color)
+    {
+        resources[key] = color;
     }
 
     public static bool HasHex(string? hex) =>
