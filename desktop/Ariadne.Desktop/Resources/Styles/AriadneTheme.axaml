@@ -1380,11 +1380,14 @@
       </Transitions>
     </Setter>
   </Style>
-  <!-- 最小化：实心主题色横条（比描边线更易辨认）。尺寸与其它窗口键图标一致（15），
-       否则 Stretch=Uniform 下横条会比最大化/关闭宽出一档。 -->
+  <!-- 最小化：实心主题色横条（比描边线更易辨认）。
+       宽度与其它窗口键一致（15）；高度必须按横条真实长宽比给（15:2.4 → 2.4），
+       不能沿用 15：Stretch=Uniform 会把横条按自身包围盒缩放，塞进 15 高的方框后
+       在这种极端长宽比下不落在框心上，看着就是「没对齐中心」。
+       给足真实高度后，VerticalAlignment=Center 才能把它精确居中。 -->
   <Style Selector="Button.window-control Path.icon.minimize">
     <Setter Property="Width" Value="15" />
-    <Setter Property="Height" Value="15" />
+    <Setter Property="Height" Value="2.4" />
     <Setter Property="StrokeThickness" Value="0" />
     <Setter Property="Stroke" Value="Transparent" />
     <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentPrimary}" />
