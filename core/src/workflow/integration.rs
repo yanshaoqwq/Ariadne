@@ -426,6 +426,8 @@ pub struct WorkflowPatchApplyOutcome {
 }
 
 /// 执行确认后的 patch 写回，并同步 runtime 写回状态。
+///
+/// 建 Git 检查点，等价于 `apply_confirmed_patch_with_checkpoint(.., true)`。
 pub fn apply_confirmed_patch(
     runtime: &mut WorkflowRuntime,
     documents: &FileDocumentService,
@@ -434,17 +436,48 @@ pub fn apply_confirmed_patch(
     patch: &DocumentPatch,
     checkpoint_message: Option<&str>,
 ) -> CoreResult<WorkflowPatchApplyOutcome> {
+    apply_confirmed_patch_with_checkpoint(
+        runtime,
+        documents,
+        git,
+        node_id,
+        patch,
+        checkpoint_message,
+        true,
+    )
+}
+
+/// U111：按 `checkpoint_enabled` 决定 patch 写回时建不建 Git 检查点。
+///
+/// `checkpoint_enabled = false` 时**只跳过检查点，正文照常落盘**——
+/// 该开关的语义是「要不要留一条可回滚的 Git 记录」，不是「要不要写正文」。
+/// 把它做成后者等于用一个设置项静默阉割核心功能。
+///
+/// 实现上传 `None` 作为 `PatchCheckpointRequest`：`apply_patch_with_cancellation`
+/// 内部按 `(git, checkpoint_request)` 双 `Some` 才建检查点，任一为 `None` 即跳过。
+/// 这里刻意不改传 `git: None` ——`git` 句柄将来可能有检查点之外的用途，
+/// 用「不给检查点请求」表达意图比「不给 git」更贴合这个开关。
+pub fn apply_confirmed_patch_with_checkpoint(
+    runtime: &mut WorkflowRuntime,
+    documents: &FileDocumentService,
+    git: Option<&GitService>,
+    node_id: &NodeId,
+    patch: &DocumentPatch,
+    checkpoint_message: Option<&str>,
+    checkpoint_enabled: bool,
+) -> CoreResult<WorkflowPatchApplyOutcome> {
     // 写回分成两步：先在 runtime 上做只读校验，再调用 DocumentService
     // 修改文件。只有真实文件写入和 checkpoint 都成功后，才把运行态置为
     // Applied，避免 I/O 失败时留下“已写回”的错误快照。
     runtime.ensure_patch_write_back_can_start(node_id)?;
+    let checkpoint_request = checkpoint_enabled.then(|| PatchCheckpointRequest {
+        node_id: node_id.as_str().to_owned(),
+        message: checkpoint_message.map(str::to_owned),
+    });
     let report = documents.apply_patch_with_cancellation(
         patch,
         git,
-        Some(&PatchCheckpointRequest {
-            node_id: node_id.as_str().to_owned(),
-            message: checkpoint_message.map(str::to_owned),
-        }),
+        checkpoint_request.as_ref(),
         runtime.cancellation(),
     )?;
     runtime.mark_patch_write_back_state(node_id, PatchWriteBackState::Applied)?;
@@ -477,6 +510,7 @@ pub fn apply_approved_patch_for_confirmation(
     documents: &FileDocumentService,
     git: Option<&GitService>,
     confirmation_id: &str,
+    checkpoint_enabled: bool,
 ) -> CoreResult<Option<WorkflowPatchApplyOutcome>> {
     let Some(confirmation) = runtime.state.confirmations.get(confirmation_id) else {
         return Ok(None);
@@ -500,13 +534,14 @@ pub fn apply_approved_patch_for_confirmation(
         return Ok(None);
     }
     let message = format!("writing patch approved via {confirmation_id}");
-    apply_confirmed_patch(
+    apply_confirmed_patch_with_checkpoint(
         runtime,
         documents,
         git,
         &node_id,
         &commit.patch,
         Some(&message),
+        checkpoint_enabled,
     )
     .map(Some)
 }

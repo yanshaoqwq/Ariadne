@@ -152,6 +152,34 @@ fn seed_document(project_root: &std::path::Path, relative: &str, body: &str) -> 
     relative.to_owned()
 }
 
+/// 数当前分支的 commit 条数。
+///
+/// U111 的判据必须取**真实 git 历史**：`checkpoint_enabled` 的作用就是
+/// 「要不要多一个 commit」，断言 `PatchCheckpointRequest` 是否被构造
+/// 只能证明代码路径走到了，证明不了 git 里到底有没有多出那条记录。
+fn commit_count(project_root: &std::path::Path) -> usize {
+    let output = std::process::Command::new("git")
+        .args(["rev-list", "--count", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .expect("git rev-list 应当可执行");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// 改写项目配置里的 `workflow.checkpoint_enabled`。
+///
+/// 走 `ConfigStore` 而不是手写 YAML：真相源是配置层，手写文件会在
+/// schema 变动时静默失配，测试仍绿但测的已不是产品读的那份配置。
+fn set_checkpoint_enabled(project_root: &std::path::Path, enabled: bool) {
+    let store = ariadne::config::ConfigStore::new(project_root);
+    let mut config = store.load().expect("载入项目配置应当成功");
+    config.workflow.checkpoint_enabled = enabled;
+    store.save(&config).expect("保存项目配置应当成功");
+}
+
 fn read_document(project_root: &std::path::Path, relative: &str) -> String {
     std::fs::read_to_string(project_root.join(relative)).unwrap_or_default()
 }
@@ -509,5 +537,118 @@ fn approving_the_same_confirmation_twice_writes_the_patch_once() {
         "同一确认项审批两次，patch 被重复写回。\
          多半是写盘后的 `Applied` 标记没落库——判重全靠它。\
          磁盘实际内容：{body:?}"
+    );
+}
+
+// ════════════════════════════════════════════════════════
+// U111：`checkpoint_enabled` 必须真的控制建不建 Git 检查点
+// ════════════════════════════════════════════════════════
+
+/// 开关打开（默认值）时，patch 写回必须**真的**产生一个 Git commit。
+///
+/// 这条先钉住「开关有东西可关」。U108 阶段 3 之前 `apply_confirmed_patch`
+/// 生产零调用者，checkpoint 那条路径根本到不了——彼时给开关加门控
+/// 等于「为不存在的执行路径装开关」，这也是 U111 长期悬而未决的原因。
+#[test]
+fn u111_checkpoint_enabled_creates_a_real_git_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+
+    let base_url = spawn_patch_tool_llm(vec![(
+        "writer-insert-lines".to_owned(),
+        json!({
+            "document_id": CHAPTER_PATH,
+            "after_line": 1,
+            "text": "开着检查点写的一段。\n"
+        })
+        .to_string(),
+    )]);
+    let secrets = MemorySecretStore::default();
+    provision(temp.path(), &secrets, base_url);
+    set_checkpoint_enabled(temp.path(), true);
+
+    let document_id = seed_document(temp.path(), CHAPTER_PATH, "第一章\n");
+    let run_id = run_writer_node(temp.path(), &secrets, &document_id);
+    let before = commit_count(temp.path());
+
+    let confirmation_id = pending_confirmation_id(temp.path(), "writer", &run_id);
+    resolve_confirmation_impl(
+        temp.path(),
+        ResolveConfirmationRequest {
+            workflow_id: "writer".to_owned(),
+            run_id,
+            confirmation_id,
+            decision: ConfirmationDecision::Approve,
+            review_reason: None,
+        },
+    )
+    .expect("同意确认项应当成功");
+
+    // 前置条件：正文确实写进去了。否则下面的 commit 断言测的是别的东西。
+    assert!(
+        read_document(temp.path(), CHAPTER_PATH).contains("开着检查点写的一段。"),
+        "正文没落盘，本用例的 checkpoint 断言失去意义"
+    );
+    assert_eq!(
+        commit_count(temp.path()),
+        before + 1,
+        "checkpoint_enabled = true 时 patch 写回必须产生一个 Git 检查点，\
+         但 commit 数没变——checkpoint 那条路径没有真正执行"
+    );
+}
+
+/// 开关关闭时，正文照常落盘，但**不得**产生 Git commit。
+///
+/// 两个断言缺一不可：
+/// - 只断言「没有新 commit」，一个「关掉开关就连正文也不写」的实现会通过，
+///   那是把功能开关做成了功能阉割；
+/// - 只断言「正文写了」，则完全测不到开关。
+#[test]
+fn u111_checkpoint_disabled_still_writes_body_but_creates_no_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+
+    let base_url = spawn_patch_tool_llm(vec![(
+        "writer-insert-lines".to_owned(),
+        json!({
+            "document_id": CHAPTER_PATH,
+            "after_line": 1,
+            "text": "关着检查点写的一段。\n"
+        })
+        .to_string(),
+    )]);
+    let secrets = MemorySecretStore::default();
+    provision(temp.path(), &secrets, base_url);
+    set_checkpoint_enabled(temp.path(), false);
+
+    let document_id = seed_document(temp.path(), CHAPTER_PATH, "第一章\n");
+    let run_id = run_writer_node(temp.path(), &secrets, &document_id);
+    let before = commit_count(temp.path());
+
+    let confirmation_id = pending_confirmation_id(temp.path(), "writer", &run_id);
+    resolve_confirmation_impl(
+        temp.path(),
+        ResolveConfirmationRequest {
+            workflow_id: "writer".to_owned(),
+            run_id,
+            confirmation_id,
+            decision: ConfirmationDecision::Approve,
+            review_reason: None,
+        },
+    )
+    .expect("同意确认项应当成功");
+
+    let body = read_document(temp.path(), CHAPTER_PATH);
+    assert!(
+        body.contains("关着检查点写的一段。"),
+        "关掉 checkpoint 后正文也不写了——开关的语义是「要不要建检查点」，\
+         不是「要不要写正文」。磁盘实际内容：{body:?}"
+    );
+    assert_eq!(
+        commit_count(temp.path()),
+        before,
+        "checkpoint_enabled = false 时仍产生了 Git 检查点——开关没有生效"
     );
 }

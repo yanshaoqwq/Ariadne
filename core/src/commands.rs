@@ -14027,11 +14027,23 @@ fn apply_resolved_confirmation_patch(
     let mut runtime = crate::workflow::WorkflowRuntime::from_state(runtime_state);
     let documents = document_service(project_root);
     let git = git_service_with_cancellation(project_root, runtime.cancellation());
+    // U111：`checkpoint_enabled` 的唯一门控点。此前它在全后端零消费点——
+    // 因为建检查点的唯一入口 `apply_confirmed_patch` 生产零调用者，
+    // 给它加门控等于「为不存在的执行路径装开关」。U108 阶段 3 接通写回后
+    // 这条路径才真实存在，开关也才有东西可关。
+    //
+    // 读不到配置时按**建检查点**处理（与 `WorkflowConfig::default` 一致）：
+    // 检查点是可回滚的安全网，配置异常时宁可多留一条 Git 记录。
+    let checkpoint_enabled = ConfigStore::new(project_root)
+        .load()
+        .map(|config| config.workflow.checkpoint_enabled)
+        .unwrap_or(true);
     let outcome = crate::workflow::integration::apply_approved_patch_for_confirmation(
         &mut runtime,
         &documents,
         Some(&git),
         confirmation_id,
+        checkpoint_enabled,
     );
 
     match outcome {
