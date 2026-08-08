@@ -268,46 +268,72 @@ impl<'a> SummaryPipelineExecutor<'a> {
         revision_id: &str,
         metadata: serde_json::Value,
     ) -> CoreResult<ConfirmationItem> {
-        let mut state = self
-            .confirmation_policy
-            .initial_state(kind, &self.auto_mode);
-        let mut metadata = merge_metadata(
-            metadata,
-            json!({ "revision_id": revision_id, "chapter_id": chapter_id }),
-        );
-        if state == ConfirmationState::AutoAudited {
-            if let Some(decisions) = &self.auto_audit_decisions {
-                let decision = decisions.get(&kind).ok_or_else(|| {
-                    CoreError::validation(format!(
-                        "missing Auto Mode audit decision for confirmation kind {kind:?}"
-                    ))
-                })?;
-                if decision.reason.trim().is_empty() {
-                    return Err(CoreError::validation(format!(
-                        "empty Auto Mode audit reason for confirmation kind {kind:?}"
-                    )));
-                }
-                if !decision.approved {
-                    state = ConfirmationState::Pending;
-                }
-                metadata = merge_metadata(
-                    metadata,
-                    json!({
-                        "auto_audit": {
-                            "approved": decision.approved,
-                            "reason": decision.reason,
-                        }
-                    }),
-                );
-            }
-        }
-        Ok(ConfirmationItem::new(
-            confirmation_id(kind, chapter_id, revision_id),
+        build_writing_confirmation(
             kind,
-            state,
+            chapter_id,
+            revision_id,
             metadata,
-        ))
+            &self.confirmation_policy,
+            &self.auto_mode,
+            self.auto_audit_decisions.as_ref(),
+        )
     }
+}
+
+/// U117：按确认策略组装一条写作确认项。
+///
+/// 从 `SummaryPipelineExecutor::build_confirmation` 提取为自由函数，供写作节点
+/// （outliner/designer/planner/critic/prudent/writer/polisher）与总结流水线**共用**。
+///
+/// 必须共用而不是各写一份：这里有两条安全语义，任何一处漏掉都会静默放宽审批——
+/// 1. Auto Mode 审计**不通过**时状态回落 `Pending`，即模型说「不行」就必须转人工；
+/// 2. 声明了 AutoAudited 却拿不到审计决定时 **fail-loud**，而不是当作通过。
+pub fn build_writing_confirmation(
+    kind: ConfirmationKind,
+    chapter_id: &str,
+    revision_id: &str,
+    metadata: serde_json::Value,
+    policy: &WritingConfirmationPolicy,
+    auto_mode: &crate::contracts::AutoModeState,
+    auto_audit_decisions: Option<&BTreeMap<ConfirmationKind, ConfirmationAuditDecision>>,
+) -> CoreResult<ConfirmationItem> {
+    let mut state = policy.initial_state(kind, auto_mode);
+    let mut metadata = merge_metadata(
+        metadata,
+        json!({ "revision_id": revision_id, "chapter_id": chapter_id }),
+    );
+    if state == ConfirmationState::AutoAudited {
+        if let Some(decisions) = auto_audit_decisions {
+            let decision = decisions.get(&kind).ok_or_else(|| {
+                CoreError::validation(format!(
+                    "missing Auto Mode audit decision for confirmation kind {kind:?}"
+                ))
+            })?;
+            if decision.reason.trim().is_empty() {
+                return Err(CoreError::validation(format!(
+                    "empty Auto Mode audit reason for confirmation kind {kind:?}"
+                )));
+            }
+            if !decision.approved {
+                state = ConfirmationState::Pending;
+            }
+            metadata = merge_metadata(
+                metadata,
+                json!({
+                    "auto_audit": {
+                        "approved": decision.approved,
+                        "reason": decision.reason,
+                    }
+                }),
+            );
+        }
+    }
+    Ok(ConfirmationItem::new(
+        confirmation_id(kind, chapter_id, revision_id),
+        kind,
+        state,
+        metadata,
+    ))
 }
 
 /// 把待确认项状态推进为已通过，并物化 summary pending_payload（F14）。

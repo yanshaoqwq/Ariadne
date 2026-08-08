@@ -13,8 +13,8 @@
   <Border Classes="ai-composer"
           HorizontalAlignment="Stretch"
           MinHeight="128"
-          Padding="12,10,8,10">
-    <Grid RowDefinitions="Auto,*" RowSpacing="8" HorizontalAlignment="Stretch">
+          Padding="12,10">
+    <Grid RowDefinitions="Auto,*,Auto" RowSpacing="8" HorizontalAlignment="Stretch">
       <Button Grid.Row="0"
               Classes="subtle"
               ctl:SelectedClass.IsSelected="{Binding ProjectAutomation.IsEnabled}"
@@ -28,8 +28,10 @@
           <TextBlock Grid.Column="1" Text="{Binding ProjectAutomation.StateText}" Classes="caption" />
         </Grid>
       </Button>
-      <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="8" HorizontalAlignment="Stretch">
-      <TextBox Grid.Column="0"
+      <!-- 输入框占满整框宽度，发送键落到它下方右侧。
+           原本发送键与输入框分列同一行，输入框因此只剩局部宽度——
+           写长段时可写区域比看到的框窄一截，是这个面最别扭的地方。 -->
+      <TextBox Grid.Row="1"
                Text="{Binding ProjectAiMessage, Mode=TwoWay}"
                AcceptsReturn="True"
                TextWrapping="Wrap"
@@ -45,10 +47,10 @@
                VerticalContentAlignment="Top"
                VerticalAlignment="Stretch"
                PlaceholderText="{Binding ProjectAiPlaceholder}" />
-      <Button Grid.Column="1"
+      <Button Grid.Row="2"
               Classes="primary"
               Width="36" Height="36" Padding="0"
-              VerticalAlignment="Bottom"
+              HorizontalAlignment="Right"
               Command="{Binding SendProjectAiCommand}"
               ToolTip.Tip="{Binding ProjectAiText}"
               AutomationProperties.Name="{Binding ProjectAiText}">
@@ -56,7 +58,6 @@
               Stroke="{DynamicResource Ariadne.TextOnAccent}"
               Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
       </Button>
-      </Grid>
     </Grid>
   </Border>
 </UserControl>

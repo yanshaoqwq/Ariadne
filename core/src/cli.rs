@@ -72,6 +72,8 @@ fn run_workflow_command(args: &[String]) -> Result<Value, String> {
                 workflow_id,
                 start_node_id: options.start.clone(),
                 initial_inputs,
+                variables: std::collections::BTreeMap::new(),
+                origin_conversation_id: None,
             };
             commands::start_workflow_with_request(&state, request.clone())
                 .map(|started| {

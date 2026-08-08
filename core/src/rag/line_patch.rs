@@ -158,15 +158,26 @@ pub fn insert_lines_to_patch(
 ) -> CoreResult<DocumentPatch> {
     validate_document_id(&request.document_id)?;
     let ranges = line_ranges(original);
-    if request.after_line == 0 || request.after_line as usize > ranges.len() {
+    // U123：`after_line = 0` = 插入到文件最开头（第 1 行之前）。
+    //
+    // 放开它有两个不可或缺的理由：
+    // 1. **空文件**的 `ranges` 为空，任何 `after_line >= 1` 都越界——而「每章一个
+    //    文件」时新建章节文件为空是最常见的起点，原先 writer 一个字都写不进去。
+    // 2. 即使文件非空，原先最小值 1 意味着只能插到第 1 行**之后**；想在开头补一段
+    //    只能改用 `replace_lines(1, 1, "新段落\n原第一行")`，逼 LLM 重述原文。
+    if request.after_line as usize > ranges.len() {
         return Err(CoreError::validation(format!(
-            "after_line {} is outside document line range 1..={}",
+            "after_line {} is outside document line range 0..={}",
             request.after_line,
             ranges.len()
         )));
     }
 
-    let insert_at = ranges[(request.after_line - 1) as usize].1;
+    // after_line = 0 → 插入点为 0（文件开头）；空文件因此写入全部内容。
+    let insert_at = match request.after_line {
+        0 => 0,
+        line => ranges[(line - 1) as usize].1,
+    };
     patch_for_range(
         request.document_id,
         request.base_version,
@@ -203,6 +214,10 @@ pub fn line_range_to_text_range(
 ) -> CoreResult<TextRange> {
     let ranges = line_ranges(text);
     validate_replace_lines(start_line, end_line, ranges.len())?;
+    // U123：空文件的合法区间 (0, 0) 对应空文本范围——不能去索引空的 ranges。
+    if ranges.is_empty() {
+        return TextRange::new(0, 0);
+    }
     let start = ranges[(start_line - 1) as usize].0 as u64;
     let end = ranges[(end_line - 1) as usize].1 as u64;
     TextRange::new(start, end)
@@ -250,13 +265,18 @@ fn apply_line_operation(original: &str, operation: &LinePatchOperation) -> CoreR
     match operation {
         LinePatchOperation::Insert { after_line, text } => {
             let ranges = line_ranges(original);
-            if *after_line == 0 || *after_line as usize > ranges.len() {
+            // U123：与 `insert_lines_to_patch` 同步放行 `after_line = 0`。
+            // 两处逻辑必须一致，否则 PatchSession 的模拟结果与直接调用会漂移。
+            if *after_line as usize > ranges.len() {
                 return Err(CoreError::validation(format!(
-                    "after_line {after_line} is outside document line range 1..={}",
+                    "after_line {after_line} is outside document line range 0..={}",
                     ranges.len()
                 )));
             }
-            let insert_at = ranges[(*after_line - 1) as usize].1;
+            let insert_at = match *after_line {
+                0 => 0,
+                line => ranges[(line - 1) as usize].1,
+            };
             let mut next = String::with_capacity(original.len() + text.len());
             next.push_str(&original[..insert_at]);
             next.push_str(text);
@@ -282,6 +302,21 @@ fn apply_line_operation(original: &str, operation: &LinePatchOperation) -> CoreR
 
 /// 校验替换行号区间。
 fn validate_replace_lines(start_line: u64, end_line: u64, line_count: usize) -> CoreResult<()> {
+    // U123：空文件的 0 行区间是合法的「写入初始内容」操作。
+    //
+    // 空文件唯一可表达的区间是 `(0, 0)`——没有任何 1-based 行可指。这是分章节
+    // 写作的常见起点（新建章节文件为空），原先在这里被无条件拒绝。
+    // 非空文件仍要求 1-based 闭区间：那里 `(0, 0)` 没有意义，放行只会掩盖
+    // LLM 的行号计算错误。
+    if line_count == 0 {
+        if start_line == 0 && end_line == 0 {
+            return Ok(());
+        }
+        return Err(CoreError::validation(format!(
+            "document is empty; use start_line = end_line = 0 to write initial content \
+             (got {start_line}..={end_line})"
+        )));
+    }
     if start_line == 0 || end_line == 0 || start_line > end_line {
         return Err(CoreError::validation(
             "replace line range must be a 1-based closed interval",

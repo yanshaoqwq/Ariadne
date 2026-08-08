@@ -1594,6 +1594,12 @@ pub(crate) fn render_chapters_epub(chapters: &[(String, String)]) -> CoreResult<
             .to_vec(),
         ZipCompression::Deflated,
     ));
+    // U127：EPUB 3.0 要求 manifest 里必须有一个 `properties="nav"` 的导航文档。
+    // 缺了它阅读器目录面板为空、无法跳章，epubcheck 判不合规——而「跳章」对
+    // 长篇小说恰好是最常用的操作。导航项排在章节前，与 spine 顺序无关
+    // （nav 本身不入 spine，读者不该在正文流里读到目录页）。
+    let nav_manifest_item =
+        r#"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#;
     let manifest_items = chapters
         .iter()
         .enumerate()
@@ -1604,6 +1610,7 @@ pub(crate) fn render_chapters_epub(chapters: &[(String, String)]) -> CoreResult<
         })
         .collect::<Vec<_>>()
         .join("\n    ");
+    let manifest_items = format!("{nav_manifest_item}\n    {manifest_items}");
     let spine_items = chapters
         .iter()
         .enumerate()
@@ -1629,6 +1636,40 @@ pub(crate) fn render_chapters_epub(chapters: &[(String, String)]) -> CoreResult<
     files.push((
         "OEBPS/content.opf".to_owned(),
         opf.into_bytes(),
+        ZipCompression::Deflated,
+    ));
+    // U127：导航文档本体。章节标题已在 `chapters` 的 `.0` 里，无需新增数据源；
+    // 标题必须转义——章节名里出现 `&` 或 `<` 会让整个 nav 变成非良构 XML，
+    // 阅读器届时连目录都解析不出来（比没有目录更糟）。
+    let nav_entries = chapters
+        .iter()
+        .enumerate()
+        .map(|(index, (title, _))| {
+            format!(
+                r#"<li><a href="chapter{index}.xhtml">{}</a></li>"#,
+                escape_xml(title)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n        ");
+    let nav = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh-CN">
+  <head><title>目录</title></head>
+  <body>
+    <nav epub:type="toc" id="toc">
+      <h1>目录</h1>
+      <ol>
+        {nav_entries}
+      </ol>
+    </nav>
+  </body>
+</html>"#
+    );
+    files.push((
+        "OEBPS/nav.xhtml".to_owned(),
+        nav.into_bytes(),
         ZipCompression::Deflated,
     ));
     for (index, (title, content)) in chapters.iter().enumerate() {

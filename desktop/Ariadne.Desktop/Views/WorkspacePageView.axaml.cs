@@ -221,6 +221,7 @@ public partial class WorkspacePageView : UserControl
             viewModel.RequestEnsureNodeVisible = EnsureNodeInSafeViewport;
             viewModel.PickFolder = PickFolderAsync;
             viewModel.PickFile = PickFileAsync;
+            viewModel.RequestFocusRejectReason = FocusRejectReason;
             viewModel.Nodes.CollectionChanged += OnNodesCollectionChanged;
             viewModel.Edges.CollectionChanged += OnEdgesCollectionChanged;
             viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -249,6 +250,22 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
+    /// <summary>
+    /// 理由线展开后把焦点交给输入框，光标落在末尾。
+    ///
+    /// 走 Dispatcher.Post(Input) 而不是直接 Focus()：此刻宽度动效刚开始，
+    /// 控件还没进入可聚焦布局，同步聚焦会落空。与作品页快捷改写同一做法。
+    /// </summary>
+    private void FocusRejectReason()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            RejectReasonBox.Focus();
+            RejectReasonBox.SelectionStart = RejectReasonBox.Text?.Length ?? 0;
+            RejectReasonBox.SelectionEnd = RejectReasonBox.SelectionStart;
+        }, DispatcherPriority.Input);
+    }
+
     private void DetachViewActions()
     {
         if (_attachedViewModel is null)
@@ -260,6 +277,7 @@ public partial class WorkspacePageView : UserControl
         _attachedViewModel.EndPortDragHighlight();
         _keyboardEdgeSourceNode = null;
         _keyboardEdgeSourceHandle = null;
+        _attachedViewModel.RequestFocusRejectReason = null;
         _attachedViewModel.RequestFitView = null;
         _attachedViewModel.RequestCanvasZoomStep = null;
         _attachedViewModel.RequestResetCanvasZoom = null;

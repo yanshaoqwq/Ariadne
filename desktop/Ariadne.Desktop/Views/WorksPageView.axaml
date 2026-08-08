@@ -177,22 +177,32 @@
                          IsVisible="{Binding ShowReadModeEmptyDocument}"
                          HorizontalAlignment="Center"
                          VerticalAlignment="Center" />
-              <ItemsControl Grid.Row="1"
-                            ItemsSource="{Binding DocumentBlocks}"
-                            IsVisible="{Binding !IsEditMode}">
-                <ItemsControl.ItemsPanel>
-                  <ItemsPanelTemplate>
-                    <VirtualizingStackPanel />
-                  </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                  <DataTemplate DataType="{x:Type vm:DocumentBlockViewModel}">
-                    <SelectableTextBlock Text="{Binding Text}"
-                                         Classes="reading"
-                                         Margin="0,0,0,18" />
-                  </DataTemplate>
-                </ItemsControl.ItemTemplate>
-              </ItemsControl>
+              <!-- U128：阅读模式正文必须外包一层 ScrollViewer。
+                   裸 ItemsControl 在 Avalonia 里**不自带滚动**——`ItemsPresenter` 不是
+                   `IScrollable`，内部的 `VirtualizingStackPanel` 也不实现 `ILogicalScrollable`，
+                   于是长篇正文只能看到第一屏、末块永远不可达（产品主用途不成立）。
+                   ScrollViewer 同时是 `VirtualizingStackPanel` 的视口来源，虚拟化因此才真正生效。
+                   x:Name 供 U129 的「切换视图保留阅读位置」寻址。 -->
+              <ScrollViewer x:Name="DocumentReaderScroll"
+                            Grid.Row="1"
+                            IsVisible="{Binding !IsEditMode}"
+                            HorizontalScrollBarVisibility="Disabled"
+                            VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding DocumentBlocks}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                      <VirtualizingStackPanel />
+                    </ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:DocumentBlockViewModel}">
+                      <SelectableTextBlock Text="{Binding Text}"
+                                           Classes="reading"
+                                           Margin="0,0,0,18" />
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
               <ae:TextEditor x:Name="DocumentEditor"
                              Grid.Row="1"
                              Document="{Binding EditorDocument}"
@@ -294,7 +304,6 @@
                       <TextBlock Text="{Binding OutlineText}" Classes="caption" VerticalAlignment="Center" />
                     </StackPanel>
                   </Button>
-                  <Button Classes="subtle" Padding="10,6" Content="{Binding ImportText}" Command="{Binding ToggleImportPanelCommand}" />
                 </StackPanel>
                 <!-- 导入表单：去掉描边盒，改为左缘强调脊的「展开工作区」 -->
                 <Border Classes="detail-row accent"

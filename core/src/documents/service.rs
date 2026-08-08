@@ -419,6 +419,19 @@ impl FileDocumentService {
     ) -> CoreResult<DocumentWriteReport> {
         cancellation.check()?;
         self.ensure_write(&request.path)?;
+        // U123：入库即规范化换行，使内部只存在 LF。
+        //
+        // 病根是两处换行语义不一致：`line_numbered_text` 用 `text.lines()`
+        // （剥掉 `\r\n`），而 `line_ranges` 只按 `\n` 切分（`\r` 留在行内）。
+        // 用户从 Word / 记事本导入带 `\r\n` 的正文时，LLM 看到的行内容与实际
+        // 字节区间错位，replace 会把 `\r` 算进区间、切坏正文。
+        //
+        // 落在写入边界而非 `line_patch.rs` 内部：在那里做兼容会留下两套换行
+        // 语义，每个新增的行号计算都得再记得兼容一次。
+        let request = DocumentWriteRequest {
+            content: normalize_newlines(&request.content),
+            ..request
+        };
         let _project_mutation = self
             .invalidation_outbox
             .acquire_project_mutation("document_save")?;
@@ -534,6 +547,23 @@ fn restore_previous_file_if_result(
 }
 
 /// 解析文档格式，拒绝不支持的文件扩展名。
+/// U123：把 CRLF / 单独 CR 统一成 LF。
+///
+/// 行号工具（`line_ranges`）只按 `\n` 切分，而带行号预览（`line_numbered_text`）
+/// 用 `str::lines()` 会剥掉 `\r`。两者对同一段文本给出的行边界不同，混用会让
+/// LLM 按预览算出的行号落到错误的字节区间。统一在入库时规范化，内部就只有一
+/// 种换行。
+///
+/// 单独的 `\r`（老式 Mac 换行）一并处理：它同样会被 `lines()` 当作换行、
+/// 却不被 `line_ranges` 当作换行，是同一类错位。
+fn normalize_newlines(content: &str) -> String {
+    if !content.contains('\r') {
+        // 绝大多数写入本就是 LF，避免无谓分配。
+        return content.to_owned();
+    }
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn resolve_format(
     path: &Path,
     explicit_format: Option<DocumentFormat>,

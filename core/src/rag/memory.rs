@@ -404,7 +404,14 @@ impl MemoryWritingKnowledgeBase {
                     ));
                 }
                 change.status = RegisteredChangeStatus::Deleted;
-                Ok(vec![change.clone()])
+                let deleted = change.clone();
+                // U121：两个容器必须同步退场，否则删掉的伏笔仍被 find 查回。
+                if function == RegisterFunction::Foreshadowing {
+                    if let Some(record) = state.foreshadowing.get_mut(&change_id) {
+                        record.status = ForeshadowingStatus::Abandoned;
+                    }
+                }
+                Ok(vec![deleted])
             }
         }
     }
@@ -801,6 +808,35 @@ impl MemoryWritingKnowledgeBase {
             metadata: Value::Null,
         };
         state.link_structured_register(&change_id, &change.content);
+        // U121：伏笔必须同时进入 `foreshadowing` 容器。
+        //
+        // `find_foreshadowing` 只读 `state.foreshadowing`，而其余注册类知识
+        // （性格/关系/主题锚点）都从 `state.changes` 查。若只写 changes，
+        // planner 埋下的伏笔 writer 永远查不回来——写入即黑洞，且伏笔
+        // 「种植→回收」的整条机制都无从启动（`apply_foreshadowing_update`
+        // 要求记录已存在）。
+        //
+        // 这里用 change_id 作 foreshadowing_id，使两个容器一一对应，
+        // 后续 delete/update 能定位到同一条。
+        if let RegisterContent::Foreshadowing(content) = &change.content {
+            state.foreshadowing.insert(
+                change_id.clone(),
+                ForeshadowingRecord {
+                    foreshadowing_id: change_id.clone(),
+                    title: content.title.clone(),
+                    description: content.description.clone(),
+                    status: ForeshadowingStatus::Planned,
+                    planted_segment_ids: Vec::new(),
+                    recovered_segment_ids: Vec::new(),
+                    // 保留 intended_payoff：它是伏笔的回收目标，
+                    // ForeshadowingRecord 没有对应字段，放 metadata 不丢信息。
+                    metadata: serde_json::json!({
+                        "intended_payoff": content.intended_payoff,
+                        "change_id": change_id,
+                    }),
+                },
+            );
+        }
         state.changes.insert(change_id, change.clone());
         Ok(change)
     }

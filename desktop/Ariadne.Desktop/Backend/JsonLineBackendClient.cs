@@ -6,6 +6,11 @@ namespace Ariadne.Desktop.Backend;
 
 public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
 {
+    /// <summary>
+    /// 无 BOM 的 UTF-8。JSON-line 协议逐行解析，BOM 会让后端把第一行判为非法 JSON。
+    /// </summary>
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     private readonly string? _backendCommand;
     private readonly string _appStateRoot;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
@@ -312,9 +317,16 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
-    public Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default)
+    public Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, IReadOnlyDictionary<string, object?>? variables = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<WorkflowRunStarted>("start_workflow", new { workflow_id = workflowId, start_node_id = startNodeId }, cancellationToken);
+        // variables 为空时不发该键：让后端按 #[serde(default)] 取空表，
+        // 避免把 null 当成「显式清空」传下去。
+        return InvokeRequiredAsync<WorkflowRunStarted>("start_workflow", new
+        {
+            workflow_id = workflowId,
+            start_node_id = startNodeId,
+            variables = variables is { Count: > 0 } ? variables : null,
+        }, cancellationToken);
     }
 
     public Task<WorkflowActionResult> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
@@ -654,7 +666,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<BudgetStatus>("get_budget_status", null, cancellationToken);
     }
 
-    public Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double preauthorizedUsd, CancellationToken cancellationToken = default)
+    public Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double? preauthorizedUsd, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<BudgetStatus>("update_budget_config", new { budget_usd = budgetUsd, preauthorized_usd = preauthorizedUsd }, cancellationToken);
     }
@@ -877,9 +889,14 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-                StandardInputEncoding = Encoding.UTF8,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
+                // P0 根因：静态 Encoding.UTF8 带 BOM 前导码，管道不可 seek 时
+                // StreamWriter 会在第一次写入前发出 EF BB BF——后端 serde_json
+                // 对第一条请求报 "expected value at line 1 column 1"，回一个
+                // 无 request_id 的错误，旧版 stdout pump 因此杀死整条连接，
+                // 之后所有按钮都报「无法连接本地后端服务」。必须用无 BOM 编码。
+                StandardInputEncoding = Utf8NoBom,
+                StandardOutputEncoding = Utf8NoBom,
+                StandardErrorEncoding = Utf8NoBom,
             };
             ApplyProjectEnvironment(startInfo);
 
@@ -919,11 +936,26 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
                 {
                     continue;
                 }
-                var envelope = JsonSerializer.Deserialize<BackendResult<JsonElement>>(line, _jsonOptions)
-                    ?? throw BackendException.Transport("ipc", "backend ipc returned invalid json");
-                if (string.IsNullOrWhiteSpace(envelope.RequestId))
+                BackendResult<JsonElement>? envelope;
+                try
                 {
-                    throw BackendException.Transport("ipc", "backend ipc response is missing request id");
+                    envelope = JsonSerializer.Deserialize<BackendResult<JsonElement>>(line, _jsonOptions);
+                }
+                catch (JsonException)
+                {
+                    // 非 JSON 行（sidecar 误把日志写到 stdout、外层包装脚本回显等）
+                    // 不得毒死整条连接：过去这里抛异常会终止 pump，之后**所有**
+                    // 请求都失败并报「无法连接本地后端服务」，整个应用不可用。
+                    _stderrBuffer.AppendLine($"[stdout non-json] {Truncate(line)}");
+                    continue;
+                }
+                if (envelope is null || string.IsNullOrWhiteSpace(envelope.RequestId))
+                {
+                    // 缺 request_id 的响应无法归属到任何等待中的请求。
+                    // 它通常是后端在解析请求失败时回的全局错误——记录下来供诊断，
+                    // 但同样不能终止 pump，否则一次坏输入就让整个会话报废。
+                    _stderrBuffer.AppendLine($"[unattributed response] {Truncate(line)}");
+                    continue;
                 }
                 _responseRouter.TryComplete(envelope.RequestId, line);
             }
@@ -960,6 +992,10 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     {
         return _stderrBuffer.Read().Trim();
     }
+
+    /// <summary>诊断行截断，避免异常长的坏行撑爆 stderr 环形缓冲。</summary>
+    private static string Truncate(string line) =>
+        line.Length <= 500 ? line : line[..500] + "…";
 
     private void ResetBackendProcess()
     {

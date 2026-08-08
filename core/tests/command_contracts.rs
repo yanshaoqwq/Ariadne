@@ -28,6 +28,7 @@ use ariadne::commands::{
     query_run_logs, quick_edit_impl, register_executor_adapters_for_project, remove_provider,
     resolve_confirmation_impl, resolve_project_references, resolve_workflow_operation_in_doubt,
     restore_to_new_branch, resume_from_node, resume_workflow, run_workflow, run_workflow_impl,
+    stop_workflow,
     save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
     save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
     save_project_canvas_impl, save_provider_key, save_provider_key_impl,
@@ -320,6 +321,8 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             workflow_id: "f10c-schema".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .expect_err("empty initial_inputs must fail required schema");
@@ -336,6 +339,8 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             workflow_id: "f10c-schema".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs: wrong_type,
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .expect_err("wrong type must fail");
@@ -353,6 +358,8 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             workflow_id: "f10c-schema".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs: unknown,
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .expect_err("unknown property must fail");
@@ -1401,7 +1408,13 @@ fn n8_pack_operation_id_replays_exact_result_and_rejects_reuse_for_other_request
 #[test]
 fn f8_summarizer_graph_is_validated_before_save_and_before_run_creation() {
     let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
     let valid_graph = WorkflowGraphData {
         workflow_id: "f8-summarizer".to_owned(),
         name: "F8 Summarizer".to_owned(),
@@ -1450,7 +1463,7 @@ fn f8_summarizer_graph_is_validated_before_save_and_before_run_creation() {
         .unwrap()
         .remove("chapter_id");
     let validation_error =
-        ariadne::commands::validate_workflow_graph(invalid_graph.clone()).unwrap_err();
+        ariadne::commands::validate_workflow_graph(&app, invalid_graph.clone()).unwrap_err();
     assert!(validation_error.contains("chapter_id"));
     let save_error = save_workflow_graph_impl(temp.path(), invalid_graph).unwrap_err();
     assert!(save_error.contains("chapter_id"));
@@ -1477,6 +1490,8 @@ fn f8_summarizer_graph_is_validated_before_save_and_before_run_creation() {
             workflow_id: "f8-summarizer".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -1510,6 +1525,8 @@ fn explicit_missing_workflow_id_is_not_loaded_as_default_graph() {
             workflow_id: "missing-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -2007,6 +2024,8 @@ fn run_workflow_executes_document_nodes_with_real_document_service() {
             workflow_id: "doc-flow".to_owned(),
             start_node_id: None,
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2299,6 +2318,8 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
             workflow_id: "multi-start".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2309,6 +2330,8 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
             workflow_id: "multi-start".to_owned(),
             start_node_id: Some("start-extra".to_owned()),
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2427,6 +2450,8 @@ fn async_run_persists_inputs_and_expired_lease_resume_uses_prepared_snapshot() {
             workflow_id: "tool-start".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs,
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2545,6 +2570,8 @@ fn run_workflow_start_node_id_must_reference_start_node() {
             workflow_id: "bad-start".to_owned(),
             start_node_id: Some("read".to_owned()),
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -2586,6 +2613,8 @@ fn run_workflow_llm_node_requires_configured_provider_instead_of_noop() {
             workflow_id: "llm-flow".to_owned(),
             start_node_id: None,
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -2713,6 +2742,8 @@ fn workflow_llm_node_routes_to_declared_provider_instead_of_project_default() {
             workflow_id: "declared-provider-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2729,7 +2760,7 @@ fn workflow_llm_node_routes_to_declared_provider_instead_of_project_default() {
 fn budget_and_provider_commands_do_not_return_secret_values() {
     let temp = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
-    update_budget_config_impl(temp.path(), 25.0, 3.5).unwrap();
+    update_budget_config_impl(temp.path(), 25.0, Some(3.5)).unwrap();
     save_provider_settings_impl(
         temp.path(),
         ProviderSettingsUpdate {
@@ -2776,7 +2807,7 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
     assert_eq!(live_limits.daily_usd, Some(25.0));
 
     assert_eq!(budget.budget_usd, 25.0);
-    assert_eq!(budget.preauthorized_usd, 3.5);
+    assert_eq!(budget.preauthorized_usd, Some(3.5));
     assert!(provider.has_openai_key);
     assert_eq!(provider.default_llm_provider_id.as_deref(), Some("openai"));
     assert_eq!(
@@ -3565,6 +3596,8 @@ fn malicious_project_secret_ref_is_rejected_before_all_provider_network_entrypoi
             workflow_id: "llm-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         }
     )
     .unwrap_err()
@@ -4409,7 +4442,7 @@ fn automation_and_permission_settings_round_trip_config_files() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
     ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
-    update_budget_config_impl(temp.path(), 10.0, 1.0).unwrap();
+    update_budget_config_impl(temp.path(), 10.0, Some(1.0)).unwrap();
     let current = get_automation_settings_impl(temp.path()).unwrap();
     save_automation_settings_impl(
         temp.path(),
@@ -4417,7 +4450,7 @@ fn automation_and_permission_settings_round_trip_config_files() {
             budget: ariadne::commands::BudgetStatus {
                 budget_usd: 20.0,
                 spent_usd: current.budget.spent_usd,
-                preauthorized_usd: 4.0,
+                preauthorized_usd: Some(4.0),
                 auto_mode_enabled: true,
             },
             confirmation_policies: vec![
@@ -4440,7 +4473,7 @@ fn automation_and_permission_settings_round_trip_config_files() {
     let automation = get_automation_settings_impl(temp.path()).unwrap();
 
     assert_eq!(automation.budget.budget_usd, 20.0);
-    assert_eq!(automation.budget.preauthorized_usd, 4.0);
+    assert_eq!(automation.budget.preauthorized_usd, Some(4.0));
     assert!(automation.budget.auto_mode_enabled);
     assert!(automation
         .confirmation_policies
@@ -4543,7 +4576,7 @@ fn zero_preauthorized_budget_is_persisted_as_zero_not_unlimited() {
     let app_state = tempfile::tempdir().unwrap();
     ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
 
-    update_budget_config_impl(temp.path(), 10.0, 0.0).unwrap();
+    update_budget_config_impl(temp.path(), 10.0, Some(0.0)).unwrap();
 
     let config = ConfigStore::new(temp.path()).load_or_create().unwrap();
     assert_eq!(config.auto_mode.preauthorized_budget_usd, Some(0.0));
@@ -4551,7 +4584,8 @@ fn zero_preauthorized_budget_is_persisted_as_zero_not_unlimited() {
         get_budget_status_impl(temp.path())
             .unwrap()
             .preauthorized_usd,
-        0.0
+        Some(0.0),
+        "显式零额度必须在读取侧仍表现为 Some(0.0)，不能退化成『未设置』"
     );
 }
 
@@ -4676,7 +4710,6 @@ fn module_settings_round_trip_config_files() {
 
     let mut workflow = get_workflow_settings_impl(temp.path()).unwrap().workflow;
     workflow.max_tool_rounds = 12;
-    workflow.runtime_autosave_ms = 2500;
     save_workflow_settings_impl(temp.path(), WorkflowSettings { workflow }).unwrap();
     assert_eq!(
         get_workflow_settings_impl(temp.path())
@@ -5960,6 +5993,8 @@ fn failed_git_restore_persists_maintenance_gate_for_document_writes() {
             workflow_id: "must-not-start".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -6646,6 +6681,8 @@ fn executor_adapter_web_search_uses_project_permission_policy_in_product_workflo
             workflow_id: "adapter-web-search-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -6801,6 +6838,8 @@ fn executor_adapter_llm_routes_to_manifest_provider_instead_of_project_default()
             workflow_id: "manifest-provider-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -6971,6 +7010,8 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             workflow_id: "n25-healthy-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -7001,6 +7042,8 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             workflow_id: "n25-bad-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -7029,6 +7072,8 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             workflow_id: "n25-healthy-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -9156,7 +9201,7 @@ fn automation_settings_mid_fail_leaves_journal_and_recover_completes() {
     let baseline = get_automation_settings_impl(&project).unwrap();
     let mut settings = baseline.clone();
     settings.budget.budget_usd = 42.5;
-    settings.budget.preauthorized_usd = 1.0;
+    settings.budget.preauthorized_usd = Some(1.0);
     settings.budget.auto_mode_enabled = true;
 
     save_automation_settings_impl(&project, settings.clone()).unwrap();
@@ -9309,6 +9354,9 @@ fn seed_command_in_doubt_search_run(
             "config": Value::Null,
             "inputs": ariadne::contracts::PortMap::new(),
             "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
+            // 变量参与 request_hash（循环每轮取值不同，不计入会被判成重放）。
+            // 本 fixture 的 workflow 没有变量声明，展平后为空表。
+            "variables": BTreeMap::<String, Value>::new(),
             "metadata": Value::Null,
         }))
         .unwrap(),
@@ -9603,5 +9651,137 @@ fn works_tree_and_chapter_summary_commands_share_official_stage_projection() {
     assert_eq!(
         summary.segments[0].source.document_id,
         "documents/chapter-1.md"
+    );
+}
+
+/// U116：诊断报告里不得凭空冒出 provider 探活项。
+///
+/// 探活只针对**已缓存**的 provider 实例。刚建好的项目一次 LLM 调用都没发过，
+/// 缓存为空——此时若报一条 Unavailable，用户会以为 provider 坏了，
+/// 而实际上只是还没用过。假警报比没有诊断更糟：它会把人引去查根本不存在的故障。
+#[test]
+fn backend_diagnostics_omits_provider_reachability_before_any_llm_call() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+
+    assert!(
+        !report
+            .items
+            .iter()
+            .any(|item| item.component.starts_with("providers.llm.reachability")),
+        "尚未发起过 LLM 调用时不应有探活项，实际项：{:?}",
+        report
+            .items
+            .iter()
+            .map(|item| item.component.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// U116：探活项与「配置是否自洽」项必须可区分。
+///
+/// 两者答的是不同问题：`providers.llm.default` 说的是「能不能选出 provider/model」，
+/// `providers.llm.reachability.*` 说的是「这个 provider 现在通不通」。
+/// 若共用同一 component 名，前端无法分辨，用户看到「providers.llm.default 异常」
+/// 也判断不出该去改配置还是去换 key。
+///
+/// **必须让缓存里真有实例**：探活项只在缓存非空时才产生。若照着「刚建好的项目」
+/// 去断言，命名撞不撞车这条根本不会被执行到——那是一条空转用例
+/// （我第一版就是这样，变异测试把它抓了出来）。所以这里刻意把 provider id
+/// 取成 `default`，正是最容易与 `providers.llm.default` 撞名的那个值。
+#[test]
+fn provider_reachability_items_do_not_collide_with_config_items() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+
+    // provider id 取 `default`：与配置诊断项 `providers.llm.default` 同尾，
+    // 命名一旦复用即刻撞车。
+    save_provider_settings_impl(
+        project.path(),
+        ProviderSettingsUpdate {
+            provider_id: "default".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Default".to_owned(),
+            enabled: true,
+            base_url: Some("http://127.0.0.1:1/v1".to_owned()),
+            models: vec![ModelConfig {
+                model_id: "m".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    // 直接往缓存里塞一个实例，等价于「已经发起过一次 LLM 调用」。
+    // 走真实 quick_edit 会打网络、且需要凭据，与本条契约无关。
+    let config = ConfigStore::new(project.path()).load_or_create().unwrap();
+    let provider_config = config
+        .providers
+        .providers
+        .iter()
+        .find(|item| item.provider_id == "default")
+        .cloned()
+        .expect("provider 应已保存");
+    let cache = state.llm_provider_cache_for_tests();
+    let key = ariadne::providers::ProviderCacheKey::new(&provider_config, None).unwrap();
+    cache.lock().unwrap().insert(
+        key,
+        Arc::new(
+            ariadne::providers::OpenAiCompatibleLlmProvider::new(provider_config, None).unwrap(),
+        ),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+    let reachability = report
+        .items
+        .iter()
+        .filter(|item| item.component.starts_with("providers.llm.reachability"))
+        .count();
+    assert!(
+        reachability > 0,
+        "缓存已非空，必须产生探活项——否则这条用例又退化成空转。实际项：{:?}",
+        report
+            .items
+            .iter()
+            .map(|item| item.component.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let config_items = report
+        .items
+        .iter()
+        .filter(|item| item.component == "providers.llm.default")
+        .count();
+    assert_eq!(
+        config_items, 1,
+        "配置诊断项应恰好一条；探活项若复用同名会让这里变成多条、两种含义再也分不开。\
+         实际项：{:?}",
+        report
+            .items
+            .iter()
+            .map(|item| item.component.as_str())
+            .collect::<Vec<_>>()
     );
 }

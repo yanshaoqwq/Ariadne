@@ -28,6 +28,46 @@ pub enum WritingAgentKind {
 }
 
 impl WritingAgentKind {
+    /// 全部写作 agent，顺序与画布节点面板一致。
+    pub const ALL: [Self; 9] = [
+        Self::Outliner,
+        Self::Designer,
+        Self::Planner,
+        Self::Detail,
+        Self::Writer,
+        Self::Critic,
+        Self::Prudent,
+        Self::Polisher,
+        Self::Summarizer,
+    ];
+
+    /// 返回该 agent 对应的工作流节点类型名。
+    ///
+    /// 这是 agent 与画布节点之间唯一的身份映射：`node_capabilities.rs` 的
+    /// `WORKFLOW_NODE_CAPABILITIES`、权限页的工具作用域 key 和 `serde` 的
+    /// snake_case 表示都用同一组字符串。U108 之前这层映射并不存在，
+    /// `commands.rs` / `workflow/` 完全无法从节点类型取到 agent。
+    pub fn node_type(self) -> &'static str {
+        match self {
+            Self::Outliner => "outliner",
+            Self::Designer => "designer",
+            Self::Planner => "planner",
+            Self::Detail => "detail",
+            Self::Writer => "writer",
+            Self::Critic => "critic",
+            Self::Prudent => "prudent",
+            Self::Polisher => "polisher",
+            Self::Summarizer => "summarizer",
+        }
+    }
+
+    /// 由工作流节点类型解析 agent；`llm` 等非写作节点返回 `None`。
+    pub fn from_node_type(node_type: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|agent| agent.node_type() == node_type)
+    }
+
     /// 返回该节点/agent 的显示名资源 key。
     pub fn display_name_key(self) -> &'static str {
         match self {
@@ -88,6 +128,19 @@ pub struct WritingNodeDefinition {
 }
 
 impl WritingNodeDefinition {
+    /// U117：返回该 agent 声明产出的确认项种类。
+    ///
+    /// 产出侧必须**从声明推导**，不能在执行器里另写一份 agent→kind 映射：
+    /// 两份映射一旦漂移，缺失方向是「少产出确认项」——即**静默减少审批门禁**，
+    /// 而测试与 UI 都看不出异常（这正是 U117 本身的形态）。
+    pub fn confirmation_kinds_for(agent: WritingAgentKind) -> Vec<ConfirmationKind> {
+        Self::built_in_nodes()
+            .into_iter()
+            .find(|node| node.agent == agent)
+            .map(|node| node.confirmation_kinds)
+            .unwrap_or_default()
+    }
+
     /// 返回内置写作节点定义。
     pub fn built_in_nodes() -> Vec<Self> {
         vec![
@@ -360,6 +413,9 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
             WRITER_WEB_SEARCH_TOOL,
             "writer-insert-lines",
             "writer-replace-lines",
+            // U123：整章重写。原设计要求「用户显式确认重写模式」，但该确认
+            // 在产品里从不存在；分章节写作下整章重写是自然操作。
+            "writer-rewrite-file",
         ],
         WritingAgentKind::Critic => &["critic-find", CRITIC_SEARCH_TOOL, CRITIC_WEB_SEARCH_TOOL],
         WritingAgentKind::Prudent => {
@@ -371,6 +427,9 @@ fn expected_tool_names(agent: WritingAgentKind) -> &'static [&'static str] {
             POLISHER_WEB_SEARCH_TOOL,
             "polisher-insert-lines",
             "polisher-replace-lines",
+            // U123：整章重写。原设计要求「用户显式确认重写模式」，但该确认
+            // 在产品里从不存在；分章节写作下整章重写是自然操作。
+            "polisher-rewrite-file",
         ],
         WritingAgentKind::Summarizer => &[SUMMARIZER_SEARCH_TOOL, SUMMARIZER_WEB_SEARCH_TOOL],
     }
@@ -421,14 +480,12 @@ fn expected_confirmation_kinds(agent: WritingAgentKind) -> &'static [Confirmatio
     }
 }
 
-/// Detail 节点的预设类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DetailPreset {
-    Environment,
-    Psychology,
-    Setting,
-}
+// U116：原有 `pub enum DetailPreset { Environment, Psychology, Setting }` 已删除。
+// 三个变体在生产、测试、资源文件里**全部零命中**——节点目录给 detail 配的是单一
+// `preset_type: "detail"`，从来没有环境/心理/设定这层子分类。
+//
+// 这是「声明了子类型但从未接线」的典型：留着会让人以为 detail 节点支持按预设切换
+// 提示词，照着接却发现无处可接。若日后真要做，需同时动节点目录、display_name 与提示词模板。
 
 /// 故事段记录，只保存正文来源引用，不复制正文。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1036,6 +1093,56 @@ impl WritingConfirmationPolicy {
 /// 旧策略反序列化时，新确认项默认走人工确认，避免自动放宽审批。
 fn default_confirmation_mode_require_human() -> ConfirmationMode {
     ConfirmationMode::RequireHuman
+}
+
+impl ConfirmationKind {
+    /// 全部确认项种类。
+    ///
+    /// U117：确认项的产出侧、策略加载侧与设置页三处都需要「遍历全集」。
+    /// 此前各处自己手写数组，于是加载侧只写了 4 种总结类，另外 8 种被静默丢弃——
+    /// 而缺失是**减少门禁**方向的，测试和 UI 都看不出异常。收敛到这一处常量后，
+    /// 枚举新增变体时编译器会强制更新此表（下面的 `debug_assert` 钉住长度）。
+    pub const ALL: [ConfirmationKind; 12] = [
+        ConfirmationKind::OutlinerOutput,
+        ConfirmationKind::DesignerOutput,
+        ConfirmationKind::PlannerOutput,
+        ConfirmationKind::PlannerRegister,
+        ConfirmationKind::CriticReview,
+        ConfirmationKind::PrudentReview,
+        ConfirmationKind::SegmentSummary,
+        ConfirmationKind::EventSummary,
+        ConfirmationKind::ChapterSummary,
+        ConfirmationKind::StageSummary,
+        ConfirmationKind::WriterCorrectionPatch,
+        ConfirmationKind::PolisherCorrectionPatch,
+    ];
+}
+
+/// 把设置页/磁盘上的策略键还原成确认项种类。
+///
+/// U117：这是 `confirmation_kind_policy_key` 的反函数，两者必须同步改动。
+/// register 类在设置页被拆成 `<agent>_register_<function>` 的细粒度键
+/// （见 `commands.rs` 的 `register_policy_key`），而领域策略只有一个
+/// `planner_register` 档位，故所有 `*_register*` 变体在此收敛回它——
+/// 否则用户在设置页配了「伏笔注册需人工确认」，加载时会因键名不匹配被丢弃。
+pub fn confirmation_kind_from_policy_key(key: &str) -> Option<ConfirmationKind> {
+    match key {
+        "outliner_output" => Some(ConfirmationKind::OutlinerOutput),
+        "designer_output" => Some(ConfirmationKind::DesignerOutput),
+        "planner_output" => Some(ConfirmationKind::PlannerOutput),
+        "critic_review" => Some(ConfirmationKind::CriticReview),
+        "prudent_review" => Some(ConfirmationKind::PrudentReview),
+        "segment_summary" => Some(ConfirmationKind::SegmentSummary),
+        "event_summary" => Some(ConfirmationKind::EventSummary),
+        "chapter_summary" => Some(ConfirmationKind::ChapterSummary),
+        "stage_summary" => Some(ConfirmationKind::StageSummary),
+        "writer_correction_patch" => Some(ConfirmationKind::WriterCorrectionPatch),
+        "polisher_correction_patch" => Some(ConfirmationKind::PolisherCorrectionPatch),
+        // 细粒度 register 键（`outliner_register_foreshadowing` 等）与旧聚合键
+        // `planner_register` 同归一档；不做前缀兜底会让整类注册确认静默失效。
+        other if other.contains("_register") => Some(ConfirmationKind::PlannerRegister),
+        _ => None,
+    }
 }
 
 /// 返回确认项对应的自动审计 prompt key。

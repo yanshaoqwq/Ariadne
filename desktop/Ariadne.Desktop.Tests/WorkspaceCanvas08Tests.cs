@@ -640,7 +640,10 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("SaveProjectCanvasAsync(graph)", source, StringComparison.Ordinal);
         Assert.Contains("_runSession", source, StringComparison.Ordinal);
         Assert.Contains("var workflowId = CurrentWorkflowId;", source, StringComparison.Ordinal);
-        Assert.Contains(".StartAsync(workflowId, startNodeId)", source, StringComparison.Ordinal);
+        // 守卫的是「运行入口走页面级 run session coordinator」这条性质，不是参数列表。
+        // 变量系统给 StartAsync 加了第三个实参（起始节点的变量初值），
+        // 因此只断言前缀，避免每次扩参都要改守卫。
+        Assert.Contains(".StartAsync(workflowId, startNodeId", source, StringComparison.Ordinal);
         Assert.Contains("_runSession.ThrowIfStale(sessionFence)", source, StringComparison.Ordinal);
         Assert.Contains("_runSession.EventsReceived += ApplyWorkflowEvents", source, StringComparison.Ordinal);
         Assert.DoesNotContain("GetWorkflowEventsAsync(CurrentWorkflowId", source, StringComparison.Ordinal);

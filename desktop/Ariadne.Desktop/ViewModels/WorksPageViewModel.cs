@@ -1557,12 +1557,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     {
         DocumentBlocks.Clear();
         var index = 0;
+        // U129：块的起始字符偏移必须在切分时累加记录。切完再回头 IndexOf 找不可靠——
+        // 长篇正文里重复段落很常见，按内容反查会命中错误的位置。
+        var offset = 0;
         foreach (var block in SplitDocumentBlocks(content))
         {
             DocumentBlocks.Add(new DocumentBlockViewModel(
                 $"read-block-{index}",
                 index++,
-                block));
+                block,
+                offset));
+            offset += block.Length;
         }
         OnPropertyChanged(nameof(HasDocumentBlocks));
         OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
@@ -2908,16 +2913,28 @@ public sealed class DocumentBlockViewModel
     public DocumentBlockViewModel(
         string id,
         int index,
-        string text)
+        string text,
+        int startOffset)
     {
         Id = id;
         Index = index;
         Text = text;
+        StartOffset = startOffset;
     }
 
     public string Id { get; }
     public int Index { get; }
     public string Text { get; }
+    /// <summary>
+    /// U129：该块首字符在**整篇正文**中的偏移。
+    ///
+    /// 阅读模式与编辑器是两套完全不同的滚动坐标系（块索引 vs 行号/像素偏移），
+    /// 唯一能在两者间换算的共同量就是字符偏移。没有它，「切换视图保留位置」
+    /// 只能退化成块级对齐——而块粒度是 4000–6000 字符（约 8–12 屏），差得太远。
+    /// </summary>
+    public int StartOffset { get; }
+    /// <summary>该块末字符之后的偏移（半开区间右端）。</summary>
+    public int EndOffset => StartOffset + Text.Length;
 }
 
 public sealed class WorksTreeItemViewModel : ViewModelBase

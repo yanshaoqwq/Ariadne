@@ -38,6 +38,17 @@ public static class PromptCatalog
         return string.Empty;
     }
 
+    /// <summary>
+    /// 执行页变量摘要句式的生成提示词（<c>workflow.variable_summary</c>）。
+    ///
+    /// 缺键时返回空串而不是塞一份兜底文案：静默兜底会让「提示词丢了」变成
+    /// 「AI 表现变差」这种查不出来的症状，调用方据此禁用入口更诚实。
+    /// </summary>
+    public static string ResolveWorkflowVariableSummaryPrompt() =>
+        Load().TryGetValue("workflow.variable_summary", out var entry)
+            ? entry.Prompt ?? string.Empty
+            : string.Empty;
+
     /// <summary>纯函数：在已加载 map 上解析（供单测注入）。</summary>
     public static string ResolveNodePromptFromMap(
         string? nodeType,

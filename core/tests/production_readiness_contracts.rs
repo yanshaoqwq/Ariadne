@@ -197,20 +197,40 @@ fn u109_fix_does_not_lock_projects_that_already_enabled_reranker() {
 // U111：假开关——后端零消费点
 // ————————————————————————————————————————————————
 
-/// `WorkflowConfig::validate()` 校验了 timeout / loop / tool_rounds 三项，
-/// 唯独漏掉 `runtime_autosave_ms`。零值自动保存间隔必须被拒绝。
+/// `runtime_autosave_ms` 已被**移除**（2026-08-08），本用例钉住这个决定。
 ///
-/// 该字段当前在后端**完全没有消费点**（全仓 grep 仅命中定义、默认值与一处测试赋值），
-/// 补校验只是接线前的第一步。
+/// 它曾是设置页上一个纯假开关：用户能填、能存进 YAML，但后端没有一行代码读它。
+/// 「消灭假开关」有两条路，这里选的是移除而非接线，理由是**接线会削弱持久性**——
+/// 运行态目前经 `persist_if_needed` 每次状态跃迁同步落盘；改成按 ms 间隔节流，
+/// 会在崩溃时丢掉窗口内的全部跃迁，等于拿可恢复性去换一个用户没要求的性能优化，
+/// 与产品「Pause/Stop/Resume with checkpoints」的核心承诺直接冲突。
+///
+/// 判据取**序列化产物**而非结构体字段：字段不存在时代码根本不编译，
+/// 那种「用例」实际什么都没断言；而 YAML 里残留该键才是真正会误导用户的形态。
 #[test]
-fn u111_zero_runtime_autosave_interval_is_rejected() {
-    let mut workflow = WorkflowConfig::default();
-    workflow.runtime_autosave_ms = 0;
+fn u111_runtime_autosave_ms_stays_removed_from_workflow_config() {
+    let yaml = yaml_serde::to_string(&WorkflowConfig::default())
+        .expect("WorkflowConfig 必须可序列化");
 
     assert!(
-        workflow.validate().is_err(),
-        "U111：runtime_autosave_ms = 0 必须被拒绝；\
-         该字段目前既无校验也无任何后端消费点，设置页却提供输入框"
+        !yaml.contains("runtime_autosave"),
+        "`runtime_autosave_ms` 已于 2026-08-08 移除，不应再出现在配置产物里。\
+         若确需恢复「运行态自动保存间隔」，请先解决它与同步持久化语义的冲突，\
+         而不是把字段加回来——加回来只会重新变成一个没人读的假开关。\
+         当前序列化结果：\n{yaml}"
+    );
+}
+
+/// 契约层 `WorkflowExecutionLimits::default()` 与 `WorkflowConfig::default()`
+/// 必须给出同一组出厂限制；两者若漂移，运行时回落值会与设置页展示值不一致。
+#[test]
+fn u113_contract_default_limits_match_workflow_config_defaults() {
+    let from_config = WorkflowConfig::default().execution_limits();
+    let from_contract = ariadne::contracts::WorkflowExecutionLimits::default();
+
+    assert_eq!(
+        from_config, from_contract,
+        "契约层默认限制与 WorkflowConfig 出厂值漂移了"
     );
 }
 
@@ -218,57 +238,89 @@ fn u111_zero_runtime_autosave_interval_is_rejected() {
 // U113：工作流全局限制未接线（超时与循环上限）
 // ————————————————————————————————————————————————
 
-/// 设置页「自动化」分区并排三个工作流限制输入框，但只有 `max_tool_rounds` 真正生效。
+/// 设置页「自动化」分区并排三个工作流限制输入框，过去只有 `max_tool_rounds` 真正生效。
 ///
-/// `default_timeout_ms` 与 `max_loop_iterations` 唯一的可达路径是
-/// `WorkflowConfig::validate_loop_policy`，而该函数在全仓**零调用者**，
-/// 故两项配置从未参与任何执行判定。
-///
-/// 本用例用一个**明显违规**的 loop policy 作探针：若全局限制真的生效，
-/// 超出上限的 policy 必须被拒绝。
+/// 三者现已收敛为契约层的 `WorkflowExecutionLimits`（唯一事实源），
+/// 由 `WorkflowConfig::execution_limits()` 派生，供预检、节点超时回落与
+/// tool-use 轮次共同消费。本用例守住配置 → 限制的派生保真。
 #[test]
-fn u113_global_loop_limit_actually_constrains_node_policies() {
+fn u113_workflow_config_derives_the_single_execution_limit_source() {
     let workflow = WorkflowConfig {
-        max_loop_iterations: 5,
+        default_timeout_ms: 45_000,
+        max_loop_iterations: 3,
+        max_tool_rounds: 6,
         ..WorkflowConfig::default()
     };
+    let limits = workflow.execution_limits();
 
-    // 节点声明 999 轮，远超全局上限 5。
+    assert_eq!(limits.default_timeout_ms, 45_000);
+    assert_eq!(limits.max_loop_iterations, 3);
+    assert_eq!(limits.max_tool_rounds, 6);
+
+    // 节点声明 999 轮，远超全局上限 3，必须被拒绝。
     let runaway = ariadne::contracts::LoopPolicy {
         max_iterations: 999,
-        timeout_ms: 60_000,
+        timeout_ms: 30_000,
         budget_limit_usd: None,
         stop_condition: serde_json::json!({"kind": "manual"}),
     };
-
     assert!(
-        workflow.validate_loop_policy(&runaway).is_err(),
+        runaway.validate_within(&limits).is_err(),
         "全局循环上限必须能拒绝越界的节点 policy"
     );
 
-    // 上面的断言即使通过也只证明函数本身可用；真正的问题是它没有被接线。
-    // 运行时 (`workflow/runtime.rs`) 判定用的是节点自带的 `policy.max_iterations`，
-    // 全局上限从未参与，因此 999 轮循环会照跑 999 轮。
-    // 该缺陷无法用纯配置层单测覆盖，接线后应补一条工作流执行层用例。
+    // 上限内的 policy 必须放行，证明该校验不是无差别拒绝。
+    let compliant = ariadne::contracts::LoopPolicy {
+        max_iterations: 3,
+        timeout_ms: 30_000,
+        budget_limit_usd: None,
+        stop_condition: serde_json::json!({"kind": "manual"}),
+    };
+    assert!(
+        compliant.validate_within(&limits).is_ok(),
+        "未越界的 loop policy 不应被全局上限拒绝：{:?}",
+        compliant.validate_within(&limits).err()
+    );
 }
 
-/// 节点超时的实际默认值必须与用户在设置页看到的默认值一致。
+/// 节点未声明超时时，回落值必须取自项目配置，而不是运行时硬编码常量。
 ///
-/// 当前 `workflow/integration.rs` 的 `resolve_node_timeout_ms` 硬编码回落 120_000ms，
-/// 而 `WorkflowConfig::default().default_timeout_ms` 是 300_000ms。
-/// 用户看到「默认超时 300 秒」，实际未配置的节点按 120 秒超时。
+/// 修复前 `resolve_node_timeout_ms` 硬编码回落 120_000ms，而设置页展示的
+/// `WorkflowConfig::default().default_timeout_ms` 是 300_000ms——用户看到
+/// 「默认超时 300 秒」，未配置的节点却按 120 秒超时，且改配置不产生任何效果。
 #[test]
-fn u113_node_timeout_fallback_matches_configured_default() {
-    // 与 workflow/integration.rs:809 `resolve_node_timeout_ms` 的硬编码值保持同步。
-    const HARDCODED_NODE_TIMEOUT_FALLBACK_MS: u64 = 120_000;
+fn u113_node_timeout_falls_back_to_configured_default_not_a_constant() {
+    // 取一个既非旧硬编码值（120s）也非出厂值（300s）的配置，
+    // 这样「回落值真的来自配置」与「回落到某个常量」不可能同时成立。
+    let configured = WorkflowConfig {
+        default_timeout_ms: 77_000,
+        ..WorkflowConfig::default()
+    };
+    let limits = configured.execution_limits();
 
     assert_eq!(
+        limits.resolve_node_timeout_ms(None),
+        77_000,
+        "U113：节点未声明超时时必须回落到项目配置的 default_timeout_ms"
+    );
+    assert_eq!(
+        limits.resolve_node_timeout_ms(Some(0)),
+        77_000,
+        "0 等同未声明，同样回落到配置值"
+    );
+    assert_eq!(
+        limits.resolve_node_timeout_ms(Some(9_000)),
+        9_000,
+        "节点显式声明的超时优先于全局默认"
+    );
+
+    // 出厂配置下的回落值就是设置页展示的那个数，两者不得再次漂移。
+    assert_eq!(
+        WorkflowConfig::default()
+            .execution_limits()
+            .resolve_node_timeout_ms(None),
         WorkflowConfig::default().default_timeout_ms,
-        HARDCODED_NODE_TIMEOUT_FALLBACK_MS,
-        "U113：设置页展示的默认超时（{}ms）与运行时实际回落值（{}ms）不一致；\
-         且 workflow.default_timeout_ms 在后端零消费点，改它不产生任何效果",
-        WorkflowConfig::default().default_timeout_ms,
-        HARDCODED_NODE_TIMEOUT_FALLBACK_MS
+        "设置页展示的默认超时必须等于运行时真实回落值"
     );
 }
 
@@ -276,35 +328,33 @@ fn u113_node_timeout_fallback_matches_configured_default() {
 // U112：预授权预算 0 值语义
 // ————————————————————————————————————————————————
 
-/// 同一设置分区内两个相邻的金额输入框，对 `0` 的解释必须一致。
+/// **安全契约**：预授权预算的 `Some(0.0)` 是用户**显式设定的零额度**，
+/// 任何有成本的调用都必须暂停。
 ///
-/// 当前：全局预算 `0` = 不限制（见 `budget_limits_from_global_budget` 文档注释），
-/// 预授权预算 `0` = 零额度并暂停一切调用。样式、单位、位置都相同，含义却相反。
+/// 这与全局日预算的 `0`（= 不设上限）语义相反，且该差异是**有意**的：
+/// 把预授权的 0 也当成「不限制」会静默解除用户刻意设下的零额度，是安全性倒退。
+/// 两个字段的区别由文案承担，不能靠统一数值语义消除。
+/// （本文件首版曾断言二者应同义，已否决——见 `costs/budget.rs` 的就地说明。）
 #[test]
-fn u112_zero_means_the_same_thing_for_both_budget_fields() {
-    let limits = ariadne::costs::budget_limits_from_global_budget(0.0);
-    let global_zero_means_unlimited = limits.daily_usd.is_none();
-
-    let auto_mode = ariadne::config::AutoModeConfig {
-        enabled_by_default: true,
-        preauthorized_budget_usd: Some(0.0),
-        ..ariadne::config::AutoModeConfig::default()
-    };
+fn u112_explicit_zero_preauthorized_budget_blocks_spending() {
     let decision = evaluate_budget(
         &BudgetLimits::default(),
-        &auto_mode,
+        &ariadne::config::AutoModeConfig {
+            enabled_by_default: true,
+            preauthorized_budget_usd: Some(0.0),
+            ..ariadne::config::AutoModeConfig::default()
+        },
         BudgetUsage {
             requested_usd: 0.01,
             spent_today_usd: 0.0,
             spent_this_month_usd: 0.0,
         },
     );
-    let preauthorized_zero_means_unlimited = decision.action != BudgetAction::Pause;
 
     assert_eq!(
-        global_zero_means_unlimited, preauthorized_zero_means_unlimited,
-        "U112：全局预算的 0 表示『不限制』，预授权预算的 0 却表示『零额度、全部暂停』；\
-         两个相邻输入框对同一个数字给出相反语义"
+        decision.action,
+        BudgetAction::Pause,
+        "显式设定的零预授权额度必须暂停一切有成本的调用"
     );
 }
 
@@ -338,44 +388,51 @@ fn u112_unset_preauthorized_budget_does_not_block_auto_mode() {
     );
 }
 
-/// 语义回归护栏：把 `None` 经“显示为 0 → 原样保存”的往返后，
-/// Auto Mode 的行为必须与往返前一致。
+/// U112 的真实缺陷：读取侧把 `None` 折叠成 `0` 显示，保存侧再把这个 `0`
+/// 原样写回成 `Some(0.0)`——用户只是打开设置页保存一次无关改动，
+/// 「不限制」就被静默翻转成「全部暂停」。
+///
+/// 修复后 DTO 用 `Option<f64>` 区分「未设置」与「零额度」，故这里断言
+/// **真实命令边界**的空往返：读回什么就写回什么，语义不得改变。
 #[test]
-fn u112_display_save_roundtrip_preserves_unlimited_semantics() {
-    let stored: Option<f64> = None;
+fn u112_empty_settings_roundtrip_preserves_unlimited_semantics() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+    ConfigStore::new(temp.path()).load_or_create().unwrap();
 
-    // 读取侧当前实现：commands.rs 的 `.unwrap_or(0.0)`。
-    let displayed = stored.unwrap_or(0.0);
-    // 保存侧当前实现：update_budget_config_impl 的 `Some(preauthorized_usd)`。
-    let saved_back = Some(displayed);
-
-    let usage = BudgetUsage {
-        requested_usd: 0.01,
-        spent_today_usd: 0.0,
-        spent_this_month_usd: 0.0,
-    };
-    let before = evaluate_budget(
-        &BudgetLimits::default(),
-        &ariadne::config::AutoModeConfig {
-            enabled_by_default: true,
-            preauthorized_budget_usd: stored,
-            ..ariadne::config::AutoModeConfig::default()
-        },
-        usage,
-    );
-    let after = evaluate_budget(
-        &BudgetLimits::default(),
-        &ariadne::config::AutoModeConfig {
-            enabled_by_default: true,
-            preauthorized_budget_usd: saved_back,
-            ..ariadne::config::AutoModeConfig::default()
-        },
-        usage,
-    );
-
+    let before = ConfigStore::new(temp.path()).load_or_create().unwrap();
     assert_eq!(
-        before.action, after.action,
-        "U112：一次『打开设置页再保存』的空往返改变了预算语义（{:?} → {:?}）",
-        before.action, after.action
+        before.auto_mode.preauthorized_budget_usd, None,
+        "新项目的预授权预算应为未设置"
+    );
+
+    // 用户打开设置页只改日预算，预授权原样回传（读取侧给出的就是「未设置」）。
+    let status = ariadne::commands::get_budget_status_impl(temp.path()).unwrap();
+    ariadne::commands::update_budget_config_impl(temp.path(), 10.0, status.preauthorized_usd)
+        .unwrap();
+
+    let after = ConfigStore::new(temp.path()).load_or_create().unwrap();
+    assert_eq!(
+        after.auto_mode.preauthorized_budget_usd, None,
+        "U112：一次『打开设置页再保存』的空往返把「不限制」翻成了「零额度、全部暂停」"
+    );
+}
+
+/// 反向护栏：用户**显式**填 0 时必须被持久化为零额度，不得当成「未设置」丢弃。
+#[test]
+fn u112_explicit_zero_input_is_persisted_not_discarded() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+    ConfigStore::new(temp.path()).load_or_create().unwrap();
+
+    ariadne::commands::update_budget_config_impl(temp.path(), 10.0, Some(0.0)).unwrap();
+
+    let config = ConfigStore::new(temp.path()).load_or_create().unwrap();
+    assert_eq!(
+        config.auto_mode.preauthorized_budget_usd,
+        Some(0.0),
+        "用户显式填的 0 是零额度，必须原样持久化"
     );
 }

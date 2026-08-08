@@ -11,28 +11,49 @@
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
     </Style>
+    <!-- 索引项无底色块无描边：文字悬在空白上，状态全部由小圆点与字色承担。 -->
     <Style Selector="ListBox.settings-section-index ListBoxItem">
       <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="3,0,0,0" />
-      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="0" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-      <Setter Property="Padding" Value="10,8" />
-      <Setter Property="Margin" Value="0,1" />
+      <Setter Property="Padding" Value="0,5" />
+      <Setter Property="Margin" Value="0" />
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextMuted}" />
+    </Style>
+    <Style Selector="ListBox.settings-section-index ListBoxItem Ellipse.index-dot">
+      <Setter Property="Fill" Value="{DynamicResource Ariadne.BorderStrong}" />
     </Style>
     <Style Selector="ListBox.settings-section-index ListBoxItem:pointerover">
-      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+      <Setter Property="Background" Value="Transparent" />
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
     </Style>
+    <Style Selector="ListBox.settings-section-index ListBoxItem:pointerover Ellipse.index-dot">
+      <Setter Property="Fill" Value="{DynamicResource Ariadne.TextMuted}" />
+    </Style>
     <Style Selector="ListBox.settings-section-index ListBoxItem:selected">
-      <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+      <Setter Property="Background" Value="Transparent" />
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
       <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="ListBox.settings-section-index ListBoxItem:selected Ellipse.index-dot">
+      <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    </Style>
+    <!-- 选中态的默认 ListBoxItem 模板会画一层底，这里连模板层一起压平 -->
+    <Style Selector="ListBox.settings-section-index ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
     </Style>
     <Style Selector="ListBox.settings-section-index ListBoxItem:focus">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <!-- 悬浮保存钮：圆形。圆角给到 24（= 半宽）才是真圆而非圆角方。
+         投影挂在外层 Border 上——BoxShadow 是 Border 的属性，Button 没有。 -->
+    <Style Selector="Button.settings-save-fab">
+      <Setter Property="CornerRadius" Value="24" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
     </Style>
     <Style Selector="ListBox.settings-tabs">
       <Setter Property="Background" Value="Transparent" />
@@ -122,10 +143,10 @@
 
     <!-- 页内索引 = 无分栏「悬浮索引」。
          它不再占据布局列、不画全高栏、不加分栏边界：内容区铺满整宽，
-         索引只是一块浮在内容之上、贴右缘垂直居中的锚点面板。
-         内容 ScrollViewer 右侧留出余量，正文不会跑到索引底下。 -->
+         索引只是一列浮在内容之上、贴左缘垂直居中的文字锚点。
+         内容 ScrollViewer 左侧留出余量，正文不会跑到索引底下。 -->
     <Panel Grid.Row="1">
-      <ScrollViewer x:Name="SettingsContentScroll" Padding="32,26,208,32">
+      <ScrollViewer x:Name="SettingsContentScroll" Padding="196,26,36,32">
         <StackPanel MaxWidth="1040" HorizontalAlignment="Stretch" Spacing="14">
         <Border Classes="stream-list"
                 IsVisible="{Binding HasSectionLoadFailures}">
@@ -220,7 +241,6 @@
                 </Grid>
               </StackPanel>
             </Border>
-            <Button Classes="primary" Content="{Binding SaveGeneralText}" HorizontalAlignment="Right" Command="{Binding SaveGeneralCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsModelsSelected}" IsEnabled="{Binding IsModelsEditable}" Spacing="18">
@@ -393,7 +413,6 @@
               </StackPanel>
             </Border>
 
-            <Button Classes="primary" Content="{Binding SaveModelText}" HorizontalAlignment="Right" Command="{Binding SaveModelCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsPresetsSelected}" Spacing="18">
@@ -505,7 +524,6 @@
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
-                <Button Classes="primary" Content="{Binding SavePresetsText}" HorizontalAlignment="Right" Command="{Binding SavePresetsCommand}" />
               </StackPanel>
             </Border>
 
@@ -531,7 +549,6 @@
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding DefaultBudgetLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding DefaultBudgetUsd, Mode=TwoWay}"
                          AutomationProperties.Name="{Binding DefaultBudgetLabel}" />
-                <Button Grid.Row="3" Grid.Column="1" Classes="primary" Content="{Binding SavePresetsText}" HorizontalAlignment="Right" Command="{Binding SavePresetsCommand}" />
                 </Grid>
               </StackPanel>
             </Border>
@@ -682,7 +699,7 @@
             <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="RuntimeSectionAnchor" Text="{Binding RuntimeSectionTitle}" Classes="subtitle" />
-                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding WorkflowDefaultTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding WorkflowDefaultTimeoutMs, Mode=TwoWay}"
                          AutomationProperties.Name="{Binding WorkflowDefaultTimeoutLabel}" />
@@ -692,14 +709,14 @@
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding MaxToolRoundsLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MaxToolRounds, Mode=TwoWay}"
                          AutomationProperties.Name="{Binding MaxToolRoundsLabel}" />
-                <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding RuntimeAutosaveLabel}" Classes="secondary" VerticalAlignment="Center" />
-                <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding RuntimeAutosaveMs, Mode=TwoWay}"
-                         AutomationProperties.Name="{Binding RuntimeAutosaveLabel}" />
-                <CheckBox Grid.Row="4" Grid.Column="1" IsChecked="{Binding CheckpointEnabled, Mode=TwoWay}" Content="{Binding CheckpointEnabledLabel}" />
+                <!-- U111：原第 3 行「运行态自动保存 (ms)」输入框已移除（2026-08-08）。
+                     它是纯假开关——后端零消费点；而接线会削弱持久性（运行态现在每次
+                     状态跃迁同步落盘，按 ms 节流会在崩溃时丢窗口内的跃迁），
+                     故选择移除而非接线。 -->
+                <CheckBox Grid.Row="3" Grid.Column="1" IsChecked="{Binding CheckpointEnabled, Mode=TwoWay}" Content="{Binding CheckpointEnabledLabel}" />
                 </Grid>
               </StackPanel>
             </Border>
-            <Button Classes="primary" Content="{Binding SaveAutomationText}" HorizontalAlignment="Right" Command="{Binding SaveAutomationCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsPermissionsSelected}" IsEnabled="{Binding IsPermissionsEditable}" Spacing="18">
@@ -892,7 +909,6 @@
             </Border>
               </StackPanel>
             </Expander>
-            <Button Classes="primary" Content="{Binding SavePermissionsText}" HorizontalAlignment="Right" Command="{Binding SavePermissionsCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsPersonalizationSelected}" IsEnabled="{Binding IsPersonalizationEditable}" Spacing="18">
@@ -1083,7 +1099,6 @@
                 </Grid>
               </StackPanel>
             </Border>
-            <Button Classes="primary" Content="{Binding SavePersonalizationText}" HorizontalAlignment="Right" Command="{Binding SavePersonalizationCommand}" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsRetrievalSelected}" Spacing="18">
@@ -1165,7 +1180,6 @@
                   </Grid>
                 </Expander>
                 <CheckBox IsChecked="{Binding RerankerEnabled, Mode=TwoWay}" Content="{Binding RerankerEnabledText}" />
-                <Button Classes="primary" Content="{Binding SaveRetrievalText}" HorizontalAlignment="Right" Command="{Binding SaveRetrievalCommand}" />
               </StackPanel>
             </Border>
             <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsAppRuntimeEditable}">
@@ -1184,7 +1198,6 @@
                     <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding QdrantStartupTimeoutMs, Mode=TwoWay}" AutomationProperties.Name="{Binding QdrantStartupTimeoutLabel}" />
                   </Grid>
                 </Expander>
-                <Button Classes="primary" Content="{Binding SaveAppRuntimeText}" HorizontalAlignment="Right" Command="{Binding SaveAppRuntimeCommand}" />
               </StackPanel>
             </Border>
           </StackPanel>
@@ -1202,7 +1215,6 @@
                 </WrapPanel>
                 <TextBlock Text="{Binding IgnoredPathsLabel}" Classes="secondary" />
                 <TextBox Text="{Binding IgnoredPathsText, Mode=TwoWay}" PlaceholderText="{Binding IgnoredPathsPlaceholder}" AcceptsReturn="True" MinHeight="120" AutomationProperties.Name="{Binding IgnoredPathsLabel}" AutomationProperties.HelpText="{Binding IgnoredPathsPlaceholder}" />
-                <Button Classes="primary" Content="{Binding SaveGitText}" HorizontalAlignment="Right" Command="{Binding SaveGitCommand}" />
               </StackPanel>
             </Border>
           </StackPanel>
@@ -1258,18 +1270,16 @@
         </StackPanel>
       </ScrollViewer>
 
-      <!-- 悬浮索引本体：纯浮层（圆角 + 浮层投影），贴右缘垂直居中。去掉描边——
-           浮层靠投影而非边框成形，视觉更干净。窄窗（Window.compact）下仍整块隐藏。 -->
+      <!-- 章节索引：贴左缘垂直居中，无浮层无描边无投影——文字直接悬在空白上，
+           靠每行前面的小圆点成列。索引是导览而非控件，给它一个面反而抢走正文的主次。
+           窄窗（Window.compact）下仍整块隐藏。 -->
       <Border Classes="settings-index-rail"
-              HorizontalAlignment="Right"
+              HorizontalAlignment="Left"
               VerticalAlignment="Center"
-              Margin="0,24,22,24"
-              Width="178"
+              Margin="18,24,0,24"
+              Width="166"
               MaxHeight="470"
-              CornerRadius="10"
-              Padding="7"
-              Background="{DynamicResource Ariadne.BackgroundElevated}"
-              BoxShadow="{DynamicResource Ariadne.Shadow.Flyout}">
+              Background="Transparent">
         <ListBox x:Name="SettingsSectionIndex"
                  Classes="settings-section-index"
                  ItemsSource="{Binding CurrentTabSectionIndexItems}"
@@ -1280,13 +1290,46 @@
                  ScrollViewer.VerticalScrollBarVisibility="Auto">
           <ListBox.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:SettingsSectionNavigationItemViewModel}">
-              <TextBlock Text="{Binding Title}"
-                         FontSize="12.5"
-                         TextWrapping="Wrap"
-                         AutomationProperties.Name="{Binding Title}" />
+              <!-- 小圆点承担「这是一条目录项」和「当前在哪一节」两件事：
+                   选中态由圆点填实 + 文字转强调色表达，不靠底色块。 -->
+              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="9">
+                <Ellipse Grid.Column="0"
+                         Classes="index-dot"
+                         Width="5" Height="5"
+                         VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1"
+                           Text="{Binding Title}"
+                           FontSize="12.5"
+                           TextWrapping="Wrap"
+                           VerticalAlignment="Center"
+                           AutomationProperties.Name="{Binding Title}" />
+              </Grid>
             </DataTemplate>
           </ListBox.ItemTemplate>
         </ListBox>
+      </Border>
+
+      <!-- 保存：右下角悬浮圆钮。各分页原本各自散着一个「保存」按钮（有的两个），
+           作者要在长页里找它；收成一个固定落点后，位置与「改哪页存哪页」都不再需要想。
+           只在本页有未保存改动时出现——没改动时它没有意义，露着反而让人怀疑漏了什么。 -->
+      <Border HorizontalAlignment="Right"
+              VerticalAlignment="Bottom"
+              Margin="0,0,28,22"
+              Width="48" Height="48"
+              CornerRadius="24"
+              IsVisible="{Binding HasUnsavedChanges}"
+              BoxShadow="{DynamicResource Ariadne.Shadow.Flyout}">
+        <Button Classes="primary settings-save-fab"
+                Width="48" Height="48"
+                Padding="0"
+                Command="{Binding SaveCurrentTabCommand}"
+                ToolTip.Tip="{Binding SaveCurrentTabText}"
+                AutomationProperties.Name="{Binding SaveCurrentTabText}">
+          <Path Classes="icon" Width="19" Height="19" Stretch="Uniform"
+                Stroke="{DynamicResource Ariadne.TextOnAccent}"
+                StrokeThickness="1.6"
+                Data="M5,4 L15,4 L20,9 L20,20 L5,20 Z M8,4 L8,10 L15,10 L15,4 M9,20 L9,14 L16,14 L16,20" />
+        </Button>
       </Border>
     </Panel>
   </Grid>

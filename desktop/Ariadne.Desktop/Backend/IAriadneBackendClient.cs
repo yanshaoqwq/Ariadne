@@ -115,7 +115,7 @@ public interface IAriadneBackendClient
         string expectedProjectRoot,
         CancellationToken cancellationToken = default);
 
-    Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default);
+    Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, IReadOnlyDictionary<string, object?>? variables = null, CancellationToken cancellationToken = default);
 
     Task<WorkflowActionResult> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default);
 
@@ -228,7 +228,7 @@ public interface IAriadneBackendClient
 
     Task<BudgetStatus> GetBudgetStatusAsync(CancellationToken cancellationToken = default);
 
-    Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double preauthorizedUsd, CancellationToken cancellationToken = default);
+    Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double? preauthorizedUsd, CancellationToken cancellationToken = default);
 
     Task SetAutoModeAsync(bool enabled, CancellationToken cancellationToken = default);
 

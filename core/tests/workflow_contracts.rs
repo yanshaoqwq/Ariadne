@@ -10,8 +10,9 @@ use ariadne::contracts::{
     CommunicationEdgeConfig, DocumentPatch, Edge, EdgeId, ExternalDispatchAuthorization, NodeId,
     NodeInstance, PatchHunk, PermissionPolicy, PortEndpoint, PortMap, PortValue,
     ProviderCapability, ProviderDefinition, ProviderType, RunControl, RunId, RunStatus, TextRange,
-    WorkflowDefinition, WorkflowEdgeKind, WorkflowId, COMMUNICATION_PORT, EXECUTION_INPUT_PORT,
-    EXECUTION_OUTPUT_PORT,
+    WorkflowDefinition, WorkflowEdgeKind, WorkflowExecutionLimits, WorkflowId, COMMUNICATION_PORT,
+    EXECUTION_INPUT_PORT, EXECUTION_OUTPUT_PORT, EXECUTION_OUTPUT_PORT_FALSE,
+    EXECUTION_OUTPUT_PORT_TRUE,
 };
 use ariadne::costs::{CostLedger, CostQuery, SqliteCostLedger, TokenUsage};
 use ariadne::documents::{
@@ -272,7 +273,7 @@ fn f8_summarizer_contract_requires_complete_config_and_matching_chapter_text_edg
         metadata: Value::Null,
     };
 
-    let missing_edge = validate_workflow_execution_contracts(&workflow).unwrap_err();
+    let missing_edge = validate_workflow_execution_contracts(&workflow, &WorkflowExecutionLimits::default()).unwrap_err();
     assert!(missing_edge
         .to_string()
         .contains("incoming data edge with alias chapter_body"));
@@ -291,10 +292,10 @@ fn f8_summarizer_contract_requires_complete_config_and_matching_chapter_text_edg
         alias: Some("chapter_body".to_owned()),
         communication: None,
     });
-    validate_workflow_execution_contracts(&workflow).unwrap();
+    validate_workflow_execution_contracts(&workflow, &WorkflowExecutionLimits::default()).unwrap();
 
     workflow.nodes[1].config["chapter_document_id"] = json!("  ");
-    let missing_document = validate_workflow_execution_contracts(&workflow).unwrap_err();
+    let missing_document = validate_workflow_execution_contracts(&workflow, &WorkflowExecutionLimits::default()).unwrap_err();
     assert!(missing_document
         .to_string()
         .contains("chapter_document_id cannot be empty"));
@@ -333,18 +334,20 @@ fn utility_node_contracts_require_matching_aliases_and_valid_branch_selectors() 
         metadata: Value::Null,
     };
 
-    let mismatch = validate_workflow_execution_contracts(&workflow).unwrap_err();
+    let mismatch = validate_workflow_execution_contracts(&workflow, &WorkflowExecutionLimits::default()).unwrap_err();
     assert!(mismatch
         .to_string()
         .contains("incoming data edge with alias query"));
     workflow.edges[0].alias = Some("query".to_owned());
-    validate_workflow_execution_contracts(&workflow).unwrap();
+    validate_workflow_execution_contracts(&workflow, &WorkflowExecutionLimits::default()).unwrap();
 
     workflow.nodes[1].type_name = "condition".to_owned();
     workflow.nodes[1].config = json!({
         "input_alias": "query",
         "operator": "truthy"
     });
+    // U125：分支不再由边的 alias 承载，而由出边引脚承载。用通用 exec_out
+    // 从 condition 连出必须被拒——那正是修复前「恒放行」的画法。
     workflow.edges.push(Edge {
         id: EdgeId::from("invalid-branch"),
         kind: WorkflowEdgeKind::Control,
@@ -356,15 +359,16 @@ fn utility_node_contracts_require_matching_aliases_and_valid_branch_selectors() 
             node_id: NodeId::from("target"),
             port_name: EXECUTION_INPUT_PORT.to_owned(),
         },
-        alias: Some("yes".to_owned()),
+        alias: None,
         communication: None,
     });
-    let invalid_selector = validate_workflow_execution_contracts(&workflow).unwrap_err();
-    assert!(invalid_selector
-        .to_string()
-        .contains("branch selector true or false"));
-    workflow.edges[1].alias = Some("true".to_owned());
-    validate_workflow_execution_contracts(&workflow).unwrap();
+    let invalid_selector = validate_workflow_execution_contracts(&workflow, &WorkflowExecutionLimits::default()).unwrap_err();
+    assert!(
+        invalid_selector.to_string().contains("exec_out_true"),
+        "错误信息应提示改用分支引脚，实际：{invalid_selector}"
+    );
+    workflow.edges[1].from.port_name = EXECUTION_OUTPUT_PORT_TRUE.to_owned();
+    validate_workflow_execution_contracts(&workflow, &WorkflowExecutionLimits::default()).unwrap();
 }
 
 #[test]
@@ -2172,6 +2176,9 @@ fn completed_operation_response_is_reused_without_second_provider_call() {
             "inputs": PortMap::new(),
             "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
             "metadata": Value::Null,
+            // 变量参与 request_hash：循环每轮变量不同，若不计入，第二轮请求会与
+            // 第一轮完全一致而被 operation journal 误判成重放。
+            "variables": BTreeMap::<String, Value>::new(),
         }))
         .unwrap(),
     );
@@ -2260,6 +2267,9 @@ fn persisted_operation_rejects_recovery_policy_drift_for_the_same_identity() {
             "inputs": PortMap::new(),
             "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
             "metadata": Value::Null,
+            // 变量参与 request_hash：循环每轮变量不同，若不计入，第二轮请求会与
+            // 第一轮完全一致而被 operation journal 误判成重放。
+            "variables": BTreeMap::<String, Value>::new(),
         }))
         .unwrap(),
     );
@@ -3150,6 +3160,7 @@ fn ui_llm_node_uses_prompt_template_and_project_provider_defaults() {
             PortValue::inline(json!("根据本章大纲续写")),
         )]),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -3207,6 +3218,7 @@ fn writing_node_can_call_project_search_before_final_answer() {
         config: json!({ "prompt_template": "续写并先核对项目事实" }),
         inputs: PortMap::new(),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -3224,7 +3236,8 @@ fn writing_node_can_call_project_search_before_final_answer() {
                 ariadne::retrieval::project_search_tool_definition("writer-search", "检索项目事实"),
             )),
             web_search: None,
-            max_tool_rounds: 4,
+            writing_tools: None,
+            limits: WorkflowExecutionLimits { max_tool_rounds: 4, ..WorkflowExecutionLimits::default() },
         },
     )
     .unwrap();
@@ -3260,6 +3273,7 @@ fn writing_node_can_call_web_search_before_final_answer() {
         config: json!({ "prompt_template": "写作前核对公开资料" }),
         inputs: PortMap::new(),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -3281,7 +3295,8 @@ fn writing_node_can_call_web_search_before_final_answer() {
                     "搜索公开互联网",
                 ),
             )),
-            max_tool_rounds: 4,
+            writing_tools: None,
+            limits: WorkflowExecutionLimits { max_tool_rounds: 4, ..WorkflowExecutionLimits::default() },
         },
     )
     .unwrap();
@@ -3320,6 +3335,7 @@ fn f13_llm_node_timeout_and_budget_enter_provider_context() {
         }),
         inputs: PortMap::new(),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -3366,6 +3382,7 @@ fn f13_llm_node_accepts_ui_shaped_string_timeout_and_budget() {
         }),
         inputs: PortMap::new(),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -3404,6 +3421,7 @@ fn f13_llm_node_fails_when_cost_exceeds_single_call_budget() {
         }),
         inputs: PortMap::new(),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -3415,10 +3433,13 @@ fn f13_llm_node_fails_when_cost_exceeds_single_call_budget() {
         message.contains("single-call") || message.contains("budget") || message.contains("1"),
         "expected single-call budget failure, got: {message}"
     );
+    // U113：节点未配 timeout_ms 时回落到**配置的**默认超时，而不是旧的硬编码
+    // 120s。此处断言与 `WorkflowExecutionLimits::default()` 同源——两者漂移时
+    // 该断言应当跟着改，而不是把硬编码值重新钉回来。
     assert_eq!(
         provider.contexts.lock().unwrap()[0].timeout_ms,
-        120_000,
-        "unset timeout still defaults to 120s"
+        WorkflowExecutionLimits::default().default_timeout_ms,
+        "未配置超时的节点应回落到配置默认值"
     );
 }
 
@@ -3449,6 +3470,7 @@ fn summarizer_reuses_committed_knowledge_receipt_without_provider_call() {
             PortValue::inline(json!("正文不会再次发送给模型")),
         )]),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: cancellation.clone(),
         dispatch_authorization: Default::default(),
@@ -3472,7 +3494,7 @@ fn summarizer_reuses_committed_knowledge_receipt_without_provider_call() {
         )
         .unwrap();
 
-    let actual = execute_summarizer_node(request, &provider, &ledger, temp.path()).unwrap();
+    let actual = execute_summarizer_node(request, &provider, &ledger, temp.path(), &WorkflowExecutionLimits::default()).unwrap();
 
     assert_eq!(actual, expected);
     assert!(provider.requests.lock().unwrap().is_empty());
@@ -3630,6 +3652,7 @@ fn summarizer_receipt_replays_dispatched_runtime_operation_without_second_llm_pi
                     first_provider.as_ref(),
                     first_ledger.as_ref(),
                     &first_root,
+                    &WorkflowExecutionLimits::default(),
                 )
             }),
         )
@@ -3683,6 +3706,7 @@ fn summarizer_receipt_replays_dispatched_runtime_operation_without_second_llm_pi
                     replay_provider.as_ref(),
                     replay_ledger.as_ref(),
                     &replay_root,
+                    &WorkflowExecutionLimits::default(),
                 )
             }),
         )
@@ -3842,6 +3866,7 @@ fn summarizer_unknown_stage_response_pauses_same_parent_operation_without_redisp
                     handler_provider.as_ref(),
                     handler_ledger.as_ref(),
                     &project_root,
+                    &WorkflowExecutionLimits::default(),
                 )
             }),
         )
@@ -3933,6 +3958,7 @@ fn project_search_node_returns_indexed_project_results() {
         config: json!({"query_alias": "query", "limit": 5}),
         inputs: PortMap::from([("query".to_owned(), PortValue::inline(json!("线索")))]),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -3962,6 +3988,7 @@ fn project_search_node_rejects_product_limit_before_retrieval_dispatch() {
         config: json!({"query_alias": "query", "limit": 51}),
         inputs: PortMap::from([("query".to_owned(), PortValue::inline(json!("线索")))]),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -3995,6 +4022,7 @@ fn project_search_node_rejects_oversized_inline_results() {
         config: json!({"query_alias": "query", "limit": 1}),
         inputs: PortMap::from([("query".to_owned(), PortValue::inline(json!("线索")))]),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -5394,13 +5422,14 @@ fn builtin_condition_node_routes_control_branches() {
                     kind: WorkflowEdgeKind::Control,
                     from: PortEndpoint {
                         node_id: NodeId::from("condition"),
-                        port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                        // U125：分支由引脚承载，不再用 alias。
+                        port_name: EXECUTION_OUTPUT_PORT_TRUE.to_owned(),
                     },
                     to: PortEndpoint {
                         node_id: NodeId::from("true-node"),
                         port_name: EXECUTION_INPUT_PORT.to_owned(),
                     },
-                    alias: Some("true".to_owned()),
+                    alias: None,
                     communication: None,
                 },
                 Edge {
@@ -5408,13 +5437,13 @@ fn builtin_condition_node_routes_control_branches() {
                     kind: WorkflowEdgeKind::Control,
                     from: PortEndpoint {
                         node_id: NodeId::from("condition"),
-                        port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                        port_name: EXECUTION_OUTPUT_PORT_FALSE.to_owned(),
                     },
                     to: PortEndpoint {
                         node_id: NodeId::from("false-node"),
                         port_name: EXECUTION_INPUT_PORT.to_owned(),
                     },
-                    alias: Some("false".to_owned()),
+                    alias: None,
                     communication: None,
                 },
                 Edge {
@@ -5685,13 +5714,14 @@ fn mixed_builtin_and_external_graph_executes_search_condition_approval_export() 
                 kind: WorkflowEdgeKind::Control,
                 from: PortEndpoint {
                     node_id: NodeId::from("condition"),
-                    port_name: EXECUTION_OUTPUT_PORT.to_owned(),
+                    // U125：分支由引脚承载，不再用 alias。
+                    port_name: EXECUTION_OUTPUT_PORT_TRUE.to_owned(),
                 },
                 to: PortEndpoint {
                     node_id: NodeId::from("approval"),
                     port_name: EXECUTION_INPUT_PORT.to_owned(),
                 },
-                alias: Some("true".to_owned()),
+                alias: None,
                 communication: None,
             },
             control_edge("approval-loop", "approval", "loop"),
@@ -5727,7 +5757,7 @@ fn mixed_builtin_and_external_graph_executes_search_condition_approval_export() 
         ],
         metadata: Value::Null,
     };
-    validate_workflow_execution_contracts(&workflow).unwrap();
+    validate_workflow_execution_contracts(&workflow, &WorkflowExecutionLimits::default()).unwrap();
 
     let search_calls = Arc::new(AtomicUsize::new(0));
     let search_calls_for_handler = Arc::clone(&search_calls);
@@ -6024,6 +6054,7 @@ fn document_export_sink_writes_export_artifact() {
         config: Value::Null,
         inputs: ariadne::contracts::PortMap::new(),
         communication_messages: Vec::new(),
+        variables: BTreeMap::new(),
         metadata: Value::Null,
         cancellation: ariadne::contracts::ExecutionCancellation::new(),
         dispatch_authorization: Default::default(),
@@ -6285,6 +6316,7 @@ fn routed_external_executor_dispatches_registered_handlers() {
             config: Value::Null,
             inputs: ariadne::contracts::PortMap::new(),
             communication_messages: Vec::new(),
+            variables: BTreeMap::new(),
             metadata: Value::Null,
             cancellation: ariadne::contracts::ExecutionCancellation::new(),
             dispatch_authorization: Default::default(),
@@ -6652,11 +6684,12 @@ fn f17_summarizer_uses_saved_confirmation_policies_in_both_modes() {
             }),
             inputs: PortMap::from([("chapter_text".to_owned(), PortValue::inline(json!("正文")))]),
             communication_messages: Vec::new(),
+            variables: BTreeMap::new(),
             metadata: Value::Null,
             cancellation: ariadne::contracts::ExecutionCancellation::new(),
             dispatch_authorization: Default::default(),
         };
-        let output = execute_summarizer_node(request, &provider, &ledger, temp.path()).unwrap();
+        let output = execute_summarizer_node(request, &provider, &ledger, temp.path(), &WorkflowExecutionLimits::default()).unwrap();
         assert_eq!(
             provider.calls.load(Ordering::SeqCst),
             if auto_mode { 6 } else { 4 }
@@ -6775,6 +6808,7 @@ fn f17_malformed_confirmation_policy_blocks_summarizer_before_provider_call() {
             }),
             inputs: PortMap::from([("chapter_text".to_owned(), PortValue::inline(json!("正文")))]),
             communication_messages: Vec::new(),
+            variables: BTreeMap::new(),
             metadata: Value::Null,
             cancellation: ariadne::contracts::ExecutionCancellation::new(),
             dispatch_authorization: Default::default(),
@@ -6782,6 +6816,7 @@ fn f17_malformed_confirmation_policy_blocks_summarizer_before_provider_call() {
         &provider,
         &ledger,
         temp.path(),
+        &WorkflowExecutionLimits::default(),
     )
     .unwrap_err();
     assert!(error.to_string().contains("json"));
@@ -6877,6 +6912,7 @@ fn f18_corrupt_knowledge_blocks_summarizer_before_provider_call() {
             }),
             inputs: PortMap::from([("chapter_text".to_owned(), PortValue::inline(json!("正文")))]),
             communication_messages: Vec::new(),
+            variables: BTreeMap::new(),
             metadata: Value::Null,
             cancellation: ariadne::contracts::ExecutionCancellation::new(),
             dispatch_authorization: Default::default(),
@@ -6884,6 +6920,7 @@ fn f18_corrupt_knowledge_blocks_summarizer_before_provider_call() {
         &provider,
         &ledger,
         temp.path(),
+        &WorkflowExecutionLimits::default(),
     )
     .unwrap_err();
     assert!(error.to_string().contains("json"));

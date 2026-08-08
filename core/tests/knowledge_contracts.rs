@@ -217,3 +217,80 @@ fn rebuild_status_reports_recovery_requirements() {
     assert_eq!(report.status, KnowledgeRebuildStatus::Completed);
     assert_eq!(kb.health_report().status, KnowledgeRebuildStatus::Completed);
 }
+
+/// 同值复述**不得丢掉最早的出处**。
+///
+/// 背景：`decide_proposal` 只比 `fact.value`，所以「值相同但来自不同章节版本」
+/// 不算冲突，会走 Approved 路径整体覆盖既有事实。若覆盖时不合并 `sources`，
+/// 第 3 章定下的设定被第 40 章复述后，溯源只剩第 40 章——百万字长篇里这意味着
+/// 「这个设定最早在哪定的」永远查不回来，改设定时也不知道该回改哪些章。
+///
+/// 判据取**落库后的事实**而不是返回的 decision：decision 只说状态，
+/// 说明不了库里到底存了什么。
+#[test]
+fn same_value_restatement_preserves_every_earlier_source() {
+    let kb = auto_kb();
+    // 第 3 章首次登记。
+    kb.apply_proposal(
+        proposal("proposal-1", fact("fact-1", "林越", "佩剑", json!("断水"))),
+        None,
+    )
+    .unwrap();
+
+    // 第 40 章复述同一设定：值相同，但来源版本与原文跨度都不同。
+    let mut restated = fact("fact-1", "林越", "佩剑", json!("断水"));
+    restated.fact.source_version = "v40".to_owned();
+    restated.fact.sources = vec![SourceSpan {
+        document_id: "chapter-40".to_owned(),
+        range: TextRange { start: 100, end: 112 },
+        version: Some("v40".to_owned()),
+    }];
+    let decision = kb
+        .apply_proposal(proposal("proposal-2", restated), None)
+        .unwrap();
+    assert_eq!(
+        decision.status,
+        ApprovalStatus::Approved,
+        "同值复述不应被判成冲突——否则每次复述都会堵住审批队列"
+    );
+
+    let stored = kb.fact("fact-1").unwrap().expect("事实应当已落库");
+    let documents = stored
+        .fact
+        .sources
+        .iter()
+        .map(|span| span.document_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        documents.contains(&"doc-1"),
+        "最早的出处 doc-1 被复述覆盖掉了，溯源链断裂。实际出处={documents:?}"
+    );
+    assert!(
+        documents.contains(&"chapter-40"),
+        "复述自身的出处也应保留。实际出处={documents:?}"
+    );
+    // `source_version` 表达「当前依据哪个版本」，取较新的那个。
+    assert_eq!(stored.fact.source_version, "v40");
+}
+
+/// 重复登记**同一段**原文不应产生重复出处。
+///
+/// 没有这条，上面那条可以被「无脑 push、从不去重」的实现满足，
+/// 而那会让同一章反复抽取同一句话时把 sources 撑成几十条重复项。
+#[test]
+fn repeated_identical_source_is_not_duplicated() {
+    let kb = auto_kb();
+    let candidate = fact("fact-1", "林越", "佩剑", json!("断水"));
+    kb.apply_proposal(proposal("proposal-1", candidate.clone()), None)
+        .unwrap();
+    kb.apply_proposal(proposal("proposal-2", candidate), None)
+        .unwrap();
+
+    let stored = kb.fact("fact-1").unwrap().expect("事实应当已落库");
+    assert_eq!(
+        stored.fact.sources.len(),
+        1,
+        "同一段原文重复登记不应产生重复出处。实际={:?}",
+        stored.fact.sources
+    );
+}

@@ -176,7 +176,9 @@ public sealed record ProviderModelsResult(
 public sealed record BudgetStatus(
     [property: JsonPropertyName("budget_usd")] double BudgetUsd,
     [property: JsonPropertyName("spent_usd")] double SpentUsd,
-    [property: JsonPropertyName("preauthorized_usd")] double PreauthorizedUsd,
+    // U112：null = 从未设置（不限制）；0 = 用户显式设定的零额度。
+    // 两者必须可区分，否则一次「打开设置页再保存」会把不限制静默翻成全部暂停。
+    [property: JsonPropertyName("preauthorized_usd")] double? PreauthorizedUsd,
     [property: JsonPropertyName("auto_mode_enabled")] bool AutoModeEnabled);
 
 public sealed record AutomationSettings(
@@ -242,8 +244,7 @@ public sealed record WorkflowConfig(
     [property: JsonPropertyName("default_timeout_ms")] long DefaultTimeoutMs,
     [property: JsonPropertyName("max_loop_iterations")] int MaxLoopIterations,
     [property: JsonPropertyName("max_tool_rounds")] int MaxToolRounds,
-    [property: JsonPropertyName("checkpoint_enabled")] bool CheckpointEnabled,
-    [property: JsonPropertyName("runtime_autosave_ms")] long RuntimeAutosaveMs);
+    [property: JsonPropertyName("checkpoint_enabled")] bool CheckpointEnabled);
 
 public sealed record GitSettings(
     [property: JsonPropertyName("git")] GitConfig Git);

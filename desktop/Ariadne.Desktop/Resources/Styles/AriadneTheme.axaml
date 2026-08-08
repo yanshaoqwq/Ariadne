@@ -1229,8 +1229,10 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
   </Style>
+  <!-- 执行页起始项是行不是卡：不给圆角（圆角只对有面的东西有意义），
+       面与分隔线在视图里按行式列表定义。 -->
   <Style Selector="Border.exec-start-card">
-    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="CornerRadius" Value="0" />
   </Style>
 
   <!-- 项目 AI 输入区：Works + Workspace 共用 ProjectAiComposer / ai-composer。

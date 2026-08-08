@@ -18,11 +18,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ariadne::commands::{
-    run_workflow_impl, save_provider_settings_impl, save_workflow_graph_impl, CanvasNode,
-    ProviderSettingsUpdate, RunWorkflowRequest, WorkflowGraphData,
+    run_workflow_impl, save_provider_settings_impl, save_workflow_graph_impl, CanvasEdge,
+    CanvasNode, ProviderSettingsUpdate, RunWorkflowRequest, WorkflowGraphData,
 };
 use ariadne::config::{MemorySecretStore, ModelConfig, ProjectCredentialScope, SecretValue};
-use ariadne::contracts::{ProviderCapability, ProviderType};
+use ariadne::contracts::{ProviderCapability, ProviderType, WorkflowEdgeKind};
 use serde_json::{json, Value};
 
 // ————————————————————————————————————————————————
@@ -202,6 +202,8 @@ fn production_flow_minimal_llm_node_runs_to_success() {
             workflow_id: "minimal".to_owned(),
             start_node_id: None,
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     );
     let _ = server.join();
@@ -285,6 +287,8 @@ fn production_flow_tool_use_model_completes_whole_journey() {
             workflow_id: "tooling-flow".to_owned(),
             start_node_id: None,
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     );
     let _ = server.join();
@@ -327,6 +331,9 @@ fn production_flow_writer_node_offers_write_tool_to_the_model() {
         "writer-chat",
         ProviderCapability::Llm,
     );
+    // 写入类工具出厂即关（`global.write = false`）。用户要让写作节点动笔，
+    // 必须先在权限页打开——这一步是产品设定，不是测试脚手架。
+    enable_write_tools(temp.path());
 
     save_single_node_workflow(
         temp.path(),
@@ -335,7 +342,11 @@ fn production_flow_writer_node_offers_write_tool_to_the_model() {
         json!({
             "provider_id": PRIMARY_PROVIDER_ID,
             "model_id": "writer-chat",
-            "prompt_template": "把开头写进第一章"
+            "prompt_template": "把开头写进第一章",
+            // 写作节点必须指名要编辑的文档：行号 patch 工具需要正文原文才能
+            // 把行号换算成字节区间。未指名时只下发只读工具（见下面的姊妹用例）。
+            // 路径相对文档根，此处文档根即项目根。
+            "document_id": "documents/chapter-01.md"
         }),
     );
 
@@ -346,12 +357,19 @@ fn production_flow_writer_node_offers_write_tool_to_the_model() {
             workflow_id: "writing-flow".to_owned(),
             start_node_id: None,
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     );
+
+    // 先暴露运行错误：否则装配阶段失败时，下面的工具断言会掩盖真实原因。
+    let run = run.expect("writer 节点应能运行成功");
+    assert_eq!(run.status, "succeeded", "writer 节点运行未成功");
+
     let requests = server.join().unwrap_or_default();
     let outbound_request = requests.first().cloned().unwrap_or_default();
 
-    // U108 的核心断言：写作节点连一个写入工具都没有下发给模型。
+    // U108 的核心断言：写作节点必须真的拿到写入工具。
     assert!(
         outbound_request.contains("writer-insert-lines")
             || outbound_request.contains("writer-replace-lines"),
@@ -359,8 +377,147 @@ fn production_flow_writer_node_offers_write_tool_to_the_model() {
          writer-replace-lines），模型即便想写也无从下笔。实际出站请求片段：{}",
         outbound_request.chars().take(800).collect::<String>()
     );
+}
 
-    run.expect("writer 节点本身（不含写入工具时的纯文本生成）应能运行成功");
+/// 安全边界一：节点没有指名 `document_id` 时，不得下发行号 patch 工具。
+///
+/// 行号 patch 需要正文原文才能把 1-based 行号换算成字节区间；没有文档上下文
+/// 就下发这些工具，模型只会调用失败。只读工具（find/search）仍应可用。
+#[test]
+fn production_flow_writer_without_document_gets_no_write_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+
+    let (base_url, server) = spawn_fake_llm(vec![chat_response("writer-chat", "先想想。")]);
+    let secrets = MemorySecretStore::default();
+    provision_project_with_llm(
+        temp.path(),
+        &secrets,
+        base_url,
+        "writer-chat",
+        ProviderCapability::Llm,
+    );
+    enable_write_tools(temp.path());
+
+    // 与主用例唯一的差别：没有 document_id。
+    save_single_node_workflow(
+        temp.path(),
+        "no-doc-flow",
+        "writer",
+        json!({
+            "provider_id": PRIMARY_PROVIDER_ID,
+            "model_id": "writer-chat",
+            "prompt_template": "想一下开头"
+        }),
+    );
+
+    let run = run_workflow_impl(
+        temp.path(),
+        &secrets,
+        RunWorkflowRequest {
+            workflow_id: "no-doc-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
+        },
+    );
+    let run = run.expect("未指名文档的写作节点仍应能做纯文本生成");
+    assert_eq!(run.status, "succeeded");
+
+    let outbound = server
+        .join()
+        .unwrap_or_default()
+        .first()
+        .cloned()
+        .unwrap_or_default();
+
+    assert!(
+        !outbound.contains("writer-insert-lines") && !outbound.contains("writer-replace-lines"),
+        "未指名 document_id 时不得下发行号 patch 工具（模型必然调用失败）：{}",
+        outbound.chars().take(600).collect::<String>()
+    );
+    assert!(
+        outbound.contains("writer-find"),
+        "只读工具不受文档缺失影响，应照常下发：{}",
+        outbound.chars().take(600).collect::<String>()
+    );
+}
+
+/// 安全边界二：权限页把写入工具关掉时（出厂默认），即使指名了文档也不得下发。
+///
+/// 这是权限开关对写作工具真正生效的证据——修复前那批 `write` 开关是死配置。
+#[test]
+fn production_flow_disabled_write_permission_removes_write_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+
+    let chapter_path = temp.path().join("documents/chapter-01.md");
+    std::fs::create_dir_all(chapter_path.parent().unwrap()).unwrap();
+    std::fs::write(&chapter_path, "# 第一章\n").unwrap();
+
+    let (base_url, server) = spawn_fake_llm(vec![chat_response("writer-chat", "写好了。")]);
+    let secrets = MemorySecretStore::default();
+    provision_project_with_llm(
+        temp.path(),
+        &secrets,
+        base_url,
+        "writer-chat",
+        ProviderCapability::Llm,
+    );
+    // 注意：这里**不**调用 enable_write_tools，保持出厂的 write = false。
+
+    save_single_node_workflow(
+        temp.path(),
+        "locked-flow",
+        "writer",
+        json!({
+            "provider_id": PRIMARY_PROVIDER_ID,
+            "model_id": "writer-chat",
+            "prompt_template": "把开头写进第一章",
+            "document_id": "documents/chapter-01.md"
+        }),
+    );
+
+    let run = run_workflow_impl(
+        temp.path(),
+        &secrets,
+        RunWorkflowRequest {
+            workflow_id: "locked-flow".to_owned(),
+            start_node_id: None,
+            initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
+        },
+    );
+    let run = run.expect("权限关闭只影响工具清单，不应让节点运行失败");
+    assert_eq!(run.status, "succeeded");
+
+    let outbound = server
+        .join()
+        .unwrap_or_default()
+        .first()
+        .cloned()
+        .unwrap_or_default();
+
+    assert!(
+        !outbound.contains("writer-insert-lines") && !outbound.contains("writer-replace-lines"),
+        "权限页关闭写入工具时不得下发给模型：{}",
+        outbound.chars().take(600).collect::<String>()
+    );
+}
+
+/// 打开「修改项目文件」这一类工具开关，模拟用户在权限页的勾选。
+fn enable_write_tools(project_root: &std::path::Path) {
+    let mut settings = ariadne::commands::get_permissions_settings_impl(project_root).unwrap();
+    settings
+        .tool_controls
+        .entry("global".to_owned())
+        .or_default()
+        .insert("write".to_owned(), Some(true));
+    ariadne::commands::save_permissions_settings_impl(project_root, settings).unwrap();
 }
 
 // ————————————————————————————————————————————————
@@ -386,19 +543,99 @@ fn production_flow_global_loop_limit_constrains_runaway_workflow() {
     config.workflow.max_loop_iterations = 2;
     store.save(&config).unwrap();
 
-    // 工作流里的 loop 节点却要求 50 轮（`LoopNodeConfig` 字段是平铺的，
-    // 不是嵌套在 "policy" 键下——见 workflow/nodes.rs 的 LoopNodeConfig）。
-    save_single_node_workflow(
+    // loop 节点的图合同（`workflow/integration.rs` 的 `validate_workflow_execution_contracts`）
+    // 要求 stop_condition.input_alias 必须有上游数据边喂值，因此需要一个 start 节点
+    // 提供 `approved` 数据；这与本用例要验证的缺陷（全局轮次上限不生效）无关，
+    // 只是满足图结构合同的最小必要脚手架。
+    //
+    // 工作流里的 loop 节点声明了 50 轮，远超全局上限 2。
+    // `LoopNodeConfig` 字段是平铺的，不嵌套在 "policy" 键下。
+    let saved = save_workflow_graph_impl(
         temp.path(),
-        "runaway",
-        "loop",
-        json!({
-            "max_iterations": 50,
-            "timeout_ms": 60_000,
-            "stop_condition": {"kind": "manual"}
-        }),
+        WorkflowGraphData {
+            workflow_id: "runaway".to_owned(),
+            name: "runaway".to_owned(),
+            nodes: vec![
+                CanvasNode {
+                    id: "start".to_owned(),
+                    r#type: "start".to_owned(),
+                    label: None,
+                    data: json!({"initial_inputs": {"approved": true}}),
+                    position: Value::Null,
+                },
+                CanvasNode {
+                    id: "loop-node".to_owned(),
+                    r#type: "loop".to_owned(),
+                    label: None,
+                    data: json!({
+                        "max_iterations": 50,
+                        "timeout_ms": 60_000,
+                        "stop_condition": {"input_alias": "approved", "equals": true},
+                        "rerun_node_ids": []
+                    }),
+                    position: Value::Null,
+                },
+                // 图合同要求 loop 节点要么有 rerun_node_ids，要么有出向控制边；
+                // 用一个无外部依赖的 export 节点（无 sink 时安全空操作）满足该合同，
+                // 与本用例要验证的缺陷本身无关。
+                CanvasNode {
+                    id: "sink".to_owned(),
+                    r#type: "export".to_owned(),
+                    label: None,
+                    data: json!({"artifact_id": "runaway-export", "format": "json"}),
+                    position: Value::Null,
+                },
+            ],
+            edges: vec![
+                CanvasEdge {
+                    id: "start-loop-exec".to_owned(),
+                    source: "start".to_owned(),
+                    target: "loop-node".to_owned(),
+                    source_handle: "exec_out".to_owned(),
+                    target_handle: "exec_in".to_owned(),
+                    kind: WorkflowEdgeKind::Control,
+                    label: None,
+                    data: Value::Null,
+                },
+                CanvasEdge {
+                    id: "start-loop-data".to_owned(),
+                    source: "start".to_owned(),
+                    target: "loop-node".to_owned(),
+                    source_handle: "approved".to_owned(),
+                    target_handle: "input".to_owned(),
+                    kind: WorkflowEdgeKind::Data,
+                    label: Some("approved".to_owned()),
+                    data: Value::Null,
+                },
+                CanvasEdge {
+                    id: "loop-sink-exec".to_owned(),
+                    source: "loop-node".to_owned(),
+                    target: "sink".to_owned(),
+                    source_handle: "exec_out".to_owned(),
+                    target_handle: "exec_in".to_owned(),
+                    kind: WorkflowEdgeKind::Control,
+                    label: None,
+                    data: Value::Null,
+                },
+            ],
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
     );
 
+    // 全局上限生效后，越界的 loop 在**保存边界**就应被拒绝——这比等到运行时更早，
+    // 用户在画布上按下保存的当下就能看到「超出全局上限」，不必先烧掉一次运行。
+    if let Err(error) = saved {
+        let diagnostic = error.diagnostic_text();
+        assert!(
+            diagnostic.contains("exceeds workflow limit"),
+            "U113：拒绝原因应指明越过了全局循环上限，实际：{diagnostic}"
+        );
+        return;
+    }
+
+    // 若保存边界放行（例如历史数据绕过保存直接落盘），运行前预检必须兜住。
     let run = run_workflow_impl(
         temp.path(),
         &MemorySecretStore::default(),
@@ -406,13 +643,13 @@ fn production_flow_global_loop_limit_constrains_runaway_workflow() {
             workflow_id: "runaway".to_owned(),
             start_node_id: None,
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     );
 
-    // 全局上限若生效，越界的 loop policy 应在预检或运行时被拒绝。
     assert!(
         run.is_err(),
-        "U113：全局最大循环轮次设为 2，工作流声明 50 轮却被放行，\
-         全局成本护栏未接线（`validate_loop_policy` 零调用者）"
+        "U113：全局最大循环轮次设为 2，工作流声明 50 轮却被放行，全局成本护栏未接线"
     );
 }

@@ -1005,8 +1005,6 @@ pub struct WorkflowConfig {
     pub max_tool_rounds: u32,
     #[serde(default = "default_true")]
     pub checkpoint_enabled: bool,
-    #[serde(default = "default_runtime_autosave_ms")]
-    pub runtime_autosave_ms: u64,
 }
 
 impl Default for WorkflowConfig {
@@ -1018,32 +1016,32 @@ impl Default for WorkflowConfig {
             max_loop_iterations: default_max_loop_iterations(),
             max_tool_rounds: default_max_tool_rounds(),
             checkpoint_enabled: true,
-            runtime_autosave_ms: default_runtime_autosave_ms(),
         }
     }
 }
 
 impl WorkflowConfig {
+    /// 派生运行时全局限制。这是 `WorkflowConfig` 与执行层之间的唯一通道：
+    /// 预检、节点超时回落与 tool-use 轮次上限都从这里取值，不再各自硬编码（U113）。
+    pub fn execution_limits(&self) -> crate::contracts::WorkflowExecutionLimits {
+        crate::contracts::WorkflowExecutionLimits {
+            default_timeout_ms: self.default_timeout_ms,
+            max_loop_iterations: self.max_loop_iterations,
+            max_tool_rounds: self.max_tool_rounds,
+        }
+    }
+
     /// 校验 workflow 全局限制。
     pub fn validate(&self) -> CoreResult<()> {
-        if self.default_timeout_ms == 0 {
-            return Err(CoreError::validation("default_timeout_ms cannot be zero"));
-        }
-
-        if self.max_loop_iterations == 0 {
-            return Err(CoreError::validation("max_loop_iterations cannot be zero"));
-        }
-
-        if self.max_tool_rounds == 0 {
-            return Err(CoreError::validation("max_tool_rounds cannot be zero"));
-        }
+        // 限制字段的零值语义由契约层统一裁定，避免两处校验规则漂移。
+        self.execution_limits().validate()?;
 
         Ok(())
     }
 
     /// 用 workflow 全局限制校验单个 loop policy。
     pub fn validate_loop_policy(&self, policy: &crate::contracts::LoopPolicy) -> CoreResult<()> {
-        policy.validate_against_limits(self.max_loop_iterations, self.default_timeout_ms)
+        policy.validate_within(&self.execution_limits())
     }
 }
 
@@ -1267,11 +1265,6 @@ fn default_max_loop_iterations() -> u32 {
 /// 默认最大 tool-use 轮次。
 fn default_max_tool_rounds() -> u32 {
     8
-}
-
-/// 默认 runtime 自动保存间隔。
-fn default_runtime_autosave_ms() -> u64 {
-    5_000
 }
 
 /// 默认 Git 忽略路径。

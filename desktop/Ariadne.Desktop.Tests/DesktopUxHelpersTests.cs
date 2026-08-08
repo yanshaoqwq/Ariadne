@@ -1052,7 +1052,11 @@ public sealed class DesktopUxHelpersTests
 
         Assert.Contains("HorizontalContentAlignment=\"Stretch\"", composer, StringComparison.Ordinal);
         Assert.Contains("HorizontalAlignment=\"Stretch\"", composer, StringComparison.Ordinal);
-        Assert.Contains("<TextBox Grid.Column=\"0\"", composer, StringComparison.Ordinal);
+        // 输入框改为独占一行、发送键落到它下方右侧：原先两者分列同一行，
+        // 输入框只剩「整框宽度减去发送键」那一截，看到的框比能写的区域宽。
+        // 守卫的是「输入框铺满整框宽度」这条性质，不是它当年在第几列。
+        Assert.Contains("<TextBox Grid.Row=\"1\"", composer, StringComparison.Ordinal);
+        Assert.DoesNotContain("<TextBox Grid.Column=\"0\"", composer, StringComparison.Ordinal);
         Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", works, StringComparison.Ordinal);
         Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", workspace, StringComparison.Ordinal);
         Assert.Contains("HorizontalAlignment=\"Stretch\" />", works, StringComparison.Ordinal);

@@ -143,7 +143,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(MaxLoopIterationsLabel),
         nameof(MaxToolRoundsLabel),
         nameof(CheckpointEnabledLabel),
-        nameof(RuntimeAutosaveLabel),
         nameof(SaveAutomationText),
         nameof(AllowNetworkText),
         nameof(AllowWebSearchText),
@@ -332,7 +331,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private string _maxLoopIterations = "5";
     private string _maxToolRounds = "8";
     private bool _checkpointEnabled = true;
-    private string _runtimeAutosaveMs = "5000";
 
     private bool _allowNetwork;
     private bool _allowWebSearch;
@@ -572,6 +570,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         RestoreCurrentTabCommand = new RelayCommand(
             () => _ = RestoreSelectedTabAsync(),
             CanRestoreSelectedTab);
+        SaveCurrentTabCommand = new RelayCommand(
+            () => _ = SaveSelectedTabAsync(),
+            CanSaveSelectedTab);
         RestoreRecommendedDefaultsCommand = new RelayCommand(
             () => _ = RestoreRecommendedDefaultsAsync(),
             CanRestoreRecommendedDefaults);
@@ -788,6 +789,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 OnPropertyChanged(nameof(NavigationSelection));
                 OnPropertyChanged(nameof(CurrentTabSectionIndexItems));
                 RestoreCurrentTabCommand.NotifyCanExecuteChanged();
+                SaveCurrentTabCommand.NotifyCanExecuteChanged();
+                OnPropertyChanged(nameof(SaveCurrentTabText));
                 RestoreRecommendedDefaultsCommand.NotifyCanExecuteChanged();
             }
         }
@@ -1050,6 +1053,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public RelayCommand SaveRetrievalCommand { get; }
     public RelayCommand SaveGitCommand { get; }
     public RelayCommand RestoreCurrentTabCommand { get; }
+
+    /// <summary>右下角悬浮保存钮：保存当前分页。</summary>
+    public RelayCommand SaveCurrentTabCommand { get; }
+
+    public string SaveCurrentTabText => _displayNames.Text("ui.settings.save_current_tab");
     public RelayCommand RestoreRecommendedDefaultsCommand { get; }
     public RelayCommand RestoreOfficialTemplateRepositoryCommand { get; }
     public RelayCommand RefreshDiagnosticsCommand { get; }
@@ -1187,7 +1195,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string MaxLoopIterationsLabel => _displayNames.Text("ui.settings.automation.max_loop_iterations");
     public string MaxToolRoundsLabel => _displayNames.Text("ui.settings.automation.max_tool_rounds");
     public string CheckpointEnabledLabel => _displayNames.Text("ui.settings.automation.checkpoint_enabled");
-    public string RuntimeAutosaveLabel => _displayNames.Text("ui.settings.automation.runtime_autosave_ms");
     public string SaveAutomationText => _displayNames.Text("ui.settings.automation.save");
 
     public string AllowNetworkText => _displayNames.Text("ui.settings.permissions.allow_network");
@@ -1456,7 +1463,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string MaxLoopIterations { get => _maxLoopIterations; set => SetProperty(ref _maxLoopIterations, value); }
     public string MaxToolRounds { get => _maxToolRounds; set => SetProperty(ref _maxToolRounds, value); }
     public bool CheckpointEnabled { get => _checkpointEnabled; set => SetProperty(ref _checkpointEnabled, value); }
-    public string RuntimeAutosaveMs { get => _runtimeAutosaveMs; set => SetProperty(ref _runtimeAutosaveMs, value); }
 
     public bool AllowNetwork
     {
@@ -2254,7 +2260,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     MaxLoopIterations = value.Item2.Workflow.MaxLoopIterations.ToString();
                     MaxToolRounds = value.Item2.Workflow.MaxToolRounds.ToString();
                     CheckpointEnabled = value.Item2.Workflow.CheckpointEnabled;
-                    RuntimeAutosaveMs = value.Item2.Workflow.RuntimeAutosaveMs.ToString();
                 },
                 cancellationToken).ConfigureAwait(true);
 
@@ -2432,6 +2437,57 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         };
     }
 
+    /// <summary>
+    /// 右下角悬浮保存钮是否可用。
+    ///
+    /// 判据直接复用 <see cref="CanRestoreSelectedTab"/> ——「本页有未保存改动」
+    /// 与「本页可还原」是同一件事。另开一套脏判定必然与它漂移。
+    /// </summary>
+    private bool CanSaveSelectedTab() => CanRestoreSelectedTab();
+
+    /// <summary>
+    /// 保存当前分页。
+    ///
+    /// 各分页原本各自散着一个「保存」按钮（有的还两个），作者要在长页里找它。
+    /// 悬浮钮把这件事收成一个固定落点：改哪一页就保存哪一页，
+    /// retrieval 页跨两个 section，两个都要写回。
+    /// </summary>
+    private async Task SaveSelectedTabAsync()
+    {
+        switch (SelectedTab.Id)
+        {
+            case "general":
+                await SaveGeneralAsync().ConfigureAwait(true);
+                break;
+            case "models":
+                await SaveModelAsync().ConfigureAwait(true);
+                break;
+            case "presets":
+                // 预设页也横跨两个 section：模板仓库地址与预设本身分开写回。
+                // 只存前者会让「有未保存改动」一直亮着却存不下去。
+                await SavePresetsAsync().ConfigureAwait(true);
+                await SaveTemplateRepositoryAsync().ConfigureAwait(true);
+                break;
+            case "automation":
+                await SaveAutomationAsync().ConfigureAwait(true);
+                break;
+            case "permissions":
+                await SavePermissionsAsync().ConfigureAwait(true);
+                break;
+            case "personalization":
+                await SavePersonalizationAsync().ConfigureAwait(true);
+                break;
+            case "retrieval":
+                // 检索页横跨 app_runtime 与 retrieval 两个 section，逐个写回。
+                await SaveAppRuntimeAsync().ConfigureAwait(true);
+                await SaveRetrievalAsync().ConfigureAwait(true);
+                break;
+            case "version_control":
+                await SaveGitAsync().ConfigureAwait(true);
+                break;
+        }
+    }
+
     private bool CanRestoreRecommendedDefaults() => SelectedTab.Id switch
     {
         "automation" => CanSave(AutomationSection),
@@ -2479,13 +2535,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         {
             case "automation":
                 BudgetUsd = "0";
-                PreauthorizedUsd = "0";
+                // U112：推荐默认是「预授权未设置」（留空），不是零额度。
+                PreauthorizedUsd = string.Empty;
                 SelectedConfirmationProfile = ConfirmationProfileOptions.First(item => item.Value == "recommended");
                 WorkflowDefaultTimeoutMs = "300";
                 MaxLoopIterations = "5";
                 MaxToolRounds = "8";
                 CheckpointEnabled = true;
-                RuntimeAutosaveMs = "5000";
                 break;
             case "permissions":
                 SelectedPermissionProfile = PermissionProfileOptions.First(item => item.Value == "recommended");
@@ -2574,7 +2630,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     MaxLoopIterations = value.Item2.Workflow.MaxLoopIterations.ToString(CultureInfo.InvariantCulture);
                     MaxToolRounds = value.Item2.Workflow.MaxToolRounds.ToString(CultureInfo.InvariantCulture);
                     CheckpointEnabled = value.Item2.Workflow.CheckpointEnabled;
-                    RuntimeAutosaveMs = value.Item2.Workflow.RuntimeAutosaveMs.ToString(CultureInfo.InvariantCulture);
                 }).ConfigureAwait(true),
             "permissions" => await LoadSectionAsync(
                 generation,
@@ -2762,6 +2817,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             "providers.llm.default" => _displayNames.Text("ui.settings.misc.diagnostics.component.default_llm"),
             "providers.embedding.default" => _displayNames.Text("ui.settings.misc.diagnostics.component.default_embedding"),
             "providers.reranker.default" => _displayNames.Text("ui.settings.misc.diagnostics.component.default_reranker"),
+            // U118：凭据保护是常驻诊断项——用户当时同意了明文，几个月后未必记得。
+            "secrets.protection" => _displayNames.Text("ui.settings.misc.diagnostics.component.secrets_protection"),
             _ => _displayNames.Text("ui.settings.misc.diagnostics.component.other"),
         };
     }
@@ -2806,6 +2863,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         if (component == "project.config")
         {
             return _displayNames.Text("ui.settings.misc.diagnostics.recovery.project_config");
+        }
+        // U118：凭据保护的补救动作是「设主密码 / 确认明文风险」，都在设置页内，
+        // 落到 runtime 那条「重启应用」的兜底文案上会把用户指向一个完全无效的操作。
+        if (component == "secrets.protection")
+        {
+            return _displayNames.Text("ui.settings.misc.diagnostics.recovery.secrets");
         }
         return _displayNames.Text("ui.settings.misc.diagnostics.recovery.runtime");
     }
@@ -4615,8 +4678,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     saved.Workflow.Workflow.MaxLoopIterations.ToString(CultureInfo.InvariantCulture), value => MaxLoopIterations = value);
                 ApplyCanonicalText(submitted, persisted, nameof(MaxToolRounds),
                     saved.Workflow.Workflow.MaxToolRounds.ToString(CultureInfo.InvariantCulture), value => MaxToolRounds = value);
-                ApplyCanonicalText(submitted, persisted, nameof(RuntimeAutosaveMs),
-                    saved.Workflow.Workflow.RuntimeAutosaveMs.ToString(CultureInfo.InvariantCulture), value => RuntimeAutosaveMs = value);
             }, persisted);
         }
         catch (SettingsInputException ex)
@@ -4638,7 +4699,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     BudgetUsd,
                     "ui.settings.automation.global_budget"),
                 _spentUsd,
-                SettingsInputValidation.NonNegativeDouble(
+                SettingsInputValidation.OptionalNonNegativeDouble(
                     PreauthorizedUsd,
                     "ui.settings.automation.preauthorized_budget"),
                 _projectAutomation.IsEnabled),
@@ -4672,10 +4733,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             SettingsInputValidation.PositiveInt(
                 MaxToolRounds,
                 "ui.settings.automation.max_tool_rounds"),
-            CheckpointEnabled,
-            SettingsInputValidation.PositiveLong(
-                RuntimeAutosaveMs,
-                "ui.settings.automation.runtime_autosave_ms")));
+            CheckpointEnabled));
         return new AutomationSectionSettings(automation, workflow);
     }
 
@@ -5002,7 +5060,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private void ApplyAutomation(AutomationSettings automation)
     {
         BudgetUsd = automation.Budget.BudgetUsd.ToString("0.####");
-        PreauthorizedUsd = automation.Budget.PreauthorizedUsd.ToString("0.####");
+        // U112：未设置就保持空串，不折叠成 "0"——否则原样保存会把「不限制」
+        // 写成「零额度、全部暂停」。空串在保存侧回到 null。
+        PreauthorizedUsd = automation.Budget.PreauthorizedUsd?.ToString("0.####") ?? string.Empty;
         _projectAutomation.ApplyBackendValue(automation.Budget.AutoModeEnabled);
         _spentUsd = automation.Budget.SpentUsd;
         SpentText = $"${automation.Budget.SpentUsd:0.####}";
@@ -5683,6 +5743,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     private static string StableNumber(double value) =>
         value.ToString("0.####", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// U112：可空金额的规范文本。「未设置」渲染成空串而非 <c>0</c>——
+    /// 折叠成 0 会在下一次保存时把「不限制」静默写成「零额度、全部暂停」。
+    /// </summary>
+    private static string StableNumber(double? value) =>
+        value.HasValue ? StableNumber(value.Value) : string.Empty;
 
     private void ApplyCanonicalText(
         IReadOnlyDictionary<string, string> submitted,
@@ -6368,7 +6435,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             [nameof(MaxLoopIterations)] = MaxLoopIterations,
             [nameof(MaxToolRounds)] = MaxToolRounds,
             [nameof(CheckpointEnabled)] = CheckpointEnabled.ToString(),
-            [nameof(RuntimeAutosaveMs)] = RuntimeAutosaveMs,
             [nameof(ConfirmationPolicies)] = confirmationSnapshot,
             [nameof(AllowNetwork)] = AllowNetwork.ToString(),
             [nameof(AllowWebSearch)] = AllowWebSearch.ToString(),
@@ -6456,7 +6522,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             {
                 nameof(BudgetUsd), nameof(PreauthorizedUsd),
                 nameof(WorkflowDefaultTimeoutMs), nameof(MaxLoopIterations), nameof(MaxToolRounds),
-                nameof(CheckpointEnabled), nameof(RuntimeAutosaveMs), nameof(ConfirmationPolicies),
+                nameof(CheckpointEnabled), nameof(ConfirmationPolicies),
             },
             PermissionsSection => new[]
             {
@@ -6559,6 +6625,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         var current = CurrentValues();
         HasUnsavedChanges = _draftState.IsDirty(current);
         RestoreCurrentTabCommand?.NotifyCanExecuteChanged();
+        SaveCurrentTabCommand?.NotifyCanExecuteChanged();
         if (!updateStatus)
         {
             return;
@@ -6816,7 +6883,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             or nameof(DefaultTimeoutMs) or nameof(DefaultBudgetUsd) or nameof(TemplateRepositoryBaseUrl)
             or nameof(BudgetUsd) or nameof(PreauthorizedUsd)
             or nameof(WorkflowDefaultTimeoutMs) or nameof(MaxLoopIterations) or nameof(MaxToolRounds)
-            or nameof(CheckpointEnabled) or nameof(RuntimeAutosaveMs) or nameof(AllowNetwork)
+            or nameof(CheckpointEnabled) or nameof(AllowNetwork)
             or nameof(AllowWebSearch) or nameof(AllowHttpSkill) or nameof(AllowWasmNetwork)
             or nameof(AllowSecretRead) or nameof(ReadableRootsText) or nameof(WritableRootsText)
             or nameof(Theme) or nameof(ThemeMainColor) or nameof(ThemeSurfaceColor) or nameof(ThemeBrandColor)
