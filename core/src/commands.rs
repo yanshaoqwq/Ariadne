@@ -24,7 +24,8 @@ use crate::config::{
     policy_code_from_dual_policy, read_confirmation_policy_settings, AppConfig,
     AppPermissionsStore, AppRuntimeSettings, AppRuntimeSettingsStore, ApprovalPromptConfig,
     ConfigStore, GitConfig, ModelConfig, PermissionsConfig, ProjectConfig, ProjectCredentialScope,
-    ProviderCatalogStore, ProviderConfig, QdrantAuthMode, RagConfig, SecretStore, SecretValue,
+    ProviderCatalogStore, ProviderConfig, QdrantAuthMode, RagConfig, SecretProtectionStatus,
+    SecretStore, SecretValue,
     VectorStoreBackend, WorkflowConfig,
 };
 use crate::contracts::{
@@ -72,8 +73,10 @@ use crate::node_capabilities::{
     EXECUTOR_ADAPTER_TOOL_CAPABILITY, PROJECT_AI_TOOL_CAPABILITY,
 };
 use crate::providers::{
-    web_search_tool_definition, ContentPart, HttpWebSearchProvider, LlmMessage, LlmRole,
-    OpenAiCompatibleLlmProvider, Provider, ProviderProtocol, SearchProvider, ToolDefinition,
+    web_search_tool_definition, ContentPart, HttpWebSearchProvider, LlmMessage, LlmProvider,
+    LlmRole, OpenAiCompatibleLlmProvider, Provider, ProviderCacheKey, ProviderHealth,
+    ProviderHealthReport,
+    ProviderProtocol, ProviderRuntimeRegistry, SearchProvider, ToolDefinition,
     WebSearchToolExecutor, EXECUTOR_ADAPTER_WEB_SEARCH_TOOL, PROJECT_AI_WEB_SEARCH_TOOL,
 };
 use crate::rag::SqliteWritingKnowledgeStore;
@@ -105,13 +108,19 @@ const WORKFLOW_WORKER_LEASE_LOST_ERROR: &str = "workflow worker lease was lost d
 const WORKFLOW_SCHEDULER_LEASE_TTL_MS: u64 = 3_000;
 const WORKFLOW_SCHEDULER_MAX_SLEEP_MS: u64 = 1_000;
 const WORKFLOW_SCHEDULER_MAX_CLAIMS_PER_TICK: usize = 64;
+/// 运行完成回报追加进对话时的 revision CAS 重试上限。
+/// 有界是为了不让通知在并发写入下无限自旋占住调度线程。
+const WORKFLOW_COMPLETION_APPEND_MAX_ATTEMPTS: usize = 8;
 
-pub const WORKFLOW_STATUS_UPDATE_EVENT: &str = "workflow_status_update";
-pub const RUN_LOG_APPENDED_EVENT: &str = "run_log_appended";
-pub const BUDGET_UPDATED_EVENT: &str = "budget_updated";
-pub const CONFIRMATION_CREATED_EVENT: &str = "confirmation_created";
-pub const DIAGNOSTICS_UPDATED_EVENT: &str = "diagnostics_updated";
-pub const TOAST_CREATED_EVENT: &str = "toast_created";
+// U116：原先这里有 6 个 `*_EVENT` 事件名常量（workflow_status_update / run_log_appended /
+// budget_updated / confirmation_created / diagnostics_updated / toast_created），全部零发射点、
+// 桌面端也一个都不监听——它们描述的是一套**从未建成的推送架构**。
+//
+// 实际交付方式是**轮询**：前端调 `get_workflow_events` 按 sequence 增量拉取，
+// CLI 侧由 `ipc.rs` 的 `run_watch_workflow_events` 循环轮询。没有 emit/push 通道。
+//
+// 保留这些常量比删掉更坏：维护者看到 `TOAST_CREATED_EVENT` 会以为存在 toast 推送通道，
+// 照着接线却发现无人接收。若日后真要做推送，应连同通道一起设计，而不是先摆一批名字。
 
 const DEFAULT_PROJECT_ENV: &str = "ARIADNE_PROJECT_ROOT";
 const RECENT_PROJECTS_FILE: &str = "recent_projects.json";
@@ -198,6 +207,21 @@ impl Drop for WorkflowSchedulerHandle {
     }
 }
 
+/// U116：进程内 LLM provider 实例缓存。
+///
+/// 键含「配置+凭据指纹」，所以缓存是**自校验**的：用户改 base_url 或换 key 后
+/// 指纹随即改变、旧条目不再命中。这使得六个「改配置」命令
+/// （`save_provider_key` / `revoke_provider_key` / `rebind_project_provider_key` /
+/// `save_provider_settings` / `save_provider_section_settings` / `remove_provider`）
+/// **都不需要各自挂失效逻辑**——漏挂一处就是「改完 key 后端仍用旧凭据发请求」这种
+/// 静默缺陷，而且以后新增第七个命令还会再漏。
+///
+/// 取成独立句柄类型（而非只挂在 state 上）是因为 `llm_runtime` 这条链路上的函数
+/// 只收 `&dyn SecretStore`，不持有整个 `AriadneAppState`；传句柄可避免为了缓存
+/// 去改动一串公开签名。
+pub type LlmProviderCache =
+    Arc<Mutex<BTreeMap<ProviderCacheKey, Arc<OpenAiCompatibleLlmProvider>>>>;
+
 /// 桌面前端共享状态。project_root 只能由显式环境变量或项目生命周期命令设置。
 #[derive(Clone)]
 pub struct AriadneAppState {
@@ -205,6 +229,10 @@ pub struct AriadneAppState {
     app_state_root: PathBuf,
     secret_store: Arc<dyn SecretStore>,
     retrieval_runtime: Arc<Mutex<Option<Arc<ProjectRetrievalRuntime>>>>,
+    /// U116：进程内 LLM provider 实例缓存，键含配置+凭据指纹（自校验，见
+    /// `ProviderRuntimeRegistry` 说明）。缓存 provider 是为了复用其 HTTP 连接池，
+    /// 并让 `health_check_all` 之类的生命周期能力有统一入口。
+    llm_providers: LlmProviderCache,
     workflow_scheduler: Arc<Mutex<Option<WorkflowSchedulerHandle>>>,
     project_activation: Arc<Mutex<()>>,
     global_settings: Arc<Mutex<()>>,
@@ -221,6 +249,7 @@ impl AriadneAppState {
             app_state_root: app_state_root.into(),
             secret_store,
             retrieval_runtime: Arc::new(Mutex::new(None)),
+            llm_providers: Arc::new(Mutex::new(BTreeMap::new())),
             workflow_scheduler: Arc::new(Mutex::new(None)),
             project_activation: Arc::new(Mutex::new(())),
             global_settings: Arc::new(Mutex::new(())),
@@ -451,6 +480,46 @@ impl AriadneAppState {
         drop(runtime_slot);
         drop(previous);
         Ok(runtime)
+    }
+
+    /// U116：按「配置+凭据指纹」取用 LLM provider 实例，未命中则构造并缓存。
+    ///
+    /// 复用的意义是省掉重建 `reqwest` 连接池；而**正确性**由指纹保证——
+    /// 用户改 base_url / 换 key 后指纹随即改变，旧条目不再命中，
+    /// 因此六个「改配置」命令都不需要各自挂失效逻辑（漏一处即是静默用旧凭据发请求）。
+    /// 返回 LLM provider 缓存句柄，供不持有整个 state 的下游函数取用。
+    pub(crate) fn llm_provider_cache(&self) -> LlmProviderCache {
+        Arc::clone(&self.llm_providers)
+    }
+
+    /// 测试专用：直接取缓存句柄以预置实例。
+    ///
+    /// 「探活项」只在缓存非空时产生，而填充缓存的正常途径是真发一次 LLM 调用——
+    /// 那要打网络、要凭据，与命名/分类这类契约无关。给测试一个显式入口，
+    /// 好过让用例绕道真实网络（慢、不稳、且掩盖被测契约）。
+    pub fn llm_provider_cache_for_tests(&self) -> LlmProviderCache {
+        self.llm_provider_cache()
+    }
+
+    /// U116：对当前已缓存的 LLM provider 逐个做健康检查。
+    ///
+    /// 这是 `ProviderRuntimeRegistry::health_check_all` 在产品侧的落点：
+    /// 此前产品完全没有「统一探活」的入口，用户只能靠真跑一次工作流才知道
+    /// provider 是否可用。
+    pub fn check_llm_provider_health(&self) -> CommandResult<Vec<ProviderHealthReport>> {
+        let cache = self
+            .llm_providers
+            .lock()
+            .map_err(|_| CommandError::internal("llm provider cache lock poisoned"))?;
+        let mut registry = ProviderRuntimeRegistry::default();
+        for (key, provider) in cache.iter() {
+            // 同一 provider_id 在缓存里最多一条（见 cached_llm_provider 的 retain），
+            // 所以这里不会撞 RegistryDuplicate。
+            registry
+                .register_llm(key.provider_id.clone(), Arc::clone(provider) as Arc<dyn LlmProvider>)
+                .map_err(error_to_string)?;
+        }
+        Ok(registry.health_check_all())
     }
 
     /// 配置或凭据变更后原子替换组合根，旧 sidecar 在新运行时就绪后再关闭。
@@ -815,6 +884,14 @@ pub struct RunWorkflowRequest {
     pub start_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub initial_inputs: BTreeMap<String, Value>,
+    /// 工作流变量初值。与 `initial_inputs`（节点端口输入）不同层：
+    /// 变量是整个 run 的可读写状态，端口输入只喂给起始节点。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, Value>,
+    /// 发起本次运行的项目空间 AI 对话 id；人工点「运行」时为 None。
+    /// 终态回报据此定位目标对话，缺了它 AI 启动完就断线。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -827,7 +904,11 @@ pub struct WorkflowRunStarted {
 pub struct BudgetStatus {
     pub budget_usd: f64,
     pub spent_usd: f64,
-    pub preauthorized_usd: f64,
+    /// U112：`None` = 从未设置（Auto Mode 不限额）；`Some(0.0)` = 用户显式设的零额度。
+    /// 不可折叠成裸 `f64`——那会让一次「打开设置页再保存」的空往返
+    /// 把「不限制」静默翻转成「全部暂停」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preauthorized_usd: Option<f64>,
     pub auto_mode_enabled: bool,
 }
 
@@ -2126,7 +2207,10 @@ pub fn import_chapter(
 ) -> CommandResult<ChapterDocumentIndex> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "chapter_import")?;
-    request.source_path = project_path_buf(&project_root, &request.source_path)?;
+    // 源稿在项目外是**正常情况**：作者从下载目录、U 盘、别的写作软件导出目录里挑稿子。
+    // 要求源在项目内等于要求「先手工拷进项目再导入」，导入功能本身就没意义了。
+    // 落点 target_path 仍必须在项目内——那是我们要写入的地方。
+    request.source_path = import_source_path_buf(&project_root, &request.source_path)?;
     request.target_path = project_path_buf(&project_root, &request.target_path)?;
     let mut index = load_chapter_index(&project_root)?;
     if !request.overwrite
@@ -2138,7 +2222,15 @@ pub fn import_chapter(
             "chapter id or target document already exists; explicit overwrite is required",
         ));
     }
-    let documents = document_service(&project_root);
+    // 文档服务的读权限走 readable_file_roots 沙箱，默认只含项目内。源稿在项目外时
+    // 必须把它**所在目录**加进可读根，否则解析放行了、读取仍被拒。
+    // 只加这一次导入用到的那个目录、且只读：不放宽写入根，也不把沙箱本身改宽。
+    let documents = match request.source_path.parent() {
+        Some(source_dir) if !source_dir.starts_with(&project_root) => {
+            document_service_with_extra_readable_root(&project_root, source_dir.to_path_buf())
+        }
+        _ => document_service(&project_root),
+    };
     let report = import_chapter_document(&documents, request).map_err(error_to_string)?;
     index
         .entries
@@ -2187,9 +2279,15 @@ pub fn list_workflow_graphs(state: &AriadneAppState) -> CommandResult<Vec<Workfl
     list_workflow_graphs_impl(&project_root)
 }
 
-pub fn validate_workflow_graph(graph_data: WorkflowGraphData) -> CommandResult<()> {
+pub fn validate_workflow_graph(
+    state: &AriadneAppState,
+    graph_data: WorkflowGraphData,
+) -> CommandResult<()> {
+    // U113：预校验必须用项目真实限制，否则前端放行、保存边界拒绝，用户看到自相矛盾的结果。
+    let project_root = project_root_from_state(state, None)?;
+    let limits = project_workflow_limits(&project_root)?;
     let workflow = graph_to_workflow(graph_data)?;
-    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)
+    validate_workflow_execution_contracts(&workflow, &limits).map_err(error_to_string)
 }
 
 pub fn save_workflow_graph(
@@ -2378,7 +2476,8 @@ pub fn pack_workflow_selection_impl_with_operation_id_and_app_state(
     let mut graph = workflow_to_graph(report.workflow);
     graph.expected_revision = Some(base_revision.clone());
     let prepared_workflow = graph_to_workflow(graph.clone())?;
-    validate_workflow_execution_contracts(&prepared_workflow).map_err(error_to_string)?;
+    validate_workflow_execution_contracts(&prepared_workflow, &project_workflow_limits(project_root)?)
+        .map_err(error_to_string)?;
     let prepared_body =
         serde_json::to_string_pretty(&prepared_workflow).map_err(error_to_string)?;
     let mut prepared_graph = workflow_to_graph(prepared_workflow);
@@ -2490,6 +2589,8 @@ pub fn start_workflow(
             workflow_id,
             start_node_id,
             initial_inputs: BTreeMap::new(),
+            variables: BTreeMap::new(),
+            origin_conversation_id: None,
         },
     )?;
     state.ensure_workflow_scheduler()?;
@@ -3091,7 +3192,7 @@ pub fn save_template_repository_settings(
 pub fn update_budget_config(
     state: &AriadneAppState,
     budget_usd: f64,
-    preauthorized_usd: f64,
+    preauthorized_usd: Option<f64>,
 ) -> CommandResult<BudgetStatus> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation =
@@ -3843,6 +3944,53 @@ pub fn restore_to_new_branch_with_cancellation(
     }
 }
 
+/// U118：当前凭据保护状态，设置页据此决定是否弹「设主密码 / 用明文」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretProtectionReport {
+    pub status: SecretProtectionStatus,
+    /// 是否需要用户立刻处置（`Locked` 时保存凭据必失败）。
+    pub requires_setup: bool,
+}
+
+/// U118：读取凭据保护状态。
+pub fn get_secret_protection(state: &AriadneAppState) -> CommandResult<SecretProtectionReport> {
+    let status = state.secret_store.protection_status();
+    Ok(SecretProtectionReport {
+        status,
+        requires_setup: status == SecretProtectionStatus::Locked,
+    })
+}
+
+/// U118：设置本地主密码，凭据自此以密文落盘。
+///
+/// 这条命令的存在本身就是修复的核心：此前错误信息让用户去
+/// 「set a local secret master password」，而那个操作**在产品里不存在**——
+/// IPC 零命令、UI 零入口、文案零条目，GUI 用户照着提示做只会撞墙。
+pub fn set_local_secret_master_password(
+    state: &AriadneAppState,
+    master_password: String,
+) -> CommandResult<SecretProtectionReport> {
+    state
+        .secret_store
+        .set_master_password(SecretValue::new(master_password))
+        .map_err(error_to_string)?;
+    get_secret_protection(state)
+}
+
+/// U118：用户显式接受明文存储。
+///
+/// 独立成一条命令、而非 `set_master_password(None)` 之类的重载：明文是一个
+/// **需要用户明确点头**的选择，把它藏在参数里会让调用点读不出这层含义。
+pub fn allow_unprotected_local_secrets(
+    state: &AriadneAppState,
+) -> CommandResult<SecretProtectionReport> {
+    state
+        .secret_store
+        .allow_unprotected_storage()
+        .map_err(error_to_string)?;
+    get_secret_protection(state)
+}
+
 pub fn get_provider_config(state: &AriadneAppState) -> CommandResult<ProviderConfigStatus> {
     let project_root = project_root_from_state(state, None)?;
     crate::config::bind_project_app_state(&project_root, state.app_state_root())
@@ -3958,8 +4106,7 @@ pub fn revoke_provider_key(
     credentials
         .delete_provider_secret(&provider)
         .map_err(error_to_string)?;
-    // 凭据已删除：此后任何一步失败都必须先把它放回去，否则一次失败的撤销会把
-    // 用户的 key 永久销毁，而调用方只看到一个错误、以为什么都没发生。
+    // 凭据已删除，此后任一步失败都要先把它放回去，避免一次失败的撤销把 key 永久销毁。
     let revoked = provider_config_status_from_config_with_app_state(
         &project_root,
         config,
@@ -4309,11 +4456,13 @@ pub fn quick_edit_with_cancellation(
     cancellation: &crate::contracts::ExecutionCancellation,
 ) -> CommandResult<QuickEditResult> {
     let project_root = project_root_from_state(state, None)?;
+    let provider_cache = state.llm_provider_cache();
     quick_edit_impl_with_cancellation(
         &project_root,
         state.secret_store.as_ref(),
         request,
         cancellation,
+        Some(&provider_cache),
     )
 }
 
@@ -4363,6 +4512,7 @@ pub fn project_ai_chat_with_cancellation(
     let runner_retrieval = state.retrieval_runtime()?;
     let project_ai_retrieval = Arc::clone(&runner_retrieval);
     let scheduler_state = state.clone();
+    let provider_cache = state.llm_provider_cache();
     let response = project_ai_chat_with_runner(
         &project_root,
         state.secret_store.as_ref(),
@@ -4379,6 +4529,7 @@ pub fn project_ai_chat_with_cancellation(
             scheduler_state.ensure_workflow_scheduler()?;
             Ok(started)
         },
+        Some(&provider_cache),
     )?;
     state.ensure_workflow_scheduler()?;
     Ok(response)
@@ -4531,7 +4682,11 @@ fn install_template_for_active_project(
         load_workflow_definition_with_revision(expected_project_root, None)?;
     normalize_project_canvas_identity(&mut canvas);
     if merge_workflow_into_project_canvas(&mut canvas, source, content_revision_hash(&raw)) {
-        validate_workflow_execution_contracts(&canvas).map_err(error_to_string)?;
+        validate_workflow_execution_contracts(
+            &canvas,
+            &project_workflow_limits(expected_project_root)?,
+        )
+        .map_err(error_to_string)?;
         let mut graph = workflow_to_graph(canvas);
         graph.expected_revision = (!canvas_revision.is_empty()).then_some(canvas_revision);
         save_workflow_graph_locked(expected_project_root, graph)?;
@@ -4576,6 +4731,14 @@ pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<Backend
         Vec::new(),
         retrieval_reports,
     );
+    // U116：把 provider **实际连通性**并入诊断。
+    //
+    // 下面的 `provider_config_diagnostic_items` 只看配置是否自洽（能不能选出
+    // provider/model），答不了「这个 key 现在还能不能用」。此前产品完全没有统一探活
+    // 入口，用户只能靠真跑一次工作流才知道 provider 通不通——一次失败的工作流
+    // 既花钱又要等，还分不清是配置错、凭据过期还是对端故障。
+    report.extend_items(llm_provider_health_diagnostic_items(state));
+    report.extend_items([secret_protection_diagnostic_item(state)]);
     match config {
         Ok(config) => report.extend_items(provider_config_diagnostic_items(
             &config.providers,
@@ -4588,6 +4751,72 @@ pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<Backend
         }]),
     }
     Ok(report)
+}
+
+/// U118：把凭据保护状态做成常驻诊断项。
+///
+/// 为什么明文要报 `Degraded` 而不是 `Healthy`：用户当时点头同意了明文，
+/// 但三个月后未必记得自己的 API Key 正躺在磁盘上。若这里报 Healthy，
+/// 「同意过」就成了一次性的、再也看不见的决定——而诊断面板正是
+/// 「现在这台机器处于什么状态」的唯一常驻答案。
+///
+/// `Locked` 报 `Unavailable`：该状态下保存凭据必定失败，属真实阻断。
+fn secret_protection_diagnostic_item(state: &AriadneAppState) -> DiagnosticItem {
+    let (status, reason) = match state.secret_store.protection_status() {
+        SecretProtectionStatus::Managed => (DiagnosticStatus::Healthy, None),
+        SecretProtectionStatus::Encrypted => (DiagnosticStatus::Healthy, None),
+        // reason 必须是本地化 key（`diagnostics.*` 约定，与 reranker 那条同源）：
+        // 前端 `DiagnosticReasonLabel` 只对该前缀查表，塞裸英文会直接显示给中/日用户。
+        SecretProtectionStatus::Unprotected => (
+            DiagnosticStatus::Degraded,
+            Some("diagnostics.secrets.unprotected".to_owned()),
+        ),
+        SecretProtectionStatus::Locked => (
+            DiagnosticStatus::Unavailable,
+            Some("diagnostics.secrets.locked".to_owned()),
+        ),
+    };
+    DiagnosticItem {
+        component: "secrets.protection".to_owned(),
+        status,
+        reason,
+    }
+}
+
+/// U116：对已缓存的 LLM provider 逐个探活，转成诊断项。
+///
+/// 只探**已缓存**的实例：缓存是按「配置+凭据指纹」建的，里面装的正是当前生效的那批
+/// provider。缓存为空（尚未发起过任何 LLM 调用）时不报任何项——那时既没有实例可探，
+/// 也谈不上健康与否，凭空报一条 Unavailable 只会制造假警报。
+fn llm_provider_health_diagnostic_items(state: &AriadneAppState) -> Vec<DiagnosticItem> {
+    let reports = match state.check_llm_provider_health() {
+        Ok(reports) => reports,
+        // 探活本身失败（锁中毒等）不应把整份诊断带崩：诊断的用途正是排查故障。
+        Err(error) => {
+            return vec![DiagnosticItem {
+                component: "providers.llm.reachability".to_owned(),
+                status: DiagnosticStatus::Unavailable,
+                reason: Some(error.diagnostic.unwrap_or(error.message_key)),
+            }]
+        }
+    };
+    reports
+        .into_iter()
+        .map(|report| {
+            let (status, reason) = match report.health {
+                ProviderHealth::Healthy => (DiagnosticStatus::Healthy, None),
+                ProviderHealth::Degraded { reason } => (DiagnosticStatus::Degraded, Some(reason)),
+                ProviderHealth::Unhealthy { reason } => {
+                    (DiagnosticStatus::Unavailable, Some(reason))
+                }
+            };
+            DiagnosticItem {
+                component: format!("providers.llm.reachability.{}", report.provider_id),
+                status,
+                reason,
+            }
+        })
+        .collect()
 }
 
 fn provider_config_diagnostic_items(
@@ -5150,7 +5379,8 @@ fn load_project_canvas_locked(project_root: &Path) -> CommandResult<WorkflowGrap
     }
 
     if changed {
-        validate_workflow_execution_contracts(&canvas).map_err(error_to_string)?;
+        validate_workflow_execution_contracts(&canvas, &project_workflow_limits(project_root)?)
+            .map_err(error_to_string)?;
         let mut graph = workflow_to_graph(canvas);
         graph.expected_revision = (!canvas_revision.is_empty()).then_some(canvas_revision);
         return save_workflow_graph_locked(project_root, graph);
@@ -5198,7 +5428,8 @@ fn save_workflow_graph_locked(
 ) -> CommandResult<WorkflowGraphData> {
     let expected_revision = graph_data.expected_revision.clone();
     let workflow = graph_to_workflow(graph_data)?;
-    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
+    validate_workflow_execution_contracts(&workflow, &project_workflow_limits(project_root)?)
+        .map_err(error_to_string)?;
     let path = workflow_path(project_root, Some(workflow.id.as_str().to_owned()))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(error_to_string)?;
@@ -5707,7 +5938,8 @@ fn prepare_workflow_run_state(
             "initial_inputs require start_node_id",
         ));
     }
-    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
+    validate_workflow_execution_contracts(&workflow, &project_workflow_limits(project_root)?)
+        .map_err(error_to_string)?;
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
     let dependency_plan =
         compile_workflow_runtime_dependency_plan(project_root, secrets, &workflow)?;
@@ -5737,6 +5969,20 @@ fn prepare_workflow_run_state(
         None
     };
     let mut runtime = WorkflowRuntime::new(&workflow, run_id).map_err(error_to_string)?;
+    // 变量注入必须在 preflight 之前：类型不符或必填留空要在建 run 之前就失败，
+    // 而不是先把 run 落进 runtime.db 再报错。
+    if !request.variables.is_empty() {
+        runtime
+            .inject_variables(
+                &request.variables,
+                crate::workflow::WorkflowVariableSource::ProjectAi,
+            )
+            .map_err(error_to_string)?;
+    }
+    runtime
+        .ensure_required_variables_present()
+        .map_err(error_to_string)?;
+    runtime.state.origin_conversation_id = request.origin_conversation_id.clone();
     runtime.state.prepared_workflow = Some(workflow.clone());
     runtime.state.prepared_dependency_plan = Some(
         serde_json::to_value(freeze_workflow_runtime_dependency_plan(&dependency_plan))
@@ -6206,6 +6452,43 @@ struct WorkflowNodeSearchBindings {
     project_search: Option<(Arc<ProjectRetrievalRuntime>, ToolDefinition)>,
     web_search: Option<(Arc<HttpWebSearchProvider>, ToolDefinition)>,
     permission_policy: PermissionPolicy,
+    /// U108：该节点经权限过滤后允许下发的 Module 9 写作工具名。
+    /// 与检索工具共用同一套 `node_tool_control_enabled` 判定，
+    /// 权限页上这批开关自此真正生效，不再是空接线。
+    writing_tools: BTreeSet<String>,
+}
+
+/// U108：按 tool_controls 过滤该写作节点可下发的工具名。
+///
+/// 只处理写作执行器自己承接的工具（`WritingToolExecutor::handles_tool`）——
+/// `*-search` 归项目检索装配、`*-web-search` 已在 `web_search` 分支判定过，
+/// 避免同一个开关被两处解释。
+fn workflow_writing_tools_for_node(
+    type_name: &str,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
+    presets: &NodePresetSettings,
+) -> BTreeSet<String> {
+    let Some(agent) = crate::rag::models::WritingAgentKind::from_node_type(type_name) else {
+        return BTreeSet::new();
+    };
+    let prompts = match crate::rag::resources::load_prompt_resources() {
+        Ok(prompts) => prompts,
+        // 内置 prompt 资源不可读属于打包缺陷，此处降级为「不下发写作工具」，
+        // 真实错误由 tool_definitions_for_agent 在装配时 fail-loud。
+        Err(_) => return BTreeSet::new(),
+    };
+    let Ok(definitions) = crate::rag::tools::tool_definitions_for_agent(agent, &prompts) else {
+        return BTreeSet::new();
+    };
+    definitions
+        .into_iter()
+        .map(|tool| tool.name)
+        .filter(|tool| crate::rag::tools::WritingToolExecutor::handles_tool(tool))
+        .filter(|tool| !tool.ends_with("-web-search"))
+        .filter(|tool| {
+            node_tool_control_enabled(controls, presets, type_name, type_name, tool)
+        })
+        .collect()
 }
 
 fn workflow_node_search_bindings(
@@ -6248,6 +6531,7 @@ fn workflow_node_search_bindings(
         project_search,
         web_search,
         permission_policy,
+        writing_tools: workflow_writing_tools_for_node(type_name, controls, presets),
     }
 }
 
@@ -6297,7 +6581,22 @@ fn execute_workflow_runtime(
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
     let ledger = Arc::new(SqliteCostLedger::open(project_root).map_err(error_to_string)?);
     let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls.clone());
-    let max_tool_rounds = project_config.workflow.max_tool_rounds;
+    // U113：节点超时回落、loop 上限与 tool-use 轮次共用同一份项目限制。
+    let workflow_limits = project_config.workflow.execution_limits();
+    // U126：日预算此前只约束快速编辑与项目问答，对工作流零约束——而工作流是
+    // 主力消费路径。这里把它接进节点执行前的门禁。
+    let daily_budget_limits =
+        budget_limits_from_global_budget(read_budget_config(project_root)?.budget_usd);
+    let auto_mode_config = project_config.auto_mode.clone();
+    // U117：确认项策略在运行开始时锁定一次。
+    // 放进 handler 闭包会让每个节点重读一遍配置文件，且同一次运行中途
+    // 改设置会导致前后节点用不同策略——与 dependency plan 的冻结语义相悖。
+    let writing_confirmation_policy = crate::workflow::load_writing_confirmation_policy(
+        project_root,
+        auto_mode_config.enabled_by_default,
+    )
+    .map_err(|error| CommandError::internal(error.to_string()))?
+    .0;
     let retrieval_runtime = if requires_project_retrieval {
         Some(match retrieval_runtime {
             Some(runtime) => runtime,
@@ -6342,6 +6641,15 @@ fn execute_workflow_runtime(
                 retrieval_runtime.as_ref(),
                 web_search_runtime.as_ref(),
             );
+            // U108：写作节点要访问项目写作知识库与章节正文，二者都由 project_root
+            // 定位；闭包是 move 的，这里先把根路径复制进去。
+            let writing_agent = crate::rag::models::WritingAgentKind::from_node_type(type_name);
+            let writing_root = project_root.to_path_buf();
+            // U126：日预算门禁所需的数据，随闭包移动。
+            let daily_budget_limits = daily_budget_limits.clone();
+            let auto_mode_config = auto_mode_config.clone();
+            let writing_confirmation_policy = writing_confirmation_policy.clone();
+            let writing_document_root = document_root.to_path_buf();
             external
                 .register_handler_with_policy(
                     type_name,
@@ -6353,8 +6661,29 @@ fn execute_workflow_runtime(
                             llm_routes.as_ref(),
                             llm_providers.as_ref(),
                         )?;
+                        // U126：每次 LLM 调用前检查日预算。放在路由之后、调用之前，
+                        // 这样节点不会先花掉钱再报错。
+                        ensure_workflow_daily_budget_allows_call(
+                            ledger.as_ref(),
+                            &daily_budget_limits,
+                            &auto_mode_config,
+                        )?;
+                        // U108：写作节点在每次执行时重新加载知识库与正文，
+                        // 保证 find 看到的是当前状态、行号 patch 基于最新版本。
+                        let writing_context = match writing_agent {
+                            Some(agent) if !search_bindings.writing_tools.is_empty() => Some(
+                                load_workflow_writing_context(
+                                    &writing_root,
+                                    &writing_document_root,
+                                    agent,
+                                    &request,
+                                )?,
+                            ),
+                            _ => None,
+                        };
                         if search_bindings.project_search.is_none()
                             && search_bindings.web_search.is_none()
+                            && writing_context.is_none()
                         {
                             return execute_llm_node_with_defaults(
                                 request,
@@ -6364,7 +6693,10 @@ fn execute_workflow_runtime(
                                 Some(&route.model_id),
                             );
                         }
-                        execute_llm_node_with_search_tools(
+                        // 落盘需要 operation 身份，而 request 会被下面的调用消费掉。
+                        let request_operation_id = request.operation_id.clone();
+                        let request_hash = request.request_hash.clone();
+                        let output = execute_llm_node_with_search_tools(
                             request,
                             provider,
                             ledger.as_ref(),
@@ -6384,9 +6716,53 @@ fn execute_workflow_runtime(
                                         )
                                     },
                                 ),
-                                max_tool_rounds,
+                                writing_tools: writing_context.as_ref().map(|context| {
+                                    crate::workflow::WorkflowWritingToolOptions {
+                                        agent: context.agent,
+                                        allowed_tools: search_bindings.writing_tools.clone(),
+                                        knowledge: &context.knowledge,
+                                        document: context.document_context(),
+                                        chapter_id: context.chapter_id.as_deref(),
+                                        confirmation_policy: writing_confirmation_policy
+                                            .clone(),
+                                        auto_mode: crate::contracts::AutoModeState {
+                                            enabled: auto_mode_config.enabled_by_default,
+                                            preauthorized_budget_usd: auto_mode_config
+                                                .preauthorized_budget_usd,
+                                        },
+                                        // U108 阶段 3：不传会话 = 写作产出不落盘。
+                                        patch_session: context
+                                            .document
+                                            .as_ref()
+                                            .map(|document| document.patch_session.clone()),
+                                    }
+                                }),
+                                limits: workflow_limits,
                             },
-                        )
+                        );
+
+                        // U121：register 类工具写的是内存知识库，必须在节点结束时落盘，
+                        // 否则「登记伏笔/人物」在节点返回的瞬间就丢了。
+                        //
+                        // 只在本节点确实装配了写作工具时落盘：纯 LLM 节点没有 writing_context，
+                        // 不该在它的执行路径上触碰知识库。
+                        //
+                        // 落盘带 operation receipt（与 summarizer 同一套幂等机制），
+                        // 因此节点重放不会把同一次注册写成两条。
+                        match (&writing_context, &output) {
+                            (Some(context), Ok(node_output)) => {
+                                persist_workflow_writing_knowledge(
+                                    &writing_root,
+                                    &context.knowledge,
+                                    &request_operation_id,
+                                    &request_hash,
+                                    node_output,
+                                )?;
+                            }
+                            // 节点失败时不落盘：失败路径的知识库可能只写了一半。
+                            _ => {}
+                        }
+                        output
                     }),
                 )
                 .map_err(error_to_string)?;
@@ -6426,6 +6802,7 @@ fn execute_workflow_runtime(
                                 provider,
                                 ledger.as_ref(),
                                 &summarizer_root,
+                                &workflow_limits,
                             );
                         }
                         execute_summarizer_node_with_search_tools(
@@ -6447,7 +6824,7 @@ fn execute_workflow_runtime(
                                         tool.clone(),
                                     )
                                 }),
-                            max_tool_rounds,
+                            &workflow_limits,
                         )
                     }),
                 )
@@ -6531,9 +6908,119 @@ fn execute_workflow_runtime(
     } else {
         store
     };
-    runtime
+    let status = runtime
         .run_persisted(workflow, &mut executor, &store)
-        .map_err(error_to_string)
+        .map_err(error_to_string)?;
+
+    // 运行完成回报：项目空间 AI 启动的运行到达终态后，必须把结果送回发起对话。
+    // 放在这里而不是 runtime 内部，是因为 runtime 不该依赖对话存储；
+    // 这里是「执行一次工作流」的唯一收口，两条启动路径（直启 / 工具调用）
+    // 和 Resume 后的终态都会经过它。
+    //
+    // 回报失败不改变运行结果：稿子已经写出来了，不能因为通知没送达就把成功
+    // 的运行标成失败。但也不能静默 —— 打到 stderr 便于排查。
+    if let Some(report) = runtime.run_completion_report() {
+        if let Err(error) = deliver_workflow_run_completion(project_root, &report) {
+            eprintln!(
+                "[ariadne] workflow run completion report undelivered for {}/{}: {error}",
+                report.workflow_id.as_str(),
+                report.run_id.as_str()
+            );
+        }
+    }
+
+    Ok(status)
+}
+
+/// 把运行完成回报写进发起对话。
+///
+/// 用 `assistant` 角色而非 `user`：这条消息陈述的是系统侧发生的事实，
+/// 不是人说的话。伪装成用户发言会污染后续轮次的对话语义。
+///
+/// 措辞在这里组装而不在 runtime：core 的 runtime 层不该硬编码展示文案，
+/// 而对话内容必须是自然语言 —— 这里是两者的边界。
+fn deliver_workflow_run_completion(
+    project_root: &Path,
+    report: &crate::workflow::WorkflowRunCompletionReport,
+) -> CommandResult<()> {
+    let store = ProjectAiConversationStore::open(project_root).map_err(CommandError::from)?;
+    let content = workflow_run_completion_message(report);
+
+    // revision CAS 重试：完成回报是系统通知，不是用户编辑。撞上并发修订时
+    // 应当重读最新 revision 再追加，而不是像用户提交那样报冲突让人重试 ——
+    // 没有人在等着点「重试」。
+    for _ in 0..WORKFLOW_COMPLETION_APPEND_MAX_ATTEMPTS {
+        let snapshot = store
+            .load(&report.conversation_id)
+            .map_err(CommandError::from)?;
+        match store
+            .append_messages(
+                &report.conversation_id,
+                snapshot.revision,
+                &[("assistant".to_owned(), content.clone())],
+            )
+            .map_err(CommandError::from)?
+        {
+            ProjectAiAppendOutcome::Saved { .. } => return Ok(()),
+            ProjectAiAppendOutcome::RevisionConflict { .. } => continue,
+        }
+    }
+
+    Err(CommandError::conflict(format!(
+        "workflow run completion report could not be appended to conversation {} after {} attempts",
+        report.conversation_id, WORKFLOW_COMPLETION_APPEND_MAX_ATTEMPTS
+    )))
+}
+
+/// 完成回报的自然语言措辞。
+///
+/// 只陈述事实，不替 AI 决定下一步 —— 决定权在 AI 那边，这里多写一句
+/// 「请继续下一章」会把编排逻辑埋进文案里。
+fn workflow_run_completion_message(
+    report: &crate::workflow::WorkflowRunCompletionReport,
+) -> String {
+    let status = match report.status {
+        crate::contracts::RunStatus::Succeeded => "已完成",
+        crate::contracts::RunStatus::Failed => "已失败",
+        crate::contracts::RunStatus::Paused => "已暂停",
+        _ => "状态未知",
+    };
+    let mut lines = vec![format!(
+        "[工作流运行回报] 工作流 {} 的运行 {} {}。",
+        report.workflow_id.as_str(),
+        report.run_id.as_str(),
+        status
+    )];
+
+    if let Some(reason) = report.pause_reason.as_deref() {
+        lines.push(format!("暂停原因：{reason}"));
+    }
+    if let Some(reason) = report.stop_reason.as_deref() {
+        lines.push(format!("停止原因：{reason}"));
+    }
+    if let Some(failure) = report.failure.as_ref() {
+        lines.push(format!(
+            "失败详情：{}（阶段 {}）。建议：{}",
+            failure.message, failure.stage, failure.recovery_suggestion
+        ));
+    }
+    if !report.variables.is_empty() {
+        let rendered = report
+            .variables
+            .iter()
+            .map(|(name, value)| match value {
+                Value::String(text) => format!("{name}={text}"),
+                other => format!("{name}={other}"),
+            })
+            .collect::<Vec<_>>()
+            .join("，");
+        lines.push(format!("变量终值：{rendered}"));
+    }
+    if !report.artifacts.is_empty() {
+        lines.push(format!("产出：{}", report.artifacts.join("，")));
+    }
+
+    lines.join("\n")
 }
 
 fn inject_start_node_initial_inputs(
@@ -6936,13 +7423,20 @@ pub fn get_budget_status_impl(project_root: &Path) -> CommandResult<BudgetStatus
     let config = config_store.load_or_create().map_err(error_to_string)?;
     let budget_config = read_budget_config(project_root)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
+    // U126：`budget_usd` 是**日**预算（文案「今日累计花费上限」），
+    // 而这里原先用 `CostQuery::default()`（无时间窗口）取的是项目**全历史**累计。
+    // 两个口径塞进同一个分数（`ui.layout.budget_status` = `${spent}/${budget}`），
+    // 用久了必然显示超限。改为与预算判定同口径的今日窗口。
     let spent_usd = ledger
-        .total_cost(&CostQuery::default())
+        .total_cost(&CostQuery {
+            start_ms: Some(crate::costs::start_of_local_day_ms(workflow_lease_now_ms()?)),
+            ..CostQuery::default()
+        })
         .map_err(error_to_string)?;
     Ok(BudgetStatus {
         budget_usd: budget_config.budget_usd,
         spent_usd,
-        preauthorized_usd: config.auto_mode.preauthorized_budget_usd.unwrap_or(0.0),
+        preauthorized_usd: config.auto_mode.preauthorized_budget_usd,
         auto_mode_enabled: config.auto_mode.enabled_by_default,
     })
 }
@@ -7286,16 +7780,20 @@ fn display_name_language_pack_file_name(lang: &str) -> String {
 pub fn update_budget_config_impl(
     project_root: &Path,
     budget_usd: f64,
-    preauthorized_usd: f64,
+    preauthorized_usd: Option<f64>,
 ) -> CommandResult<()> {
     let _project_mutation = acquire_project_mutation_guard(project_root, "budget_settings_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     validate_money("budget_usd", budget_usd)?;
-    validate_money("preauthorized_usd", preauthorized_usd)?;
+    if let Some(preauthorized_usd) = preauthorized_usd {
+        validate_money("preauthorized_usd", preauthorized_usd)?;
+    }
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
-    // 0 是明确的零自动支出额度；缺失值仅保留给尚未保存过该设置的旧配置。
-    config.auto_mode.preauthorized_budget_usd = Some(preauthorized_usd);
+    // U112：`Some(0.0)` 是「零自动支出额度」这一显式意图，必须原样保存——
+    // 规整成 None 会静默解除用户刻意设的零额度，属安全性倒退。
+    // `None` 表示调用方没有提交该字段（未设置 / 原样回传），同样原样保留。
+    config.auto_mode.preauthorized_budget_usd = preauthorized_usd;
     config_store.save(&config).map_err(error_to_string)?;
     write_budget_config(project_root, &BudgetConfigFile { budget_usd })
 }
@@ -7365,7 +7863,9 @@ fn save_automation_settings_impl_with_app_state_and_workflow(
         acquire_project_mutation_guard(project_root, "automation_settings_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     validate_money("budget_usd", settings.budget.budget_usd)?;
-    validate_money("preauthorized_usd", settings.budget.preauthorized_usd)?;
+    if let Some(preauthorized_usd) = settings.budget.preauthorized_usd {
+        validate_money("preauthorized_usd", preauthorized_usd)?;
+    }
 
     let config_store = ConfigStore::with_app_state(project_root, app_state_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
@@ -7373,8 +7873,9 @@ fn save_automation_settings_impl_with_app_state_and_workflow(
         workflow.validate().map_err(error_to_string)?;
         config.workflow = workflow;
     }
-    // 不使用 0 作为“无限”哨兵，避免一次普通数值输入解除自动支出上限。
-    config.auto_mode.preauthorized_budget_usd = Some(settings.budget.preauthorized_usd);
+    // U112：与 update_budget_config_impl 一致——Some(0.0) 是显式零额度，None 是未设置，
+    // 两者都原样保存，绝不互相折叠。
+    config.auto_mode.preauthorized_budget_usd = settings.budget.preauthorized_usd;
     config.auto_mode.enabled_by_default = settings.budget.auto_mode_enabled;
 
     let mut normalized_settings = Vec::new();
@@ -7804,21 +8305,38 @@ fn resolve_confirmation_impl_with_claim(
         }
     };
 
-    let runtime_confirmation = runtime_state
-        .confirmations
-        .get(&request.confirmation_id)
-        .ok_or_else(|| {
-            CommandError::not_found(format!(
-                "confirmation item not found: {}",
-                request.confirmation_id
-            ))
-        })?;
-    let confirmation = confirmation_log_entry_from_runtime(
-        runtime_confirmation,
-        request.review_reason.as_deref(),
-        &request.workflow_id,
-        &request.run_id,
-    );
+    let confirmation = {
+        let runtime_confirmation = runtime_state
+            .confirmations
+            .get(&request.confirmation_id)
+            .ok_or_else(|| {
+                CommandError::not_found(format!(
+                    "confirmation item not found: {}",
+                    request.confirmation_id
+                ))
+            })?;
+        confirmation_log_entry_from_runtime(
+            runtime_confirmation,
+            request.review_reason.as_deref(),
+            &request.workflow_id,
+            &request.run_id,
+        )
+    };
+
+    // U108 阶段 3：审批通过后把 patch 写回磁盘。
+    //
+    // 位置由四条约束共同定死：
+    // - 在 `commit_confirmation_resolution` **之后**——只有确认项状态已落库为
+    //   Approved，写回门禁才会放行（之前读到的还是 Pending，必被拒）；
+    // - 在 `claim_resume` **之前**——它会把 run 置为可续跑并 spawn worker 跑
+    //   下游节点，那些节点可能读同一个文件，patch 必须先落盘；
+    // - 在 `_project_mutation` guard 之内——`apply_patch` 自己取的是共享锁，
+    //   可重入，不死锁；
+    // - 在本函数而**不是** resume worker 里——`resolve_confirmation_impl`
+    //   释放 lease 且从不续跑，放 worker 里等于 headless 路径永远不落盘。
+    let runtime_state =
+        apply_resolved_confirmation_patch(project_root, &store, &request.confirmation_id, runtime_state)?;
+
     let owner_id = format!("worker-{}", new_run_id()?.as_str());
     let lease = match store
         .claim_resume(
@@ -8923,6 +9441,8 @@ pub fn quick_edit_impl(
         secrets,
         request,
         &crate::contracts::ExecutionCancellation::new(),
+        // 无 state 的直调路径（测试与非桌面入口）不共享缓存，行为与接线前一致。
+        None,
     )
 }
 
@@ -8931,13 +9451,14 @@ pub fn quick_edit_impl_with_cancellation(
     secrets: &dyn SecretStore,
     request: QuickEditRequest,
     cancellation: &crate::contracts::ExecutionCancellation,
+    provider_cache: Option<&LlmProviderCache>,
 ) -> CommandResult<QuickEditResult> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "quick_edit")?;
-    let runtime = llm_runtime(project_root, secrets)?;
+    let runtime = llm_runtime(project_root, secrets, provider_cache)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
     let service = LlmService::new(&ledger, runtime.auto_mode.clone());
-    QuickEditService::new(service, &runtime.provider, runtime.config)
+    QuickEditService::new(service, runtime.provider.as_ref(), runtime.config)
         .quick_edit_with_cancellation(
             &request.selected_text,
             &request.instruction,
@@ -8967,6 +9488,7 @@ pub fn project_ai_chat_impl(
                 "project AI workflow start requires the application runtime",
             ))
         },
+        None,
     )
 }
 
@@ -9002,6 +9524,7 @@ fn project_ai_chat_with_runner(
     retrieval: Arc<ProjectRetrievalRuntime>,
     cancellation: &crate::contracts::ExecutionCancellation,
     workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
+    provider_cache: Option<&LlmProviderCache>,
 ) -> CommandResult<ProjectAiResponse> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "project_ai_chat")?;
@@ -9095,6 +9618,9 @@ fn project_ai_chat_with_runner(
             workflow_id,
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: BTreeMap::new(),
+            // 由项目空间 AI 发起：终态要回报给这个对话，否则 AI 无从得知结果。
+            origin_conversation_id: Some(conversation_id.clone()),
         })?)
     } else {
         None
@@ -9131,6 +9657,7 @@ fn project_ai_chat_with_runner(
         let (answer, tool_workflow_run, context_window) = project_ai_answer(
             project_root,
             secrets,
+            provider_cache,
             &structured_memory,
             &summary_chunks,
             &resolved_references,
@@ -9140,6 +9667,7 @@ fn project_ai_chat_with_runner(
             retrieval.as_ref(),
             cancellation,
             workflow_runner,
+            &conversation_id,
         )?;
         if workflow_run.is_none() {
             workflow_run = tool_workflow_run;
@@ -9394,6 +9922,7 @@ const LIST_START_NODES_TOOL: &str = "list_start_nodes";
 fn project_ai_answer(
     project_root: &Path,
     secrets: &dyn SecretStore,
+    provider_cache: Option<&LlmProviderCache>,
     project_memory: &[ProjectAiMemoryEntry],
     conversation_summaries: &[ProjectAiSummaryChunk],
     references: &[ProjectReference],
@@ -9403,8 +9932,9 @@ fn project_ai_answer(
     retrieval: &ProjectRetrievalRuntime,
     cancellation: &crate::contracts::ExecutionCancellation,
     workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
+    conversation_id: &str,
 ) -> CommandResult<(String, Option<WorkflowRunStarted>, ProjectAiContextWindow)> {
-    let runtime = llm_runtime(project_root, secrets)?;
+    let runtime = llm_runtime(project_root, secrets, provider_cache)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
     let service = LlmService::new(&ledger, runtime.auto_mode.clone());
     let context_window = project_ai_context_window(
@@ -9459,7 +9989,7 @@ fn project_ai_answer(
     for round in 0..=max_rounds {
         let report = service
             .complete_basic(
-                &runtime.provider,
+                runtime.provider.as_ref(),
                 LlmRunRequest {
                     config: config.clone(),
                     messages: messages.clone(),
@@ -9503,6 +10033,7 @@ fn project_ai_answer(
                 queried_start_nodes: &mut queried_start_nodes,
                 workflow_runner,
                 tool_workflow_run: &mut tool_workflow_run,
+                origin_conversation_id: conversation_id,
             };
             let output = project_ai_execute_tool_call(
                 call.name.as_str(),
@@ -9540,6 +10071,9 @@ struct ProjectAiToolExecutionState<'a> {
     queried_start_nodes: &'a mut bool,
     workflow_runner: &'a mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
     tool_workflow_run: &'a mut Option<WorkflowRunStarted>,
+    /// 本轮对话 id。AI 通过工具启动工作流时要写进 run state，
+    /// 终态才知道回报给谁。
+    origin_conversation_id: &'a str,
 }
 
 fn project_ai_execute_tool_call(
@@ -9661,11 +10195,16 @@ fn project_ai_execute_tool_call(
         });
     }
 
-    let initial_inputs = workflow_tool_initial_inputs(arguments.clone())?;
+    // 工具参数里 `variables` 这个保留键走变量通道，其余键仍是起始节点端口输入。
+    // 两者不同层：变量是整个 run 的可读写状态，端口输入只喂给起始节点。
+    let (variables, port_arguments) = split_workflow_tool_variables(arguments.clone())?;
+    let initial_inputs = workflow_tool_initial_inputs(port_arguments)?;
     let started = (state.workflow_runner)(RunWorkflowRequest {
         workflow_id: tool.workflow_id.clone(),
         start_node_id: Some(tool.start_node_id.clone()),
         initial_inputs,
+        variables,
+        origin_conversation_id: Some(state.origin_conversation_id.to_owned()),
     })?;
     *state.tool_workflow_run = Some(started.clone());
     Ok(ToolExecutionOutput {
@@ -9969,6 +10508,37 @@ fn empty_tool_input_schema() -> Value {
         "properties": {},
         "additionalProperties": false
     })
+}
+
+/// 从工具参数里分出工作流变量与起始节点端口输入。
+///
+/// `variables` 是保留键：它下面的对象是工作流变量初值，其余键仍按端口输入处理。
+/// 分成两层而不是混在一起，是因为二者生命周期不同 —— 变量是整个 run 的可读写
+/// 状态（循环会改写它），端口输入只喂给起始节点一次。
+fn split_workflow_tool_variables(
+    arguments: Value,
+) -> CommandResult<(BTreeMap<String, Value>, Value)> {
+    let Value::Object(mut map) = arguments else {
+        // 非对象形态交给 workflow_tool_initial_inputs 报错，这里不重复判类型。
+        return Ok((BTreeMap::new(), arguments));
+    };
+
+    let Some(raw) = map.remove("variables") else {
+        return Ok((BTreeMap::new(), Value::Object(map)));
+    };
+
+    let variables = match raw {
+        Value::Object(values) => values.into_iter().collect(),
+        Value::Null => BTreeMap::new(),
+        other => {
+            return Err(CommandError::validation(format!(
+                "workflow tool `variables` must be a JSON object, got {}",
+                json_value_kind(&other)
+            )))
+        }
+    };
+
+    Ok((variables, Value::Object(map)))
 }
 
 fn workflow_tool_initial_inputs(arguments: Value) -> CommandResult<BTreeMap<String, Value>> {
@@ -11823,7 +12393,7 @@ fn validate_template_url(url: &str) -> CommandResult<()> {
 }
 
 struct CommandLlmRuntime {
-    provider: OpenAiCompatibleLlmProvider,
+    provider: Arc<OpenAiCompatibleLlmProvider>,
     config: LlmServiceConfig,
     auto_mode: crate::config::AutoModeConfig,
 }
@@ -11895,7 +12465,46 @@ fn select_web_search_provider(
         })
 }
 
-fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<CommandLlmRuntime> {
+/// U116：按「配置+凭据指纹」取用 LLM provider，未命中则构造并缓存。
+///
+/// 复用是为了省掉重建 `reqwest` 连接池；**正确性由指纹保证**——配置或凭据一变，
+/// 键就变、旧条目自然不再命中，因此调用方不需要在改配置时记得手工失效。
+fn cached_llm_provider(
+    cache: Option<&LlmProviderCache>,
+    provider: &ProviderConfig,
+    api_key: Option<&str>,
+) -> CommandResult<Arc<OpenAiCompatibleLlmProvider>> {
+    let build = || -> CommandResult<Arc<OpenAiCompatibleLlmProvider>> {
+        Ok(Arc::new(
+            OpenAiCompatibleLlmProvider::new(provider.clone(), api_key.map(str::to_owned))
+                .map_err(error_to_string)?,
+        ))
+    };
+    // 没有缓存句柄时（例如直接以 project_root 调用的测试路径）退化为直接构造，
+    // 行为与接线前一致。
+    let Some(cache) = cache else {
+        return build();
+    };
+    let key = ProviderCacheKey::new(provider, api_key).map_err(error_to_string)?;
+    let mut cache = cache
+        .lock()
+        .map_err(|_| CommandError::internal("llm provider cache lock poisoned"))?;
+    if let Some(existing) = cache.get(&key) {
+        return Ok(Arc::clone(existing));
+    }
+    // 同一 provider_id 的旧指纹条目此刻即可丢弃：配置已变，它不会再被命中，
+    // 留着只会让缓存随用户改配置的次数无界增长。
+    cache.retain(|cached, _| cached.provider_id != key.provider_id);
+    let built = build()?;
+    cache.insert(key, Arc::clone(&built));
+    Ok(built)
+}
+
+fn llm_runtime(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    provider_cache: Option<&LlmProviderCache>,
+) -> CommandResult<CommandLlmRuntime> {
     validate_project_root(project_root)?;
     let project_config = ConfigStore::new(project_root)
         .load_or_create()
@@ -11916,8 +12525,7 @@ fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<
         .get_provider_secret(&provider_config.provider_id)
         .map_err(error_to_string)?
         .map(|value| value.expose_secret().to_owned());
-    let provider = OpenAiCompatibleLlmProvider::new(provider_config.clone(), api_key)
-        .map_err(error_to_string)?;
+    let provider = cached_llm_provider(provider_cache, &provider_config, api_key.as_deref())?;
     let budget_config = read_budget_config(project_root)?;
     let mut config =
         LlmServiceConfig::new(provider_config.provider_id, model_config.model_id.clone())
@@ -11962,11 +12570,7 @@ fn select_llm_provider(
         .ok_or_else(|| CommandError::not_found("no enabled LLM provider is configured"))
 }
 
-/// 默认模型 id 只对项目默认 LLM Provider 生效。
-///
-/// 节点显式指定了别的 Provider 时，若仍把默认 Provider 的 model_id 传进
-/// `select_llm_model`，会被当成该 Provider 的必选模型而直接报 not_found，
-/// 失去「回退到该 Provider 首个 LLM 模型」的语义。
+/// 默认模型 id 只对项目默认 LLM Provider 生效；换成别的 Provider 时应回退到它自己的首个 LLM 模型。
 fn default_llm_model_id_for<'a>(
     providers: &'a crate::config::ProvidersConfig,
     provider_id: &str,
@@ -12076,6 +12680,23 @@ fn document_service(project_root: &Path) -> FileDocumentService {
     )
 }
 
+/// 项目文档服务，额外允许读取一个项目外目录。
+///
+/// 只给导入源稿用：作者在文件选择器里挑了项目外的稿子，读取它必须有可读根。
+/// 刻意只加**只读**根、且只加这一次用到的那个目录 —— 不动 `writable_file_roots`，
+/// 也不把默认沙箱改宽，免得别的路径顺带获得项目外读权限。
+fn document_service_with_extra_readable_root(
+    project_root: &Path,
+    readable_root: PathBuf,
+) -> FileDocumentService {
+    let artifact_root = project_root.join(".runtime").join("artifacts");
+    let mut permissions = project_document_permission(project_root);
+    permissions.readable_file_roots.push(artifact_root.clone());
+    permissions.writable_file_roots.push(artifact_root.clone());
+    permissions.readable_file_roots.push(readable_root);
+    FileDocumentService::new(permissions, artifact_root)
+}
+
 fn configured_document_service(project_root: &Path) -> CommandResult<FileDocumentService> {
     let layout = project_layout(project_root)?;
     layout
@@ -12086,6 +12707,245 @@ fn configured_document_service(project_root: &Path) -> CommandResult<FileDocumen
         project_root.join(".runtime").join("artifacts"),
         Some(layout.exports),
     ))
+}
+
+/// U108：写作节点单次执行所需的运行期上下文。
+///
+/// 持有正文的 owned 副本，`document_context()` 再借出给 `WritingToolExecutor`——
+/// 因为后者的 `WriterDocumentContext` 借用 `&str`，正文必须活得比它久。
+struct WorkflowWritingContext {
+    agent: crate::rag::models::WritingAgentKind,
+    knowledge: crate::rag::MemoryWritingKnowledgeBase,
+    document: Option<WorkflowWritingDocument>,
+    /// U114：上下文装配的归属键，来自节点 config 的 `chapter_id`。
+    /// 未声明时不装配上下文（提示词里若有占位符会 fail-loud）。
+    chapter_id: Option<String>,
+}
+
+struct WorkflowWritingDocument {
+    document_id: String,
+    base_version: String,
+    text: String,
+    scope: crate::rag::tools::WritingDocumentScope,
+    /// U108 阶段 3：节点开始时建立的 patch 会话，行号工具据此累积改动。
+    ///
+    /// 它的 `document_id` 是**绝对**路径，与上面那个相对的 `document_id`
+    /// 刻意不同：`DocumentService::apply_patch` 直接把 patch 的 document_id
+    /// 当文件路径用（`documents/service.rs`），而路径沙箱对相对路径一律拒绝；
+    /// 相对值则是给 LLM 比对工具参数用的（`resolve_line_patch_target`）。
+    patch_session: crate::rag::line_patch::PatchSession,
+}
+
+impl WorkflowWritingContext {
+    /// 借出当前文档上下文；节点未指名文档时返回 None，写入类工具随之不下发。
+    fn document_context(&self) -> Option<crate::rag::tools::WriterDocumentContext<'_>> {
+        self.document
+            .as_ref()
+            .map(|document| crate::rag::tools::WriterDocumentContext {
+                document_id: &document.document_id,
+                base_version: Some(&document.base_version),
+                text: &document.text,
+                scope: document.scope,
+            })
+    }
+}
+
+/// U108：按节点 config 指定的 `document_id` 从磁盘读取正文，并加载写作知识库。
+///
+/// 正文走磁盘而非上游端口，符合项目「引用式数据流」原则——百万字正文不经
+/// workflow 边传递。每次节点执行都重新读取，保证行号 patch 基于最新版本。
+/// U121：把写作节点执行期间累积的知识库变更落盘。
+///
+/// register 类工具（`*-register`）改的是 `load_workflow_writing_context` 交给
+/// executor 的**内存**知识库。若不在节点收尾时保存，用户登记的伏笔、人物关系
+/// 会在节点返回的瞬间消失——工具返回值显示成功，库里什么也没有。
+///
+/// 幂等性与 summarizer 同源：带 `operation_id` + `request_hash` 的回执，
+/// 同一次操作重放时 `save_knowledge_with_operation` 会识别出既有回执并跳过，
+/// 不会把一条注册写成两条。
+fn persist_workflow_writing_knowledge(
+    project_root: &Path,
+    knowledge: &crate::rag::MemoryWritingKnowledgeBase,
+    operation_id: &str,
+    request_hash: &str,
+    output: &crate::workflow::WorkflowNodeExecutionOutput,
+) -> CoreResult<()> {
+    let store = crate::rag::store::SqliteWritingKnowledgeStore::open(project_root)?;
+    store.save_knowledge_with_operation(
+        knowledge,
+        operation_id,
+        request_hash,
+        &serde_json::to_value(output)?,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+/// U126：工作流节点执行前的日预算门禁。
+///
+/// 此前日预算（`budget_usd` → `BudgetLimits::daily_usd`）只在 `llm_runtime()` 里
+/// 生效，而它的调用方仅 `quick_edit_impl` 与 `project_ai_answer`。工作流 LLM 节点
+/// 走 `integration.rs` 的 `executor.complete_llm` **绕过 `LlmService`**，
+/// `ProviderExecutor` 又只记账不判定——于是用户设的「日预算 $5」对主力消费路径
+/// 零约束，一个 50 章的循环工作流能跑到账户欠费。
+///
+/// **`CostQuery` 刻意不带 `run_id`**：日预算是跨运行的当日累计上限。若限定到本次
+/// run，用户连开 N 个工作流即可绕过——每个 run 各自从 0 起算。
+/// （`llm/service.rs` 的 `spent_in_window` 带 `run_id` 是因为那是 quick_edit /
+/// project_ai 的单次会话语境，照抄到这里会留下同样的口子。）
+fn ensure_workflow_daily_budget_allows_call(
+    ledger: &SqliteCostLedger,
+    limits: &crate::costs::BudgetLimits,
+    auto_mode: &crate::config::AutoModeConfig,
+) -> CoreResult<()> {
+    // 未设日预算时 `daily_usd` 为 None，此处无需查账本。
+    if limits.daily_usd.is_none() && auto_mode.preauthorized_budget_usd.is_none() {
+        return Ok(());
+    }
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| CoreError::validation(format!("system time before epoch: {error}")))?
+            .as_millis(),
+    )
+    .map_err(|_| CoreError::validation("timestamp exceeds u64 range"))?;
+    let day_start = crate::costs::start_of_local_day_ms(now_ms);
+    let query = CostQuery {
+        start_ms: Some(day_start),
+        // 见上：绝不能带 run_id。
+        ..CostQuery::default()
+    };
+    let spent_today = ledger.total_cost(&query)?;
+    // 用今日已发生调用的平均成本估算本次；今日还没调用过就退化为 0
+    // （首次调用无从估算，此时只要 spent_today 未超即放行）。
+    let today_calls = ledger.list_costs(&query)?.len();
+    let last_call_cost = (today_calls > 0).then(|| spent_today / today_calls as f64);
+
+    // `evaluate_budget` 判的是「本次调用**之后**会不会超」（内部按
+    // spent_today + requested 比较）。这里拿不到本次调用的真实成本——它由
+    // provider 响应回填——所以用「上一次调用的成本」作为本次的近似。
+    //
+    // 为什么必须给个非零估算：若传 0，判定退化成「已经超了才拦」，
+    // 那么最后一次把额度打穿的调用总是能过去，日预算实际比设定值多花一次。
+    // 宁可保守一点提前拦，也不要让用户在超支之后才收到通知。
+    let projected = last_call_cost.unwrap_or(0.0).max(0.0);
+    let decision = crate::costs::evaluate_budget(
+        limits,
+        auto_mode,
+        crate::costs::BudgetUsage {
+            requested_usd: projected,
+            spent_today_usd: spent_today,
+            spent_this_month_usd: spent_today,
+        },
+    );
+    if decision.action == crate::costs::BudgetAction::Pause {
+        return Err(CoreError::validation(format!(
+            "workflow paused by budget: {} (spent today ${spent_today:.4})",
+            decision
+                .reason
+                .unwrap_or_else(|| "daily budget exhausted".to_owned())
+        )));
+    }
+    Ok(())
+}
+
+fn load_workflow_writing_context(
+    project_root: &Path,
+    document_root: &Path,
+    agent: crate::rag::models::WritingAgentKind,
+    request: &crate::workflow::WorkflowNodeExecutionRequest,
+) -> CoreResult<WorkflowWritingContext> {
+    let store = crate::rag::store::SqliteWritingKnowledgeStore::open(project_root)?;
+    let knowledge = store.load_knowledge()?;
+
+    let config =
+        serde_json::from_value::<crate::workflow::WorkflowLlmNodeConfig>(request.config.clone())?;
+    // U114：章节 id 是上下文装配的归属键（章节概括、伏笔都按它归档）。
+    // 缺省时不装配上下文，节点行为与接线前一致。
+    let chapter_id = config
+        .chapter_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let document_id = config
+        .document_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(document_id) = document_id else {
+        return Ok(WorkflowWritingContext {
+            agent,
+            knowledge,
+            chapter_id,
+            document: None,
+        });
+    };
+
+    // 作用域决定该 agent 能改哪类文件；`WritingToolExecutor` 会用它拒绝越权写入。
+    let scope = writing_document_scope_for_agent(agent).ok_or_else(|| {
+        CoreError::validation(format!(
+            "agent {} does not support line patch tools; remove document_id from the node",
+            agent.node_type()
+        ))
+    })?;
+
+    let path = document_root.join(document_id);
+    crate::contracts::ensure_path_under_root(document_root, &path)?;
+    let documents = document_service_with_artifacts(
+        document_root,
+        project_root.join(".runtime").join("artifacts"),
+        None,
+    );
+    let content = documents.open_document(crate::documents::DocumentReadRequest {
+        path: path.clone(),
+        format: None,
+    })?;
+
+    // U108 阶段 3：节点一开始就建 patch 会话。行号工具的改动累积在这里，
+    // 节点结束时提交成一个最终 patch 随确认项持久化，审批通过后落盘。
+    // 不建会话 = 改动只存在于工具返回值里，节点一结束就没了。
+    //
+    // document_id 用**绝对** path：apply_patch 直接拿它当文件路径，
+    // 相对路径会被路径沙箱拒绝（normalize_absolute_path 对非绝对返回 None）。
+    let patch_session = crate::rag::line_patch::PatchSession::new(
+        path.to_string_lossy().as_ref(),
+        Some(content.metadata.version.clone()),
+        content.content.clone(),
+    )?;
+
+    Ok(WorkflowWritingContext {
+        agent,
+        knowledge,
+        chapter_id,
+        document: Some(WorkflowWritingDocument {
+            document_id: document_id.to_owned(),
+            base_version: content.metadata.version,
+            text: content.content,
+            scope,
+            patch_session,
+        }),
+    })
+}
+
+/// U108：agent → 可写文档作用域，与 `创作总结机制` 中的分工一致。
+/// 只读 agent（detail/critic/prudent/summarizer）没有写入作用域，返回 None。
+fn writing_document_scope_for_agent(
+    agent: crate::rag::models::WritingAgentKind,
+) -> Option<crate::rag::tools::WritingDocumentScope> {
+    use crate::rag::models::WritingAgentKind;
+    use crate::rag::tools::WritingDocumentScope;
+    match agent {
+        WritingAgentKind::Outliner => Some(WritingDocumentScope::GlobalOutline),
+        WritingAgentKind::Designer => Some(WritingDocumentScope::StageOutline),
+        WritingAgentKind::Planner => Some(WritingDocumentScope::ChapterOutline),
+        WritingAgentKind::Writer | WritingAgentKind::Polisher => {
+            Some(WritingDocumentScope::ChapterBody)
+        }
+        WritingAgentKind::Detail
+        | WritingAgentKind::Critic
+        | WritingAgentKind::Prudent
+        | WritingAgentKind::Summarizer => None,
+    }
 }
 
 fn document_service_with_artifacts(
@@ -12182,6 +13042,17 @@ fn scan_tree(project_root: &Path, root: &Path) -> CommandResult<DocumentTreeNode
         kind: DocumentTreeNodeKind::Directory,
         children,
     })
+}
+
+/// U113：读取项目的工作流全局限制。图校验、保存边界与运行前预检共用它，
+/// 保证「设置页改了上限」在这三条路径上同时生效，不会出现预校验放行、保存拒绝的分裂。
+fn project_workflow_limits(
+    project_root: &Path,
+) -> CommandResult<crate::contracts::WorkflowExecutionLimits> {
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    Ok(config.workflow.execution_limits())
 }
 
 fn workflow_path(project_root: &Path, workflow_id: Option<String>) -> CommandResult<PathBuf> {
@@ -12931,6 +13802,23 @@ fn project_path(root: &Path, input: &str) -> CommandResult<PathBuf> {
     project_path_buf(root, Path::new(input))
 }
 
+/// 解析导入源稿路径：允许项目外的绝对路径，相对路径仍按项目根解析。
+///
+/// 与 `project_path_buf` 的区别只在**不要求落在项目内** —— 导入的语义就是
+/// 「把外面的稿子搬进来」。仍然拒绝 `..`：那是路径穿越的形状，
+/// 用绝对路径表达项目外位置更明确，也让审计日志读得懂。
+///
+/// 安全边界：`import_chapter` 只经 IPC 暴露给桌面 UI（由人在文件选择器里挑），
+/// **没有**作为 AI 工具暴露。放开这里不会给模型任意读文件的能力。
+fn import_source_path_buf(root: &Path, input: &Path) -> CommandResult<PathBuf> {
+    ensure_no_parent_traversal(input)?;
+    Ok(if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        root.join(input)
+    })
+}
+
 fn project_path_buf(root: &Path, input: &Path) -> CommandResult<PathBuf> {
     let raw = input;
     let path = if raw.is_absolute() {
@@ -13120,6 +14008,67 @@ fn simple_random_u16() -> u16 {
     }
 }
 
+/// U108 阶段 3：确认项解决后，把已审批的 patch 真正写回磁盘。
+///
+/// 装配逻辑放在这里、判定逻辑放在 `workflow::integration`：后者已经有
+/// `apply_confirmed_patch` 和三道运行态门禁，属同一关注点；这里只负责
+/// 把 DocumentService / GitService / WorkflowRuntime 三样东西凑齐。
+///
+/// 返回**写回后**的运行态。调用方必须改用返回值——`apply_confirmed_patch`
+/// 会在成功后把节点标为 `Applied` 并记下 checkpoint_id，那是内存改动；
+/// 不落库的话下次审批同一确认项会**重复写盘一次**
+/// （判重正是靠 `Applied`，见 `ensure_patch_write_back_can_start`）。
+fn apply_resolved_confirmation_patch(
+    project_root: &Path,
+    store: &SqliteWorkflowRuntimeStore,
+    confirmation_id: &str,
+    runtime_state: crate::workflow::WorkflowRunState,
+) -> CommandResult<crate::workflow::WorkflowRunState> {
+    let mut runtime = crate::workflow::WorkflowRuntime::from_state(runtime_state);
+    let documents = document_service(project_root);
+    let git = git_service_with_cancellation(project_root, runtime.cancellation());
+    let outcome = crate::workflow::integration::apply_approved_patch_for_confirmation(
+        &mut runtime,
+        &documents,
+        Some(&git),
+        confirmation_id,
+    );
+
+    match outcome {
+        // 没有 patch 要写（拒绝、产出类确认项、空 patch）：运行态未被改动，原样返回。
+        Ok(None) => Ok(runtime.state),
+        Ok(Some(_)) => {
+            // 写盘成功。必须落库，否则 Applied 标记丢失 → 重复写盘。
+            store
+                .save_state(&mut runtime.state, None)
+                .map_err(error_to_string)?;
+            Ok(runtime.state)
+        }
+        Err(error) => {
+            // 写回失败与 F14-b 的投影失败**不同**：投影是可重建的，patch 写回不是。
+            // 静默吞掉等于用户以为正文写进去了、其实没有。故标记 Failed 并 fail-loud。
+            let node_id = runtime
+                .state
+                .confirmations
+                .get(confirmation_id)
+                .map(|item| item.node_id.clone());
+            if let Some(node_id) = node_id {
+                if runtime
+                    .mark_patch_write_back_state(
+                        &node_id,
+                        crate::workflow::PatchWriteBackState::Failed,
+                    )
+                    .is_ok()
+                {
+                    // 标记本身失败不改变结论：真正要报给用户的是写回失败。
+                    let _ = store.save_state(&mut runtime.state, None);
+                }
+            }
+            Err(error_to_string(error))
+        }
+    }
+}
+
 #[cfg(test)]
 mod permission_and_preset_resolution_tests {
     use super::*;
@@ -13229,6 +14178,7 @@ mod permission_and_preset_resolution_tests {
             config: json!({"prompt_template":"write"}),
             inputs: Default::default(),
             communication_messages: Vec::new(),
+            variables: Default::default(),
             metadata: Value::Null,
             cancellation: Default::default(),
             dispatch_authorization: Default::default(),

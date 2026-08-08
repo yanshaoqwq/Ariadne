@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::Mutex;
 
 use crate::contracts::{CoreError, CoreResult};
 use crate::llm::{ToolExecutionContext, ToolExecutionOutput, ToolExecutor};
@@ -22,7 +23,8 @@ use crate::providers::{
     ToolDefinition,
 };
 use crate::rag::line_patch::{
-    insert_lines_to_patch, replace_lines_to_patch, WriterInsertLines, WriterReplaceLines,
+    insert_lines_to_patch, replace_lines_to_patch, rewrite_file_to_patch, PatchSession,
+    PatchSessionCommit, WriterInsertLines, WriterReplaceLines,
 };
 use crate::rag::memory::MemoryWritingKnowledgeBase;
 use crate::rag::models::{
@@ -35,23 +37,28 @@ pub const TOOL_OUTLINER_REGISTER: &str = "outliner-register";
 pub const TOOL_OUTLINER_FIND: &str = "outliner-find";
 pub const TOOL_OUTLINER_INSERT_LINES: &str = "outliner-insert-lines";
 pub const TOOL_OUTLINER_REPLACE_LINES: &str = "outliner-replace-lines";
+pub const TOOL_OUTLINER_REWRITE_FILE: &str = "outliner-rewrite-file";
 pub const TOOL_DESIGNER_REGISTER: &str = "designer-register";
 pub const TOOL_DESIGNER_FIND: &str = "designer-find";
 pub const TOOL_DESIGNER_INSERT_LINES: &str = "designer-insert-lines";
 pub const TOOL_DESIGNER_REPLACE_LINES: &str = "designer-replace-lines";
+pub const TOOL_DESIGNER_REWRITE_FILE: &str = "designer-rewrite-file";
 pub const TOOL_PLANNER_REGISTER: &str = "planner-register";
 pub const TOOL_PLANNER_FIND: &str = "planner-find";
 pub const TOOL_PLANNER_INSERT_LINES: &str = "planner-insert-lines";
 pub const TOOL_PLANNER_REPLACE_LINES: &str = "planner-replace-lines";
+pub const TOOL_PLANNER_REWRITE_FILE: &str = "planner-rewrite-file";
 pub const TOOL_DETAIL_FIND: &str = "detail-find";
 pub const TOOL_WRITER_FIND: &str = "writer-find";
 pub const TOOL_WRITER_INSERT_LINES: &str = "writer-insert-lines";
 pub const TOOL_WRITER_REPLACE_LINES: &str = "writer-replace-lines";
+pub const TOOL_WRITER_REWRITE_FILE: &str = "writer-rewrite-file";
 pub const TOOL_CRITIC_FIND: &str = "critic-find";
 pub const TOOL_PRUDENT_FIND: &str = "prudent-find";
 pub const TOOL_POLISHER_FIND: &str = "polisher-find";
 pub const TOOL_POLISHER_INSERT_LINES: &str = "polisher-insert-lines";
 pub const TOOL_POLISHER_REPLACE_LINES: &str = "polisher-replace-lines";
+pub const TOOL_POLISHER_REWRITE_FILE: &str = "polisher-rewrite-file";
 
 /// 为指定写作 agent 生成工具定义，描述文本来自 prompt_list.json。
 pub fn tool_definitions_for_agent(
@@ -96,6 +103,12 @@ pub fn tool_definitions_for_agent(
                 prompts,
                 writer_replace_schema(),
             )?,
+            tool_definition(
+                TOOL_OUTLINER_REWRITE_FILE,
+                "tool.outliner_rewrite_file",
+                prompts,
+                rewrite_file_schema(),
+            )?,
         ]),
         WritingAgentKind::Designer => Ok(vec![
             tool_definition(
@@ -134,6 +147,12 @@ pub fn tool_definitions_for_agent(
                 prompts,
                 writer_replace_schema(),
             )?,
+            tool_definition(
+                TOOL_DESIGNER_REWRITE_FILE,
+                "tool.designer_rewrite_file",
+                prompts,
+                rewrite_file_schema(),
+            )?,
         ]),
         WritingAgentKind::Planner => Ok(vec![
             tool_definition(
@@ -171,6 +190,12 @@ pub fn tool_definitions_for_agent(
                 "tool.planner_replace_lines",
                 prompts,
                 writer_replace_schema(),
+            )?,
+            tool_definition(
+                TOOL_PLANNER_REWRITE_FILE,
+                "tool.planner_rewrite_file",
+                prompts,
+                rewrite_file_schema(),
             )?,
         ]),
         WritingAgentKind::Detail => Ok(vec![
@@ -213,6 +238,12 @@ pub fn tool_definitions_for_agent(
                 "tool.writer_replace_lines",
                 prompts,
                 writer_replace_schema(),
+            )?,
+            tool_definition(
+                TOOL_WRITER_REWRITE_FILE,
+                "tool.writer_rewrite_file",
+                prompts,
+                rewrite_file_schema(),
             )?,
         ]),
         WritingAgentKind::Critic => Ok(vec![
@@ -281,6 +312,12 @@ pub fn tool_definitions_for_agent(
                 prompts,
                 writer_replace_schema(),
             )?,
+            tool_definition(
+                TOOL_POLISHER_REWRITE_FILE,
+                "tool.polisher_rewrite_file",
+                prompts,
+                rewrite_file_schema(),
+            )?,
         ]),
         WritingAgentKind::Summarizer => Ok(vec![
             tool_definition(
@@ -305,6 +342,21 @@ pub struct WritingToolExecutor<'a> {
     current_document: Option<WriterDocumentContext<'a>>,
     search_provider: Option<&'a dyn SearchProvider>,
     search_context: Option<ProviderCallContext>,
+    /// U108 阶段 3：本节点内累积的行号 patch 会话。
+    ///
+    /// **为什么必须累积而不是每次独立成 patch**：同一节点内第 2 次插入的行号，
+    /// 是模型对着「第 1 次插入之后」的正文数出来的。各自独立算 patch 会让第 2 次
+    /// 插错位置，且症状随插入点变化，事后极难定位。`PatchSession.simulated`
+    /// 就是为此存在的。
+    ///
+    /// **为什么是 `Mutex` 而不是 `RefCell`**：`ToolExecutor` 要求 `Send + Sync`
+    /// 且 `execute` 只收 `&self`（`ToolExecutorRouter` 存的是 `&dyn ToolExecutor`
+    /// 共享引用，且同一个 executor 会注册到多个工具名下）。`RefCell` 不是 `Sync`，
+    /// 挂上去会让本类型不再实现 `ToolExecutor`。
+    ///
+    /// 为 `None` 时行号工具行为与接线前完全一致（只返回 patch，不累积、不落盘），
+    /// 因此既有调用方无需改动。
+    patch_session: Option<Mutex<PatchSession>>,
 }
 
 /// 行号 patch 工具的文档作用域；用于约束“每类节点只能修改自己负责的文件”。
@@ -346,19 +398,21 @@ impl WritingDocumentScope {
 /// 返回行号 patch 工具被允许写入的文档作用域；非行号工具返回 None。
 fn line_tool_required_scope(tool_name: &str) -> Option<WritingDocumentScope> {
     match tool_name {
-        TOOL_OUTLINER_INSERT_LINES | TOOL_OUTLINER_REPLACE_LINES => {
-            Some(WritingDocumentScope::GlobalOutline)
-        }
-        TOOL_DESIGNER_INSERT_LINES | TOOL_DESIGNER_REPLACE_LINES => {
-            Some(WritingDocumentScope::StageOutline)
-        }
-        TOOL_PLANNER_INSERT_LINES | TOOL_PLANNER_REPLACE_LINES => {
+        TOOL_OUTLINER_INSERT_LINES
+        | TOOL_OUTLINER_REPLACE_LINES
+        | TOOL_OUTLINER_REWRITE_FILE => Some(WritingDocumentScope::GlobalOutline),
+        TOOL_DESIGNER_INSERT_LINES
+        | TOOL_DESIGNER_REPLACE_LINES
+        | TOOL_DESIGNER_REWRITE_FILE => Some(WritingDocumentScope::StageOutline),
+        TOOL_PLANNER_INSERT_LINES | TOOL_PLANNER_REPLACE_LINES | TOOL_PLANNER_REWRITE_FILE => {
             Some(WritingDocumentScope::ChapterOutline)
         }
         TOOL_WRITER_INSERT_LINES
         | TOOL_WRITER_REPLACE_LINES
+        | TOOL_WRITER_REWRITE_FILE
         | TOOL_POLISHER_INSERT_LINES
-        | TOOL_POLISHER_REPLACE_LINES => Some(WritingDocumentScope::ChapterBody),
+        | TOOL_POLISHER_REPLACE_LINES
+        | TOOL_POLISHER_REWRITE_FILE => Some(WritingDocumentScope::ChapterBody),
         _ => None,
     }
 }
@@ -381,6 +435,7 @@ impl<'a> WritingToolExecutor<'a> {
             current_document: None,
             search_provider: None,
             search_context: None,
+            patch_session: None,
         }
     }
 
@@ -394,7 +449,17 @@ impl<'a> WritingToolExecutor<'a> {
             current_document: Some(current_document),
             search_provider: None,
             search_context: None,
+            patch_session: None,
         }
+    }
+
+    /// U108 阶段 3：挂上 patch 会话，使本节点内的行号改动累积成一个最终 patch。
+    ///
+    /// 不挂会话时行号工具只返回 patch 给模型看，不会有任何东西落盘——
+    /// 这正是接线前的缺陷状态，因此**写作节点必须挂**。
+    pub fn with_patch_session(mut self, session: PatchSession) -> Self {
+        self.patch_session = Some(Mutex::new(session));
+        self
     }
 
     /// 接入外部 SearchProvider；搜索结果仍不会自动写入知识库。
@@ -517,7 +582,11 @@ impl<'a> WritingToolExecutor<'a> {
             after_line: required_u64(arguments, "after_line")?,
             text: required_str(arguments, "text")?.to_owned(),
         };
-        let patch = insert_lines_to_patch(document.text, request)?;
+        // U108 阶段 3：行号一律对着**会话模拟文本**换算，而不是节点开始时的原始正文。
+        // 模型数的行号是「上一次改动之后」的行号；用原始正文换算会插错位置。
+        let basis = self.line_patch_basis(document.text)?;
+        let patch = insert_lines_to_patch(&basis, request.clone())?;
+        self.record_insert(&request)?;
         Ok(ToolExecutionOutput {
             value: serde_json::to_value(&patch)?,
             audit_metadata: json!({
@@ -542,7 +611,10 @@ impl<'a> WritingToolExecutor<'a> {
             end_line: required_u64(arguments, "end_line")?,
             text: required_str(arguments, "text")?.to_owned(),
         };
-        let patch = replace_lines_to_patch(document.text, request)?;
+        // 同 `execute_line_insert`：行号对着会话模拟文本换算。
+        let basis = self.line_patch_basis(document.text)?;
+        let patch = replace_lines_to_patch(&basis, request.clone())?;
+        self.record_replace(&request)?;
         Ok(ToolExecutionOutput {
             value: serde_json::to_value(&patch)?,
             audit_metadata: json!({
@@ -559,6 +631,103 @@ impl<'a> WritingToolExecutor<'a> {
     ///    例如 outliner-* 只能作用于全局总纲，不能改章节正文。
     /// 2. 调用参数中的 `document_id` 不能偏离当前上下文文档，
     ///    避免 LLM 通过参数把 patch 指向其它文件绕过沙箱。
+    /// U119：整文件重写。复用行号工具的作用域与目标校验，避免规划类 agent
+    /// 借该工具整章覆写正文；产出同样只是 `DocumentPatch`，落盘仍走确认流。
+    fn execute_rewrite_file(
+        &self,
+        tool_name: &str,
+        arguments: &Value,
+    ) -> CoreResult<ToolExecutionOutput> {
+        let document = self.require_document_context()?;
+        let document_id = self.resolve_line_patch_target(tool_name, &document, arguments)?;
+        let replacement = required_str(arguments, "text")?.to_owned();
+        // 整文件重写同样要对着会话模拟文本：本节点内先插了几行再整章重写时，
+        // 覆盖的应该是「插入之后」的正文。
+        let basis = self.line_patch_basis(document.text)?;
+        let patch = rewrite_file_to_patch(
+            document_id,
+            base_version_from_args(arguments, document.base_version),
+            &basis,
+            replacement.clone(),
+        )?;
+        self.record_rewrite(&basis, replacement)?;
+        Ok(ToolExecutionOutput {
+            value: serde_json::to_value(&patch)?,
+            audit_metadata: json!({
+                "tool": tool_name,
+                "hunks": patch.hunks.len(),
+            }),
+        })
+    }
+
+    /// U108 阶段 3：行号换算的基准文本。
+    ///
+    /// 有会话时取模拟文本（含本节点此前的全部改动），无会话时退回原始正文，
+    /// 后者即接线前的行为。
+    fn line_patch_basis(&self, document_text: &str) -> CoreResult<String> {
+        let Some(session) = &self.patch_session else {
+            return Ok(document_text.to_owned());
+        };
+        let session = session.lock().map_err(|_| Self::patch_session_poisoned())?;
+        Ok(session.simulated.clone())
+    }
+
+    /// 把一次插入记进会话；无会话时不记账（行为与接线前一致）。
+    fn record_insert(&self, request: &WriterInsertLines) -> CoreResult<()> {
+        let Some(session) = &self.patch_session else {
+            return Ok(());
+        };
+        let mut session = session.lock().map_err(|_| Self::patch_session_poisoned())?;
+        session.insert_lines(request.after_line, request.text.clone())
+    }
+
+    /// 把一次替换记进会话；无会话时不记账。
+    fn record_replace(&self, request: &WriterReplaceLines) -> CoreResult<()> {
+        let Some(session) = &self.patch_session else {
+            return Ok(());
+        };
+        let mut session = session.lock().map_err(|_| Self::patch_session_poisoned())?;
+        session.replace_lines(request.start_line, request.end_line, request.text.clone())
+    }
+
+    /// 把一次整文件重写记进会话：等价于「替换掉当前全部行」。
+    ///
+    /// 空文件用 `(0, 0)`——`validate_replace_lines` 对空文档只接受这一个区间。
+    fn record_rewrite(&self, basis: &str, replacement: String) -> CoreResult<()> {
+        let Some(session) = &self.patch_session else {
+            return Ok(());
+        };
+        let mut session = session.lock().map_err(|_| Self::patch_session_poisoned())?;
+        let line_count = basis.split_inclusive('\n').count() as u64;
+        if line_count == 0 {
+            session.replace_lines(0, 0, replacement)
+        } else {
+            session.replace_lines(1, line_count, replacement)
+        }
+    }
+
+    /// 锁中毒即前一次记账 panic 了，会话内容不可信。
+    /// fail-loud 而不是跳过：跳过等于悄悄丢掉用户的正文改动。
+    fn patch_session_poisoned() -> CoreError {
+        CoreError::validation("writing patch session lock is poisoned; node output is unreliable")
+    }
+
+    /// U108 阶段 3：提交本节点累积的 patch 会话。
+    ///
+    /// 没有会话、或会话里一次改动都没有时返回 `None`——与
+    /// 「副作用类确认项无证据则不产出」同一语义，避免造出一条永远待审的空确认项
+    /// 把工作流卡死在 `PendingConfirmation`。
+    pub fn commit_patch_session(&self) -> CoreResult<Option<PatchSessionCommit>> {
+        let Some(session) = &self.patch_session else {
+            return Ok(None);
+        };
+        let session = session.lock().map_err(|_| Self::patch_session_poisoned())?;
+        if session.pending_ops.is_empty() {
+            return Ok(None);
+        }
+        session.commit().map(Some)
+    }
+
     fn resolve_line_patch_target(
         &self,
         tool_name: &str,
@@ -627,6 +796,73 @@ impl<'a> WritingToolExecutor<'a> {
     }
 }
 
+impl WritingToolExecutor<'_> {
+    /// 本执行器**自己**能承接的工具名。
+    ///
+    /// 刻意不含 `*-search`：项目检索由 `ProjectSearchToolExecutor` 承接，
+    /// 二者必须经 `ToolExecutorRouter` 分流。调用方据此注册路由，
+    /// 就不会把 `writer-search` 错误地交给本执行器而收到
+    /// "unsupported writing tool"（U108 接线时的第一个坑）。
+    pub fn handles_tool(tool_name: &str) -> bool {
+        matches!(
+            tool_name,
+            TOOL_OUTLINER_REGISTER
+                | TOOL_DESIGNER_REGISTER
+                | TOOL_PLANNER_REGISTER
+                | TOOL_OUTLINER_FIND
+                | TOOL_DESIGNER_FIND
+                | TOOL_PLANNER_FIND
+                | TOOL_DETAIL_FIND
+                | TOOL_WRITER_FIND
+                | TOOL_CRITIC_FIND
+                | TOOL_PRUDENT_FIND
+                | TOOL_POLISHER_FIND
+                | TOOL_OUTLINER_INSERT_LINES
+                | TOOL_DESIGNER_INSERT_LINES
+                | TOOL_PLANNER_INSERT_LINES
+                | TOOL_WRITER_INSERT_LINES
+                | TOOL_POLISHER_INSERT_LINES
+                | TOOL_OUTLINER_REPLACE_LINES
+                | TOOL_DESIGNER_REPLACE_LINES
+                | TOOL_PLANNER_REPLACE_LINES
+                | TOOL_WRITER_REPLACE_LINES
+                | TOOL_POLISHER_REPLACE_LINES
+                | TOOL_OUTLINER_REWRITE_FILE
+                | TOOL_DESIGNER_REWRITE_FILE
+                | TOOL_PLANNER_REWRITE_FILE
+                | TOOL_WRITER_REWRITE_FILE
+                | TOOL_POLISHER_REWRITE_FILE
+                | TOOL_OUTLINER_WEB_SEARCH
+                | TOOL_DESIGNER_WEB_SEARCH
+                | TOOL_PLANNER_WEB_SEARCH
+                | TOOL_DETAIL_WEB_SEARCH
+                | TOOL_WRITER_WEB_SEARCH
+                | TOOL_CRITIC_WEB_SEARCH
+                | TOOL_PRUDENT_WEB_SEARCH
+                | TOOL_POLISHER_WEB_SEARCH
+        )
+    }
+
+    /// 判断工具是否有副作用（写盘或改知识库）。
+    ///
+    /// 有副作用的工具要求节点具备可重放的幂等保证，因此装配时需要与只读工具区别对待。
+    pub fn is_mutating_tool(tool_name: &str) -> bool {
+        Self::is_line_patch_tool(tool_name)
+            || matches!(
+                tool_name,
+                TOOL_OUTLINER_REGISTER | TOOL_DESIGNER_REGISTER | TOOL_PLANNER_REGISTER
+            )
+    }
+
+    /// 判断工具是否是行号 patch 类。
+    ///
+    /// 这类工具必须有当前文档正文才能把行号换算成字节区间，
+    /// 因此节点未指名 `document_id` 时不应下发——否则模型拿到的是必然失败的工具。
+    pub fn is_line_patch_tool(tool_name: &str) -> bool {
+        line_tool_required_scope(tool_name).is_some()
+    }
+}
+
 impl ToolExecutor for WritingToolExecutor<'_> {
     /// 执行 Module 9 写作工具。
     fn execute(
@@ -652,6 +888,20 @@ impl ToolExecutor for WritingToolExecutor<'_> {
             | TOOL_PLANNER_REPLACE_LINES
             | TOOL_WRITER_REPLACE_LINES
             | TOOL_POLISHER_REPLACE_LINES => self.execute_line_replace(&call.name, &call.arguments),
+            // U119：整文件重写只对规划类短纲领开放；writer/polisher 的正文
+            // 必须走行级修改（见 指导性文件/项目总计划-架构版:416），因此这里
+            // 刻意不含 writer/polisher，且作用域校验会再拦一次越权覆写。
+            // U123：writer/polisher 也开放整文件重写。设计原先要求「除非用户显式
+            // 确认 Writer 重写模式」，但该确认条件在产品里从不存在（无开关、无确认
+            // 项）；而分章节写作下一个文件就是一章，整章重写是自然操作。
+            // 作用域校验仍拦住越权——writer 只能重写 ChapterBody，改不到纲领。
+            TOOL_OUTLINER_REWRITE_FILE
+            | TOOL_DESIGNER_REWRITE_FILE
+            | TOOL_PLANNER_REWRITE_FILE
+            | TOOL_WRITER_REWRITE_FILE
+            | TOOL_POLISHER_REWRITE_FILE => {
+                self.execute_rewrite_file(&call.name, &call.arguments)
+            }
             TOOL_OUTLINER_WEB_SEARCH
             | TOOL_DESIGNER_WEB_SEARCH
             | TOOL_PLANNER_WEB_SEARCH
@@ -660,6 +910,21 @@ impl ToolExecutor for WritingToolExecutor<'_> {
             | TOOL_CRITIC_WEB_SEARCH
             | TOOL_PRUDENT_WEB_SEARCH
             | TOOL_POLISHER_WEB_SEARCH => self.execute_search_tool(&call.name, &call.arguments),
+            // `*-search` 是项目检索，归 ProjectSearchToolExecutor；能走到这里
+            // 说明调用方没有按 `handles_tool` 分流，属于装配错误而非模型错误。
+            TOOL_OUTLINER_SEARCH
+            | TOOL_DESIGNER_SEARCH
+            | TOOL_PLANNER_SEARCH
+            | TOOL_DETAIL_SEARCH
+            | TOOL_WRITER_SEARCH
+            | TOOL_CRITIC_SEARCH
+            | TOOL_PRUDENT_SEARCH
+            | TOOL_POLISHER_SEARCH
+            | TOOL_SUMMARIZER_SEARCH => Err(CoreError::validation(format!(
+                "project search tool '{}' must be routed to the project search executor, \
+                 not the writing tool executor",
+                call.name
+            ))),
             other => Err(CoreError::validation(format!(
                 "unsupported writing tool: {other}"
             ))),
@@ -759,20 +1024,53 @@ fn planner_register_schema() -> Value {
     })
 }
 
+/// 整文件重写输入 schema（U119）。
+///
+/// 只暴露 `text`：目标文件由执行时的文档上下文锚定，`document_id` 仅用于
+/// 让模型显式确认写的是哪个文件（与上下文不一致时 `resolve_line_patch_target`
+/// 会拒绝）。不接受行号——整文件重写本身就是「全量替换」语义。
+fn rewrite_file_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": {
+            "document_id": {
+                "type": "string",
+                "description": "可选；给出时必须与当前节点负责的文档一致"
+            },
+            "base_version": {
+                "type": "string",
+                "description": "可选；乐观并发版本号，缺省取当前文档版本"
+            },
+            "text": {
+                "type": "string",
+                "description": "替换后的完整文件正文"
+            }
+        }
+    })
+}
+
 /// find 输入 schema。
 fn find_schema() -> Value {
     json!({
         "type": "object",
         "required": ["a", "b"],
         "properties": {
+            // U120：这里必须与 `FindScope::parse`（rag/models.rs）保持同步。
+            // 少列一个 scope，对应的知识就变成「register 写得进、find 查不回」的
+            // 黑洞——底层查询早已实现，只是模型从 schema 里看不到这个入口。
             "a": {
                 "type": "string",
                 "enum": [
+                    "character_profile",
+                    "character_plan",
                     "character_trait_path",
                     "relationship_path",
                     "event_segments",
                     "segment_text",
                     "foreshadowing",
+                    "theme_anchor",
                     "chapter_summary",
                     "stage_summary"
                 ]
@@ -805,7 +1103,14 @@ fn writer_insert_schema() -> Value {
         "properties": {
             "document_id": { "type": "string" },
             "base_version": { "type": "string" },
-            "after_line": { "type": "integer", "minimum": 1 },
+            // U123：0 = 插入到文件最开头（第 1 行之前）。schema 若仍写
+            // `minimum: 1`，模型就不知道 0 可用，后端放行等于白做——空文件
+            // 依旧一个字写不进去。
+            "after_line": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "在第几行之后插入；0 表示插入到文件最开头（空文件必须用 0）"
+            },
             "text": { "type": "string" }
         }
     })
@@ -819,8 +1124,18 @@ fn writer_replace_schema() -> Value {
         "properties": {
             "document_id": { "type": "string" },
             "base_version": { "type": "string" },
-            "start_line": { "type": "integer", "minimum": 1 },
-            "end_line": { "type": "integer", "minimum": 1 },
+            // U123：空文件只能用 start_line = end_line = 0 写入初始内容；
+            // 非空文件仍是 1-based 闭区间（后端会拒绝非空文件上的 0）。
+            "start_line": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "起始行（1-based）；空文件写入初始内容时用 0"
+            },
+            "end_line": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "结束行（1-based，含）；空文件写入初始内容时用 0"
+            },
             "text": { "type": "string" }
         }
     })
