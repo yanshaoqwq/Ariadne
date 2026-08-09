@@ -1038,11 +1038,6 @@ impl WorkflowConfig {
 
         Ok(())
     }
-
-    /// 用 workflow 全局限制校验单个 loop policy。
-    pub fn validate_loop_policy(&self, policy: &crate::contracts::LoopPolicy) -> CoreResult<()> {
-        policy.validate_within(&self.execution_limits())
-    }
 }
 
 /// Git 跟踪策略配置。

@@ -446,57 +446,6 @@ impl MemoryWritingKnowledgeBase {
         Ok(())
     }
 
-    /// 标记伏笔已经在故事段中种植、回收或废弃，并维护双向索引。
-    pub fn apply_foreshadowing_update(&self, update: ForeshadowingUpdate) -> CoreResult<()> {
-        validate_non_empty_local("foreshadowing_id", &update.foreshadowing_id)?;
-        validate_non_empty_local("segment_id", &update.segment_id)?;
-        let mut state = self.lock_state()?;
-        if !state.segments.contains_key(&update.segment_id) {
-            return Err(CoreError::validation(format!(
-                "story segment not found: {}",
-                update.segment_id
-            )));
-        }
-        let record = state
-            .foreshadowing
-            .get_mut(&update.foreshadowing_id)
-            .ok_or_else(|| {
-                CoreError::validation(format!(
-                    "foreshadowing not found: {}",
-                    update.foreshadowing_id
-                ))
-            })?;
-        if !matches!(
-            update.status,
-            ForeshadowingStatus::Planted | ForeshadowingStatus::Recovered
-        ) {
-            return Err(CoreError::validation(
-                "summarizer foreshadowing update only supports planted or recovered",
-            ));
-        }
-        record.status = update.status;
-        match update.status {
-            ForeshadowingStatus::Planted => {
-                push_unique(&mut record.planted_segment_ids, update.segment_id.clone());
-            }
-            ForeshadowingStatus::Recovered => {
-                push_unique(&mut record.recovered_segment_ids, update.segment_id.clone());
-            }
-            ForeshadowingStatus::Planned | ForeshadowingStatus::Abandoned => unreachable!(),
-        }
-        link_unique(
-            &mut state.index.foreshadowing_segments,
-            &update.foreshadowing_id,
-            update.segment_id.clone(),
-        );
-        link_unique(
-            &mut state.index.segment_foreshadowing,
-            &update.segment_id,
-            update.foreshadowing_id,
-        );
-        Ok(())
-    }
-
     /// 将章节归入阶段，表达“阶段概括使章节成为某阶段子项”。
     pub fn link_chapter_stage(&self, chapter_id: &str, stage_id: &str) -> CoreResult<()> {
         validate_non_empty_local("chapter_id", chapter_id)?;
@@ -542,45 +491,6 @@ impl MemoryWritingKnowledgeBase {
             .filter(|issue| chapter_id.is_empty() || issue.chapter_id == chapter_id)
             .cloned()
             .collect())
-    }
-
-    /// 根据当前注册项生成未落地问题，避免 Summarizer 静默忽略计划变化。
-    pub fn queue_unrealized_changes_for_chapter(
-        &self,
-        chapter_id: &str,
-    ) -> CoreResult<Vec<PlannerIssue>> {
-        validate_non_empty_local("chapter_id", chapter_id)?;
-        let mut state = self.lock_state()?;
-        let changes: Vec<RegisteredChange> = state
-            .changes
-            .values()
-            .filter(|change| {
-                change.status == RegisteredChangeStatus::Planned
-                    && change.applies_to_chapter(chapter_id)
-            })
-            .cloned()
-            .collect();
-        let mut issues = Vec::new();
-        for change in changes {
-            let issue_id = format!("{chapter_id}::{}", change.change_id);
-            if let Some(existing) = state.issues.get(&issue_id).cloned() {
-                issues.push(existing);
-                continue;
-            }
-            let issue = PlannerIssue {
-                issue_id: issue_id.clone(),
-                change_id: change.change_id,
-                chapter_id: chapter_id.to_owned(),
-                reason: "registered change was not matched to any realized story segment"
-                    .to_owned(),
-                related_sources: Vec::new(),
-                planner_explanation: None,
-                correction_patch: None,
-            };
-            state.issues.insert(issue_id, issue.clone());
-            issues.push(issue);
-        }
-        Ok(issues)
     }
 
     /// 写入确认项。
