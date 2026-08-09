@@ -2170,19 +2170,11 @@ pub struct WorkflowDocumentReadConfig {
     pub include_content: bool,
 }
 
-/// 执行文档读取节点。
-/// U116 留痕：**生产不走这个入口**。`commands.rs:6621` 注册的是
-/// `execute_document_read_node_with_root`，它带文档根、能约束读取范围。
-/// 本函数把 root 传 `None`（等于不设边界），只应在测试与非项目场景使用；
-/// 接线新调用方时请用 `_with_root` 版本，别照着这个签名走。
-pub fn execute_document_read_node(
-    request: WorkflowNodeExecutionRequest,
-    documents: &FileDocumentService,
-) -> CoreResult<WorkflowNodeExecutionOutput> {
-    execute_document_read_node_with_root(request, documents, None)
-}
-
 /// 执行文档读取节点，并把相对路径锚定到指定工作目录。
+///
+/// U116：曾有一个不带 root 的 `execute_document_read_node` 薄包装（root 传 `None`
+/// = **不设读取边界**），生产从不走它，已删。新调用方一律用本函数并显式给出
+/// `work_root`——「忘记传边界」不该是一个能通过编译的选项。
 pub fn execute_document_read_node_with_root(
     request: WorkflowNodeExecutionRequest,
     documents: &FileDocumentService,
