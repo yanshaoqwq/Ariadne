@@ -20,13 +20,17 @@ use ariadne::rag::{
     WritingContextRequest, WritingDocumentScope, WritingNodeDefinition, WritingToolExecutor,
     TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH, TOOL_CRITIC_WEB_SEARCH, TOOL_DESIGNER_FIND,
     TOOL_DESIGNER_INSERT_LINES, TOOL_DESIGNER_REGISTER, TOOL_DESIGNER_REPLACE_LINES,
+    TOOL_DESIGNER_REWRITE_FILE,
     TOOL_DESIGNER_SEARCH, TOOL_DESIGNER_WEB_SEARCH, TOOL_DETAIL_FIND, TOOL_DETAIL_SEARCH,
     TOOL_DETAIL_WEB_SEARCH, TOOL_OUTLINER_FIND, TOOL_OUTLINER_INSERT_LINES, TOOL_OUTLINER_REGISTER,
-    TOOL_OUTLINER_REPLACE_LINES, TOOL_OUTLINER_SEARCH, TOOL_OUTLINER_WEB_SEARCH, TOOL_PLANNER_FIND,
+    TOOL_OUTLINER_REPLACE_LINES, TOOL_OUTLINER_REWRITE_FILE, TOOL_OUTLINER_SEARCH,
+    TOOL_OUTLINER_WEB_SEARCH, TOOL_PLANNER_FIND,
     TOOL_PLANNER_INSERT_LINES, TOOL_PLANNER_REGISTER, TOOL_PLANNER_REPLACE_LINES,
+    TOOL_PLANNER_REWRITE_FILE,
     TOOL_PLANNER_SEARCH, TOOL_PLANNER_WEB_SEARCH, TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH,
     TOOL_PRUDENT_WEB_SEARCH, TOOL_SUMMARIZER_SEARCH, TOOL_SUMMARIZER_WEB_SEARCH, TOOL_WRITER_FIND,
-    TOOL_WRITER_INSERT_LINES, TOOL_WRITER_REPLACE_LINES, TOOL_WRITER_SEARCH,
+    TOOL_WRITER_INSERT_LINES, TOOL_WRITER_REPLACE_LINES, TOOL_WRITER_REWRITE_FILE,
+    TOOL_WRITER_SEARCH,
     TOOL_WRITER_WEB_SEARCH,
 };
 use serde_json::{json, Value};
@@ -125,7 +129,9 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             TOOL_OUTLINER_SEARCH,
             TOOL_OUTLINER_WEB_SEARCH,
             TOOL_OUTLINER_INSERT_LINES,
-            TOOL_OUTLINER_REPLACE_LINES
+            TOOL_OUTLINER_REPLACE_LINES,
+            // U119/U123：整文件重写。规划类纲领本就该允许整篇重拟。
+            TOOL_OUTLINER_REWRITE_FILE
         ]
     );
     assert_eq!(
@@ -139,7 +145,8 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             TOOL_DESIGNER_SEARCH,
             TOOL_DESIGNER_WEB_SEARCH,
             TOOL_DESIGNER_INSERT_LINES,
-            TOOL_DESIGNER_REPLACE_LINES
+            TOOL_DESIGNER_REPLACE_LINES,
+            TOOL_DESIGNER_REWRITE_FILE
         ]
     );
     assert_eq!(
@@ -153,7 +160,8 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             TOOL_PLANNER_SEARCH,
             TOOL_PLANNER_WEB_SEARCH,
             TOOL_PLANNER_INSERT_LINES,
-            TOOL_PLANNER_REPLACE_LINES
+            TOOL_PLANNER_REPLACE_LINES,
+            TOOL_PLANNER_REWRITE_FILE
         ]
     );
     assert_eq!(
@@ -173,7 +181,11 @@ fn writing_agents_expose_expected_tools_from_prompt_resources() {
             TOOL_WRITER_SEARCH,
             TOOL_WRITER_WEB_SEARCH,
             TOOL_WRITER_INSERT_LINES,
-            TOOL_WRITER_REPLACE_LINES
+            TOOL_WRITER_REPLACE_LINES,
+            // U123：writer 也开放整章重写。原设计要求「用户显式确认重写模式」，
+            // 但该确认在产品里从不存在；分章节写作下一个文件就是一章，
+            // 整章重写是自然操作。作用域校验仍拦住越权——writer 改不到纲领。
+            TOOL_WRITER_REWRITE_FILE
         ]
     );
     assert!(!writer.iter().any(|tool| tool.name == TOOL_PLANNER_REGISTER));
@@ -394,7 +406,8 @@ fn writing_nodes_are_one_to_one_with_agents() {
             TOOL_WRITER_SEARCH,
             TOOL_WRITER_WEB_SEARCH,
             TOOL_WRITER_INSERT_LINES,
-            TOOL_WRITER_REPLACE_LINES
+            TOOL_WRITER_REPLACE_LINES,
+            TOOL_WRITER_REWRITE_FILE
         ]
     );
     assert_eq!(
@@ -1833,7 +1846,16 @@ mod store_contracts {
             Some("第一阶段开篇".to_owned()),
             "阶段总结"
         );
-        assert_eq!(kb2.all_foreshadowing().unwrap().len(), 1, "伏笔数量");
+        // U121 之后伏笔是 2 条，不是 1 条：本用例先 `upsert_foreshadowing` 直接写了
+        // 一条（fore-1「神秘地图」），又 `apply_register_operation` 登记了一条
+        // （「地图」）。register 现在会**同步**写入 `state.foreshadowing`——
+        // 那正是 U121 的修复内容：此前 register 只写 `state.changes`，
+        // 而 `find_foreshadowing` 读 `state.foreshadowing`，两个容器互不相通，
+        // planner 埋下的伏笔 writer 永远查不回来。
+        //
+        // 所以这里断言 2 是在钉住「register 的伏笔也进了伏笔容器」。
+        // 改回 1 等于把 U121 的修复判掉。
+        assert_eq!(kb2.all_foreshadowing().unwrap().len(), 2, "伏笔数量");
         assert_eq!(kb2.registered_changes().unwrap().len(), 1, "注册项数量");
 
         // 确认项 4 个（segment/event/chapter/stage）
