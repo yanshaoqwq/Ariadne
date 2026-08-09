@@ -629,7 +629,45 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public string QuickEditDiff
     {
         get => _quickEditDiff;
-        set => SetProperty(ref _quickEditDiff, value);
+        set
+        {
+            if (SetProperty(ref _quickEditDiff, value))
+            {
+                RebuildQuickEditDiffLines();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 快速编辑 diff 的行级投影，供统一视图（一行红一行绿）渲染。
+    ///
+    /// 之所以不直接把整段 diff 文本丢进一个只读 TextBox：那是纯文本，
+    /// 增删行没有任何视觉区分，用户要逐字比对才知道改了什么；
+    /// 而项目本身已在主题里备好 <c>Ariadne.DiffAddBackground</c> /
+    /// <c>Ariadne.DiffRemoveBackground</c>（亮/暗两套都有），此前全仓无人使用。
+    /// </summary>
+    public ObservableCollection<QuickEditDiffLineViewModel> QuickEditDiffLines { get; } = new();
+
+    /// <summary>diff 为空时整块不渲染，避免留下一个空白框。</summary>
+    public bool HasQuickEditDiff => QuickEditDiffLines.Count > 0;
+
+    private void RebuildQuickEditDiffLines()
+    {
+        QuickEditDiffLines.Clear();
+        if (!string.IsNullOrEmpty(_quickEditDiff))
+        {
+            // 按 \n 切；后端产出统一用 \n（CRLF 在 save_document_with_policy 收口处已规范化）。
+            foreach (var line in _quickEditDiff.Split('\n'))
+            {
+                // 末尾换行会切出一个空串，跳过它，否则视图底部多一条空行。
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                QuickEditDiffLines.Add(new QuickEditDiffLineViewModel(line));
+            }
+        }
+        OnPropertyChanged(nameof(HasQuickEditDiff));
     }
 
     public bool IsQuickEditGenerating
@@ -2904,6 +2942,60 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 }
 
 public sealed record ExportFormatOption(string Value, string Label);
+
+/// <summary>
+/// 快速编辑 diff 的一行。
+///
+/// 后端 <c>simple_diff</c> 产出的是带前缀的行：<c>- </c> 删除、<c>+ </c> 新增、
+/// 两个空格为上下文（含 <c>  ... (N unchanged lines)</c> 这样的折叠标记）。
+/// 这里只做「前缀 → 类别」的翻译，不重新实现 diff 算法——
+/// 算法留在后端一处，前端两处（快速编辑、将来的冲突合并）共用同一份产出，
+/// 避免两套 diff 结果对不上。
+/// </summary>
+public sealed class QuickEditDiffLineViewModel
+{
+    public QuickEditDiffLineViewModel(string rawLine)
+    {
+        if (rawLine.StartsWith("- ", StringComparison.Ordinal))
+        {
+            Kind = QuickEditDiffLineKind.Removed;
+            Text = rawLine[2..];
+        }
+        else if (rawLine.StartsWith("+ ", StringComparison.Ordinal))
+        {
+            Kind = QuickEditDiffLineKind.Added;
+            Text = rawLine[2..];
+        }
+        else
+        {
+            Kind = QuickEditDiffLineKind.Context;
+            // 上下文行带两个空格前缀；行内容本身可能以空格开头，故只剥固定前缀。
+            Text = rawLine.StartsWith("  ", StringComparison.Ordinal) ? rawLine[2..] : rawLine;
+        }
+    }
+
+    public QuickEditDiffLineKind Kind { get; }
+
+    public string Text { get; }
+
+    /// <summary>行首标记。留空而不是省略，是为了让三类行的正文左边缘对齐。</summary>
+    public string Marker => Kind switch
+    {
+        QuickEditDiffLineKind.Removed => "-",
+        QuickEditDiffLineKind.Added => "+",
+        _ => " ",
+    };
+
+    public bool IsRemoved => Kind == QuickEditDiffLineKind.Removed;
+    public bool IsAdded => Kind == QuickEditDiffLineKind.Added;
+}
+
+public enum QuickEditDiffLineKind
+{
+    Context,
+    Added,
+    Removed,
+}
 
 public sealed record EditorTextSelection(int Start, int End, string Text);
 

@@ -238,13 +238,53 @@
                   <TextBox x:Name="QuickEditInstructionBox" AutomationProperties.Name="{Binding QuickEditTitle}"
                            Text="{Binding QuickEditInstruction, Mode=TwoWay}"
                            PlaceholderText="{Binding QuickEditPlaceholder}" />
-                  <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption" />
-                  <TextBox Text="{Binding QuickEditDiff}" AutomationProperties.Name="{Binding QuickEditDiffText}"
-                           AcceptsReturn="True"
-                           TextWrapping="Wrap"
-                           MinHeight="110"
-                           MaxHeight="280"
-                           IsReadOnly="True" />
+                  <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption"
+                             IsVisible="{Binding HasQuickEditDiff}" />
+                  <!-- 统一视图（inline）：删除行红、新增行绿，上下排列。
+                       不用左右两栏——快速编辑是「这段改成那段」的顺序阅读，
+                       并排对照反而要来回扫视。着色复用主题里早已定义、
+                       但此前全仓无人使用的 Ariadne.DiffAdd/RemoveBackground。
+                       用 ItemsControl + ScrollViewer 而非只读 TextBox：
+                       后者无法分行着色，且项目规范禁止用 IsReadOnly TextBox 承载内容。 -->
+                  <Border IsVisible="{Binding HasQuickEditDiff}"
+                          Background="{DynamicResource Ariadne.BackgroundCode}"
+                          CornerRadius="8"
+                          Padding="0,6">
+                    <ScrollViewer MaxHeight="280"
+                                  HorizontalScrollBarVisibility="Auto"
+                                  VerticalScrollBarVisibility="Auto"
+                                  AutomationProperties.Name="{Binding QuickEditDiffText}">
+                      <ItemsControl ItemsSource="{Binding QuickEditDiffLines}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:QuickEditDiffLineViewModel">
+                            <!-- 整行铺底色（含左侧标记列），而不是只给文字加背景，
+                                 否则短行的色块参差不齐，读起来比不着色还乱。
+                                 用 Classes.xxx 绑定而非 Style Selector 走 DataContext，
+                                 Avalonia 里前者对 ItemTemplate 内的元素更直接。 -->
+                            <Grid ColumnDefinitions="16,*"
+                                  Classes.added="{Binding IsAdded}"
+                                  Classes.removed="{Binding IsRemoved}">
+                              <TextBlock Grid.Column="0" Text="{Binding Marker}"
+                                         FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                         Foreground="{DynamicResource Ariadne.TextSubtle}"
+                                         TextAlignment="Center" />
+                              <TextBlock Grid.Column="1" Text="{Binding Text}"
+                                         FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                         TextWrapping="Wrap" />
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                        <ItemsControl.Styles>
+                          <Style Selector="Grid.added">
+                            <Setter Property="Background" Value="{DynamicResource Ariadne.DiffAddBackground}" />
+                          </Style>
+                          <Style Selector="Grid.removed">
+                            <Setter Property="Background" Value="{DynamicResource Ariadne.DiffRemoveBackground}" />
+                          </Style>
+                        </ItemsControl.Styles>
+                      </ItemsControl>
+                    </ScrollViewer>
+                  </Border>
                   <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
                     <Button Classes="secondary" Content="{Binding QuickEditUndoText}" Command="{Binding UndoQuickEditCommand}" />
                     <Button Classes="primary" Content="{Binding QuickEditApplyText}" Command="{Binding ApplyQuickEditCommand}" />
