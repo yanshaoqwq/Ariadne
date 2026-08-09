@@ -83,7 +83,14 @@ def strip_noise(text):
     # 把中间的真实代码整段抹成空白——实测在 frontend/service.rs 上抹掉了 50% 的
     # 非空白字符，导致 WorksTreeNodeKind 这类**有真实引用**的类型被误判成死代码。
     # 误报比漏报危险得多：漏报只是少清一点，误报会让人删掉在用的东西。
-    text = re.sub(r'r(#*)"(?:(?!"\1).)*"\1', blank, text, flags=re.S)
+    #
+    # `(?<![A-Za-z0-9_])` 不可省（2026-08-08 修）：没有它，**以 r 结尾的普通字符串**
+    # 会被误当成原始字符串的开头。实测 `"reranker",` 里的 `r",` 让正则一路吞到
+    # 2414 字符之外的下一个引号，把 `retrieval/project.rs` 中间整段代码抹白，
+    # 于是 `index_configuration_revision`、`without_vector` 这些**有真实生产调用者**
+    # 的函数被报成纯死代码。与上面那条是同一类错误的另一个实例：
+    # 判断原始字符串的起点时，必须确认 `r` 不是某个标识符的尾字符。
+    text = re.sub(r'(?<![A-Za-z0-9_])r(#*)"(?:(?!"\1).)*"\1', blank, text, flags=re.S)
     text = re.sub(r'"(?:[^"\\\n]|\\.)*"', blank, text)
     return text
 
