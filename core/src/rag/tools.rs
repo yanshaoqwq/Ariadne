@@ -843,9 +843,21 @@ impl WritingToolExecutor<'_> {
         )
     }
 
-    /// 判断工具是否有副作用（写盘或改知识库）。
+    /// 判断工具是否有副作用（写盘或改知识库）：行号 patch 类 + 三个 `*-register`。
     ///
-    /// 有副作用的工具要求节点具备可重放的幂等保证，因此装配时需要与只读工具区别对待。
+    /// ⚠️ **U116 复核（2026-08-10）：生产零调用者，且刻意不接线。**
+    ///
+    /// 它原本要服务的判断是「有副作用的节点需要更强的幂等保证」。但现状是
+    /// **所有写作节点一律注册为 `WorkflowOperationPolicy::at_most_once()`**
+    /// （`commands.rs` 的模型节点 handler），那已经是最保守的策略：
+    /// 恢复走 `ManualResolution`，不自动重放。
+    ///
+    /// 也就是说这个区分只可能用来**放宽**（把只读节点降级成可自动重放），
+    /// 属于性能优化而非安全需求，眼下没有任何调用方需要它。
+    /// 接线它不会让系统更安全，只会多一条要维护的分支。
+    ///
+    /// 真正在用的是它的下位判定 `is_line_patch_tool`——
+    /// U108 用后者统计 patch 证据（`integration.rs` 的工具循环）。
     pub fn is_mutating_tool(tool_name: &str) -> bool {
         Self::is_line_patch_tool(tool_name)
             || matches!(
