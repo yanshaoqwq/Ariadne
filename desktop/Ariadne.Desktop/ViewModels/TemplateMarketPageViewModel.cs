@@ -5,9 +5,10 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAware
+public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAware, IProjectDataReloadable
 {
     private const int PageSize = 20;
+    private const string OfficialRepositoryUrl = "ariadne://official-templates/v1";
 
     private enum SearchState
     {
@@ -47,13 +48,17 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
             CreateTag("ui.template.tag.summary"),
         };
         SearchCommand = new RelayCommand(() => _ = SearchAsync(), () => !IsBusy);
-        InstallFirstCommand = new RelayCommand(() => _ = InstallFirstAsync(), () => Templates.Count > 0 && !IsBusy);
         LoadMoreCommand = new RelayCommand(() => _ = LoadMoreAsync(), () => CanLoadMore);
     }
 
     public string Title => _displayNames.Text("ui.template.title");
 
-    public string OnlineSearchText => _displayNames.Text("ui.template.online_search");
+    public string CatalogSourceText => _displayNames.Text(
+        string.IsNullOrWhiteSpace(_repositoryBaseUrl)
+            ? "ui.template.catalog"
+            : string.Equals(_repositoryBaseUrl, OfficialRepositoryUrl, StringComparison.OrdinalIgnoreCase)
+                ? "ui.template.catalog.builtin"
+                : "ui.template.catalog.custom");
 
     public string SearchPlaceholder => _displayNames.Text("ui.template.search.placeholder");
 
@@ -66,8 +71,6 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
     public string PermissionText => _displayNames.Text("ui.template.permission");
 
     public string DetailText => _displayNames.Text("ui.template.detail");
-
-    public string BackToTopText => _displayNames.Text("ui.common.back_to_top");
 
     public string LoadMoreText => _displayNames.Text("ui.common.load_more");
 
@@ -117,8 +120,6 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
 
     public RelayCommand SearchCommand { get; }
 
-    public RelayCommand InstallFirstCommand { get; }
-
     public RelayCommand LoadMoreCommand { get; }
 
     private TemplateTagViewModel CreateTag(string key)
@@ -126,7 +127,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
         var title = _displayNames.Text(key);
         return new TemplateTagViewModel(key, title, tag =>
         {
-            SearchQuery = tag.Title;
+            tag.IsSelected = !tag.IsSelected;
             _ = SearchAsync();
         }, () => !IsBusy);
     }
@@ -151,6 +152,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
 
         var settings = await _backend.GetTemplateRepositorySettingsAsync(cancellationToken).ConfigureAwait(true);
         _repositoryBaseUrl = settings.BaseUrl;
+        OnPropertyChanged(nameof(CatalogSourceText));
         if (string.IsNullOrWhiteSpace(_repositoryBaseUrl))
         {
             throw new InvalidOperationException(RepositoryMissingText);
@@ -163,6 +165,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
     {
         var searchGeneration = ++_searchGeneration;
         var query = SearchQuery;
+        var tags = SelectedTags();
         _page = -1;
         _hasMore = false;
         Templates.Clear();
@@ -174,7 +177,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
         {
             var baseUrl = await LoadRepositoryAsync(cancellationToken, refresh: true).ConfigureAwait(true);
             var results = await _backend
-                .SearchTemplatesAsync(baseUrl, query, 0, cancellationToken)
+                .SearchTemplatesAsync(baseUrl, query, tags, 0, cancellationToken)
                 .ConfigureAwait(true);
             if (!IsCurrent(searchGeneration, requestGeneration))
             {
@@ -218,13 +221,14 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
 
         var searchGeneration = _searchGeneration;
         var query = SearchQuery;
+        var tags = SelectedTags();
         var targetPage = _page + 1;
         var (requestGeneration, cancellationToken) = BeginRequest();
         try
         {
             var baseUrl = await LoadRepositoryAsync(cancellationToken, refresh: false).ConfigureAwait(true);
             var results = await _backend
-                .SearchTemplatesAsync(baseUrl, query, targetPage, cancellationToken)
+                .SearchTemplatesAsync(baseUrl, query, tags, targetPage, cancellationToken)
                 .ConfigureAwait(true);
             if (!IsCurrent(searchGeneration, requestGeneration))
             {
@@ -268,7 +272,8 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
                 ResolveDisplayText(item.Name),
                 string.Join(", ", item.Tags.Select(ResolveDisplayText)),
                 () => _ = ShowDetailsAsync(repositoryBaseUrl, item),
-                () => _ = InstallTemplateAsync(repositoryBaseUrl, item)));
+                () => _ = InstallTemplateAsync(repositoryBaseUrl, item),
+                CanInstallTemplate));
         }
         NotifyTemplateCollectionChanged();
     }
@@ -287,7 +292,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
             tag.SelectCommand.NotifyCanExecuteChanged();
         }
         LoadMoreCommand.NotifyCanExecuteChanged();
-        InstallFirstCommand.NotifyCanExecuteChanged();
+        NotifyTemplateCommandsChanged();
         return (++_requestGeneration, _requestCts.Token);
     }
 
@@ -313,7 +318,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
             tag.SelectCommand.NotifyCanExecuteChanged();
         }
         LoadMoreCommand.NotifyCanExecuteChanged();
-        InstallFirstCommand.NotifyCanExecuteChanged();
+        NotifyTemplateCommandsChanged();
         _requestCts?.Dispose();
         _requestCts = null;
     }
@@ -338,18 +343,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
     private void NotifyTemplateCollectionChanged()
     {
         OnPropertyChanged(nameof(HasResults));
-        InstallFirstCommand.NotifyCanExecuteChanged();
-    }
-
-    private async Task InstallFirstAsync()
-    {
-        var template = Templates.FirstOrDefault();
-        if (template is null)
-        {
-            StatusText = EmptyText;
-            return;
-        }
-        await InstallTemplateAsync(template.RepositoryBaseUrl, template.Summary).ConfigureAwait(true);
+        NotifyTemplateCommandsChanged();
     }
 
     private async Task ShowDetailsAsync(string repositoryBaseUrl, TemplateSummary template)
@@ -500,7 +494,42 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
         {
             return _displayNames.Text("ui.template.permission_dialog.empty");
         }
-        return string.Join(Environment.NewLine, permissions.Select(permission => "- " + permission));
+        return string.Join(Environment.NewLine, permissions.Select(permission => "- " + ResolvePermissionText(permission)));
+    }
+
+    private string ResolvePermissionText(string permission)
+    {
+        var key = permission.Trim().ToLowerInvariant() switch
+        {
+            "http_skill" => "ui.template.permission.http_skill",
+            "network" or "wasm_network" => "ui.template.permission.network",
+            "web_search" => "ui.template.permission.web_search",
+            "secret_read" => "ui.template.permission.secret_read",
+            "filesystem_read" => "ui.template.permission.filesystem_read",
+            "filesystem_write" => "ui.template.permission.filesystem_write",
+            "workflow_run" => "ui.template.permission.workflow_run",
+            _ => string.Empty,
+        };
+        return string.IsNullOrEmpty(key)
+            ? _displayNames.Format(
+                "ui.template.permission.compatibility",
+                new Dictionary<string, string> { ["permission"] = permission })
+            : _displayNames.Text(key);
+    }
+
+    private IReadOnlyList<string> SelectedTags() => Tags
+        .Where(tag => tag.IsSelected)
+        .Select(tag => tag.DisplayNameKey)
+        .ToArray();
+
+    private bool CanInstallTemplate() => _backend.HasProjectRoot && !IsBusy;
+
+    private void NotifyTemplateCommandsChanged()
+    {
+        foreach (var template in Templates)
+        {
+            template.InstallCommand.NotifyCanExecuteChanged();
+        }
     }
 
     private static IReadOnlyList<string> ExtractStringArray(object? value, string key)
@@ -546,6 +575,9 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
     internal Task InstallForTestsAsync(TemplateCardViewModel template) =>
         InstallTemplateAsync(template.RepositoryBaseUrl, template.Summary);
 
+    internal string PermissionSummaryForTests(TemplateDetail detail) =>
+        TemplatePermissionSummary(detail);
+
     internal async Task EnsureInitialCatalogLoadedAsync()
     {
         if (_initialCatalogLoadStarted)
@@ -554,6 +586,42 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
         }
         _initialCatalogLoadStarted = true;
         await SearchAsync().ConfigureAwait(true);
+    }
+
+    public Task ReloadProjectDataAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        // 本页跨项目保留实例，而仓库地址按项目配置，缓存目录属于上一个项目。
+        ResetCatalogCache();
+        NotifyTemplateCommandsChanged();
+        return Task.CompletedTask;
+    }
+
+    public void DeactivateProjectData()
+    {
+        ResetCatalogCache();
+        NotifyTemplateCommandsChanged();
+    }
+
+    /// <summary>
+    /// 丢弃与具体项目绑定的目录缓存，使下次进入本页重新按当前项目的仓库地址检索。
+    /// </summary>
+    private void ResetCatalogCache()
+    {
+        // 作废在途请求，避免旧项目的结果落进新项目的列表。
+        _searchGeneration++;
+        _requestGeneration++;
+        _requestCts?.Cancel();
+        _requestCts = null;
+        _initialCatalogLoadStarted = false;
+        _repositoryBaseUrl = string.Empty;
+        _page = -1;
+        _hasMore = false;
+        Templates.Clear();
+        SetState(SearchState.Idle);
+        StatusText = string.Empty;
+        OnPropertyChanged(nameof(CatalogSourceText));
+        OnPropertyChanged(nameof(CanLoadMore));
     }
 
     private string ResolveDisplayText(string value) => value.StartsWith("ui.", StringComparison.Ordinal)
@@ -569,7 +637,8 @@ public sealed class TemplateCardViewModel
         string displayName,
         string tagsText,
         Action showDetails,
-        Action install)
+        Action install,
+        Func<bool> canInstall)
     {
         Summary = summary;
         RepositoryBaseUrl = repositoryBaseUrl;
@@ -578,7 +647,7 @@ public sealed class TemplateCardViewModel
         RequiresPermissions = summary.RequiresPermissions;
         TagsText = tagsText;
         ShowDetailsCommand = new RelayCommand(showDetails);
-        InstallCommand = new RelayCommand(install);
+        InstallCommand = new RelayCommand(install, canInstall);
     }
 
     public TemplateSummary Summary { get; }
@@ -594,6 +663,7 @@ public sealed class TemplateCardViewModel
 public sealed class TemplateTagViewModel : ViewModelBase
 {
     private string _title;
+    private bool _isSelected;
 
     public TemplateTagViewModel(
         string displayNameKey,
@@ -608,5 +678,6 @@ public sealed class TemplateTagViewModel : ViewModelBase
 
     public string DisplayNameKey { get; }
     public string Title { get => _title; set => SetProperty(ref _title, value); }
+    public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
     public RelayCommand SelectCommand { get; }
 }

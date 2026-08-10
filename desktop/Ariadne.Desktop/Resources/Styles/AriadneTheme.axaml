@@ -1,5 +1,6 @@
 <Styles xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls">
   <!--
     Ariadne 风格地基（Win11 / Fluent 方向）
     - 设计目标：轻盈、精致、桌面感、阅读舒适，扔掉网页感。
@@ -17,17 +18,21 @@
 
         <!-- ========================= 浅色（清昼，默认强调=青绿） ========================= -->
         <ResourceDictionary x:Key="Light">
-          <!-- 背景层：明确 4 级阶梯——壳 / 工作区 / 主内容面 / 浮层（U71） -->
-          <Color x:Key="Ariadne.Color.WindowBase">#E4E9EF</Color>
-          <Color x:Key="Ariadne.Color.BackgroundMain">#EEF2F6</Color>
-          <Color x:Key="Ariadne.Color.BackgroundSurface">#FFFFFF</Color>
+          <!-- 背景层：明确 5 级阶梯——壳 / 导轨凹槽 / 工作区 / 纸面 / 浮起纸面（U71）。
+               关键：相邻层明度差必须够大（≥4 点），否则整屏塌成一片灰。
+               导轨(Subtle) 是最深的「凹槽」，浮起的纸片(Elevated) 是最亮的白，
+               两者相差 ~10 点明度，撬起动效才有立体依据。 -->
+          <Color x:Key="Ariadne.Color.WindowBase">#D4DAD8</Color>
+          <Color x:Key="Ariadne.Color.BackgroundMain">#EDF0EE</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSurface">#FAFBFA</Color>
           <Color x:Key="Ariadne.Color.BackgroundElevated">#FFFFFF</Color>
           <!-- Win11 毛玻璃菜单：高透明白 + 微冷灰，靠阴影/圆角成形 -->
           <Color x:Key="Ariadne.Color.MenuBackground">#D9F7F9FB</Color>
           <Color x:Key="Ariadne.Color.GlassTint">#E8F4F6F8</Color>
           <Color x:Key="Ariadne.Color.GlassBorder">#66FFFFFF</Color>
           <Color x:Key="Ariadne.Color.Scrim">#59000000</Color>
-          <Color x:Key="Ariadne.Color.BackgroundSubtle">#E8EDF2</Color>
+          <!-- 导轨凹槽：比主内容面明显更深，让纸片能从中「撬」出来 -->
+          <Color x:Key="Ariadne.Color.BackgroundSubtle">#E2E7E4</Color>
           <!-- 日志级别 chip 不透明底（保证 caption 对比度 ≥4.5:1，U70） -->
           <Color x:Key="Ariadne.Color.LogErrorBg">#FEE2E2</Color>
           <Color x:Key="Ariadne.Color.LogWarningBg">#FEF3C7</Color>
@@ -41,9 +46,9 @@
           <Color x:Key="Ariadne.Color.TextSecondary">#5B6469</Color>
           <Color x:Key="Ariadne.Color.TextSubtle">#7A848C</Color>
           <Color x:Key="Ariadne.Color.TextOnAccent">#FFFFFF</Color>
-          <Color x:Key="Ariadne.Color.BorderDefault">#C5CED8</Color>
-          <Color x:Key="Ariadne.Color.BorderMuted">#D5DDE6</Color>
-          <Color x:Key="Ariadne.Color.BorderStrong">#A8B4C0</Color>
+          <Color x:Key="Ariadne.Color.BorderDefault">#C5CDCA</Color>
+          <Color x:Key="Ariadne.Color.BorderMuted">#D8DEDC</Color>
+          <Color x:Key="Ariadne.Color.BorderStrong">#9FAAA6</Color>
           <Color x:Key="Ariadne.Color.BorderCard">#14140A00</Color>
           <Color x:Key="Ariadne.Color.FocusRing">#2E726B</Color>
           <!-- 强调（青绿） -->
@@ -70,13 +75,18 @@
           <Color x:Key="Ariadne.Color.GitCurrent">#2E726B</Color>
           <Color x:Key="Ariadne.Color.GitBranch">#6366F1</Color>
           <Color x:Key="Ariadne.Color.GitFolded">#B9C0BB</Color>
-          <Color x:Key="Ariadne.Color.CanvasBackground">#E8EEF3</Color>
-          <Color x:Key="Ariadne.Color.CanvasGrid">#CBD6E0</Color>
+          <Color x:Key="Ariadne.Color.CanvasBackground">#E9EEEC</Color>
+          <Color x:Key="Ariadne.Color.CanvasGrid">#CCD5D2</Color>
           <Color x:Key="Ariadne.Color.NodeBackground">#FFFFFF</Color>
+          <!-- 磨砂玻璃节点底：半透明白，让画布点阵隐隐透出，营造玻璃悬浮感 -->
+          <Color x:Key="Ariadne.Color.NodeGlass">#F2FBFCFD</Color>
+          <Color x:Key="Ariadne.Color.NodeGlassHeader">#D6FFFFFF</Color>
+          <!-- 节点底渐变的实心端：与玻璃端同色相、全不透明，形成「上透下实」的纵深 -->
+          <Color x:Key="Ariadne.Color.NodeGlassSolid">#FFFBFCFD</Color>
           <Color x:Key="Ariadne.Color.NodeBorder">#C9D3DD</Color>
           <Color x:Key="Ariadne.Color.NodeSelected">#2E726B</Color>
           <Color x:Key="Ariadne.Color.EdgeData">#2E726B</Color>
-          <Color x:Key="Ariadne.Color.EdgeControl">#8C8366</Color>
+          <Color x:Key="Ariadne.Color.EdgeControl">#8A9490</Color>
           <Color x:Key="Ariadne.Color.EdgeCommunication">#7C3AED</Color>
           <!-- 编辑 / diff -->
           <Color x:Key="Ariadne.Color.EditorBackground">#FAFBFC</Color>
@@ -133,6 +143,14 @@
           <SolidColorBrush x:Key="Ariadne.CanvasBackground" Color="{StaticResource Ariadne.Color.CanvasBackground}" />
           <SolidColorBrush x:Key="Ariadne.CanvasGrid" Color="{StaticResource Ariadne.Color.CanvasGrid}" />
           <SolidColorBrush x:Key="Ariadne.NodeBackground" Color="{StaticResource Ariadne.Color.NodeBackground}" />
+          <SolidColorBrush x:Key="Ariadne.NodeGlass" Color="{StaticResource Ariadne.Color.NodeGlass}" />
+          <SolidColorBrush x:Key="Ariadne.NodeGlassHeader" Color="{StaticResource Ariadne.Color.NodeGlassHeader}" />
+          <!-- 节点卡片底：顶部毛玻璃（画布点阵透出）纵向过渡到底部实心，取代类型色晕染 -->
+          <LinearGradientBrush x:Key="Ariadne.NodeGlassFill" StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="{StaticResource Ariadne.Color.NodeGlass}" />
+            <GradientStop Offset="0.62" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+            <GradientStop Offset="1" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+          </LinearGradientBrush>
           <SolidColorBrush x:Key="Ariadne.NodeBorder" Color="{StaticResource Ariadne.Color.NodeBorder}" />
           <SolidColorBrush x:Key="Ariadne.NodeSelected" Color="{StaticResource Ariadne.Color.NodeSelected}" />
           <SolidColorBrush x:Key="Ariadne.EdgeData" Color="{StaticResource Ariadne.Color.EdgeData}" />
@@ -142,20 +160,27 @@
           <SolidColorBrush x:Key="Ariadne.EditorSelection" Color="{StaticResource Ariadne.Color.EditorSelection}" />
           <SolidColorBrush x:Key="Ariadne.DiffAddBackground" Color="{StaticResource Ariadne.Color.DiffAddBackground}" />
           <SolidColorBrush x:Key="Ariadne.DiffRemoveBackground" Color="{StaticResource Ariadne.Color.DiffRemoveBackground}" />
+          <!-- 微观打磨：深色提示气泡 + 细滚动条滑块（浅色主题下用墨色半透明） -->
+          <SolidColorBrush x:Key="Ariadne.TooltipBackground" Color="#F22B3230" />
+          <SolidColorBrush x:Key="Ariadne.TooltipText" Color="#F4F7F5" />
+          <SolidColorBrush x:Key="Ariadne.ScrollThumb" Color="#38000000" />
+          <SolidColorBrush x:Key="Ariadne.ScrollThumbHover" Color="#66000000" />
         </ResourceDictionary>
 
         <!-- ========================= 深色（夜航，默认强调=青绿） ========================= -->
         <ResourceDictionary x:Key="Dark">
+          <!-- 深色同样拉开 5 级阶梯：导轨凹槽最深，浮起纸片最亮 -->
           <Color x:Key="Ariadne.Color.WindowBase">#1C1E21</Color>
-          <Color x:Key="Ariadne.Color.BackgroundMain">#17191C</Color>
-          <Color x:Key="Ariadne.Color.BackgroundSurface">#212427</Color>
-          <Color x:Key="Ariadne.Color.BackgroundElevated">#2A2E31</Color>
+          <Color x:Key="Ariadne.Color.BackgroundMain">#15171A</Color>
+          <Color x:Key="Ariadne.Color.BackgroundSurface">#212528</Color>
+          <Color x:Key="Ariadne.Color.BackgroundElevated">#2F3438</Color>
           <!-- 深色毛玻璃菜单 -->
           <Color x:Key="Ariadne.Color.MenuBackground">#CC1E2328</Color>
           <Color x:Key="Ariadne.Color.GlassTint">#D01C2126</Color>
           <Color x:Key="Ariadne.Color.GlassBorder">#33FFFFFF</Color>
           <Color x:Key="Ariadne.Color.Scrim">#99000000</Color>
-          <Color x:Key="Ariadne.Color.BackgroundSubtle">#1D2023</Color>
+          <!-- 导轨凹槽（暗）：比主内容面更深一档 -->
+          <Color x:Key="Ariadne.Color.BackgroundSubtle">#191C1E</Color>
           <Color x:Key="Ariadne.Color.BackgroundHover">#14FFFFFF</Color>
           <Color x:Key="Ariadne.Color.BackgroundPressed">#22FFFFFF</Color>
           <Color x:Key="Ariadne.Color.BackgroundCode">#1F2327</Color>
@@ -196,6 +221,11 @@
           <Color x:Key="Ariadne.Color.CanvasBackground">#17191C</Color>
           <Color x:Key="Ariadne.Color.CanvasGrid">#2B3137</Color>
           <Color x:Key="Ariadne.Color.NodeBackground">#212427</Color>
+          <!-- 磨砂玻璃节点底（暗）：半透明深灰，画布点阵透出 -->
+          <Color x:Key="Ariadne.Color.NodeGlass">#E62A2F33</Color>
+          <Color x:Key="Ariadne.Color.NodeGlassHeader">#26FFFFFF</Color>
+          <!-- 节点底渐变的实心端（暗）：同色相全不透明 -->
+          <Color x:Key="Ariadne.Color.NodeGlassSolid">#FF2A2F33</Color>
           <Color x:Key="Ariadne.Color.NodeBorder">#4A5159</Color>
           <Color x:Key="Ariadne.Color.NodeSelected">#6FB9AD</Color>
           <Color x:Key="Ariadne.Color.EdgeData">#6FB9AD</Color>
@@ -254,6 +284,14 @@
           <SolidColorBrush x:Key="Ariadne.CanvasBackground" Color="{StaticResource Ariadne.Color.CanvasBackground}" />
           <SolidColorBrush x:Key="Ariadne.CanvasGrid" Color="{StaticResource Ariadne.Color.CanvasGrid}" />
           <SolidColorBrush x:Key="Ariadne.NodeBackground" Color="{StaticResource Ariadne.Color.NodeBackground}" />
+          <SolidColorBrush x:Key="Ariadne.NodeGlass" Color="{StaticResource Ariadne.Color.NodeGlass}" />
+          <SolidColorBrush x:Key="Ariadne.NodeGlassHeader" Color="{StaticResource Ariadne.Color.NodeGlassHeader}" />
+          <!-- 节点卡片底：顶部毛玻璃（画布点阵透出）纵向过渡到底部实心，取代类型色晕染 -->
+          <LinearGradientBrush x:Key="Ariadne.NodeGlassFill" StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="{StaticResource Ariadne.Color.NodeGlass}" />
+            <GradientStop Offset="0.62" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+            <GradientStop Offset="1" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+          </LinearGradientBrush>
           <SolidColorBrush x:Key="Ariadne.NodeBorder" Color="{StaticResource Ariadne.Color.NodeBorder}" />
           <SolidColorBrush x:Key="Ariadne.NodeSelected" Color="{StaticResource Ariadne.Color.NodeSelected}" />
           <SolidColorBrush x:Key="Ariadne.EdgeData" Color="{StaticResource Ariadne.Color.EdgeData}" />
@@ -263,8 +301,32 @@
           <SolidColorBrush x:Key="Ariadne.EditorSelection" Color="{StaticResource Ariadne.Color.EditorSelection}" />
           <SolidColorBrush x:Key="Ariadne.DiffAddBackground" Color="{StaticResource Ariadne.Color.DiffAddBackground}" />
           <SolidColorBrush x:Key="Ariadne.DiffRemoveBackground" Color="{StaticResource Ariadne.Color.DiffRemoveBackground}" />
+          <!-- 深色主题下气泡反过来用亮底深字；滚动条滑块用白色半透明 -->
+          <SolidColorBrush x:Key="Ariadne.TooltipBackground" Color="#F0E9EDEB" />
+          <SolidColorBrush x:Key="Ariadne.TooltipText" Color="#181C1E" />
+          <SolidColorBrush x:Key="Ariadne.ScrollThumb" Color="#3DFFFFFF" />
+          <SolidColorBrush x:Key="Ariadne.ScrollThumbHover" Color="#70FFFFFF" />
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
+
+      <!-- 应用壳采用固定石墨中性色，主题色仅作为动作信号，避免整屏单色化。 -->
+      <SolidColorBrush x:Key="Ariadne.ShellRail" Color="#151B1A" />
+      <SolidColorBrush x:Key="Ariadne.ShellRailElevated" Color="#1D2523" />
+      <SolidColorBrush x:Key="Ariadne.ShellRailHover" Color="#14FFFFFF" />
+      <SolidColorBrush x:Key="Ariadne.ShellRailSelected" Color="#22FFFFFF" />
+      <SolidColorBrush x:Key="Ariadne.ShellRailText" Color="#F3F7F5" />
+      <SolidColorBrush x:Key="Ariadne.ShellRailMuted" Color="#A7B3AF" />
+      <SolidColorBrush x:Key="Ariadne.ShellRailBorder" Color="#26FFFFFF" />
+
+      <!-- 输入填充：从主题强调色派生（Color 跟随 DynamicResource 强调色），
+           靠 Opacity 做定制偏移得到极淡的品牌色凹陷槽 —— 不硬编码任何颜色，
+           换主题 / 个性化强调色时输入槽自动跟随。零描边，一列输入不再是叠框。 -->
+      <SolidColorBrush x:Key="Ariadne.InputFill"
+                       Color="{DynamicResource Ariadne.Color.AccentPrimary}"
+                       Opacity="0.06" />
+      <SolidColorBrush x:Key="Ariadne.InputFillHover"
+                       Color="{DynamicResource Ariadne.Color.AccentPrimary}"
+                       Opacity="0.11" />
 
       <!-- ===== 与变体无关：圆角 / 间距 / 字体 / 字号 ===== -->
       <CornerRadius x:Key="Ariadne.Radius.Small">4</CornerRadius>
@@ -286,8 +348,15 @@
       <FontFamily x:Key="Ariadne.Font.Mono">Cascadia Code, JetBrains Mono, Consolas, Sarasa Mono SC, DejaVu Sans Mono, WenQuanYi Zen Hei Mono, monospace</FontFamily>
 
       <!-- Win11 柔和投影：卡片 / 浮层 / 毛玻璃菜单 -->
-      <BoxShadows x:Key="Ariadne.Shadow.Card">0 1 2 0 #10000000, 0 4 12 -2 #12000000</BoxShadows>
+      <BoxShadows x:Key="Ariadne.Shadow.Card">0 1 2 0 #10000000, 0 8 22 -8 #24000000</BoxShadows>
+      <!-- 导航纸片撬起投影：左缘抬起 → 影子偏向右下，克制不糊（任务书「阴影少」）。 -->
+      <BoxShadows x:Key="Ariadne.Shadow.Lift">2 2 5 -1 #1F000000, 5 5 14 -4 #26000000</BoxShadows>
       <BoxShadows x:Key="Ariadne.Shadow.Flyout">0 2 4 0 #0F000000, 0 8 24 -4 #28000000, 0 24 48 -8 #1A000000</BoxShadows>
+      <!-- 停靠栏投影：取代 1px 硬边。栏是浮在画布之上的一块面，影子朝画布那一侧扩散，
+           于是「栏在上、画布在下」这件事由光影交代，不再需要一条线去切割。
+           负 spread 收住扩散，只在贴边处留一层薄暗，不糊到画布中央。 -->
+      <BoxShadows x:Key="Ariadne.Shadow.RailLeft">-2 0 6 -2 #1A000000, -8 0 20 -8 #22000000</BoxShadows>
+      <BoxShadows x:Key="Ariadne.Shadow.RailUp">0 -2 6 -2 #1A000000, 0 -8 20 -8 #22000000</BoxShadows>
       <BoxShadows x:Key="Ariadne.Shadow.Dialog">0 4 8 0 #12000000, 0 16 40 -4 #28000000, 0 32 64 -12 #18000000</BoxShadows>
 
       <!-- 毛玻璃材料：弹窗/菜单 Tint 用 Color key（ExperimentalAcrylicMaterial 吃 Color） -->
@@ -308,8 +377,9 @@
            用法：<Path Data="{StaticResource Ariadne.Icon.X}" .../>，
            Path Stretch=Uniform + Width/Height 控制显示尺寸。
            ============================================================ -->
-      <!-- 窗口控制（24 viewBox；Minimize 实心横条略低于几何中线，避免视觉上“偏高”） -->
-      <StreamGeometry x:Key="Ariadne.Icon.Minimize">M4.5,13.2 L19.5,13.2 L19.5,15.6 L4.5,15.6 Z</StreamGeometry>
+      <!-- 窗口控制（24 viewBox）。Minimize 横条居中于几何中线 y=12：
+           原先 13.2~15.6（中线 14.4）导致横条明显偏下，与最大化/关闭不在一条水平线上。 -->
+      <StreamGeometry x:Key="Ariadne.Icon.Minimize">M4.5,10.8 L19.5,10.8 L19.5,13.2 L4.5,13.2 Z</StreamGeometry>
       <StreamGeometry x:Key="Ariadne.Icon.Maximize">M5.5,5.5 L18.5,5.5 L18.5,18.5 L5.5,18.5 Z</StreamGeometry>
       <StreamGeometry x:Key="Ariadne.Icon.Restore">M8,9.5 L16.5,9.5 L16.5,18 L8,18 Z M9.5,7 L9.5,5.5 L18.5,5.5 L18.5,14.5 L17,14.5</StreamGeometry>
       <StreamGeometry x:Key="Ariadne.Icon.Close">M6.5,6.5 L17.5,17.5 M17.5,6.5 L6.5,17.5</StreamGeometry>
@@ -350,6 +420,8 @@
       <StreamGeometry x:Key="Ariadne.Icon.Import">M12,3 L12,13 M8,9 L12,13 L16,9 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
       <!-- 导出（向上出托盘） -->
       <StreamGeometry x:Key="Ariadne.Icon.Export">M12,13 L12,3 M8,7 L12,3 L16,7 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
+      <!-- 打包为子工作流（等轴立方体 = 把所选收进一个包） -->
+      <StreamGeometry x:Key="Ariadne.Icon.Pack">M12,3 L20,7.5 L20,16.5 L12,21 L4,16.5 L4,7.5 Z M4,7.5 L12,12 L20,7.5 M12,12 L12,21</StreamGeometry>
       <!-- 搜索（放大镜） -->
       <StreamGeometry x:Key="Ariadne.Icon.Search">M10.5,5 a5.5,5.5 0 1,0 0.01,0 M14.8,14.8 L19,19</StreamGeometry>
     </ResourceDictionary>
@@ -374,9 +446,96 @@
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
   </Style>
 
+  <!-- 悬浮提示：深色小胶囊 + 柔投影。Fluent 默认是与页面同色的浅色方框，
+       浮在浅底上几乎看不出「浮起」；深底反白是桌面工具的通行语汇，
+       小、快、不抢戏。 -->
   <Style Selector="ToolTip">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Caption}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.TooltipBackground}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TooltipText}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="9,5" />
+    <Setter Property="MaxWidth" Value="320" />
+  </Style>
+  <!-- 投影只能挂在模板内的 Border 上（ToolTip 本身无 BoxShadow 属性） -->
+  <Style Selector="ToolTip /template/ Border">
+    <Setter Property="BoxShadow" Value="0 2 6 -1 #2E000000, 0 8 20 -6 #33000000" />
+    <Setter Property="CornerRadius" Value="6" />
+  </Style>
+  <!-- 全局 TextBlock 默认色（TextPrimary 深色）会直接盖掉 ToolTip 继承下来的反白，
+       导致深底胶囊上是黑字、看不清。用更具体的选择器把提示文字拉回 TooltipText。 -->
+  <Style Selector="ToolTip TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TooltipText}" />
+  </Style>
+
+  <!-- ============================ 细滚动条 ============================
+       Fluent 默认滚动条又宽又灰，长文阅读时一直在视野里。
+       改为「静止时几乎隐形的细线，悬停才变宽变实」——
+       内容才是主角，滚动条只在需要时出现。 -->
+  <Style Selector="ScrollBar">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.16" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ScrollBar:vertical">
+    <Setter Property="Width" Value="10" />
+  </Style>
+  <Style Selector="ScrollBar:horizontal">
+    <Setter Property="Height" Value="10" />
+  </Style>
+  <!-- 滑块：静止 4px 细条、半透明；悬停整条滚动条时加粗并转实 -->
+  <Style Selector="ScrollBar /template/ Thumb#thumb">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.ScrollThumb}" />
+    <Setter Property="CornerRadius" Value="4" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <ThicknessTransition Property="Margin" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ScrollBar:vertical /template/ Thumb#thumb">
+    <Setter Property="Margin" Value="3,0" />
+  </Style>
+  <Style Selector="ScrollBar:horizontal /template/ Thumb#thumb">
+    <Setter Property="Margin" Value="0,3" />
+  </Style>
+  <Style Selector="ScrollBar:pointerover /template/ Thumb#thumb">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.ScrollThumbHover}" />
+    <Setter Property="Margin" Value="1,0" />
+  </Style>
+  <Style Selector="ScrollBar:horizontal:pointerover /template/ Thumb#thumb">
+    <Setter Property="Margin" Value="0,1" />
+  </Style>
+  <!-- 去掉两端的箭头按钮与轨道底：现代桌面滚动条不需要 -->
+  <Style Selector="ScrollBar /template/ Border#TrackRail">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="ScrollBar /template/ RepeatButton">
+    <Setter Property="IsVisible" Value="False" />
+  </Style>
+
+  <!-- 分栏拖杆：静止**完全隐形**（停靠栏的分层已由投影+高光承担，再画一道灰线
+       就又变成「小边」）；只在指针接近时淡入一道强调色细杆，告诉你这里能拖。
+       宽度不变（命中区恒定），显形靠透明度，所以不会推挤布局。 -->
+  <Style Selector="GridSplitter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Opacity" Value="0" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="GridSplitter:pointerover">
+    <Setter Property="Opacity" Value="0.85" />
   </Style>
 
   <!-- 矢量图标：描边线条，统一 stroke。geometry 见资源区 Ariadne.Icon.* -->
@@ -414,6 +573,21 @@
   <Style Selector="TextBlock.subtitle">
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Subtitle}" />
     <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <!-- 右栏/检查器的「面板标题」：整栏唯一的醒目标题，压在页眉里。 -->
+  <Style Selector="TextBlock.panel-title">
+    <Setter Property="FontSize" Value="14.5" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
+  </Style>
+  <!-- 检查器「分区标签」：安静的定位标记，不与面板标题争主角。
+       小字号 + 加字距 + 弱色，是桌面检查器（Figma/Blender/VS Code）的通行做法：
+       靠字重与字距区分层级，而不是靠给每个分区套盒子。 -->
+  <Style Selector="TextBlock.inspector-label">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="0.7" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
   </Style>
   <Style Selector="TextBlock.body">
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
@@ -472,10 +646,6 @@
       </Transitions>
     </Setter>
   </Style>
-  <Style Selector="Border.layer.recent-item:pointerover">
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
-  </Style>
   <Style Selector="Border.layer.log-row:pointerover">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
@@ -496,6 +666,127 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="BorderThickness" Value="0,0,0,1" />
   </Style>
+
+  <!-- ============================================================
+       停靠栏（右侧检查器 / 底部节点库）：不画边。
+       原先每栏一道 1px BorderMuted 硬线，两栏交汇处还会叠成一个「十字接缝」，
+       整个工作区被切成田字格 —— 这就是那几道「小边」的来源。
+       改为「浮在画布之上的一块面」：
+         - 面本身抬到 Elevated（比画布亮一档，靠明度差自然分层）；
+         - 朝画布的那一侧投一道柔和阴影，暗示这块面离画布更近；
+         - 迎光的那道 1px 玻璃高光贴在同侧，给出「厚度」而非「边框」。
+       颜色全部走 token，深浅主题与个性化换色自动跟随。
+       ============================================================ -->
+  <Style Selector="Border.dock-rail">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <!-- 开合的灵动来源：面从停靠边滑入并淡入，而不是硬切出现。
+         停留态归零，进场初态由 .rail-entering 提供（见下）。 -->
+    <Setter Property="RenderTransform" Value="translateX(0px) translateY(0px)" />
+    <Setter Property="Opacity" Value="1" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.26" Easing="CubicEaseOut" />
+        <DoubleTransition Property="Opacity" Duration="0:0:0.2" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <!-- 右栏：阴影朝左（投向画布），高光沿左缘 -->
+  <Style Selector="Border.dock-rail.dock-rail-right">
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.RailLeft}" />
+  </Style>
+  <!-- 底栏：阴影朝上 -->
+  <Style Selector="Border.dock-rail.dock-rail-bottom">
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.RailUp}" />
+  </Style>
+  <!-- 进场初态：各自从停靠的那一侧偏出一点点（右栏向右、底栏向下），
+       打开时摘掉这个类，靠上面的过渡滑回原位。位移克制在 18px 内，
+       是「面滑进来」而不是「整块飞进来」。 -->
+  <Style Selector="Border.dock-rail.dock-rail-right.rail-entering">
+    <Setter Property="RenderTransform" Value="translateX(18px)" />
+    <Setter Property="Opacity" Value="0" />
+  </Style>
+  <Style Selector="Border.dock-rail.dock-rail-bottom.rail-entering">
+    <Setter Property="RenderTransform" Value="translateY(18px)" />
+    <Setter Property="Opacity" Value="0" />
+  </Style>
+  <!-- 停靠栏内的分区标题带：同样去掉硬线，靠一层更淡的底色分层 -->
+  <Style Selector="Border.dock-rail-header">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <!-- 迎光高光：1px 竖/横线，贴在朝画布那一侧，给面一点厚度 -->
+  <Style Selector="Border.rail-lightline">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.GlassBorder}" />
+    <Setter Property="IsHitTestVisible" Value="False" />
+  </Style>
+
+  <!-- 明细行：不画盒子。左缘一道发丝竖脊 + 留白，多行堆叠时形成一列整齐的
+       「索引/目录感」，比每条都套一个圆角描边盒轻得多也雅得多。
+       hover 时竖脊转强调色，给出可交互暗示。 -->
+  <Style Selector="Border.detail-row">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="BorderThickness" Value="2,0,0,0" />
+    <Setter Property="Padding" Value="11,1,0,1" />
+    <Setter Property="Margin" Value="0,0,0,11" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.detail-row:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <!-- 强调变体：正式知识（章节/阶段总结）用主题色脊，与普通明细区分 -->
+  <Style Selector="Border.detail-row.accent">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+
+  <!-- 对象行：检查器里可增删的条目（数据引脚等）。
+       不描边 —— 一列条目各自套一个圆角框会变成「小卡片阵」；
+       改为极淡底色块，hover 才加深，靠底色分条而不是靠线框。 -->
+  <Style Selector="Border.inspector-object-row">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="5" />
+    <!-- 与最近项目行同族：悬停时以右缘为铰链轻撬（全局统一的列表行语汇） -->
+    <Setter Property="RenderTransformOrigin" Value="100%,50%" />
+    <Setter Property="RenderTransform" Value="translateX(0px) rotate(0deg)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.inspector-object-row:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="RenderTransform" Value="translateX(-2px) rotate(-0.3deg)" />
+  </Style>
+
+  <!-- 提示条：替代原来的 danger-panel「整块着色描边盒」。
+       只在左缘立一道语义色脊 + 一层极淡同色底，比四面描边的色块克制得多，
+       却更醒目（视线沿竖脊走）。语义仍是「色 + 位置 + 文字」三通道，
+       满足规范 §8「不可只靠颜色」。 -->
+  <Style Selector="Border.notice">
+    <Setter Property="BorderThickness" Value="3,0,0,0" />
+    <Setter Property="CornerRadius" Value="0,4,4,0" />
+    <Setter Property="Padding" Value="13,9" />
+  </Style>
+  <Style Selector="Border.notice.warning">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusWarning}" />
+    <Setter Property="Background" Value="#14D97706" />
+  </Style>
+  <Style Selector="Border.notice.error">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="Background" Value="#14DC2626" />
+  </Style>
+  <Style Selector="Border.notice.info">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  </Style>
   <Style Selector="Border.node-mark">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
@@ -511,22 +802,198 @@
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
   </Style>
+  <!-- 稿纸：正文阅读的主体。用最亮的纸白 + 极淡发丝边 + 柔投影，
+       让它真的像一张浮在工作台上的纸，而不是一个 UI 面板。
+       圆角只 3px——纸张不该有网页卡片那种大圆角。 -->
   <Style Selector="Border.document-surface">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderCard}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+    <Setter Property="CornerRadius" Value="3" />
+    <Setter Property="BoxShadow" Value="0 1 3 0 #14000000, 0 14 40 -12 #26000000" />
   </Style>
   <Style Selector="Border.settings-section">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
-    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Card}" />
-    <Setter Property="Margin" Value="0,0,0,4" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="BoxShadow" Value="0 0 0 0 Transparent" />
+    <Setter Property="Margin" Value="0" />
   </Style>
 
-  <!-- ============================ 按钮 ============================ -->
+  <!-- 功能页共用的连续工作台结构：页头、命令带、数据流与检查器分区。
+       页头带一层极淡的竖向渐变（纸面→工作区），让「页头」和「内容」之间
+       有一道柔和的光学过渡，而不是硬生生一条线。 -->
+  <Style Selector="Border.page-header">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Padding" Value="24,16" />
+    <Setter Property="MinHeight" Value="68" />
+    <Setter Property="Background">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.BackgroundElevated}" />
+          <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.BackgroundSurface}" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <!-- 页头强调标记：改为竖向渐变，上深下浅，像一枚被点亮的书签 -->
+  <Style Selector="Border.page-header-mark">
+    <Setter Property="Width" Value="4" />
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="CornerRadius" Value="2" />
+    <Setter Property="Background">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.AccentHover}" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style Selector="Border.command-strip">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Padding" Value="20,12" />
+  </Style>
+  <Style Selector="Border.stream-list">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Large}" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
+  <Style Selector="Border.stream-row">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.stream-row:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+  </Style>
+  <Style Selector="Border.inspector-section">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Padding" Value="16,14" />
+  </Style>
+  <Style Selector="Border.segmented-control">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+    <Setter Property="Padding" Value="3" />
+  </Style>
+
+  <!-- 检查器/右栏标签：Win11 pivot（底部下划线指示选中），不再是「盒子里的盒子」。
+       原实现是 3~4 层嵌套：右栏 Border → 同色填充条 → 描边分段控件 → 选中态又一层
+       描边+投影的小盒。现在只留一条 2px 强调色下划线；厚度常驻故切换时不挤动布局。
+       工作空间检查器与作品页右栏共用此样式（单一来源）。 -->
+  <Style Selector="Button.inspector-tab">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0,0,0,2" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="Padding" Value="8,6" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.inspector-tab:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+  </Style>
+  <Style Selector="Button.inspector-tab.selected">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="Button.inspector-tab.selected /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+
+  <!-- ============================================================
+       「灵动」通用微交互：与左栏撬起纸片同一套缓动语言，扩散到全局可点元素。
+       - 悬停：轻微上抬（预告可交互）
+       - 按下：回压缩小（给出手感回馈）
+       统一走 TransformOperationsTransition + CubicEaseOut，克制（≤2px / 0.97）。
+       scope 到具体 class，避免影响窗口控制键 / 导航项等自带变换的控件。
+       ============================================================ -->
+  <Style Selector="Button.primary, Button.secondary, Button.chip-filter, Button.icon-btn, Button.btn-compact">
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.primary:pointerover, Button.secondary:pointerover, Button.chip-filter:pointerover, Button.btn-compact:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-1px) scale(1.0)" />
+  </Style>
+  <Style Selector="Button.primary:pressed, Button.secondary:pressed, Button.chip-filter:pressed, Button.icon-btn:pressed, Button.btn-compact:pressed">
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(0.965)" />
+  </Style>
+  <!-- icon-btn 悬停：整键微抬，与全局「悬停即离面」同族。
+       同样要按平模板内 ContentPresenter 的 FluentTheme 灰底，否则抬起时底下透出色块。 -->
+  <Style Selector="Button.icon-btn /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.icon-btn:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.icon-btn:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.icon-btn:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-1px) scale(1.04)" />
+  </Style>
+  <!-- 标签页：悬停/选中轻抬，切换时有「浮起」感 -->
+  <Style Selector="Button.inspector-tab">
+    <Setter Property="RenderTransformOrigin" Value="50%,100%" />
+    <Setter Property="RenderTransform" Value="translateY(0px)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <BrushTransition Property="Foreground" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.inspector-tab:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-1px)" />
+  </Style>
+  <!-- 设置页横向标签（Win11 pivot）：同一套灵动 -->
+  <Style Selector="ListBox.settings-tabs ListBoxItem">
+    <Setter Property="RenderTransformOrigin" Value="50%,100%" />
+    <Setter Property="RenderTransform" Value="translateY(0px)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ListBox.settings-tabs ListBoxItem:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-1px)" />
+  </Style>
   <Style Selector="Button">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
@@ -548,37 +1015,115 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderStrong}" />
   </Style>
 
-  <!-- 主按钮：青绿强调 -->
+  <!-- 禁用态：按规范 §1.3 统一「降透明度」，而不是换成实色灰板。
+       FluentTheme 默认的 ButtonBackgroundDisabled 是一块深灰实心，
+       在米白纸色底上会变成刺眼的大灰砖（实测截图里最丑的元素），
+       故此处保留各自语义底色，只压 Opacity——禁用仍能看出原本是主/次按钮。 -->
+  <Style Selector="Button:disabled">
+    <Setter Property="Opacity" Value="0.45" />
+  </Style>
+  <Style Selector="Button:disabled /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <!-- 禁用的主按钮：退成中性纸面，不保留强调色。
+       半透明的青绿会变成一块浑浊的灰绿，比原来的灰板更难看，
+       且「看着像能点但点不动」反而误导。中性 + 弱字才是正确的「不可用」信号。 -->
+  <Style Selector="Button.primary:disabled /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+  </Style>
+  <Style Selector="Button.primary:disabled">
+    <Setter Property="Opacity" Value="0.75" />
+  </Style>
+  <Style Selector="Button.subtle:disabled /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <!-- 输入框禁用同理：保留纸面，只降透明度 -->
+  <Style Selector="TextBox:disabled">
+    <Setter Property="Opacity" Value="0.5" />
+  </Style>
+  <Style Selector="TextBox:disabled /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+  </Style>
+
+  <!-- 预算条：细胶囊轨 + 强调色填充，替掉 Fluent 默认那根突兀的灰线 -->
+  <Style Selector="ProgressBar">
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Pill}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
+  </Style>
+  <Style Selector="ProgressBar /template/ Border#PART_Track">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Pill}" />
+  </Style>
+  <Style Selector="ProgressBar /template/ Border#PART_Indicator">
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Pill}" />
+  </Style>
+
+  <!-- 主按钮：青绿强调 + 竖向微渐变，让实色块有「受光/背光」的立体感，
+       而不是一块死平的色板。渐变幅度很小（Hover→Pressed 两档），
+       远看仍是纯色，近看有厚度。 -->
   <Style Selector="Button.primary">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextOnAccent}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPressed}" />
     <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Background">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.AccentHover}" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
   </Style>
 
   <!-- 欢迎页主操作卡 -->
   <Style Selector="Button.welcome-action">
     <Setter Property="MinHeight" Value="72" />
     <Setter Property="Padding" Value="16,14" />
-    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="CornerRadius" Value="8" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Background" Duration="0:0:0.14" />
         <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
-        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
+  <!-- 主操作卡：强调色实心（原来借用导轨石墨黑，糊在纸白页面上是一块黑补丁）。
+       用 AccentPrimary→AccentPressed 的斜向渐变，与首屏品牌徽记同一套语汇；
+       颜色全部从主题强调色 token 派生，个性化换色时按钮跟着走。 -->
   <Style Selector="Button.welcome-action.primary-action">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPressed}" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextOnAccent}" />
+    <Setter Property="Background">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.AccentPressed}" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style Selector="Button.welcome-action.primary-action:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentHover}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentHover}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentHover}" />
+          <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style Selector="Button.welcome-action.secondary-action">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
@@ -589,8 +1134,12 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
   </Style>
+  <Style Selector="Button.welcome-action:pointerover">
+    <!-- 主操作卡悬停：整片离面抬升（原先只换底色/边色，卡片是死的） -->
+    <Setter Property="RenderTransform" Value="translateY(-3px) scale(1.008)" />
+  </Style>
   <Style Selector="Button.welcome-action:pressed">
-    <Setter Property="RenderTransform" Value="scale(0.985)" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(0.985)" />
   </Style>
   <Style Selector="Button.welcome-recent-item">
     <Setter Property="Background" Value="Transparent" />
@@ -602,9 +1151,25 @@
   <Style Selector="Button.welcome-recent-item:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="Transparent" />
   </Style>
-  <Style Selector="Border.welcome-recent">
-    <Setter Property="CornerRadius" Value="14" />
-    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
+  <!-- 最近项目行：不画盒子。默认透明，hover 整行染色 + 左缘透出强调脊，
+       靠圆角染色块表达「这一行可点」，比逐个描边轻得多。 -->
+  <!-- 最近项目行：沿用导轨「以右缘为铰链撬起纸片」的语汇——
+       悬停时左端顶出、微上翘，底色染一层弱强调，左缘透出强调脊。
+       全局共用同一套物理隐喻，而不是各处各自发明一种 hover。 -->
+  <Style Selector="Grid.recent-row">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="RenderTransformOrigin" Value="100%,50%" />
+    <Setter Property="RenderTransform" Value="translateX(0px) rotate(0deg) scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Grid.recent-row:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="RenderTransform" Value="translateX(-3px) rotate(-0.4deg) scale(1.006)" />
   </Style>
 
   <!-- 节点库芯片：可拖到画布 -->
@@ -636,23 +1201,38 @@
     <Setter Property="HorizontalContentAlignment" Value="Left" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="Padding" Value="12,8" />
+    <!-- 芯片是拖源：悬停时整片轻轻「被拈起」（中心为原点均匀抬升 + 微升投影），
+         预告它可以被拿走。与导轨的右缘铰链不同——这里没有固定边，是整片离面。 -->
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
     <Setter Property="Transitions">
       <Transitions>
-        <BrushTransition Property="Background" Duration="0:0:0.12" />
-        <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
+  </Style>
+  <Style Selector="Button.library-chip:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-2px) scale(1.03)" />
+  </Style>
+  <Style Selector="Button.library-chip:pressed">
+    <!-- 按下：压回桌面，给出「捏住了」的手感 -->
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(0.97)" />
   </Style>
   <Style Selector="Button.library-chip:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Card}" />
   </Style>
   <Style Selector="Button.library-chip.entry">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
   </Style>
+  <!-- 执行页起始项是行不是卡：不给圆角（圆角只对有面的东西有意义），
+       面与分隔线在视图里按行式列表定义。 -->
   <Style Selector="Border.exec-start-card">
-    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="CornerRadius" Value="0" />
   </Style>
 
   <!-- 项目 AI 输入区：Works + Workspace 共用 ProjectAiComposer / ai-composer。
@@ -670,26 +1250,45 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
-  <!-- 引脚毛玻璃：半透明底 + 亮边 + 圆角 -->
+  <!-- 节点端口：实体底座承载语义图形；命中区稳定，图形在悬停/连接时填充。 -->
+  <!-- 引脚：扁平极简——去掉外层盒子的底/边/影，让内部图形本身成为引脚（n8n/ComfyUI 风）。 -->
   <Style Selector="Border.pin-glass">
-    <Setter Property="Background" Value="#55FFFFFF" />
-    <Setter Property="BorderBrush" Value="#66FFFFFF" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="BoxShadow" Value="0 1 4 0 #22000000" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
   </Style>
   <Style Selector="Border.pin-glass-soft">
-    <Setter Property="Background" Value="#33FFFFFF" />
-    <Setter Property="BorderBrush" Value="#44FFFFFF" />
-    <Setter Property="BorderThickness" Value="0.8" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.pin-glass:pointerover, Border.pin-glass-soft:pointerover">
+    <Setter Property="RenderTransform" Value="scale(1.16)" />
+  </Style>
+  <Style Selector="Border.pin-glass:pointerover Ellipse.data-port">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.EdgeData}" />
+  </Style>
+  <Style Selector="Border.pin-glass-soft:pointerover Path.control-port">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.EdgeControl}" />
+  </Style>
+  <Style Selector="Border.communication-port:pointerover Border.communication-core">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.EdgeCommunication}" />
   </Style>
 
-  <!-- 选中节点：使用全局强调色；避免常驻动画并遵守减少动态效果偏好。 -->
-  <Style Selector="Border.node-flow-ring">
-    <Setter Property="Opacity" Value="1" />
-    <Setter Property="BorderThickness" Value="2.5" />
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.NodeSelected}" />
-  </Style>
+  <!-- 选中环已由自定义 SelectionFlowRing 控件承担（流动渐变描边，主题色衍生），
+       不再用 Border 平描边；此处不再保留 Border.node-flow-ring 样式。 -->
   <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentHover}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentHover}" />
@@ -736,21 +1335,24 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
   </Style>
 
-  <!-- 窗口控制：与 40px 顶栏同高并垂直居中内容，避免按钮/图标贴顶偏高 -->
+  <!-- 窗口控制：与 54px 顶栏同高并垂直居中内容。 -->
   <Style Selector="Button.window-control">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="(ctl:HoverSpin.Enable)" Value="True" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
-    <Setter Property="Width" Value="46" />
-    <Setter Property="Height" Value="40" />
-    <Setter Property="MinWidth" Value="46" />
-    <Setter Property="MinHeight" Value="40" />
+    <!-- 40x36 而非 44x54：原先高 54 且 VerticalAlignment=Stretch，把键位拉满整条
+         标题栏高度，上下留白远大于左右，看着是三个瘦长条。 -->
+    <Setter Property="Width" Value="40" />
+    <Setter Property="Height" Value="36" />
+    <Setter Property="MinWidth" Value="40" />
+    <Setter Property="MinHeight" Value="36" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
-    <Setter Property="VerticalAlignment" Value="Stretch" />
+    <Setter Property="VerticalAlignment" Value="Center" />
     <Setter Property="RenderTransformOrigin" Value="50%,50%" />
     <Setter Property="RenderTransform" Value="none" />
     <Setter Property="Transitions">
@@ -767,6 +1369,11 @@
     <Setter Property="StrokeLineCap" Value="Round" />
     <Setter Property="StrokeJoin" Value="Round" />
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <!-- 这里**不能**再设 RenderTransform，也不能给它挂过渡：
+         自转由 HoverSpin 逐帧写 RenderTransform 驱动，而样式 Setter 的优先级高于
+         代码赋值 —— 一旦这里写死 rotate(0deg)，每帧算出的角度都会被盖回 0°，
+         图标就纹丝不动；补间过渡也会与逐帧驱动互相拖拽。 -->
     <Setter Property="Transitions">
       <Transitions>
         <DoubleTransition Property="StrokeThickness" Duration="0:0:0.14" />
@@ -775,19 +1382,35 @@
       </Transitions>
     </Setter>
   </Style>
-  <!-- 最小化：实心主题色横条（比描边线更易辨认） -->
+  <!-- 最小化：实心主题色横条（比描边线更易辨认）。
+       宽度与其它窗口键一致（15）；高度必须按横条真实长宽比给（15:2.4 → 2.4），
+       不能沿用 15：Stretch=Uniform 会把横条按自身包围盒缩放，塞进 15 高的方框后
+       在这种极端长宽比下不落在框心上，看着就是「没对齐中心」。
+       给足真实高度后，VerticalAlignment=Center 才能把它精确居中。 -->
   <Style Selector="Button.window-control Path.icon.minimize">
-    <Setter Property="Width" Value="16" />
-    <Setter Property="Height" Value="16" />
+    <Setter Property="Width" Value="15" />
+    <Setter Property="Height" Value="2.4" />
     <Setter Property="StrokeThickness" Value="0" />
     <Setter Property="Stroke" Value="Transparent" />
     <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
-  <Style Selector="Button.window-control:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+  <!-- 窗口键悬停：不铺底色块（原先整键染 AccentLight，三个键逐个亮起很花），
+       改为图标自转 + 描边转强调色；旋转节奏由 HoverSpin 行为驱动（快转→停顿→慢转）。
+       关闭键保留红底（危险动作需要强信号）。 -->
+  <!-- 关键：Button 的底真正画在模板内的 ContentPresenter 上，FluentTheme 对它自带
+       :pointerover / :pressed 灰底画刷。只在 Button 本身设 Background=Transparent
+       盖不住那一层，于是悬停仍会浮出一块灰底（看着像阴影）。这里把三种状态全部按平。 -->
+  <Style Selector="Button.window-control /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
   </Style>
-  <Style Selector="Button.window-control:pointerover">
-    <Setter Property="RenderTransform" Value="scale(1.08)" />
+  <Style Selector="Button.window-control:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.window-control:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
   </Style>
   <Style Selector="Button.window-control:pointerover Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentHover}" />
@@ -800,27 +1423,21 @@
   <Style Selector="Button.window-control:pressed">
     <Setter Property="RenderTransform" Value="scale(0.9)" />
   </Style>
-  <Style Selector="Button.window-control:pressed /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentBorder}" />
-  </Style>
   <Style Selector="Button.window-control:pressed Path.icon">
     <Setter Property="Opacity" Value="0.92" />
   </Style>
-  <Style Selector="Button.window-control.close:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.StatusError}" />
-  </Style>
-  <Style Selector="Button.window-control.close:pointerover">
-    <Setter Property="RenderTransform" Value="scale(1.08)" />
-  </Style>
+  <!-- 关闭键：危险信号靠「图标变红」表达，不铺红底块。
+       悬停时描边转错误色并加粗，按下再压暗一档；最小化那根实心横条改 Fill。 -->
   <Style Selector="Button.window-control.close:pointerover Path.icon">
-    <Setter Property="Stroke" Value="White" />
-    <Setter Property="StrokeThickness" Value="2.2" />
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="StrokeThickness" Value="2.4" />
   </Style>
   <Style Selector="Button.window-control.close:pressed">
     <Setter Property="RenderTransform" Value="scale(0.9)" />
   </Style>
-  <Style Selector="Button.window-control.close:pressed /template/ ContentPresenter">
-    <Setter Property="Background" Value="#C62828" />
+  <Style Selector="Button.window-control.close:pressed Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="Opacity" Value="0.82" />
   </Style>
 
   <!-- 模板市场等：一体搜索壳（左侧图标 + 输入 + 右侧提交） -->
@@ -892,7 +1509,7 @@
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
-  <!-- 导航项：左栏满宽横条悬停（左右贴齐、无圆角卡片）。 -->
+  <!-- 通用导航项；应用壳的 rail-nav 只调整密度，颜色继续跟随主题。 -->
   <Style Selector="Button.nav">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
@@ -914,12 +1531,11 @@
     </Setter>
     <Setter Property="Template">
       <ControlTemplate>
-        <!-- 无圆角、铺满整行：悬停条左右贴齐左栏，不随文字缩成卡片 -->
         <Border x:Name="Root"
                 Background="{TemplateBinding Background}"
                 BorderBrush="{TemplateBinding BorderBrush}"
                 BorderThickness="{TemplateBinding BorderThickness}"
-                CornerRadius="0"
+                CornerRadius="{TemplateBinding CornerRadius}"
                 ClipToBounds="True">
           <ContentPresenter x:Name="PART_ContentPresenter"
                             Content="{TemplateBinding Content}"
@@ -952,6 +1568,121 @@
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
+  <!--
+    导轨导航项：「撬起的纸片」交互。
+    物理隐喻——导轨(BackgroundSubtle) 是一道凹槽，每个入口是躺在槽里的纸片；
+    铰链固定在纸片右缘(RenderTransformOrigin=100%,50%)，选中时左端向左顶出并上翘，
+    于是纸片从凹槽里被撬起来：明度升到最亮白、左缘露出强调色脊、影子偏右下。
+    - 旋转是刚体变换，文字不会被拉歪，只是整体跟着倾斜（真实纸片就该如此）。
+    - 全部走主题 token，无硬编码色；深浅主题与个性化强调色自动跟随。
+  -->
+  <Style Selector="Button.nav.rail-nav">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="CornerRadius" Value="7" />
+    <Setter Property="Padding" Value="0,6" />
+    <Setter Property="MinHeight" Value="42" />
+    <!-- 左边距要留够：撬起时左端会向左顶出（translateX + 以右缘为原点的 scale
+         都会向左扩），留 16px 才不会被导轨左缘裁掉左脊。 -->
+    <Setter Property="Margin" Value="16,2,12,2" />
+    <!-- 撬起时纸片与投影要能越出自身边界，不能被裁 -->
+    <Setter Property="ClipToBounds" Value="False" />
+    <!-- 铰链锚在右缘中点：左端才能既向左顶出、又向上翘起 -->
+    <Setter Property="RenderTransformOrigin" Value="100%,50%" />
+    <Setter Property="RenderTransform" Value="translateX(0px) rotate(0deg) scale(1)" />
+    <!-- 「受光的左缘」用纸片自身的左边框实现：厚度常驻 3px（不挤动内容），
+         平时透明、选中转强调色。边框会顺着 CornerRadius 包住左上/左下圆角，
+         比塞一个 3px 子 Border 干净——后者会在圆角外露出毛刺。 -->
+    <Setter Property="BorderThickness" Value="3,0,0,0" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.18" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.18" />
+        <BrushTransition Property="Foreground" Duration="0:0:0.18" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.26" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.nav.rail-nav TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Foreground" Duration="0:0:0.18" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.nav.rail-nav Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Stroke" Duration="0:0:0.18" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <!-- 悬停：纸片被轻轻掀起一角（预告撬起方向），底色微染 -->
+  <Style Selector="Button.nav.rail-nav:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+    <Setter Property="RenderTransform" Value="translateX(-2px) rotate(-0.45deg) scale(1.008)" />
+  </Style>
+  <Style Selector="Button.nav.rail-nav:pointerover TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+  </Style>
+  <Style Selector="Button.nav.rail-nav:pointerover Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <!-- 按下：纸片被压回槽里（给出手感回馈） -->
+  <Style Selector="Button.nav.rail-nav:pressed">
+    <Setter Property="RenderTransform" Value="translateX(-1px) rotate(-0.15deg) scale(0.995)" />
+  </Style>
+  <!-- 选中：纸片彻底撬起——左端顶出并上翘 1.3°，明度升到最亮白。
+       scale 压到 1.02：以右缘为原点时 scale 也会向左扩，两者叠加才不越界。 -->
+  <Style Selector="Button.nav.rail-nav.selected">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="RenderTransform" Value="translateX(-5px) rotate(-1.3deg) scale(1.02)" />
+  </Style>
+  <Style Selector="Button.nav.rail-nav.selected /template/ Border#Root">
+    <!-- 影子偏右下，反证左缘是抬起的那一侧 -->
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Lift}" />
+    <Setter Property="ClipToBounds" Value="False" />
+  </Style>
+  <Style Selector="Button.nav.rail-nav.selected TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="Button.nav.rail-nav.selected Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="StrokeThickness" Value="1.8" />
+  </Style>
+  <!-- 选中悬停：再多撬一点，暗示「已经是当前页」 -->
+  <Style Selector="Button.nav.rail-nav.selected:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="RenderTransform" Value="translateX(-7px) rotate(-1.6deg) scale(1.028)" />
+  </Style>
+  <!-- 悬停时左缘先透出一层弱强调，预告「这条边会被撬起」 -->
+  <Style Selector="Button.nav.rail-nav:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+  </Style>
+  <!-- 折叠态（导轨仅 64px）：展开态的 16+12 边距会把 40px 图标格挤出导轨。
+       收窄到 10+10 既不溢出，又让图标正好落在导轨中线上。 -->
+  <Style Selector="Button.nav.rail-nav.collapsed">
+    <Setter Property="Margin" Value="10,2,10,2" />
+  </Style>
+  <Style Selector="Button.rail-toggle">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="CornerRadius" Value="8" />
+  </Style>
+  <Style Selector="Button.rail-toggle Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <Style Selector="Button.rail-toggle:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <Style Selector="Button.rail-toggle:pointerover Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+
   <!-- 空状态面板：插画 + 文案 + 淡入 -->
   <Style Selector="Border.empty-state">
     <Setter Property="Background" Value="Transparent" />
@@ -978,7 +1709,22 @@
   <!-- 分母题空态插画容器 -->
   <Style Selector="Border.empty-state :is(UserControl)">
     <Setter Property="HorizontalAlignment" Value="Center" />
-    <Setter Property="Margin" Value="0,0,0,12" />
+    <Setter Property="Margin" Value="0,0,0,20" />
+  </Style>
+  <!-- 空态排版：空态往往独占大半屏，标题必须撑得起这块面积。
+       原先 16px subtitle + 12px caption 在 1440 宽的空场里像两行小字，
+       这里拉大标题、放松说明行距，让空白有一个体面的视觉焦点。 -->
+  <Style Selector="Border.empty-state TextBlock.subtitle">
+    <Setter Property="FontSize" Value="20" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
+  </Style>
+  <Style Selector="Border.empty-state TextBlock.title">
+    <Setter Property="FontSize" Value="23" />
+  </Style>
+  <Style Selector="Border.empty-state TextBlock.caption">
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="LineHeight" Value="22" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
   </Style>
   <!-- Logo 容器：位图钢笔由 AppIconPainter 着色；此处只铺底 -->
   <Style Selector="Border.brand-logo.on-paper">
@@ -988,13 +1734,6 @@
   <Style Selector="Border.brand-logo.on-accent">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="BorderThickness" Value="0" />
-  </Style>
-  <Style Selector="Border.danger-panel">
-    <Setter Property="Background" Value="#18D97706" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusWarning}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Padding" Value="14,12" />
   </Style>
 
   <!-- 个性化调色板卡片：固定比例、选中描边 -->
@@ -1113,32 +1852,35 @@
   <Style Selector="Button.panel-collapse:pointerover /template/ ContentPresenter">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
   </Style>
-  <!-- 工具条图标按钮：正方形、透明底、悬停浅灰；hover 有过渡动效 -->
+  <!-- 工具条图标按钮：正方形、透明底。悬停不给按钮铺灰底
+       （一排按钮逐个亮起色块很花），只做整键微抬 + 图标描边转强调色。
+       自转只留给窗口键三兄弟，功能键一排全转会很吵。 -->
   <Style Selector="Button.icon-btn">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Width" Value="32" />
-    <Setter Property="Height" Value="32" />
+    <Setter Property="Width" Value="30" />
+    <Setter Property="Height" Value="26" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+  </Style>
+  <!-- 图标自转：悬停时图标绕自身中心转（先快转一圈→短暂停顿→持续慢转）。
+       节奏由 HoverSpin 行为在代码里逐帧驱动——Avalonia 的关键帧动画不支持
+       RenderTransform，且主题文件禁止 IterationCount=Infinite（守卫测试）。
+       此处只保留描边变色。 -->
+  <Style Selector="Button.icon-btn > Path.icon">
     <Setter Property="Transitions">
       <Transitions>
-        <BrushTransition Property="Background" Duration="0:0:0.10" />
+        <BrushTransition Property="Stroke" Duration="0:0:0.14" />
       </Transitions>
     </Setter>
   </Style>
-  <Style Selector="Button.icon-btn:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  <Style Selector="Button.icon-btn:pointerover > Path.icon">
+    <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
-  <!-- 三个工具条按钮（导入/导出/保存）保持统一的描边图标风格，
-       不用实色背景——避免保存按钮蓝色盖住图标。
-       保存用 accent 色描边区分，导入导出用普通 secondary 描边。 -->
-  <Style Selector="Button.icon-btn.save > Path.icon">
+  <!-- 保存按钮：accent 描边区分，悬停不铺底色 -->
+  <Style Selector="Button.icon-btn.save Path.icon">
     <Setter Property="Stroke" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="StrokeThickness" Value="2" />
-  </Style>
-  <Style Selector="Button.icon-btn.save:pointerover /template/ ContentPresenter">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
   </Style>
 
   <!-- U60：页内表单在窄宽壳上拉满宽度、收紧网格间距（随 Window.compact 级联） -->
@@ -1151,25 +1893,46 @@
   <Style Selector="Window.compact Border.panel-section">
     <Setter Property="Padding" Value="10,8" />
   </Style>
+  <Style Selector="Window.compact Border.settings-index-rail">
+    <Setter Property="IsVisible" Value="False" />
+  </Style>
   <Style Selector="Window.medium Border.panel-section">
     <Setter Property="Padding" Value="14,10" />
   </Style>
 
   <!-- ============================ 输入控件 ============================ -->
+  <!-- 输入控件：无边框·柔性填充槽（去盒子）。
+       旧法每个输入是一圈灰边的盒子，一列输入 = 一堆叠框。
+       改为半透明墨色填充 + 零描边：压在任何面板底上都自然凹陷成一处槽，
+       靠明暗而非边框区分，一整列输入读起来是安静的填充带，不再是叠框。
+       聚焦时才浮现青绿描边作为可编辑信号。单行/多行/代码框统一生效。 -->
   <Style Selector="TextBox">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="1" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
-    <Setter Property="CaretBrush" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="CaretBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="10,6" />
   </Style>
-  <!-- 禁止全局「纯蓝/强调色边」焦点：聚焦保持默认边，靠 CaretBrush 表示可编辑。
-       主题色描边仅允许 Border.ai-composer:focus-within（项目 AI 一体区）。 -->
+  <Style Selector="TextBox /template/ Border#PART_BorderElement">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="TextBox:pointerover /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFillHover}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <!-- 聚焦：青绿描边（现代输入的可编辑信号），填充回落到静态槽色 -->
   <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
   </Style>
   <Style Selector="TextBox.document-editor">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Reading}" />
@@ -1189,9 +1952,25 @@
 
   <Style Selector="ComboBox">
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="1" />
     <Setter Property="MinHeight" Value="32" />
+  </Style>
+  <Style Selector="ComboBox /template/ Border#Background">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <BrushTransition Property="Background" Duration="0:0:0.14" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ComboBox:pointerover /template/ Border#Background">
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFillHover}" />
+  </Style>
+  <Style Selector="ComboBox:focus /template/ Border#Background">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
   <!-- 分隔线 -->
@@ -1199,6 +1978,30 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="Height" Value="1" />
     <Setter Property="Margin" Value="0,6" />
+  </Style>
+
+  <!-- ============================================================
+       列表 / 下拉选中：全局改掉 Fluent 默认 SystemAccentColor 蓝，
+       统一到品牌青绿（AccentLight 淡底 + AccentPrimary 文字）。
+       之前设置页右侧索引「项目」是刺眼纯蓝，就是这个默认泄漏。
+       ============================================================ -->
+  <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <Style Selector="ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <Style Selector="ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
+  <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <Style Selector="ComboBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
   </Style>
 
   <!-- 徽标（数字角标 / 标签 pill） -->
@@ -1268,16 +2071,45 @@
       </Transitions>
     </Setter>
   </Style>
-  <!-- 卡片/层悬停微抬升 -->
+  <Style Selector="Button.segment-button">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="MinHeight" Value="30" />
+    <Setter Property="Padding" Value="12,5" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <Style Selector="Button.segment-button:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+  </Style>
+  <Style Selector="Button.segment-button.selected">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="Button.segment-button.selected /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+  </Style>
+  <!-- 卡片悬停微抬升：整片离面（中心原点），影子随之加深。
+       原先注释写「微抬升」但只换了边色，卡片其实是死的。 -->
   <Style Selector="Border.card">
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        <BoxShadowsTransition Property="BoxShadow" Duration="0:0:0.18" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
   <Style Selector="Border.card:pointerover">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="RenderTransform" Value="translateY(-2px) scale(1.004)" />
+    <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Flyout}" />
   </Style>
 
   <!-- ============ Win11 毛玻璃菜单：右键 ContextMenu + 标题栏 MenuFlyout ============ -->

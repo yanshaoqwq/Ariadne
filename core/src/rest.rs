@@ -138,6 +138,8 @@ fn dispatch_rest_route(
                 workflow_id: workflow_id.clone(),
                 start_node_id: payload.start_node_id,
                 initial_inputs: payload.inputs,
+                variables: payload.variables,
+                origin_conversation_id: None,
             };
             let started = commands::start_workflow_with_request(state, request.clone())
                 .map_err(command_error)?;
@@ -312,6 +314,9 @@ struct RunWorkflowBody {
     start_node_id: Option<String>,
     #[serde(default)]
     inputs: BTreeMap<String, Value>,
+    /// 工作流变量初值；与 `inputs`（起始节点端口输入）不同层。
+    #[serde(default)]
+    variables: BTreeMap<String, Value>,
 }
 
 impl RestWorkflowRunStarted {

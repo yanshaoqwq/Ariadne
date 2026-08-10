@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Reflection;
+using System.Text.Json;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.ViewModels;
 using Xunit;
@@ -79,6 +80,29 @@ public sealed class WelcomeTemplateStateTests
         Assert.False(vm.IsRecentError);
         Assert.False(vm.IsRecentLoading);
         Assert.Equal(string.Empty, vm.RecentErrorText);
+    }
+
+    [Fact]
+    public async Task WelcomeRecentProject_LastOpenedTextRefreshesWhenLanguageChanges()
+    {
+        var names = Ariadne.Desktop.Localization.DisplayNameService.LoadDefault();
+        names.SwitchLanguage("zh");
+        var backend = StateBackend.Create();
+        backend.RecentProjectsResult = new[]
+        {
+            new RecentProjectEntry("Draft", "/projects/draft", 1_735_689_600_000),
+        };
+        var vm = new WelcomeViewModel(names, backend.Client);
+        await vm.LoadAsync();
+        var item = Assert.Single(vm.RecentProjects);
+        var changed = new List<string?>();
+        item.PropertyChanged += (_, args) => changed.Add(args.PropertyName);
+
+        names.SwitchLanguage("en");
+
+        Assert.StartsWith("Last opened: ", item.LastOpenedText, StringComparison.Ordinal);
+        Assert.Contains(nameof(RecentProjectItemViewModel.LastOpenedText), changed);
+        Assert.Contains(nameof(RecentProjectItemViewModel.HasLastOpened), changed);
     }
 
     [Fact]
@@ -201,7 +225,6 @@ public sealed class WelcomeTemplateStateTests
 
         Assert.False(window.OpenProjectCommand.CanExecute(null));
         Assert.False(window.CreateProjectCommand.CanExecute(null));
-        Assert.False(window.SwitchProjectCommand.CanExecute(null));
 
         pickerResult.SetResult(null);
         await WaitUntilAsync(
@@ -209,7 +232,6 @@ public sealed class WelcomeTemplateStateTests
             TimeSpan.FromSeconds(2));
 
         Assert.True(window.CreateProjectCommand.CanExecute(null));
-        Assert.True(window.SwitchProjectCommand.CanExecute(null));
     }
 
     [Fact]
@@ -295,7 +317,7 @@ public sealed class WelcomeTemplateStateTests
 
         Assert.Equal(2, backend.RepositorySettingsCalls);
         Assert.Equal(
-            new[] { "https://templates.example.test", "https://templates-2.example.test" },
+            new[] { "ariadne://official-templates/v1", "https://templates-2.example.test" },
             backend.SearchCalls.Select(call => call.BaseUrl).ToArray());
     }
 
@@ -316,6 +338,7 @@ public sealed class WelcomeTemplateStateTests
         Assert.Equal("长篇小说起步", template.Name);
         Assert.Contains("写小说", template.TagsText, StringComparison.Ordinal);
         Assert.Contains("大纲生成", template.TagsText, StringComparison.Ordinal);
+        Assert.Equal("Ariadne 内置模板（离线）", vm.CatalogSourceText);
 
         var root = ResolveRepoRoot();
         var view = File.ReadAllText(Path.Combine(
@@ -325,6 +348,62 @@ public sealed class WelcomeTemplateStateTests
             "Views",
             "TemplateMarketPageView.axaml"));
         Assert.Contains("Loaded=\"OnLoaded\"", view, StringComparison.Ordinal);
+        Assert.Contains("KeyDown=\"OnSearchKeyDown\"", view, StringComparison.Ordinal);
+        Assert.DoesNotContain("Text=\"{Binding Id}\"", view, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TemplateTags_AreSentAsStructuredFilters_WithoutOverwritingQuery()
+    {
+        var backend = StateBackend.Create();
+        var vm = new TemplateMarketPageViewModel(
+            Ariadne.Desktop.Localization.DisplayNameService.LoadDefault(),
+            backend.Client)
+        {
+            SearchQuery = "hero",
+        };
+        vm.Tags[0].IsSelected = true;
+
+        await vm.SearchForTestsAsync();
+
+        var call = Assert.Single(backend.SearchCalls);
+        Assert.Equal("hero", call.Query);
+        Assert.Equal(new[] { "ui.template.tag.novel" }, call.Tags);
+    }
+
+    [Fact]
+    public async Task TemplateImport_IsDisabledWithoutProject_AndRefreshesWithProjectSession()
+    {
+        var backend = StateBackend.Create();
+        backend.HasProjectRoot = false;
+        var vm = new TemplateMarketPageViewModel(
+            Ariadne.Desktop.Localization.DisplayNameService.LoadDefault(),
+            backend.Client);
+        await vm.EnsureInitialCatalogLoadedAsync();
+        var template = Assert.Single(vm.Templates);
+        Assert.False(template.InstallCommand.CanExecute(null));
+
+        backend.HasProjectRoot = true;
+        await vm.ReloadProjectDataAsync();
+
+        Assert.True(template.InstallCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void TemplatePermissionSummary_LocalizesKnownTokens_AndLabelsCompatibilityTokens()
+    {
+        var names = Ariadne.Desktop.Localization.DisplayNameService.LoadDefault();
+        var vm = new TemplateMarketPageViewModel(names, StateBackend.Create().Client);
+        using var manifest = JsonDocument.Parse("""
+            { "required_permissions": ["http_skill", "future_permission"] }
+            """);
+        var detail = new TemplateDetail("id", "name", "1", manifest.RootElement.Clone(), true);
+
+        var summary = vm.PermissionSummaryForTests(detail);
+
+        Assert.Contains(names.Text("ui.template.permission.http_skill"), summary, StringComparison.Ordinal);
+        Assert.Contains("future_permission", summary, StringComparison.Ordinal);
+        Assert.Contains("兼容权限项", summary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -360,6 +439,9 @@ public sealed class WelcomeTemplateStateTests
         Assert.DoesNotContain("MinHeight=\"440\"", view, StringComparison.Ordinal);
         Assert.DoesNotContain("Grid RowDefinitions=\"*,Auto\"", view, StringComparison.Ordinal);
         Assert.DoesNotContain("Width=\"360\" Height=\"360\"", view, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding LastOpenedText}\"", view, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding RelocateCommand}\"", view, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding ForgetCommand}\"", view, StringComparison.Ordinal);
     }
 
     private class StateBackend : DispatchProxy
@@ -380,7 +462,8 @@ public sealed class WelcomeTemplateStateTests
             Array.Empty<RecentProjectEntry>();
         public IReadOnlyList<RecentProjectEntry> RecentProjectsResult { get; set; } =
             Array.Empty<RecentProjectEntry>();
-        public string RepositoryBaseUrl { get; set; } = "https://templates.example.test";
+        public string RepositoryBaseUrl { get; set; } = "ariadne://official-templates/v1";
+        public bool HasProjectRoot { get; set; } = true;
         public string? InstallExpectedProjectRoot { get; private set; }
         public string? CreatedProjectRoot { get; private set; }
         public bool DirectoryExistedAtCreateCall { get; private set; }
@@ -391,7 +474,7 @@ public sealed class WelcomeTemplateStateTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> SlowSearchStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public ConcurrentQueue<(string BaseUrl, string Query, int Page)> SearchCalls { get; } = new();
+        public ConcurrentQueue<(string BaseUrl, string Query, IReadOnlyList<string> Tags, int Page)> SearchCalls { get; } = new();
 
         public static StateBackend Create()
         {
@@ -425,6 +508,11 @@ public sealed class WelcomeTemplateStateTests
                     return WaitRecentProjectsAsync();
                 }
                 return Task.FromResult(RecentProjectsResult);
+            }
+
+            if (targetMethod.Name == $"get_{nameof(IAriadneBackendClient.HasProjectRoot)}")
+            {
+                return HasProjectRoot;
             }
 
             if (targetMethod.Name == nameof(IAriadneBackendClient.GetTemplateRepositorySettingsAsync))
@@ -497,8 +585,9 @@ public sealed class WelcomeTemplateStateTests
             {
                 var baseUrl = (string)args![0]!;
                 var query = (string)args![1]!;
-                var page = (int)args[2]!;
-                SearchCalls.Enqueue((baseUrl, query, page));
+                var tags = Assert.IsAssignableFrom<IReadOnlyList<string>>(args[2]);
+                var page = (int)args[3]!;
+                SearchCalls.Enqueue((baseUrl, query, tags, page));
                 if (ThrowSearch)
                 {
                     return Task.FromException<IReadOnlyList<TemplateSummary>>(

@@ -557,7 +557,7 @@ fn quick_edit_diff_marks_changed_lines_and_folds_unchanged_runs() {
         llm,
         &provider,
         LlmServiceConfig {
-            provider_id: "mock-diff".to_owned(),
+            provider_id: "mock-long".to_owned(),
             model_id: "model".to_owned(),
             max_tool_rounds: 0,
             timeout_ms: 1_000,
@@ -700,6 +700,29 @@ fn project_registry_initializes_project_and_tracks_recent_projects() {
     assert!(project.join(".git").is_dir());
     assert_eq!(recent[0].name, "Novel");
     assert_eq!(registry.read_all().unwrap()[0].path, project);
+}
+
+#[test]
+fn project_registry_relocates_and_forgets_entries_without_copying_stale_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry = ProjectRegistryStore::new(temp.path().join("recent.json"));
+    let old_root = temp.path().join("old-location");
+    let new_root = temp.path().join("new-location");
+    let other_root = temp.path().join("other");
+    registry.record_opened("Other", &other_root).unwrap();
+    registry.record_opened("Novel", &old_root).unwrap();
+
+    let relocated = registry
+        .record_opened_replacing("Novel", &new_root, Some(&old_root))
+        .unwrap();
+    assert_eq!(relocated[0].path, new_root);
+    assert!(relocated.iter().all(|entry| entry.path != old_root));
+    assert_eq!(relocated.iter().filter(|entry| entry.name == "Novel").count(), 1);
+
+    let remaining = registry.forget(&new_root).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].path, other_root);
+    assert!(registry.forget(&old_root).is_err());
 }
 
 #[test]

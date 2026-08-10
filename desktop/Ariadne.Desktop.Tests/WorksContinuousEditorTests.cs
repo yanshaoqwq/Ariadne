@@ -147,6 +147,11 @@ public sealed class WorksContinuousEditorTests
         Assert.Contains("<ae:TextEditor x:Name=\"DocumentEditor\"", view, StringComparison.Ordinal);
         Assert.Contains("Document=\"{Binding EditorDocument}\"", view, StringComparison.Ordinal);
         Assert.Contains("<VirtualizingStackPanel />", view, StringComparison.Ordinal);
+        // 只读渲染必须是虚拟化 ItemsControl 而非 ListBox；断言绑定本身而不是
+        // Grid.Row 行号——行号属排版细节（刊头等分区会改变它），与本契约无关。
+        Assert.Contains("<ItemsControl", view, StringComparison.Ordinal);
+        Assert.Contains("ItemsSource=\"{Binding DocumentBlocks}\"", view, StringComparison.Ordinal);
+        Assert.DoesNotContain("<ListBox", view, StringComparison.Ordinal);
         Assert.DoesNotContain("OnDocumentBlockEditor", view, StringComparison.Ordinal);
         Assert.DoesNotContain("SelectionForBlock", viewModel, StringComparison.Ordinal);
         Assert.DoesNotContain("TryResolveBlockSelection", viewCode, StringComparison.Ordinal);

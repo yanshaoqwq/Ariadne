@@ -139,8 +139,16 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     public string StatusText
     {
         get => _statusText;
-        set => SetProperty(ref _statusText, value);
+        set
+        {
+            if (SetProperty(ref _statusText, value))
+            {
+                OnPropertyChanged(nameof(HasStatusText));
+            }
+        }
     }
+
+    public bool HasStatusText => !string.IsNullOrWhiteSpace(StatusText);
 
     public string RepositoryStatusText
     {
@@ -186,6 +194,13 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
 
     public bool HasRepositoryReason => !string.IsNullOrWhiteSpace(RepositoryReasonText);
     public bool HasDiffPreview => !string.IsNullOrWhiteSpace(DiffPreviewText);
+
+    /// <summary>
+    /// 是否已拿到仓库信息。未打开项目时这些字段全为空，
+    /// 右栏若照常渲染「仓库状态/当前分支/当前 HEAD…」标签列就会变成
+    /// 一张没填完的表单，故用此标志整块隐藏。
+    /// </summary>
+    public bool HasRepositoryInfo => !string.IsNullOrWhiteSpace(RepositoryStatusText);
 
     public GitHistoryItemViewModel? SelectedCommit
     {
@@ -653,6 +668,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     {
         OnPropertyChanged(nameof(HasRepositoryReason));
         OnPropertyChanged(nameof(HasDiffPreview));
+        OnPropertyChanged(nameof(HasRepositoryInfo));
     }
 
     private static string ShortHash(string value)

@@ -61,10 +61,22 @@ pub struct WorkflowNodeCatalogEntry {
     pub config_kind: String,
     pub execution_kind: WorkflowNodeExecutionKind,
     pub default_budget_usd: f64,
+    /// U125：该节点类型的执行输出引脚名列表。
+    ///
+    /// 绝大多数节点只有一个通用 `exec_out`，故字段缺省即视为单引脚；
+    /// condition/eval 声明两个分支引脚（`exec_out_true` / `exec_out_false`），
+    /// 桌面画布与后端校验共用这一份声明，不再各自硬编码引脚名。
+    #[serde(default = "default_catalog_execution_output_ports")]
+    pub execution_output_ports: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_search_tool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_search_tool: Option<String>,
+}
+
+/// 目录项缺省的执行输出引脚：单个通用 `exec_out`。
+fn default_catalog_execution_output_ports() -> Vec<String> {
+    vec![crate::contracts::EXECUTION_OUTPUT_PORT.to_owned()]
 }
 
 static WORKFLOW_NODE_CATALOG: OnceLock<Vec<WorkflowNodeCatalogEntry>> = OnceLock::new();

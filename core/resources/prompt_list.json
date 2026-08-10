@@ -96,7 +96,7 @@
     "describe": "Outliner 按行替换全局总纲。"
   },
   "tool.outliner_rewrite_file": {
-    "prompt": "整文件替换全局总纲文件。仅用于短纲领整体重写，系统会生成单个整文件 DocumentPatch；正文不允许使用该工具重写。",
+    "prompt": "整文件替换全局总纲文件。仅用于短纲领整体重写，系统会生成单个整文件 DocumentPatch。正文有各自的 writer/polisher 重写工具，本工具只能改纲领类文件。",
     "describe": "Outliner 整文件重写全局总纲。"
   },
   "tool.designer_register": {
@@ -124,7 +124,7 @@
     "describe": "Designer 按行替换阶段总纲。"
   },
   "tool.designer_rewrite_file": {
-    "prompt": "整文件替换当前阶段总纲文件。仅用于短纲领整体重写，系统会生成单个整文件 DocumentPatch；正文不允许使用该工具重写。",
+    "prompt": "整文件替换当前阶段总纲文件。仅用于短纲领整体重写，系统会生成单个整文件 DocumentPatch。正文有各自的 writer/polisher 重写工具，本工具只能改纲领类文件。",
     "describe": "Designer 整文件重写阶段总纲。"
   },
   "tool.planner_register": {
@@ -152,7 +152,7 @@
     "describe": "Planner 按行替换章节大纲。"
   },
   "tool.planner_rewrite_file": {
-    "prompt": "整文件替换当前章节大纲文件。仅用于短纲领整体重写，系统会生成单个整文件 DocumentPatch；正文不允许使用该工具重写。",
+    "prompt": "整文件替换当前章节大纲文件。仅用于短纲领整体重写，系统会生成单个整文件 DocumentPatch。正文有各自的 writer/polisher 重写工具，本工具只能改纲领类文件。",
     "describe": "Planner 整文件重写章节大纲。"
   },
   "tool.detail_find": {
@@ -294,5 +294,17 @@
   "summarizer.stage_summary": {
     "prompt": "判断章节是否仍属于当前阶段，并根据阶段内章节总结更新阶段概括。",
     "describe": "阶段概括提示词。"
+  },
+  "tool.writer_rewrite_file": {
+    "prompt": "整文件替换当前章节正文。适用于整章重写；只想改局部时优先用 writer-insert-lines / writer-replace-lines，改动更小也更省 token。只能重写本节点负责的章节正文文件，不能用它改纲领类文件。",
+    "describe": "Writer 整文件重写章节正文。"
+  },
+  "tool.polisher_rewrite_file": {
+    "prompt": "整文件替换当前章节正文。适用于通篇润色；只想改局部时优先用 polisher-insert-lines / polisher-replace-lines。只能重写本节点负责的章节正文文件，不能用它改纲领类文件。",
+    "describe": "Polisher 整文件重写章节正文。"
+  },
+  "workflow.variable_summary": {
+    "prompt": "请为下面这组工作流变量拟一句话，用来在执行页概括这次运行要做什么。\n要求：\n1. 只回这一句话本身，不要解释、不要引号、不要代码块。\n2. 变量一律用 {{var.变量名}} 占位符引用，不要把当前值写死进去。\n3. 贴近写作场景，简洁有文学感，控制在 30 字以内。\n\n变量：\n{{variables}}\n\n当前句式：{{current}}",
+    "describe": "执行页变量摘要句式的生成提示词（由项目空间 AI 起初稿，作者可改）。"
   }
 }

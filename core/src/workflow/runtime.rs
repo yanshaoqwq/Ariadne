@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::contracts::{
-    CommunicationEdgeConfig, CoreError, CoreResult, Edge, EdgeId, ExecutionCancellation,
-    ExternalDispatchAuthorization, LoopPolicy, NodeId, PortMap, PortValue, RunControl, RunId,
-    RunStatus, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
+    condition_branch_for_port, CommunicationEdgeConfig, CoreError, CoreResult, Edge, EdgeId,
+    ExecutionCancellation, ExternalDispatchAuthorization, LoopPolicy, NodeId, PortMap, PortValue,
+    RunControl, RunId, RunStatus, WorkflowDefinition, WorkflowEdgeKind, WorkflowId,
+    WorkflowVariableDecl,
 };
+use crate::contracts::{render_summary_template, validate_variable_decls, variable_value_is_blank};
 use crate::skills::stable_text_hash;
 
 /// 节点执行请求，包含运行态已经汇总好的 typed inputs 和通信消息。
@@ -34,6 +36,10 @@ pub struct WorkflowNodeExecutionRequest {
     pub inputs: PortMap,
     #[serde(default)]
     pub communication_messages: Vec<CommunicationMessage>,
+    /// 本次执行可见的工作流变量当前值（作用域链展平，内层优先）。
+    /// 参与 request_hash：循环每轮取值不同，不计入会被误判为同一请求的重放。
+    #[serde(default)]
+    pub variables: BTreeMap<String, Value>,
     #[serde(default)]
     pub metadata: Value,
     /// 当前 worker 执行链的共享取消信号；不持久化，也不参与 operation hash。
@@ -129,6 +135,35 @@ pub enum WorkflowRuntimeEventType {
     PatchWriteBackUpdated,
     CommunicationMessage,
     LoopUpdated,
+    /// 节点写回工作流变量；记录写入的作用域层，便于回溯循环每轮取值。
+    VariableWritten,
+    /// 节点尝试写入未声明或类型不符的变量；写入被丢弃，运行继续。
+    VariableWriteRejected,
+}
+
+/// 运行完成回报载荷：项目空间 AI 启动的运行到达终态后回发给发起对话。
+///
+/// 只承载结构化事实，不含面向人的措辞 —— 措辞在项目空间 AI 侧组装，
+/// 避免把展示文案硬编码进 runtime。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowRunCompletionReport {
+    /// 回发目标对话。
+    pub conversation_id: String,
+    pub workflow_id: WorkflowId,
+    pub run_id: RunId,
+    pub status: RunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WorkflowRunFailure>,
+    /// 变量终值（含 hidden）：AI 据此判断循环推进到哪一章。
+    #[serde(default)]
+    pub variables: BTreeMap<String, Value>,
+    /// 本次运行产出的 artifact id。
+    #[serde(default)]
+    pub artifacts: Vec<String>,
 }
 
 /// 运行级失败详情；与节点错误分离，覆盖 worker 创建和执行器初始化失败。
@@ -180,6 +215,10 @@ pub struct WorkflowNodeExecutionOutput {
     pub confirmations: Vec<RuntimeConfirmation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_control: Option<RuntimeLoopControl>,
+    /// 节点对工作流变量的写入。写入按作用域链落到声明该变量的那一层，
+    /// 因此循环体内的写入对下一轮可见（「写完第一章接着写第二章」）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variable_writes: BTreeMap<String, Value>,
     #[serde(default)]
     pub metadata: Value,
 }
@@ -197,6 +236,7 @@ impl Default for WorkflowNodeExecutionOutput {
             checkpoint_id: None,
             confirmations: Vec::new(),
             loop_control: None,
+            variable_writes: BTreeMap::new(),
             metadata: Value::Null,
         }
     }
@@ -427,6 +467,192 @@ pub struct CommunicationMessage {
     pub message_index: u32,
 }
 
+/// 一层变量作用域。
+///
+/// `owner` 为 None 表示工作流根作用域（由 start 节点声明的变量所在层）；
+/// 为 Some(loop_node_id) 表示某个 loop 节点为其循环体开出的层。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowVariableFrame {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<NodeId>,
+    #[serde(default)]
+    pub values: BTreeMap<String, Value>,
+}
+
+/// 变量作用域链。
+///
+/// 读取由内向外查找；写入落在**声明该变量的那一层**，而不是最内层。
+/// 这一条是循环语义的关键：循环体内写回要能被下一轮读到（否则每轮都从
+/// 初值重新开始，「写完第一章接着写第二章」不成立），同时嵌套循环的内层
+/// 不能污染外层的同名变量。若写入的变量在任何层都没有声明，则落在最内层，
+/// 作为该循环体的局部变量，循环结束随帧一起丢弃。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowVariableScopes {
+    /// 至少含一层根作用域；`frames[0]` 即根。
+    #[serde(default = "default_variable_frames")]
+    pub frames: Vec<WorkflowVariableFrame>,
+}
+
+fn default_variable_frames() -> Vec<WorkflowVariableFrame> {
+    vec![WorkflowVariableFrame {
+        owner: None,
+        values: BTreeMap::new(),
+    }]
+}
+
+impl Default for WorkflowVariableScopes {
+    fn default() -> Self {
+        Self {
+            frames: default_variable_frames(),
+        }
+    }
+}
+
+impl WorkflowVariableScopes {
+    /// 用根作用域初值构造作用域链。
+    pub fn with_root(values: BTreeMap<String, Value>) -> Self {
+        Self {
+            frames: vec![WorkflowVariableFrame {
+                owner: None,
+                values,
+            }],
+        }
+    }
+
+    /// 由内向外查找变量当前值。
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.values.get(name))
+    }
+
+    /// 展平为「由内向外，内层优先」的一张表，用于模板渲染。
+    pub fn flatten(&self) -> BTreeMap<String, Value> {
+        let mut flat = BTreeMap::new();
+        // 从根向内覆盖：内层同名值最终生效。
+        for frame in &self.frames {
+            for (name, value) in &frame.values {
+                flat.insert(name.clone(), value.clone());
+            }
+        }
+        flat
+    }
+
+    /// 写入变量：落在声明它的那一层；未声明则落在最内层。
+    pub fn set(&mut self, name: &str, value: Value) {
+        if let Some(frame) = self
+            .frames
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.values.contains_key(name))
+        {
+            frame.values.insert(name.to_owned(), value);
+            return;
+        }
+
+        if let Some(innermost) = self.frames.last_mut() {
+            innermost.values.insert(name.to_owned(), value);
+        }
+    }
+
+    /// 为某个 loop 节点的循环体压入一层。
+    ///
+    /// 新层初始为空：循环体读变量时会沿链找到外层的值，写入时按 `set` 的
+    /// 规则回到声明层 —— 因此跨轮次可见。
+    pub fn push_loop_frame(&mut self, owner: NodeId) {
+        self.frames.push(WorkflowVariableFrame {
+            owner: Some(owner),
+            values: BTreeMap::new(),
+        });
+    }
+
+    /// 弹出某个 loop 节点的层；只弹自己开的层，避免错弹外层。
+    pub fn pop_loop_frame(&mut self, owner: &NodeId) {
+        if self
+            .frames
+            .last()
+            .and_then(|frame| frame.owner.as_ref())
+            .is_some_and(|current| current == owner)
+        {
+            self.frames.pop();
+        }
+    }
+}
+
+/// 变量注入来源；用于区分 `hidden` 变量允许与禁止的注入路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowVariableSource {
+    /// 项目空间 AI 启动工作流时随请求传入；可写 `hidden` 变量。
+    ProjectAi,
+    /// 执行页人工输入；`hidden` 变量不出现在表单里，也不接受注入。
+    ExecutionPage,
+}
+
+/// 从 workflow 的 `start` 节点收集变量声明。
+///
+/// 声明只允许挂在 `start` 节点：变量的生命周期是整个 run，若允许任意节点声明，
+/// 同名变量的归属层就无法确定。多个 start 节点各自声明时合并，重名在
+/// `validate_variable_decls` 里被拒绝。
+pub fn collect_variable_decls(
+    workflow: &WorkflowDefinition,
+) -> CoreResult<Vec<WorkflowVariableDecl>> {
+    let mut decls = Vec::new();
+    for node in workflow
+        .nodes
+        .iter()
+        .filter(|node| node.type_name == "start")
+    {
+        let Some(raw) = node.config.get("variables") else {
+            continue;
+        };
+        let parsed = serde_json::from_value::<Vec<WorkflowVariableDecl>>(raw.clone()).map_err(
+            |error| {
+                CoreError::validation(format!(
+                    "invalid workflow variable declarations on node {}: {error}",
+                    node.id.as_str()
+                ))
+            },
+        )?;
+        decls.extend(parsed);
+    }
+
+    validate_variable_decls(&decls)?;
+    Ok(decls)
+}
+
+/// 从 `start` 节点收集摘要句式。
+///
+/// 句式描述整组变量而非单个变量，所以与 `variables` 平级挂在 start 节点配置上。
+/// 多个 start 节点各自声明时取第一个非空的：折叠行只有一句，不做拼接。
+pub fn collect_summary_template(workflow: &WorkflowDefinition) -> Option<String> {
+    workflow
+        .nodes
+        .iter()
+        .filter(|node| node.type_name == "start")
+        .find_map(|node| {
+            node.config
+                .get("summary_template")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        })
+}
+
+/// 取值的类型名，用于类型不匹配时的可诊断报错。
+fn variable_value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 /// 单条 communication 边的运行状态。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommunicationRuntimeState {
@@ -513,6 +739,22 @@ pub struct WorkflowRunState {
     pub communication_edges: BTreeMap<EdgeId, CommunicationRuntimeState>,
     #[serde(default)]
     pub loop_iterations: BTreeMap<NodeId, u32>,
+    /// 工作流变量作用域链。随快照持久化，Resume 后从最后一次写回的值继续。
+    #[serde(default)]
+    pub variables: WorkflowVariableScopes,
+    /// 启动时冻结的变量声明，用于校验写回值的类型并区分已声明/局部变量。
+    #[serde(default)]
+    pub variable_decls: Vec<WorkflowVariableDecl>,
+    /// 启动时冻结的摘要句式（`{{var.x}}` 占位符），供执行页折叠态渲染。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_template: Option<String>,
+    /// 发起本次运行的项目空间 AI 对话 id。
+    ///
+    /// 只有由项目空间 AI 启动的运行才有值；人工点「运行」启动的为 None。
+    /// 终态时据此定位回发目标 —— 没有它，AI 启动完工作流就断线，
+    /// 无法知道跑完没有、结果如何，也就无从推进下一章。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_conversation_id: Option<String>,
     #[serde(default)]
     pub rerun_queue: Vec<NodeId>,
     #[serde(default)]
@@ -547,6 +789,10 @@ impl WorkflowRunState {
             node_operation_sequences: BTreeMap::new(),
             communication_edges: BTreeMap::new(),
             loop_iterations: BTreeMap::new(),
+            variables: WorkflowVariableScopes::default(),
+            variable_decls: Vec::new(),
+            summary_template: None,
+            origin_conversation_id: None,
             rerun_queue: Vec::new(),
             confirmations: BTreeMap::new(),
             events: Vec::new(),
@@ -600,9 +846,179 @@ impl WorkflowRuntime {
                 },
             );
         }
+        // 变量声明挂在 start 节点上；这里把声明与默认值固化进根作用域。
+        // 只读取声明本身，不读取任何注入值：注入由 start_with_variables 负责，
+        // 顺序是「默认值 → 注入值」，这样 runtime 无论怎么创建都有一致的初值。
+        let decls = collect_variable_decls(workflow)?;
+        let mut root = BTreeMap::new();
+        for decl in &decls {
+            // default 省略（null）时不写入根层：读它会得到「未定义」而不是 null，
+            // 让缺失的必填注入在渲染期暴露成缺失变量错误。
+            if !decl.default.is_null() {
+                root.insert(decl.name.clone(), decl.default.clone());
+            }
+        }
+        state.variables = WorkflowVariableScopes::with_root(root);
+        state.variable_decls = decls;
+        state.summary_template = collect_summary_template(workflow);
+
         Ok(Self {
             state,
             cancellation: ExecutionCancellation::new(),
+        })
+    }
+
+    /// 按声明校验并注入一批变量初值，供项目空间 AI 启动和执行页手动输入使用。
+    ///
+    /// 覆盖顺序由调用方保证：先默认值（`new` 已写入），再项目空间 AI 注入，
+    /// 最后执行页人工输入。`hidden` 变量不接受来自执行页的注入。
+    pub fn inject_variables(
+        &mut self,
+        values: &BTreeMap<String, Value>,
+        source: WorkflowVariableSource,
+    ) -> CoreResult<()> {
+        for (name, value) in values {
+            let decl = self
+                .state
+                .variable_decls
+                .iter()
+                .find(|decl| decl.name == *name)
+                .ok_or_else(|| {
+                    CoreError::validation(format!("unknown workflow variable: {name}"))
+                })?;
+
+            if decl.hidden && source == WorkflowVariableSource::ExecutionPage {
+                return Err(CoreError::validation(format!(
+                    "workflow variable {name} is hidden and cannot be set from the execution page"
+                )));
+            }
+
+            // 不做隐式转换：字符串 "3" 不会被当成 number 3。
+            if !decl.kind.matches(value) {
+                return Err(CoreError::validation(format!(
+                    "workflow variable {} expects {} but received {}",
+                    name,
+                    decl.kind.as_str(),
+                    variable_value_type_name(value)
+                )));
+            }
+
+            self.state.variables.set(name, value.clone());
+        }
+
+        Ok(())
+    }
+
+    /// 校验必填变量在启动前都已具备非空取值。
+    ///
+    /// 「必填」= 占位符不能替换成空白，所以判据是 `variable_value_is_blank`：
+    /// `null` 与空白串算空，`0` / `false` 放行。变量未出现在作用域里同样算空
+    /// （无默认值的 required 变量若没人填，根层根本没有这个键）。
+    pub fn ensure_required_variables_present(&self) -> CoreResult<()> {
+        for decl in &self.state.variable_decls {
+            if !decl.required {
+                continue;
+            }
+            let blank = self
+                .state
+                .variables
+                .get(&decl.name)
+                .map(variable_value_is_blank)
+                .unwrap_or(true);
+            if blank {
+                return Err(CoreError::validation(format!(
+                    "workflow variable {} is required and cannot be blank",
+                    decl.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// 渲染执行页折叠态那一句话。
+    ///
+    /// 有 `summary_template` 就按它渲染；缺省时退回按声明顺序拼接
+    /// `名字 值 · 名字 值`。两条路径都跳过 `hidden` 变量的**自动拼接**，
+    /// 但句式里显式引用 `hidden` 变量时照常渲染（取值是真实的，
+    /// 只是作者在表单里改不到）。
+    pub fn render_variable_summary(&self) -> String {
+        let values = self.state.variables.flatten();
+        if let Some(template) = self.state.summary_template.as_deref() {
+            return render_summary_template(template, &values);
+        }
+
+        self.state
+            .variable_decls
+            .iter()
+            .filter(|decl| !decl.hidden)
+            .map(|decl| {
+                let text = values
+                    .get(&decl.name)
+                    .map(|value| match value {
+                        Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default();
+                format!("{} {}", decl.name, text)
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// 执行页待输入清单：`hidden` 变量不出现，连计数都不给。
+    ///
+    /// 它们是循环控制条件之类的内部量，在执行页提一嘴只会让人以为需要管。
+    pub fn visible_variable_decls(&self) -> Vec<&WorkflowVariableDecl> {
+        self.state
+            .variable_decls
+            .iter()
+            .filter(|decl| !decl.hidden)
+            .collect()
+    }
+
+    /// 组装运行完成回报的结构化载荷。
+    ///
+    /// 只回传结构化字段，**措辞留给项目空间 AI 侧组装** —— 把中文文案硬编码进
+    /// runtime 会让同一句话散落在多语言资源之外，也让 core 依赖展示层口径。
+    ///
+    /// 返回 None 表示无需回报：非终态，或该运行不是由项目空间 AI 启动的。
+    /// `Paused` 也算终态：等待确认同样需要 AI 决定是否介入。
+    pub fn run_completion_report(&self) -> Option<WorkflowRunCompletionReport> {
+        let conversation_id = self.state.origin_conversation_id.clone()?;
+        if !matches!(
+            self.state.status,
+            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Paused
+        ) {
+            return None;
+        }
+
+        // 变量终值让 AI 判断循环推进到哪一章；hidden 变量一并给出——
+        // 这是给 AI 读的载荷，不是给人看的表单，内部轮次对它有诊断价值。
+        let variables = self.state.variables.flatten();
+
+        // 产出 artifact 引用：AI 据此定位这次跑出来的东西。
+        // PortValue::ArtifactRef 是枚举变体，需要 match 提取 id。
+        let artifacts = self
+            .state
+            .nodes
+            .values()
+            .flat_map(|node| node.outputs.values())
+            .filter_map(|value| match value {
+                PortValue::ArtifactRef { artifact_id } => Some(artifact_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        Some(WorkflowRunCompletionReport {
+            conversation_id,
+            workflow_id: self.state.workflow_id.clone(),
+            run_id: self.state.run_id.clone(),
+            status: self.state.status,
+            pause_reason: self.state.pause_reason.clone(),
+            stop_reason: self.state.stop_reason.clone(),
+            failure: self.state.failure.clone(),
+            variables,
+            artifacts,
         })
     }
 
@@ -977,12 +1393,17 @@ impl WorkflowRuntime {
                 node_id.as_str(),
                 operation_attempt
             ));
+            // 变量当前值必须进 request_hash：循环每轮读到的变量不同（第一章 →
+            // 第二章），若不计入，第二轮的 request 会与第一轮完全一致，operation
+            // journal 会把它判成同一次请求的重放而复用上一轮结果。
+            let variables = self.state.variables.flatten();
             let request_hash = stable_text_hash(&serde_json::to_string(&json!({
                 "type_name": node_instance.type_name,
                 "config": node_instance.config,
                 "inputs": inputs,
                 "communication_messages": communication_messages,
                 "metadata": metadata,
+                "variables": variables,
             }))?);
             let mut request = WorkflowNodeExecutionRequest {
                 workflow_id: workflow.id.clone(),
@@ -995,6 +1416,7 @@ impl WorkflowRuntime {
                 config: node_instance.config.clone(),
                 inputs,
                 communication_messages,
+                variables,
                 metadata,
                 cancellation: self.cancellation.clone(),
                 dispatch_authorization: ExternalDispatchAuthorization::default(),
@@ -1813,6 +2235,11 @@ impl WorkflowRuntime {
                 .insert(confirmation.confirmation_id.clone(), confirmation);
         }
 
+        // 变量写回：写到「声明该变量的那一层」，由 scopes.set 决定落点。
+        // 循环体内的写入因此对下一轮可见（这是「写完第一章接着写第二章」成立
+        // 的前提），而嵌套循环各自的同名变量互不污染。
+        self.apply_variable_writes(&node_id, output.variable_writes);
+
         let attempts = self
             .state
             .nodes
@@ -1838,6 +2265,62 @@ impl WorkflowRuntime {
                 execution_attempts: attempts,
             },
         );
+    }
+
+    /// 应用节点的变量写回。
+    ///
+    /// 未声明的变量名和类型不匹配的取值都会被拒绝并记录事件，而不是静默写入：
+    /// 变量要进 `{{var.名字}}` 模板，静默接受错值会让下游渲染出错误正文，
+    /// 而错误只在最终产物里才暴露。
+    fn apply_variable_writes(&mut self, node_id: &NodeId, writes: BTreeMap<String, Value>) {
+        if writes.is_empty() {
+            return;
+        }
+
+        for (name, value) in writes {
+            let decl = self
+                .state
+                .variable_decls
+                .iter()
+                .find(|decl| decl.name == name)
+                .cloned();
+
+            let Some(decl) = decl else {
+                self.record_event(
+                    WorkflowRuntimeEventType::VariableWriteRejected,
+                    Some(node_id.clone()),
+                    format!("node {} wrote undeclared variable {name}", node_id.as_str()),
+                    json!({ "variable": name, "reason": "undeclared" }),
+                );
+                continue;
+            };
+
+            if !decl.kind.matches(&value) {
+                self.record_event(
+                    WorkflowRuntimeEventType::VariableWriteRejected,
+                    Some(node_id.clone()),
+                    format!(
+                        "node {} wrote variable {name} with a value that does not match kind {}",
+                        node_id.as_str(),
+                        decl.kind.as_str()
+                    ),
+                    json!({
+                        "variable": name,
+                        "reason": "kind_mismatch",
+                        "expected_kind": decl.kind.as_str(),
+                    }),
+                );
+                continue;
+            }
+
+            self.state.variables.set(&name, value.clone());
+            self.record_event(
+                WorkflowRuntimeEventType::VariableWritten,
+                Some(node_id.clone()),
+                format!("variable {name} updated"),
+                json!({ "variable": name, "value": value }),
+            );
+        }
     }
 
     /// 记录节点启动事件并固化本次 operation 序号。
@@ -2115,6 +2598,9 @@ impl WorkflowRuntime {
         policy.validate()?;
 
         if !loop_control.continue_loop {
+            // 闭环结束：弹掉本 loop 的变量层。声明过的变量写在根层不受影响
+            // （跨轮累积的值要留给下游），只丢弃循环体内产生的未声明局部量。
+            self.state.variables.pop_loop_frame(node_id);
             // Loop 节点判断停止条件已满足，本轮闭环结束，不修改 rerun_queue。
             self.state.events.push(format!(
                 "loop {} completed: {}",
@@ -2142,6 +2628,9 @@ impl WorkflowRuntime {
             .copied()
             .unwrap_or(0);
         if current >= policy.max_iterations {
+            // 次数耗尽同样要收掉本层局部量；已声明变量的累积值仍留在根层，
+            // 便于用户在 Pause 处查看循环停在第几章。
+            self.state.variables.pop_loop_frame(node_id);
             self.pause(format!(
                 "loop {} max iterations exhausted",
                 node_id.as_str()
@@ -2170,6 +2659,13 @@ impl WorkflowRuntime {
                 node_id.as_str()
             ));
             return Ok(());
+        }
+
+        // 首轮进入循环体时压入一层作用域。只压一次而不是每轮压一层：已声明
+        // 变量按 `set` 规则写回声明层（根层），跨轮次可见；本层只承载循环体内
+        // 未声明的局部量，循环结束随帧丢弃。每轮都压会让帧数随迭代线性增长。
+        if current == 0 {
+            self.state.variables.push_loop_frame(node_id.clone());
         }
 
         // 触发重跑时必须清理目标及其 control/data 下游快照。否则下游节点会因为
@@ -2204,6 +2700,19 @@ impl WorkflowRuntime {
         }
         for affected_node in &all_affected {
             self.state.nodes.remove(affected_node);
+            // U124：与 `resume_from_node` 对齐——被清理的**内层** loop 必须重置
+            // 迭代计数，否则外层第 2 轮起内层一进就 pause（内层状态被清、计数
+            // 却留在上限）。对文学场景即：外层「逐章循环」+ 内层「critic→polisher
+            // 返修循环」，第一章能返修 N 轮，第二章起返修直接暂停。
+            //
+            // ⚠️ 必须排除发起重跑的 loop 自身：循环图是闭环
+            // （loop → writer → loop），`collect_downstream_closure` 会把
+            // 发起者自己收进 `all_affected`。若一并清零，`current` 恒为 0，
+            // `current >= max_iterations` 永不成立 → 无限循环 + 成本失控，
+            // 比原缺陷危险得多。
+            if affected_node != node_id {
+                self.state.loop_iterations.remove(affected_node);
+            }
         }
         reset_communication_edges_for_nodes(&mut self.state, &all_affected, workflow);
         Ok(())
@@ -3132,11 +3641,13 @@ enum DependencyEdgeState {
     Waiting,
 }
 
-/// 计算单条依赖边状态。条件节点的 control alias 是分支选择器；从已跳过
-/// 节点出发的 control/data 边继续失活，使未选分支能够向下游传递。
+/// 计算单条依赖边状态。U125：condition 的分支由**出边引脚**承载（`exec_out_true` /
+/// `exec_out_false`），不再看 `edge.alias`——alias 是可留空的自由文本，留空时旧实现
+/// 直接判 `Active`，等于 condition 节点什么也拦不住。从已跳过节点出发的 control/data
+/// 边继续失活，使未选分支能够向下游传递。
 fn is_condition_selector_edge(graph_index: &WorkflowGraphIndex, edge: &Edge) -> bool {
     edge.kind == WorkflowEdgeKind::Control
-        && edge.alias.is_some()
+        && condition_branch_for_port(&edge.from.port_name).is_some()
         && graph_index.condition_nodes.contains(&edge.from.node_id)
 }
 
@@ -3169,8 +3680,9 @@ fn control_edge_state(
             PortValue::Inline { value } => value.as_str(),
             _ => None,
         });
+    // 分支值 ↔ 引脚名的映射只有 `condition_branch_for_port` 一处，避免两侧漂移。
     match selected_branch {
-        Some(selected) if Some(selected) == edge.alias.as_deref().map(str::trim) => {
+        Some(selected) if Some(selected) == condition_branch_for_port(&edge.from.port_name) => {
             DependencyEdgeState::Active
         }
         Some(_) => DependencyEdgeState::Disabled,

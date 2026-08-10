@@ -15,6 +15,12 @@ public partial class WorkspacePageView : UserControl
 {
     private const double DragThreshold = 4.0;
 
+    /// <summary>拖动态脉动点浮层的边长（点半径 5.5 + 固定光环 1.75 倍，留一点呼吸余量）。</summary>
+    private const double LibraryDragDotHostSize = 38;
+
+    /// <summary>松手后脉动点展开成卡片轮廓的时长。</summary>
+    private static readonly TimeSpan LibraryDropExpandDuration = TimeSpan.FromMilliseconds(190);
+
     private GridLength _savedLibraryHeight = new(220);
 
     // ---- 库底部 Pill（左右拖动） ----
@@ -46,6 +52,13 @@ public partial class WorkspacePageView : UserControl
     private Point _marqueeOriginLogical;
     private Point _marqueeCurrentLogical;
     private bool _marqueeAdditive;
+
+    // ---- 右键拖动平移（左键长按=框选，右键长按=拖画布）----
+    private bool _rightPanPointerDown;
+    private bool _rightPanActive;
+    private Point _rightPanOrigin;
+    /// <summary>右键拖动过后要吞掉紧随其后的那次右键菜单（否则一松手就弹菜单）。</summary>
+    private bool _suppressNextContextMenu;
 
     // ---- W2：中键 / Alt+左键 / 空格+左键平移 ----
     private bool _spacePanMode;
@@ -208,6 +221,7 @@ public partial class WorkspacePageView : UserControl
             viewModel.RequestEnsureNodeVisible = EnsureNodeInSafeViewport;
             viewModel.PickFolder = PickFolderAsync;
             viewModel.PickFile = PickFileAsync;
+            viewModel.RequestFocusRejectReason = FocusRejectReason;
             viewModel.Nodes.CollectionChanged += OnNodesCollectionChanged;
             viewModel.Edges.CollectionChanged += OnEdgesCollectionChanged;
             viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -236,6 +250,22 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
+    /// <summary>
+    /// 理由线展开后把焦点交给输入框，光标落在末尾。
+    ///
+    /// 走 Dispatcher.Post(Input) 而不是直接 Focus()：此刻宽度动效刚开始，
+    /// 控件还没进入可聚焦布局，同步聚焦会落空。与作品页快捷改写同一做法。
+    /// </summary>
+    private void FocusRejectReason()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            RejectReasonBox.Focus();
+            RejectReasonBox.SelectionStart = RejectReasonBox.Text?.Length ?? 0;
+            RejectReasonBox.SelectionEnd = RejectReasonBox.SelectionStart;
+        }, DispatcherPriority.Input);
+    }
+
     private void DetachViewActions()
     {
         if (_attachedViewModel is null)
@@ -247,6 +277,7 @@ public partial class WorkspacePageView : UserControl
         _attachedViewModel.EndPortDragHighlight();
         _keyboardEdgeSourceNode = null;
         _keyboardEdgeSourceHandle = null;
+        _attachedViewModel.RequestFocusRejectReason = null;
         _attachedViewModel.RequestFitView = null;
         _attachedViewModel.RequestCanvasZoomStep = null;
         _attachedViewModel.RequestResetCanvasZoom = null;
@@ -382,6 +413,12 @@ public partial class WorkspacePageView : UserControl
             or nameof(WorkspacePageViewModel.IsRightPanelOpen))
         {
             ApplyRightPanelResponsiveLayout();
+        }
+        // 右栏展开：与底栏同一套进场语汇（从停靠边滑入 + 淡入），不再硬切出现。
+        if (e.PropertyName is nameof(WorkspacePageViewModel.IsRightPanelOpen)
+            && sender is WorkspacePageViewModel { IsRightPanelOpen: true })
+        {
+            PlayRailEnter(RightPanelSurface);
         }
         // W16：pill / ToggleLibraryCommand 均经 IsLibraryOpen 驱动布局与 glyph
         if (e.PropertyName is nameof(WorkspacePageViewModel.IsLibraryOpen)
@@ -631,6 +668,7 @@ public partial class WorkspacePageView : UserControl
             LibraryContent.IsVisible = true;
             LibrarySplitter.IsVisible = true;
             row.Height = _savedLibraryHeight;
+            PlayRailEnter(LibraryContent);
         }
         else
         {
@@ -644,6 +682,25 @@ public partial class WorkspacePageView : UserControl
         }
 
         PositionBottomPill();
+    }
+
+    /// <summary>
+    /// 停靠栏进场：先按下 rail-entering（从停靠边偏移 + 半透明），下一帧摘掉，
+    /// 让样式里的 Transform/Opacity 过渡把它滑进来。开合从硬切变成有方向的动作。
+    /// </summary>
+    private static void PlayRailEnter(Control rail)
+    {
+        if (MotionPreferences.ReduceMotion)
+        {
+            rail.Classes.Remove("rail-entering");
+            return;
+        }
+
+        rail.Classes.Add("rail-entering");
+        // 需要真正渲染一帧带初态的画面，否则同帧增删等于没加，过渡不会触发。
+        Dispatcher.UIThread.Post(
+            () => rail.Classes.Remove("rail-entering"),
+            DispatcherPriority.Render);
     }
 
     // ===================== 库底部 Pill 位置 =====================
@@ -874,8 +931,12 @@ public partial class WorkspacePageView : UserControl
                 if (CanvasOverlay is not null
                     && IsPointOver(CanvasOverlay, e.GetPosition(CanvasOverlay)))
                 {
+                    // 落点对准卡片中心：从 NodePortSpec 派生，跟随节点宽度变化。
                     var logical = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
-                    viewModel.AddNodeAt(_libraryDragItem.NodeType, logical.X - 101, logical.Y - 38);
+                    viewModel.AddNodeAt(
+                        _libraryDragItem.NodeType,
+                        logical.X - NodePortSpec.NodeWidth / 2.0,
+                        logical.Y - 38);
                 }
                 else
                 {
@@ -902,7 +963,9 @@ public partial class WorkspacePageView : UserControl
         finally
         {
             e.Pointer.Capture(null);
-            ResetLibraryGesture();
+            // 拖到落点松手：让脉动点展开成卡片轮廓再消失（非拖动/取消场景直接隐藏）。
+            var settle = _libraryDragging;
+            ResetLibraryGesture(settle);
         }
     }
 
@@ -914,23 +977,33 @@ public partial class WorkspacePageView : UserControl
                && localPoint.Y <= control.Bounds.Height;
     }
 
-    private void ResetLibraryGesture()
+    private void ResetLibraryGesture(bool settleGhost = false)
     {
         _libraryPointerDown = false;
         _libraryDragging = false;
         _libraryAddedThisGesture = false;
         _libraryDragItem = null;
-        HideLibraryDragGhost();
+        if (settleGhost)
+        {
+            SettleLibraryDragGhost();
+        }
+        else
+        {
+            HideLibraryDragGhost();
+        }
     }
 
     private void ShowLibraryDragGhost(string title, Point positionInView)
     {
-        if (LibraryDragGhost is null || LibraryDragGhostText is null)
+        if (LibraryDragGhost is null)
         {
             return;
         }
 
-        LibraryDragGhostText.Text = title;
+        // 脉动点不带文字（拖的是「一个即将落下的节点」，标题由落地后的卡片显示）。
+        _ = title;
+        LibraryDragGhost.ExpandProgress = 0;
+        LibraryDragGhost.ExpandedSize = new Size(NodePortSpec.NodeWidth, NodePortSpec.MinimumNodeHeight);
         LibraryDragGhost.IsVisible = true;
         MoveLibraryDragGhost(positionInView);
     }
@@ -942,8 +1015,67 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        Canvas.SetLeft(LibraryDragGhost, positionInView.X + 12);
-        Canvas.SetTop(LibraryDragGhost, positionInView.Y + 12);
+        // 点居中跟随指针（原先是右下偏移 12px 的标签，脉动点应当落在指针正下方）。
+        Canvas.SetLeft(LibraryDragGhost, positionInView.X - LibraryDragGhost.Width / 2);
+        Canvas.SetTop(LibraryDragGhost, positionInView.Y - LibraryDragGhost.Height / 2);
+    }
+
+    /// <summary>
+    /// 松手落定：把脉动点在 <see cref="LibraryDropExpandDuration"/> 内展开成卡片轮廓，
+    /// 再隐藏交给真实节点。减少动态偏好下直接隐藏，不做展开。
+    /// </summary>
+    private void SettleLibraryDragGhost()
+    {
+        if (LibraryDragGhost is null || !LibraryDragGhost.IsVisible)
+        {
+            return;
+        }
+
+        if (MotionPreferences.ReduceMotion)
+        {
+            HideLibraryDragGhost();
+            return;
+        }
+
+        var ghost = LibraryDragGhost;
+        // 展开时把浮层放大到能容纳整张卡片轮廓，并保持中心不动。
+        var centerX = Canvas.GetLeft(ghost) + ghost.Width / 2;
+        var centerY = Canvas.GetTop(ghost) + ghost.Height / 2;
+        var hostWidth = NodePortSpec.NodeWidth + 24;
+        var hostHeight = NodePortSpec.MinimumNodeHeight + 24;
+        ghost.Width = hostWidth;
+        ghost.Height = hostHeight;
+        Canvas.SetLeft(ghost, centerX - hostWidth / 2);
+        Canvas.SetTop(ghost, centerY - hostHeight / 2);
+
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            HideLibraryDragGhost();
+            return;
+        }
+
+        var startedAt = TimeSpan.MinValue;
+        void Step(TimeSpan timestamp)
+        {
+            if (startedAt == TimeSpan.MinValue)
+            {
+                startedAt = timestamp;
+            }
+
+            var elapsed = timestamp - startedAt;
+            var progress = Math.Clamp(elapsed / LibraryDropExpandDuration, 0, 1);
+            ghost.ExpandProgress = progress;
+            if (progress >= 1)
+            {
+                HideLibraryDragGhost();
+                return;
+            }
+
+            topLevel.RequestAnimationFrame(Step);
+        }
+
+        topLevel.RequestAnimationFrame(Step);
     }
 
     private void HideLibraryDragGhost()
@@ -951,6 +1083,10 @@ public partial class WorkspacePageView : UserControl
         if (LibraryDragGhost is not null)
         {
             LibraryDragGhost.IsVisible = false;
+            LibraryDragGhost.ExpandProgress = 0;
+            // 复位成拖动态的小浮层尺寸，供下一次拖拽复用。
+            LibraryDragGhost.Width = LibraryDragDotHostSize;
+            LibraryDragGhost.Height = LibraryDragDotHostSize;
         }
     }
 
@@ -1193,6 +1329,18 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
+        // 右键：按下先预备，移动超过阈值才转为平移（左键长按=框选，右键长按=拖画布）。
+        // 未超阈值就松手时不算平移，右键菜单照常弹出。
+        if (point.Properties.IsRightButtonPressed)
+        {
+            _rightPanPointerDown = true;
+            _rightPanActive = false;
+            _rightPanOrigin = e.GetPosition(CanvasOverlay);
+            e.Pointer.Capture(CanvasOverlay);
+            Focus();
+            return;
+        }
+
         if (!point.Properties.IsLeftButtonPressed)
         {
             return;
@@ -1230,6 +1378,23 @@ public partial class WorkspacePageView : UserControl
 
     public void OnCanvasBackgroundPointerMoved(object? sender, PointerEventArgs e)
     {
+        // 右键预备中：越过阈值即转为平移（并记住本次手势要吞掉右键菜单）。
+        if (_rightPanPointerDown && !_rightPanActive && CanvasOverlay is not null)
+        {
+            var current = e.GetPosition(CanvasOverlay);
+            var rdx = current.X - _rightPanOrigin.X;
+            var rdy = current.Y - _rightPanOrigin.Y;
+            if ((rdx * rdx + rdy * rdy) >= DragThreshold * DragThreshold)
+            {
+                _rightPanActive = true;
+                BeginPan(_rightPanOrigin);
+                // 抑制标志必须在**这一刻**立起，不能等到 PointerReleased：
+                // Avalonia 的 ContextRequested 由右键**按下**触发，比松手早得多，
+                // 等到 Released 再置位时菜单早已弹出。
+                _suppressNextContextMenu = true;
+            }
+        }
+
         if (DataContext is WorkspacePageViewModel { CanvasViewport.IsPanning: true } panViewModel
             && CanvasOverlay is not null
             && NodesItemsControl is not null)
@@ -1263,6 +1428,24 @@ public partial class WorkspacePageView : UserControl
 
     public void OnCanvasBackgroundPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
+        // 右键手势收尾：拖过就是平移（吞掉本次右键菜单）；没拖动则放行让菜单弹出。
+        if (_rightPanPointerDown)
+        {
+            var wasPan = _rightPanActive;
+            _rightPanPointerDown = false;
+            _rightPanActive = false;
+            if (wasPan)
+            {
+                // 抑制标志已在越过阈值时置位（见 PointerMoved），此处只收尾。
+                EndPan(e.Pointer);
+                e.Handled = true;
+                return;
+            }
+
+            e.Pointer.Capture(null);
+            return;
+        }
+
         if (DataContext is WorkspacePageViewModel { CanvasViewport.IsPanning: true })
         {
             EndPan(e.Pointer);
@@ -1296,8 +1479,38 @@ public partial class WorkspacePageView : UserControl
 
     public void OnCanvasBackgroundCaptureLost(object? sender, PointerCaptureLostEventArgs e)
     {
+        _rightPanPointerDown = false;
+        _rightPanActive = false;
         EndPan(null);
         EndMarquee(null);
+    }
+
+    /// <summary>
+    /// 右键拖动平移后紧跟的那次 ContextMenu 请求要吞掉——否则拖完画布一松手就弹菜单。
+    /// 单纯右键单击（未越过拖动阈值）不受影响，菜单照常。
+    /// 标志在越过拖动阈值那一刻就置起（不能等到 PointerReleased：右键菜单在部分平台
+    /// 于 PointerPressed 阶段就已请求，那时再置位已经晚了）。
+    /// </summary>
+    private void OnCanvasContextRequested(object? sender, ContextRequestedEventArgs e)
+    {
+        if (_suppressNextContextMenu)
+        {
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// 第二道拦截：ContextRequested 的触发时机随平台而异（press / release），
+    /// 单靠它可能漏。菜单真正要打开前再判一次，并在此清标志——保证一次右键拖动
+    /// 只吞掉紧随其后的那一个菜单，不影响下一次正常右键。
+    /// </summary>
+    private void OnCanvasContextMenuOpening(object? sender, CancelEventArgs e)
+    {
+        if (_suppressNextContextMenu)
+        {
+            _suppressNextContextMenu = false;
+            e.Cancel = true;
+        }
     }
 
     /// <summary>指针滚轮缩放：保持鼠标下的逻辑点固定。</summary>
@@ -1368,6 +1581,11 @@ public partial class WorkspacePageView : UserControl
         }
 
         viewModel.CanvasViewport.BeginPan(screen.X, screen.Y);
+        // 抓手光标：让「正在拖画布」有明确的手感反馈
+        if (CanvasOverlay is not null)
+        {
+            CanvasOverlay.Cursor = new Cursor(StandardCursorType.SizeAll);
+        }
     }
 
     private void EndPan(IPointer? pointer)
@@ -1375,6 +1593,10 @@ public partial class WorkspacePageView : UserControl
         if (DataContext is WorkspacePageViewModel viewModel)
         {
             viewModel.CanvasViewport.EndPan();
+        }
+        if (CanvasOverlay is not null)
+        {
+            CanvasOverlay.Cursor = Cursor.Default;
         }
         pointer?.Capture(null);
     }
@@ -1405,6 +1627,9 @@ public partial class WorkspacePageView : UserControl
             edgeTransform.X = state.OffsetX;
             edgeTransform.Y = state.OffsetY;
         }
+
+        // 点阵背景与节点层同帧联动：同一缩放/平移状态，避免两坐标系错位。
+        CanvasGridBg?.SetViewport(state.Zoom, state.OffsetX, state.OffsetY);
 
         SyncMiniMapViewportFrame();
     }
@@ -2515,7 +2740,15 @@ public partial class WorkspacePageView : UserControl
 
         // 视觉树尚未完成测量时保留可绘制状态，但只使用同一个 VM 级兼容路径；
         // 一旦端口测量可用，下一帧会覆盖该临时结果。
-        edge.UpdateEdgePath(source.X, source.Y, target.X, target.Y);
+        // 镜像标志要一起传：循环节点的执行口左右互换，兜底算法按常量取坐标，
+        // 不传就会在首帧把边接到未镜像的一侧，等测量可用才跳回去。
+        edge.UpdateEdgePath(
+            source.X,
+            source.Y,
+            target.X,
+            target.Y,
+            source.MirrorExecPorts,
+            target.MirrorExecPorts);
     }
 
     private void LayoutEdgeLabels()

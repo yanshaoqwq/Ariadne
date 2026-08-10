@@ -240,12 +240,14 @@ public sealed class CanvasHelpersTests
         var (inx, iny) = NodePortSpec.LocalCenter(NodePortKind.Data, NodePortDirection.In);
         var (outx, outy) = NodePortSpec.LocalCenter(NodePortKind.Data, NodePortDirection.Out);
 
-        Assert.Equal(NodePortSpec.PinInsetX, inx, 6);
-        Assert.Equal(NodePortSpec.NodeWidth - NodePortSpec.PinInsetX, outx, 6);
+        // 数据口在内容栏内（padding 6 + 半 pin 7），不能与标题栏里的执行口
+        // 共用 PinInsetX（padding 8 + 半引脚 8）——两者内缩本就不同。
+        Assert.Equal(NodePortSpec.DataPinInsetX, inx, 6);
+        Assert.Equal(NodePortSpec.NodeWidth - NodePortSpec.DataPinInsetX, outx, 6);
+        Assert.NotEqual(NodePortSpec.PinInsetX, NodePortSpec.DataPinInsetX);
         Assert.Equal(NodePortSpec.DataPortY, iny, 6);
         Assert.Equal(NodePortSpec.DataPortY, outy, 6);
         // 内容栏内，非标题行
-        Assert.True(NodePortSpec.DataPortY > NodePortSpec.CardTopOffset + NodePortSpec.TitleBarHeight);
         Assert.True(NodePortSpec.DataPortY > NodePortSpec.CardTopOffset + NodePortSpec.TitleBarHeight);
     }
 

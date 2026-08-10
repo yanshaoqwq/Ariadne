@@ -81,6 +81,24 @@ pub enum ResourceKind {
 }
 
 /// 单个操作可使用的资源上限。
+///
+/// ⚠️ **U116 复核（2026-08-10）：本簇生产零引用，但刻意保留，勿当死代码删。**
+///
+/// `ResourceKind` / `ResourceLimits` / `ResourceUsage` / `ResourcePool` /
+/// `ResourcePermit` / `check_usage` 目前全仓零调用者（同文件的
+/// `CancellationToken` 有 49 处引用，可作对照）。保留的两条理由：
+///
+/// 1. `docs/module-0-contracts.md` 明列「resource limits, resource pool leases」
+///    为 Module 0 契约。删它是**毁约**，不是清理。
+/// 2. 四项上限里已有两项被别的机制实际接管，删掉反而会掩盖这个事实：
+///    - `max_cost_usd` → `enforce_single_call_budget`（节点单次预算）
+///      + `ensure_workflow_daily_budget_allows_call`（U126 日预算）
+///    - `max_runtime_ms` → `resolve_node_timeout_ms` ← `WorkflowExecutionLimits`（U113）
+///    - `max_memory_bytes` / `max_output_bytes` → **无人接管**（进程内无逐操作计量）
+///
+/// 若将来要真正启用本簇，注意 `ResourcePool::acquire` 取 `&mut self`——
+/// 它不是跨线程共享闸门。同文件里真正在用的并发限流是 `DetachedBlockingTaskLimiter`
+/// （`static`，内部自带同步），两者不要混为一谈。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResourceLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]

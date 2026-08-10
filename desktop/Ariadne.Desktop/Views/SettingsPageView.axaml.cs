@@ -1,7 +1,11 @@
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Input.Platform;
+using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -10,6 +14,7 @@ public partial class SettingsPageView : UserControl
 {
     private SettingsPageViewModel? _attachedViewModel;
     private readonly Func<string?, Task<string?>> _folderPicker;
+    private readonly Func<string?, Task<string?>> _filePicker;
     private bool _isAttachedToVisualTree;
     private int _sectionOffsetCommitCount;
 
@@ -17,6 +22,7 @@ public partial class SettingsPageView : UserControl
     {
         InitializeComponent();
         _folderPicker = PickFolderAsync;
+        _filePicker = PickFileAsync;
         DataContextChanged += OnDataContextChanged;
     }
 
@@ -48,7 +54,9 @@ public partial class SettingsPageView : UserControl
         if (DataContext is SettingsPageViewModel vm)
         {
             vm.ScrollToSectionRequested += OnScrollToSectionRequested;
+            vm.FocusValidationFieldRequested += OnFocusValidationFieldRequested;
             vm.SetFolderPicker(_folderPicker);
+            vm.SetFilePicker(_filePicker);
             _attachedViewModel = vm;
         }
     }
@@ -58,9 +66,49 @@ public partial class SettingsPageView : UserControl
         if (_attachedViewModel is not null)
         {
             _attachedViewModel.ScrollToSectionRequested -= OnScrollToSectionRequested;
+            _attachedViewModel.FocusValidationFieldRequested -= OnFocusValidationFieldRequested;
             _attachedViewModel.ClearFolderPicker(_folderPicker);
+            _attachedViewModel.ClearFilePicker(_filePicker);
         }
         _attachedViewModel = null;
+    }
+
+    private void OnFocusValidationFieldRequested(
+        object? sender,
+        SettingsFieldFocusRequest request)
+    {
+        if (sender is not SettingsPageViewModel source)
+        {
+            return;
+        }
+        Dispatcher.UIThread.Post(
+            () => FocusValidationField(source, request),
+            DispatcherPriority.Loaded);
+    }
+
+    private void FocusValidationField(
+        SettingsPageViewModel source,
+        SettingsFieldFocusRequest request)
+    {
+        if (!ReferenceEquals(_attachedViewModel, source))
+        {
+            return;
+        }
+        var candidates = this.GetVisualDescendants()
+            .OfType<Control>()
+            .Where(control => string.Equals(
+                AutomationProperties.GetName(control),
+                request.AccessibleName,
+                StringComparison.Ordinal));
+        var target = request.Item is null
+            ? candidates.FirstOrDefault()
+            : candidates.FirstOrDefault(control => ReferenceEquals(control.DataContext, request.Item));
+        if (target is null)
+        {
+            return;
+        }
+        target.BringIntoView();
+        target.Focus();
     }
 
     private void OnScrollToSectionRequested(
@@ -121,5 +169,42 @@ public partial class SettingsPageView : UserControl
             AllowMultiple = false,
         });
         return folders.FirstOrDefault()?.Path.LocalPath;
+    }
+
+    private async Task<string?> PickFileAsync(string? title)
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return null;
+        }
+
+        var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = string.IsNullOrWhiteSpace(title) ? null : title,
+            AllowMultiple = false,
+        });
+        return files.FirstOrDefault()?.Path.LocalPath;
+    }
+
+    private async void OnCopyDiagnostics(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not SettingsPageViewModel vm || string.IsNullOrWhiteSpace(vm.DiagnosticsCopyText))
+        {
+            return;
+        }
+
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard is not null)
+        {
+            try
+            {
+                await clipboard.SetTextAsync(vm.DiagnosticsCopyText);
+            }
+            catch (Exception)
+            {
+                // async void 处理器的异常无人可捕，剪贴板不可用时只能就地吞掉。
+            }
+        }
     }
 }

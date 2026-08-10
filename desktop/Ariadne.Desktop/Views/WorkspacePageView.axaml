@@ -20,26 +20,32 @@
     <Style Selector="Grid.canvas-node Border.node-card">
       <Setter Property="RenderTransformOrigin" Value="50%,50%" />
       <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="BoxShadow" Value="0 1 2 0 #14000000, 0 6 16 -6 #26000000, 0 16 40 -18 #22000000" />
       <Setter Property="Transitions">
         <Transitions>
-          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.10" Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+          <BoxShadowsTransition Property="BoxShadow" Duration="0:0:0.16" Easing="CubicEaseOut" />
         </Transitions>
       </Setter>
     </Style>
     <Style Selector="Grid.canvas-node:pointerover Border.node-card">
-      <Setter Property="RenderTransform" Value="translate(0px,-1px) scale(1.006)" />
-      <Setter Property="BoxShadow" Value="0 5 14 0 #22000000" />
+      <Setter Property="RenderTransform" Value="translate(0px,-3px) scale(1.015)" />
+      <Setter Property="BoxShadow" Value="0 2 4 0 #1A000000, 0 12 26 -8 #34000000, 0 26 56 -20 #2C000000" />
     </Style>
-    <Style Selector="Grid.canvas-node Border.node-flow-ring">
-      <Setter Property="Opacity" Value="0" />
+    <!-- 选中环（自定义流动描边控件）与卡片共享同一撬起变换：
+         基础 = scale(1) + 变换过渡；悬停 = 与卡片一致的 translate(-3px)+scale(1.015)。
+         这样卡片抬起时选中环始终贴着它走（修复「选中框不跟节点悬浮」）。 -->
+    <Style Selector="Grid.canvas-node .node-flow-ring" x:SetterTargetType="Control">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
       <Setter Property="Transitions">
         <Transitions>
-          <DoubleTransition Property="Opacity" Duration="0:0:0.12" Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
         </Transitions>
       </Setter>
     </Style>
-    <Style Selector="Grid.canvas-node.selected Border.node-flow-ring">
-      <Setter Property="Opacity" Value="1" />
+    <Style Selector="Grid.canvas-node:pointerover .node-flow-ring" x:SetterTargetType="Control">
+      <Setter Property="RenderTransform" Value="translate(0px,-3px) scale(1.015)" />
     </Style>
     <Style Selector="Grid.canvas-node Border.node-card">
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
@@ -61,6 +67,13 @@
     </Style>
     <Style Selector="Grid.canvas-node.selected Border.node-card">
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.NodeSelected}" />
+      <Setter Property="BoxShadow" Value="0 0 0 1 #4D2E726B, 0 2 4 0 #1C000000, 0 14 30 -8 #38000000, 0 30 64 -22 #30000000" />
+    </Style>
+    <!-- 玻璃头：透明底，让卡片的「毛玻璃→实心」渐变一路透上来。
+         不画底部分隔线——标题与内容本就靠字号/字重分层，多一道线只是噪点。 -->
+    <Style Selector="Border.node-card-header">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
     </Style>
     <Style Selector="Ellipse.status-indicator">
       <Setter Property="Fill" Value="{DynamicResource Ariadne.TextSubtle}" />
@@ -108,22 +121,41 @@
       <Setter Property="Stroke" Value="{DynamicResource Ariadne.NodeSelected}" />
     </Style>
     <Style Selector="Border.communication-port">
-      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Background" Value="{DynamicResource Ariadne.NodeBackground}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.EdgeCommunication}" />
     </Style>
     <Style Selector="Border.communication-port.connected">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.NodeBackground}" />
+    </Style>
+    <Style Selector="Border.communication-port Border.communication-core">
       <Setter Property="Background" Value="{DynamicResource Ariadne.EdgeCommunication}" />
+      <Setter Property="Opacity" Value="0.4" />
+    </Style>
+    <Style Selector="Border.communication-port.connected Border.communication-core">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.EdgeCommunication}" />
+      <Setter Property="Opacity" Value="1" />
     </Style>
     <Style Selector="Path.control-port">
-      <Setter Property="Fill" Value="Transparent" />
+      <Setter Property="Fill" Value="{DynamicResource Ariadne.EdgeControl}" />
+      <Setter Property="Opacity" Value="0.45" />
     </Style>
     <Style Selector="Path.control-port.connected">
       <Setter Property="Fill" Value="{DynamicResource Ariadne.EdgeControl}" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <!-- 循环节点的执行箭头水平镜像：几何本身朝右，循环节点左出右入（回流方向），
+         两端箭头都应朝左，才读得出「绕回去」而不是「继续往前」。 -->
+    <Style Selector="Path.control-port.flip-arrow">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scaleX(-1)" />
     </Style>
     <Style Selector="Ellipse.data-port">
-      <Setter Property="Fill" Value="Transparent" />
+      <Setter Property="Fill" Value="{DynamicResource Ariadne.EdgeData}" />
+      <Setter Property="Opacity" Value="0.45" />
     </Style>
     <Style Selector="Ellipse.data-port.connected">
       <Setter Property="Fill" Value="{DynamicResource Ariadne.EdgeData}" />
+      <Setter Property="Opacity" Value="1" />
     </Style>
     <Style Selector="Button.zoom-readout">
       <Setter Property="RenderTransformOrigin" Value="50%,50%" />
@@ -151,12 +183,140 @@
       <Setter Property="RenderTransform" Value="scale(1.06)" />
       <Setter Property="Opacity" Value="0.72" />
     </Style>
+    <!-- Button.inspector-tab 已提升到 AriadneTheme.axaml（工作空间与作品页共用同一
+         pivot 语汇，单一来源，禁止双份复制）。 -->
+    <Style Selector="Border.inspector-context">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+      <Setter Property="BorderThickness" Value="0,0,0,1" />
+    </Style>
+    <!-- 检查器分区：去掉每组底部横线。
+         10 个同构分区各带一条底线时，右栏会变成一道「横线梯子」，
+         每块都像独立卡片堆叠。改为纯留白分组 —— 真正的分组信号由
+         下面那个安静的小标签承担（Figma/Blender 检查器的做法）。 -->
+    <Style Selector="Border.inspector-group">
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <!-- 分区标题降级：原来用 subtitle（16px SemiBold），与右栏自身的面板标题
+         一样大，导致毫无层级、每块都在抢主角。检查器里的分区名应该是
+         「安静的定位标记」：小字号、加字距、弱色。 -->
+    <Style Selector="Border.inspector-group TextBlock.subtitle">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="LetterSpacing" Value="0.7" />
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+    </Style>
+    <!-- 行内属性行：标签在左窄列、字段在右，取代「标签在上、输入在下」的竖堆。
+         检查器从一列叠框变成紧凑的属性表（Blender/Figma 检查器语汇），竖向高度砍半。
+         键标签左对齐、弱色、垂直居中：右对齐会让长短不一的标签在左缘参差不齐，
+         一列读下来像锯齿；左对齐则所有键起点同一条竖线。 -->
+    <Style Selector="Grid.prop-row > TextBlock.k">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="TextAlignment" Value="Left" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <!-- 单位后缀（$ / 秒）：叠在字段内侧贴边，不再单独占一列。
+         原先它们各占一格网格列，把相邻行的输入框左右缘顶得长短不齐。 -->
+    <Style Selector="Grid.prop-row TextBlock.unit">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+    </Style>
+    <Style Selector="Expander.inspector-expander">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <!-- Border.inspector-object-row 已提升到 AriadneTheme.axaml（改为淡底块 +
+         hover 加深，不再描边）；此处不再局部覆盖，避免两份定义打架。 -->
+    <Style Selector="Button.inspector-edge-row">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <!-- 与最近项目行 / 检查器对象行同族：以右缘为铰链轻撬 -->
+      <Setter Property="RenderTransformOrigin" Value="100%,50%" />
+      <Setter Property="RenderTransform" Value="translateX(0px) rotate(0deg)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.inspector-edge-row:pointerover">
+      <Setter Property="RenderTransform" Value="translateX(-2px) rotate(-0.3deg)" />
+    </Style>
+    <Style Selector="Button.inspector-edge-row:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
+    </Style>
+    <Style Selector="Button.inspector-edge-row.selected">
+      <!-- 选中：撬起幅度加大并留住，与导轨选中态同一读法 -->
+      <Setter Property="RenderTransform" Value="translateX(-4px) rotate(-0.6deg)" />
+    </Style>
+    <Style Selector="Button.inspector-edge-row.selected /template/ ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <!-- 拒绝理由线：默认宽 0 且不可点，武装后向左生长出来。
+         用 Width 插值而不是 IsVisible 切换，是因为要的是「从按钮往左长出一条线」
+         这个动作；IsVisible 只会让整块凭空出现。ClipToBounds 保证收起时
+         内部控件不外溢，IsHitTestVisible 保证收起态不吃点击。 -->
+    <Style Selector="Border.reject-reason-rail">
+      <Setter Property="Width" Value="0" />
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Width" Duration="0:0:0.18" Easing="CubicEaseOut" />
+          <DoubleTransition Property="Opacity" Duration="0:0:0.14" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.reject-reason-rail.armed">
+      <Setter Property="Width" Value="240" />
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="IsHitTestVisible" Value="True" />
+    </Style>
+    <!-- 线本身就是输入框：去掉盒子与背景，只留底部一道发丝线。
+         聚焦时那道线转强调色——反馈落在线上，而不是长出一个方框。 -->
+    <Style Selector="TextBox.reason-rail-input">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderStrong}" />
+      <Setter Property="BorderThickness" Value="0,0,0,1" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="Padding" Value="2,4" />
+      <Setter Property="MinHeight" Value="26" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="TextBox.reason-rail-input:focus">
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    </Style>
+    <Style Selector="TextBox.reason-rail-input /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <!-- 武装后按钮变「确认拒绝」，用错误色描边标出它此刻真的会拒绝 -->
+    <Style Selector="Button.secondary.armed">
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusError}" />
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+    </Style>
     <!-- 无障碍降级：偏好开启后保留状态变化，去掉位移/缩放插值。 -->
+    <Style Selector="UserControl.reduce-motion Border.reject-reason-rail">
+      <Setter Property="Transitions"><Transitions /></Setter>
+    </Style>
     <Style Selector="UserControl.reduce-motion Grid.canvas-node Border.node-card">
       <Setter Property="RenderTransform" Value="scale(1)" />
       <Setter Property="Transitions"><Transitions /></Setter>
     </Style>
-    <Style Selector="UserControl.reduce-motion Grid.canvas-node Border.node-flow-ring">
+    <Style Selector="UserControl.reduce-motion Grid.canvas-node .node-flow-ring" x:SetterTargetType="Control">
+      <Setter Property="RenderTransform" Value="scale(1)" />
       <Setter Property="Transitions"><Transitions /></Setter>
     </Style>
     <Style Selector="UserControl.reduce-motion Button.zoom-readout">
@@ -168,6 +328,7 @@
       <Setter Property="Opacity" Value="1" />
       <Setter Property="Transitions"><Transitions /></Setter>
     </Style>
+    <!-- 工具条图标自转由 HoverSpin 行为驱动，其内部已尊重减少动态偏好，无需样式降级 -->
   </UserControl.Styles>
   <!-- 根 Panel：拖库 ghost 叠在最上层且不裁剪 -->
   <Panel Background="{DynamicResource Ariadne.BackgroundMain}">
@@ -183,11 +344,16 @@
 
     <Grid x:Name="WorkspaceGrid" Grid.Column="0" RowDefinitions="*,Auto,220">
       <!-- Grid 宿主：工具栏/空态始终可见；Canvas 只放节点层 -->
+      <!-- ContextRequested 挂在菜单宿主本层：Avalonia 在这一层消费该事件弹出
+           Grid.ContextMenu，挂到内层 CanvasOverlay 拦不住（见 OnCanvasContextRequested）。 -->
       <Grid x:Name="CanvasHost" Grid.Row="0"
             Background="{DynamicResource Ariadne.CanvasBackground}"
+            ContextRequested="OnCanvasContextRequested"
             ClipToBounds="True">
         <Grid.ContextMenu>
-          <ContextMenu Classes="ariadne">
+          <!-- Opening 是第二道闸：ContextRequested 在各平台触发时机不一（按下/抬起），
+               右键拖动平移后由 Opening 兜底取消，保证拖完不弹菜单。 -->
+          <ContextMenu Classes="ariadne" Opening="OnCanvasContextMenuOpening">
             <MenuItem Header="{Binding CtxAddNodeText}" Command="{Binding AddContextNodeCommand}" />
             <Separator />
             <MenuItem Header="{Binding UndoText}" Command="{Binding UndoCommand}" />
@@ -197,11 +363,19 @@
             <MenuItem Header="{Binding CtxCutText}" Command="{Binding CutSelectedNodeCommand}" />
             <MenuItem Header="{Binding CtxPasteText}" Command="{Binding PasteNodeCommand}" />
             <Separator />
+            <!-- 导出所选片段 / 批注：都是对「当前选中」的操作，放右键语境
+                 （不再占用检查器底部按钮位）。批注标题留空时用默认标题。 -->
+            <MenuItem Header="{Binding ExportSelectionText}" Command="{Binding ExportSelectionCommand}" />
+            <MenuItem Header="{Binding AddAnnotationText}" Command="{Binding AddAnnotationCommand}" />
+            <Separator />
             <MenuItem Header="{Binding CtxFitViewText}" Command="{Binding FitViewCommand}" />
             <Separator />
             <MenuItem Header="{Binding CtxDeleteText}" Command="{Binding DeleteSelectedNodeCommand}" />
           </ContextMenu>
         </Grid.ContextMenu>
+
+        <!-- 低对比点阵背景：随缩放/平移联动（CanvasGrid token），在节点层之下提供空间参照 -->
+        <ctl:CanvasGridBackground x:Name="CanvasGridBg" />
 
         <!-- 节点/边坐标系：铺满宿主（修复嵌套 Canvas 时 ItemsControl 尺寸为 0） -->
         <Canvas x:Name="CanvasOverlay"
@@ -309,7 +483,7 @@
                 通信口在顶中略出框；未连空心 / 已连实心。
                 几何常量见 NodePortSpec（连线必须对齐）。
               -->
-              <Grid Width="200"
+              <Grid Width="232"
                     Height="{Binding CanvasHeight}"
                     Classes="canvas-node"
                     Classes.running="{Binding IsRunningStatus}"
@@ -323,15 +497,14 @@
                   <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-                <!-- 通信：顶中圆角玻璃方块 -->
+                <!-- 通信：顶中圆角方芯，扁平实心，未连半透明 -->
                 <Border Grid.Row="0"
                         HorizontalAlignment="Center"
                         VerticalAlignment="Bottom"
                         Width="14" Height="14"
                         Margin="0,0,0,-6"
-                        CornerRadius="4"
-                        BorderBrush="{DynamicResource Ariadne.EdgeCommunication}"
-                        BorderThickness="1.2"
+                        CornerRadius="5"
+                        Background="Transparent"
                         Opacity="{Binding PortCommunicationOpacity}"
                         Focusable="True"
                         AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PortCommunicationTip}"
@@ -345,22 +518,29 @@
                         PointerMoved="OnPortPointerMoved"
                         PointerReleased="OnPortPointerReleased"
                         IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}"
-                        ZIndex="3" />
+                        ZIndex="3">
+                  <Border Width="9" Height="9"
+                          CornerRadius="3"
+                          Classes="communication-core"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center" />
+                </Border>
 
-                <!-- 选中环：外扩 = 描边宽 2.5，内侧贴紧卡片外缘 -->
-                <Border Grid.Row="1"
+                <!-- 选中环：贴卡片外缘的流动渐变描边（自定义控件，强调色衍生，零硬编码）。
+                     IsActive 绑选中态；悬停时随卡片一起撬起（见下方 node-flow-ring 变换样式）。 -->
+                <ctl:SelectionFlowRing Grid.Row="1"
                         Classes="node-flow-ring"
                         Margin="-2.5"
                         CornerRadius="12"
-                        IsHitTestVisible="False"
-                        IsVisible="True" />
+                        IsActive="{Binding IsSelected}" />
 
-                <!-- 整卡：标题 + 内容，引脚都在内侧 -->
+                <!-- 整卡：顶部毛玻璃（点阵透出）→ 底部实心的竖向渐变 + 顶缘光边，标题/内容分层。
+                     节点不再带类型色，质感全部由这道「玻璃→实心」渐变承担（token 派生，非硬编码）。 -->
                 <Border x:Name="NodeKeyboardFocusHost"
                         Grid.Row="1"
-                        Background="{DynamicResource Ariadne.NodeBackground}"
-                        BorderThickness="1.4"
-                        CornerRadius="10"
+                        Background="{DynamicResource Ariadne.NodeGlassFill}"
+                        BorderThickness="1"
+                        CornerRadius="12"
                         ClipToBounds="True"
                         Focusable="True"
                         Classes="keyboard-target node-keyboard-target node-card"
@@ -368,21 +548,31 @@
                         KeyDown="OnNodeCardKeyDown"
                         PointerPressed="OnNodeSelectPointerPressed">
                   <DockPanel>
-                    <!-- 标题栏：左执行入 / 文案 / 运行 / 右执行出 -->
+                    <!-- 顶缘玻璃光边：1px 受光亮线，取代旧色条；用玻璃高光 token（非硬编码） -->
+                    <Border DockPanel.Dock="Top" Height="1" IsHitTestVisible="False"
+                            Background="{DynamicResource Ariadne.GlassBorder}" />
+                    <!-- 标题栏：名称 + 运行；执行引脚在左右两端（不放类型图标/类型色） -->
                     <Border DockPanel.Dock="Top"
-                            Background="{DynamicResource Ariadne.AccentLight}"
-                            Padding="6,7"
+                            Classes="node-card-header"
+                            Padding="8,8"
                             Cursor="SizeAll"
                             PointerPressed="OnNodePointerPressed"
                             PointerMoved="OnNodePointerMoved"
                             PointerReleased="OnNodePointerReleased"
                             PointerCaptureLost="OnNodePointerCaptureLost">
-                      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" ColumnSpacing="6">
-                        <Border Grid.Column="0"
+                      <Panel>
+                        <!-- 标题行固定高 20（= NodePortSpec.TitleRowHeight）：起始节点带「运行」
+                             按钮（20px），普通节点只有引脚（16px），不固定就差 4px，
+                             数据口 Y 便无法用单个常量表达，连线会按节点类型漂移。 -->
+                        <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="7" Height="20">
+                        <!-- 执行入口。列位置随 ExecInColumn：普通节点在左(0)，循环节点镜像到右(3)。
+                             箭头方向随 .flip-arrow（循环节点两个箭头都朝左，指出回流方向）。 -->
+                        <Border Grid.Column="{Binding ExecInColumn}"
                                 Width="16" Height="16"
                                 VerticalAlignment="Center"
                                 Classes="pin-glass-soft keyboard-target"
-                                CornerRadius="3"
+                                CornerRadius="5"
+                                Background="Transparent"
                                 Opacity="{Binding PortControlInOpacity}"
                                 Focusable="True"
                                 AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PortControlInTip}"
@@ -394,32 +584,31 @@
                                 PointerMoved="OnPortPointerMoved"
                                 PointerReleased="OnPortPointerReleased"
                                 IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
-                          <Path Width="11" Height="11" Stretch="Uniform"
+                          <Path Width="12" Height="12" Stretch="Uniform"
                                 Classes="control-port"
                                 Classes.connected="{Binding PortControlInConnected}"
+                                Classes.flip-arrow="{Binding MirrorExecPorts}"
                                 HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Stroke="{DynamicResource Ariadne.EdgeControl}"
-                                StrokeThickness="1.4"
-                                Data="M3,2.5 L12,7 L3,11.5 Z" />
+                                StrokeThickness="1.25"
+                                Data="M4.1,2.4 Q3,1.9 3,3.2 L3,10.8 Q3,12.1 4.1,11.6 L11.4,8.1 Q13.2,7 11.4,5.9 Z" />
                         </Border>
-                        <Border Grid.Column="1" Width="3" Height="14" CornerRadius="1"
-                                Background="{Binding TypeAccentBrush}" VerticalAlignment="Center" />
-                        <TextBlock Grid.Column="2"
+                        <TextBlock Grid.Column="1"
                                    Text="{Binding Label}"
                                    FontWeight="SemiBold" FontSize="12"
-                                   Foreground="{DynamicResource Ariadne.AccentPrimary}"
+                                   Foreground="{DynamicResource Ariadne.TextPrimary}"
                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                        <StackPanel Grid.Column="3"
+                        <StackPanel Grid.Column="2"
                                     Orientation="Horizontal"
                                     Spacing="3"
                                     IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
                           <Button Width="22" Height="20" Padding="0"
                                   HorizontalContentAlignment="Center"
                                   VerticalContentAlignment="Center"
-                                  Background="{DynamicResource Ariadne.BackgroundSurface}"
+                                  Background="{DynamicResource Ariadne.AccentLight}"
                                   BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
                                   BorderThickness="1"
-                                  CornerRadius="4"
+                                  CornerRadius="5"
                                   IsVisible="{Binding IsStartNode}"
                                   ToolTip.Tip="{Binding $parent[UserControl].DataContext.RunText}"
                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.RunText}"
@@ -429,11 +618,19 @@
                                   Data="M9,6 L18,12 L9,18 Z" />
                           </Button>
                         </StackPanel>
-                        <Border Grid.Column="4"
-                                Width="16" Height="16"
+                        <!-- 执行出口。列位置随 ExecOutColumn：普通节点在右(3)，循环节点镜像到左(0)。
+                             U125：condition 节点改出**两个**分支引脚（真在上、假在下），
+                             分支语义由引脚身份承载——用户不可能留空、也不可能填错。
+                             外层容器统一挂页面级精度开关（与数据入引脚列同一套写法），
+                             内层两种形态按节点类型互斥切换。 -->
+                        <Panel Grid.Column="{Binding ExecOutColumn}"
+                               VerticalAlignment="Center"
+                               IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                        <Border Width="16" Height="16"
                                 VerticalAlignment="Center"
                                 Classes="pin-glass-soft keyboard-target"
-                                CornerRadius="3"
+                                CornerRadius="5"
+                                Background="Transparent"
                                 Opacity="{Binding PortControlOutOpacity}"
                                 Focusable="True"
                                 AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PortControlOutTip}"
@@ -444,16 +641,77 @@
                                 PointerPressed="OnPortPointerPressed"
                                 PointerMoved="OnPortPointerMoved"
                                 PointerReleased="OnPortPointerReleased"
-                                IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
-                          <Path Width="11" Height="11" Stretch="Uniform"
+                                IsVisible="{Binding ShowGenericExecOutPin}">
+                          <Path Width="12" Height="12" Stretch="Uniform"
                                 Classes="control-port"
                                 Classes.connected="{Binding PortControlOutConnected}"
+                                Classes.flip-arrow="{Binding MirrorExecPorts}"
                                 HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Stroke="{DynamicResource Ariadne.EdgeControl}"
-                                StrokeThickness="1.4"
-                                Data="M3,2.5 L12,7 L3,11.5 Z" />
+                                StrokeThickness="1.25"
+                                Data="M4.1,2.4 Q3,1.9 3,3.2 L3,10.8 Q3,12.1 4.1,11.6 L11.4,8.1 Q13.2,7 11.4,5.9 Z" />
                         </Border>
-                      </Grid>
+                        <!-- U125：condition 的两个分支引脚（真在上、假在下），等距对称。
+                             居中元素的 Margin 按 (top-bottom)/2 偏移，故要错开
+                             ±BranchPinOffsetY(10) 就写 ∓20/±20 这对不对称边距。
+                             包络高 16+2*10=36，正好等于标题栏总高——这是不越界的
+                             最大间距，再拉开就会溢出去撞上顶部通信口。
+                             其它节点的数据口 Y 与 NodePortSpec 常量都无需改。 -->
+                        <Panel VerticalAlignment="Center"
+                               Height="36"
+                               IsVisible="{Binding ShowBranchExecOutPins}">
+                          <Border Width="16" Height="16"
+                                  VerticalAlignment="Center"
+                                  Margin="0,-20,0,0"
+                                  Classes="pin-glass-soft keyboard-target"
+                                  CornerRadius="5"
+                                  Background="Transparent"
+                                  Opacity="{Binding PortControlOutOpacity}"
+                                  Focusable="True"
+                                  AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PortControlOutTrueTip}"
+                                  Cursor="Cross"
+                                  Tag="control|out|exec_out_true"
+                                  ToolTip.Tip="{Binding $parent[UserControl].DataContext.PortControlOutTrueTip}"
+                                  KeyDown="OnPortKeyDown"
+                                  PointerPressed="OnPortPointerPressed"
+                                  PointerMoved="OnPortPointerMoved"
+                                  PointerReleased="OnPortPointerReleased">
+                            <Path Width="12" Height="12" Stretch="Uniform"
+                                  Classes="control-port"
+                                  Classes.connected="{Binding PortControlOutTrueConnected}"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                                  Stroke="{DynamicResource Ariadne.EdgeControl}"
+                                  StrokeThickness="1.25"
+                                  Data="M4.1,2.4 Q3,1.9 3,3.2 L3,10.8 Q3,12.1 4.1,11.6 L11.4,8.1 Q13.2,7 11.4,5.9 Z" />
+                          </Border>
+                          <Border Width="16" Height="16"
+                                  VerticalAlignment="Center"
+                                  Margin="0,20,0,0"
+                                  Classes="pin-glass-soft keyboard-target"
+                                  CornerRadius="5"
+                                  Background="Transparent"
+                                  Opacity="{Binding PortControlOutOpacity}"
+                                  Focusable="True"
+                                  AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PortControlOutFalseTip}"
+                                  Cursor="Cross"
+                                  Tag="control|out|exec_out_false"
+                                  ToolTip.Tip="{Binding $parent[UserControl].DataContext.PortControlOutFalseTip}"
+                                  KeyDown="OnPortKeyDown"
+                                  PointerPressed="OnPortPointerPressed"
+                                  PointerMoved="OnPortPointerMoved"
+                                  PointerReleased="OnPortPointerReleased">
+                            <Path Width="12" Height="12" Stretch="Uniform"
+                                  Classes="control-port"
+                                  Classes.connected="{Binding PortControlOutFalseConnected}"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                                  Stroke="{DynamicResource Ariadne.EdgeControl}"
+                                  StrokeThickness="1.25"
+                                  Data="M4.1,2.4 Q3,1.9 3,3.2 L3,10.8 Q3,12.1 4.1,11.6 L11.4,8.1 Q13.2,7 11.4,5.9 Z" />
+                          </Border>
+                        </Panel>
+                        </Panel>
+                        </Grid>
+                      </Panel>
                     </Border>
 
                     <!-- 内容栏：数据入顶对齐 + Spacing=8（14+8=22=DataPortSpacing），与 LocalCenter 一致 -->
@@ -475,6 +733,7 @@
                               <Border Width="14" Height="14"
                                       Classes="pin-glass keyboard-target"
                                       CornerRadius="7"
+                                      Background="Transparent"
                                       Focusable="True"
                                       AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PortDataInTip}"
                                       Cursor="Cross"
@@ -484,11 +743,9 @@
                                       PointerPressed="OnPortPointerPressed"
                                       PointerMoved="OnPortPointerMoved"
                                       PointerReleased="OnPortPointerReleased">
-                                <Ellipse Width="9" Height="9"
+                                <Ellipse Width="8" Height="8"
                                          Classes="data-port"
                                          Classes.connected="{Binding IsConnected}"
-                                         Stroke="{DynamicResource Ariadne.EdgeData}"
-                                         StrokeThickness="1.3"
                                          HorizontalAlignment="Center" VerticalAlignment="Center" />
                               </Border>
                             </DataTemplate>
@@ -512,7 +769,7 @@
                         </Button>
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Top" Margin="0,0,0,0">
-                          <TextBlock Text="{Binding Name}" Classes="caption" TextTrimming="CharacterEllipsis" />
+                          <!-- 节点名只在标题栏出现一次（这里原本又画了一遍 Name，同一个名字上下重复） -->
                           <Panel IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasDetails}">
                             <TextBlock Text="{Binding ImportPathDisplay}" Classes="caption mono"
                                        TextTrimming="CharacterEllipsis" Opacity="0.85"
@@ -529,12 +786,17 @@
                                        IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasDetails}" />
                           </Grid>
                         </StackPanel>
-                        <!-- 数据出与首个数据入同一顶对齐基线 -->
-                        <Border Grid.Column="2"
-                                Width="14" Height="14"
+                        <!-- 数据出与首个数据入同一顶对齐基线。
+                             外层 Panel 挂页面级精度开关，内层按节点类型隐藏：
+                             condition 不要数据出口（分支已由两个执行出引脚承载）。 -->
+                        <Panel Grid.Column="2"
+                               VerticalAlignment="Top"
+                               IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                        <Border Width="14" Height="14"
                                 VerticalAlignment="Top"
                                 Classes="pin-glass keyboard-target"
                                 CornerRadius="7"
+                                Background="Transparent"
                                 Opacity="{Binding PortDataOutOpacity}"
                                 Focusable="True"
                                 AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PortDataOutTip}"
@@ -545,14 +807,13 @@
                                 PointerPressed="OnPortPointerPressed"
                                 PointerMoved="OnPortPointerMoved"
                                 PointerReleased="OnPortPointerReleased"
-                                IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
-                          <Ellipse Width="9" Height="9"
+                                IsVisible="{Binding ShowDataOutPin}">
+                          <Ellipse Width="8" Height="8"
                                    Classes="data-port"
                                    Classes.connected="{Binding PortDataOutConnected}"
-                                   Stroke="{DynamicResource Ariadne.EdgeData}"
-                                   StrokeThickness="1.3"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
+                        </Panel>
                       </Grid>
                     </Border>
                   </DockPanel>
@@ -591,8 +852,13 @@
               Margin="16,12"
               ColumnDefinitions="*,Auto"
               ColumnSpacing="12">
-          <StackPanel x:Name="CanvasToolbarActions" Grid.Column="1" Orientation="Horizontal" Spacing="6">
-            <Border Classes="soft-panel" Padding="3">
+          <!-- 画布工具条：原先并排三个 soft-panel 描边盒，像三块补丁。
+               改为「一块浮起的工具板」，组间用发丝竖线分隔（少 2 个盒子）。 -->
+          <Border Grid.Column="1"
+                  Classes="soft-panel"
+                  Padding="3"
+                  VerticalAlignment="Top">
+            <StackPanel x:Name="CanvasToolbarActions" Orientation="Horizontal" Spacing="2">
               <StackPanel x:Name="CanvasEditActions" Orientation="Horizontal" Spacing="2">
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding UndoText}" AutomationProperties.Name="{Binding UndoText}" Command="{Binding UndoCommand}">
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Undo}" />
@@ -600,9 +866,12 @@
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding RedoText}" AutomationProperties.Name="{Binding RedoText}" Command="{Binding RedoCommand}">
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Redo}" />
                 </Button>
+                <!-- 打包为子工作流：选中操作，放右上角画布工具条（不再占用检查器底部按钮位） -->
+                <Button Classes="icon-btn" ToolTip.Tip="{Binding SubworkflowText}" AutomationProperties.Name="{Binding SubworkflowText}" Command="{Binding PackSelectionCommand}">
+                  <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Pack}" />
+                </Button>
               </StackPanel>
-            </Border>
-            <Border Classes="soft-panel" Padding="3">
+              <Border Width="1" Margin="4,5" Background="{DynamicResource Ariadne.BorderMuted}" />
               <StackPanel x:Name="CanvasFileActions" Orientation="Horizontal" Spacing="2">
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding ReloadProjectCanvasText}" AutomationProperties.Name="{Binding ReloadProjectCanvasText}" Command="{Binding ReloadProjectCanvasCommand}">
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Refresh}" />
@@ -625,8 +894,7 @@
                   </Panel>
                 </Button>
               </StackPanel>
-            </Border>
-            <Border Classes="soft-panel" Padding="3">
+              <Border Width="1" Margin="4,5" Background="{DynamicResource Ariadne.BorderMuted}" />
               <StackPanel x:Name="CanvasViewActions" Orientation="Horizontal" Spacing="2">
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomOutText}" AutomationProperties.Name="{Binding ZoomOutText}" Command="{Binding ZoomOutCommand}">
                   <TextBlock Text="{Binding ZoomOutGlyphText}" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -650,8 +918,8 @@
                   <TextBlock Text="{Binding ZoomInGlyphText}" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Button>
               </StackPanel>
-            </Border>
-          </StackPanel>
+            </StackPanel>
+          </Border>
         </Grid>
 
         <Border x:Name="CanvasStatusHost"
@@ -707,7 +975,7 @@
                   <Border Width="10"
                           Height="6"
                           CornerRadius="2"
-                          Background="{Binding TypeAccentBrush}"
+                          Background="{DynamicResource Ariadne.BorderStrong}"
                           BorderBrush="{DynamicResource Ariadne.BackgroundSurface}"
                           BorderThickness="1"
                           IsHitTestVisible="False" />
@@ -766,22 +1034,59 @@
         </Canvas>
       </Grid>
 
+      <!-- 拖杆本体透明：分层信号由下栏自身的顶缘光边承担，不再多画一道灰线。 -->
       <GridSplitter x:Name="LibrarySplitter" Grid.Row="1" Height="5"
                     HorizontalAlignment="Stretch"
-                    Background="{DynamicResource Ariadne.BorderMuted}"
+                    Background="Transparent"
                     ResizeDirection="Rows" />
 
+      <!-- 下栏：去掉 1px 灰描边，改「浮起的台面」——顶缘一道受光亮边 + 向上的投影，
+           台面自身比画布亮一档。层次靠光影而非线框（与节点卡同一套语汇）。 -->
       <Border x:Name="LibraryContent" Grid.Row="2"
+              Classes="dock-rail dock-rail-bottom"
               Background="{DynamicResource Ariadne.BackgroundSurface}"
-              BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-              BorderThickness="0,1,0,0">
+              BorderThickness="0">
         <DockPanel>
-          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="2" Margin="14,5,14,0">
-            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsNodeLibraryPanel}"
-                    Content="{Binding NodeLibraryText}" Command="{Binding ShowNodeLibraryCommand}" />
-            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsExecutionPanel}"
-                    Content="{Binding ExecutionText}" Command="{Binding ShowExecutionCommand}" />
-          </StackPanel>
+          <!-- 下栏标题栏：左侧分页键，右侧运行控制三键（图标）。
+               运行控制原本埋在执行页内容区里、还是三条满宽堆叠；挪到标题栏右侧后
+               它与分页键同处一条带上，切到节点库页也够得着。 -->
+          <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="14,5,14,0">
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="2">
+              <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsNodeLibraryPanel}"
+                      Content="{Binding NodeLibraryText}" Command="{Binding ShowNodeLibraryCommand}" />
+              <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsExecutionPanel}"
+                      Content="{Binding ExecutionText}" Command="{Binding ShowExecutionCommand}" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+              <Button Classes="icon-btn"
+                      ToolTip.Tip="{Binding PauseText}"
+                      AutomationProperties.Name="{Binding PauseText}"
+                      Command="{Binding PauseWorkflowCommand}">
+                <!-- 暂停：两条竖杠 -->
+                <Path Classes="icon-fill" Width="11" Height="11" Stretch="Uniform"
+                      Fill="{DynamicResource Ariadne.TextSecondary}"
+                      Data="M7,5 L10,5 L10,19 L7,19 Z M14,5 L17,5 L17,19 L14,19 Z" />
+              </Button>
+              <Button Classes="icon-btn"
+                      ToolTip.Tip="{Binding ResumeText}"
+                      AutomationProperties.Name="{Binding ResumeText}"
+                      Command="{Binding ResumeWorkflowCommand}">
+                <!-- 继续：三角 -->
+                <Path Classes="icon-fill" Width="11" Height="11" Stretch="Uniform"
+                      Fill="{DynamicResource Ariadne.TextSecondary}"
+                      Data="M8,5 L19,12 L8,19 Z" />
+              </Button>
+              <Button Classes="icon-btn"
+                      ToolTip.Tip="{Binding StopText}"
+                      AutomationProperties.Name="{Binding StopText}"
+                      Command="{Binding StopWorkflowCommand}">
+                <!-- 停止：实心方块。停止是危险动作，图标走错误色。 -->
+                <Path Classes="icon-fill" Width="10" Height="10" Stretch="Uniform"
+                      Fill="{DynamicResource Ariadne.StatusError}"
+                      Data="M6,6 L18,6 L18,18 L6,18 Z" />
+              </Button>
+            </StackPanel>
+          </Grid>
           <ScrollViewer Margin="0" IsVisible="{Binding IsNodeLibraryPanel}" VerticalScrollBarVisibility="Auto">
             <StackPanel Margin="14,8,14,12" Spacing="10">
               <TextBlock Text="{Binding LibraryDragHintText}" Classes="caption" Opacity="0.85" TextWrapping="Wrap" />
@@ -872,22 +1177,27 @@
                 <ItemsControl ItemsSource="{Binding StartNodes}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:WorkflowNodeViewModel}">
-                      <Border Classes="card exec-start-card"
+                      <!-- 无卡片面：起始节点是一**行**而不是一张卡。
+                           行与行之间只用一道发丝线分隔，状态由左侧状态点承担。
+                           卡片给每个条目都套一层盒子，条目一多整页全是框。 -->
+                      <Border Classes="exec-start-card"
                               Classes.running="{Binding IsRunningStatus}"
                               Classes.pending="{Binding IsPendingStatus}"
                               Classes.paused="{Binding IsPausedStatus}"
                               Classes.succeeded="{Binding IsSucceededStatus}"
                               Classes.failed="{Binding IsFailedStatus}"
-                              Padding="14,12" Margin="0,0,0,10">
-                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14">
-                          <Border Grid.Column="0" Width="36" Height="36" CornerRadius="10"
-                                  Background="{DynamicResource Ariadne.AccentLight}"
-                                  VerticalAlignment="Center">
-                            <Path Width="12" Height="12" Stretch="Uniform"
-                                  Fill="{DynamicResource Ariadne.AccentPrimary}"
-                                  HorizontalAlignment="Center" VerticalAlignment="Center"
-                                  Data="M9,6 L18,12 L9,18 Z" />
-                          </Border>
+                              Background="Transparent"
+                              BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                              BorderThickness="0,0,0,1"
+                              Padding="2,12" Margin="0">
+                        <StackPanel Spacing="0">
+                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                          <!-- 36px 的着色方块也是一层「面」，去掉盒子只留裸三角字形：
+                               行式列表里的图标应当是标记，不是又一个色块。 -->
+                          <Path Grid.Column="0" Width="11" Height="11" Stretch="Uniform"
+                                Fill="{DynamicResource Ariadne.AccentPrimary}"
+                                VerticalAlignment="Center"
+                                Data="M9,6 L18,12 L9,18 Z" />
                           <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
                             <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" />
                             <TextBlock Text="{Binding WorkDir}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -901,6 +1211,87 @@
                                   Command="{Binding RunCommand}"
                                   VerticalAlignment="Center" />
                         </Grid>
+
+                        <!-- 变量区：折叠态只显示一句话。变量最终会成为稿子里的句子，
+                             所以折叠行读作「稿签」而不是一堆标签配输入框；正文用阅读衬线，
+                             是全项目唯一让 Reading 字族进控制界面的地方。
+                             无可见变量（含全为 hidden）时整块不渲染。 -->
+                        <StackPanel Spacing="8" Margin="23,10,0,0" IsVisible="{Binding HasVariables}">
+                          <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}"
+                                  Opacity="0.6" Margin="0,0,0,2" />
+                          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBlock Grid.Column="0"
+                                       Text="{Binding Variables.SummaryText}"
+                                       FontFamily="{DynamicResource Ariadne.Font.Reading}"
+                                       FontSize="13"
+                                       TextWrapping="Wrap"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Ariadne.TextPrimary}" />
+                            <Button Grid.Column="1" Classes="subtle"
+                                    Padding="6,2"
+                                    VerticalAlignment="Center"
+                                    Content="{Binding Variables.ToggleText}"
+                                    AutomationProperties.Name="{Binding Variables.ToggleText}"
+                                    Command="{Binding Variables.ToggleCommand}" />
+                          </Grid>
+
+                          <!-- 展开态：规范表单（§1.4 语汇）。所有非 hidden 变量一律可编辑，
+                               没有只读态——章节号通常由循环递增，但作者随时能改成第 0 章。 -->
+                          <StackPanel Spacing="8" IsVisible="{Binding Variables.IsExpanded}">
+                            <ItemsControl ItemsSource="{Binding Variables.Variables}">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:WorkflowVariableViewModel}">
+                                  <Grid ColumnDefinitions="110,*" ColumnSpacing="10" Margin="0,0,0,6">
+                                    <TextBlock Grid.Column="0" Text="{Binding Name}"
+                                               Classes="caption" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip.Tip="{Binding Name}" />
+                                    <!-- 数字走等宽右对齐：数值就该读作数值 -->
+                                    <TextBox Grid.Column="1"
+                                             Text="{Binding Text, Mode=TwoWay}"
+                                             AutomationProperties.Name="{Binding Name}"
+                                             IsVisible="{Binding IsNumber}"
+                                             FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                             TextAlignment="Right"
+                                             MaxWidth="140" HorizontalAlignment="Left" />
+                                    <TextBox Grid.Column="1"
+                                             Text="{Binding Text, Mode=TwoWay}"
+                                             AutomationProperties.Name="{Binding Name}"
+                                             IsVisible="{Binding IsText}" />
+                                    <CheckBox Grid.Column="1"
+                                              IsVisible="{Binding IsBoolean}"
+                                              AutomationProperties.Name="{Binding Name}"
+                                              IsChecked="{Binding IsChecked, Mode=TwoWay}" />
+                                  </Grid>
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- 句式本身可编辑：项目 AI 生成初稿后作者可改 -->
+                            <StackPanel Spacing="3">
+                              <TextBlock Text="{Binding Variables.SummaryLabelText}" Classes="caption" />
+                              <TextBox Text="{Binding Variables.SummaryTemplate, Mode=TwoWay}"
+                                       AutomationProperties.Name="{Binding Variables.SummaryLabelText}"
+                                       FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                       FontSize="12" />
+                              <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                                <TextBlock Grid.Column="0" Text="{Binding Variables.SummaryHintText}"
+                                           Classes="subtle" TextWrapping="Wrap"
+                                           VerticalAlignment="Center" />
+                                <!-- Ctrl+K 填的是变量**值**；这个键起的是**句式**，两回事。 -->
+                                <TextBlock Grid.Column="1" Text="{Binding Variables.FillWithAiText}"
+                                           Classes="subtle" VerticalAlignment="Center" />
+                                <Button Grid.Column="2"
+                                        Classes="subtle"
+                                        Padding="8,3"
+                                        Content="{Binding Variables.GenerateSummaryText}"
+                                        AutomationProperties.Name="{Binding Variables.GenerateSummaryText}"
+                                        Command="{Binding Variables.GenerateSummaryCommand}" />
+                              </Grid>
+                            </StackPanel>
+                          </StackPanel>
+                        </StackPanel>
+                        </StackPanel>
                       </Border>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
@@ -914,19 +1305,20 @@
                 </Border>
               </StackPanel>
 
+              <!-- 无卡片面：当前运行区与左侧起始列同处一张底面，
+                   只靠一道竖发丝线分栏，不再是一张浮在页上的卡。 -->
               <Border x:Name="ExecutionRunPane" Grid.Column="2" Grid.Row="0"
-                      Classes="card" Padding="16" VerticalAlignment="Stretch">
+                      Background="Transparent"
+                      BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                      BorderThickness="1,0,0,0"
+                      Padding="16,0,0,0" VerticalAlignment="Stretch">
                 <StackPanel Spacing="14">
                   <StackPanel Spacing="4">
                     <TextBlock Text="{Binding CurrentRunText}" Classes="subtitle" />
                     <TextBlock Text="{Binding CurrentRunValueText}" Classes="mono" TextWrapping="Wrap" FontSize="12" />
                   </StackPanel>
-                  <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
-                  <StackPanel Spacing="8">
-                    <Button Classes="secondary" HorizontalAlignment="Stretch" Content="{Binding PauseText}" Command="{Binding PauseWorkflowCommand}" />
-                    <Button Classes="secondary" HorizontalAlignment="Stretch" Content="{Binding ResumeText}" Command="{Binding ResumeWorkflowCommand}" />
-                    <Button Classes="danger" HorizontalAlignment="Stretch" Content="{Binding StopText}" Command="{Binding StopWorkflowCommand}" />
-                  </StackPanel>
+                  <!-- 暂停/继续/停止已移到下栏标题栏右侧（图标三键）：
+                       运行控制不该只在执行页内才够得着，切到节点库页同样要能停。 -->
                   <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}" IsVisible="{Binding HasInDoubtOperations}" />
                   <StackPanel Spacing="8" IsVisible="{Binding HasInDoubtOperations}">
                     <TextBlock Text="{Binding InDoubtTitleText}" Classes="subtitle" TextWrapping="Wrap" />
@@ -1072,8 +1464,32 @@
                            PlaceholderText="{Binding ConfirmationReasonPlaceholder}"
                            VerticalAlignment="Center" />
                   <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <Button Classes="secondary" Content="{Binding RejectConfirmationText}" Command="{Binding RejectConfirmationCommand}" />
-                    <Button Classes="primary" Content="{Binding ApproveConfirmationText}" Command="{Binding ApproveConfirmationCommand}" />
+                    <!-- 拒绝是两步：第一次点击就地向左展开一条可写的线并把自己变成
+                         「确认拒绝」，同时「通过」让位为「取消」；第二次才真正提交。
+                         因此不再叠加危险对话框——两道确认会让人闭眼连点。 -->
+                    <Border Classes="reject-reason-rail"
+                            Classes.armed="{Binding IsRejectArmed}"
+                            VerticalAlignment="Center">
+                      <!-- 只见一条线：TextBox 去掉盒子，仅留底部一道发丝线。
+                           提示语直接做 placeholder，不另占一行标签。 -->
+                      <TextBox x:Name="RejectReasonBox"
+                               Classes="reason-rail-input"
+                               VerticalAlignment="Center"
+                               AutomationProperties.Name="{Binding RejectReasonPromptText}"
+                               Text="{Binding ConfirmationReason, Mode=TwoWay}"
+                               PlaceholderText="{Binding RejectReasonPromptText}" />
+                    </Border>
+                    <Button Classes="secondary"
+                            Classes.armed="{Binding IsRejectArmed}"
+                            Content="{Binding RejectButtonText}"
+                            AutomationProperties.Name="{Binding RejectButtonText}"
+                            Command="{Binding RejectConfirmationCommand}" />
+                    <!-- 武装态下「通过」让位为「取消」：同一位置、同一按钮，
+                         避免多长出一个键；点取消后变回「通过」。 -->
+                    <Button Classes="primary"
+                            Content="{Binding ApproveButtonText}"
+                            AutomationProperties.Name="{Binding ApproveButtonText}"
+                            Command="{Binding ApproveOrCancelCommand}" />
                   </StackPanel>
                 </Grid>
               </Grid>
@@ -1083,26 +1499,39 @@
       </Border>
     </Grid>
 
+    <!-- 拖杆透明：分层由右栏左缘的受光亮边承担（见 dock-rail-right）。 -->
     <GridSplitter x:Name="RightPanelSplitter" Grid.Column="1"
                   Width="4"
-                  Background="{DynamicResource Ariadne.BorderMuted}"
+                  Background="Transparent"
                   ResizeDirection="Columns"
                   IsVisible="{Binding IsRightPanelDocked}" />
 
     <Panel x:Name="RightPanelHost" Grid.Column="2">
+      <!-- 右栏：同下栏语汇——左缘受光亮边 + 向左的投影，取代 1px 灰描边。 -->
       <Border
-          Background="{DynamicResource Ariadne.BackgroundSurface}"
-          BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-          BorderThickness="1,0,0,0"
+          x:Name="RightPanelSurface"
+          Classes="dock-rail dock-rail-right"
           IsVisible="{Binding IsRightPanelOpen}">
         <DockPanel>
-          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="12,8,12,0">
-            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsProjectAiTab}"
-                    Content="{Binding ProjectAiText}" Command="{Binding ShowProjectAiCommand}" />
-            <Button Classes="tab" ctl:SelectedClass.IsSelected="{Binding IsNodeDetailsTab}"
-                    Content="{Binding NodeDetailsText}" Command="{Binding ShowNodeDetailsCommand}" />
-          </StackPanel>
-          <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Ariadne.BorderMuted}" Margin="0,6,0,0" />
+          <!-- pivot 带：去掉底部硬线，靠一层更淡的底色分层（选中下划线自己承担定位信号） -->
+          <Border DockPanel.Dock="Top"
+                  Classes="dock-rail-header"
+                  Padding="10,8,10,0">
+            <Grid ColumnDefinitions="*,*,*" ColumnSpacing="2">
+              <Button Grid.Column="0" Classes="inspector-tab"
+                      ctl:SelectedClass.IsSelected="{Binding IsProjectAiTab}"
+                      Content="{Binding ProjectAiText}"
+                      Command="{Binding ShowProjectAiCommand}" />
+              <Button Grid.Column="1" Classes="inspector-tab"
+                      ctl:SelectedClass.IsSelected="{Binding IsNodeDetailsTab}"
+                      Content="{Binding NodeDetailsText}"
+                      Command="{Binding ShowNodeDetailsCommand}" />
+              <Button Grid.Column="2" Classes="inspector-tab"
+                      ctl:SelectedClass.IsSelected="{Binding IsEdgeDetailsTab}"
+                      Content="{Binding EdgeDetailsText}"
+                      Command="{Binding ShowEdgeDetailsCommand}" />
+            </Grid>
+          </Border>
 
           <Grid>
             <Grid IsVisible="{Binding IsProjectAiTab}" RowDefinitions="*,Auto" HorizontalAlignment="Stretch">
@@ -1137,68 +1566,90 @@
                   </ItemsControl>
                 </StackPanel>
               </ScrollViewer>
+              <!-- 输入面：去掉顶部硬线，用一层更淡的底色把「输入区」从对话流里分出来 -->
               <Border Grid.Row="1"
+                      Classes="dock-rail-header"
                       Padding="12,10"
-                      HorizontalAlignment="Stretch"
-                      BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                      BorderThickness="0,1,0,0">
+                      HorizontalAlignment="Stretch">
                 <!-- 与作品页共用 ProjectAiComposer；输入面始终跟随实际对话栏宽度。 -->
                 <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
               </Border>
             </Grid>
 
-            <ScrollViewer IsVisible="{Binding IsNodeDetailsTab}" Margin="16,14">
-              <StackPanel Spacing="18">
-                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
-                  <Border Grid.Column="0" Classes="node-mark" Width="34" Height="34">
+            <Grid IsVisible="{Binding !IsProjectAiTab}" RowDefinitions="Auto,*">
+              <Border Grid.Row="0" Classes="inspector-context" Padding="14,12">
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="11">
+                  <Border Grid.Column="0" Classes="node-mark" Width="36" Height="36">
                     <Path Classes="icon" Width="17" Height="17" Data="{StaticResource Ariadne.Icon.Workspace}" />
                   </Border>
-                  <StackPanel Grid.Column="1" Spacing="3">
-                    <TextBlock Text="{Binding SelectedNodeTitle}" Classes="subtitle" TextWrapping="Wrap" />
-                    <TextBlock Text="{Binding NoNodeSelectedText}" Classes="caption" TextWrapping="Wrap" IsVisible="{Binding !HasSelectedNode}" />
-                    <TextBlock Text="{Binding SelectedNode.StatusText}" Classes="caption" TextWrapping="Wrap" IsVisible="{Binding HasSelectedNode}" />
+                  <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding SelectedNodeTitle}"
+                               FontSize="14" FontWeight="SemiBold"
+                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding SelectedNode.StatusText}"
+                               Classes="caption" TextWrapping="Wrap"
+                               MaxLines="2" TextTrimming="CharacterEllipsis"
+                               IsVisible="{Binding HasSelectedNode}" />
                   </StackPanel>
+                  <Button Grid.Column="2"
+                          Classes="icon-btn"
+                          ToolTip.Tip="{Binding RunText}"
+                          AutomationProperties.Name="{Binding RunText}"
+                          Command="{Binding RunSelectedNodeCommand}"
+                          IsVisible="{Binding IsSelectedStartNode}">
+                    <Path Classes="icon" Fill="{DynamicResource Ariadne.AccentPrimary}"
+                          StrokeThickness="0"
+                          Data="M9,6 L18,12 L9,18 Z" />
+                  </Button>
                 </Grid>
-                <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}" />
+              </Border>
 
-                <StackPanel IsVisible="{Binding HasSelectedNode}" Spacing="18">
-                  <Border Classes="panel-section" Padding="0,0,0,16">
-                    <StackPanel Spacing="8">
-                      <TextBlock Text="{Binding NodeNameLabel}" Classes="subtitle" />
-                      <TextBox Text="{Binding SelectedNode.Name, Mode=TwoWay}"  AutomationProperties.Name="{Binding NodeNameLabel}" />
-                      <StackPanel Spacing="4" IsVisible="{Binding IsSelectedStartNode}">
-                        <TextBlock Text="{Binding WorkDirLabel}" Classes="caption" />
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                          <TextBox Grid.Column="0" Text="{Binding SelectedNode.WorkDir, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding WorkDirLabel}"
-                                   PlaceholderText="{Binding WorkDirPlaceholder}" />
-                          <Button Grid.Column="1" Classes="secondary"
-                                  Content="{Binding BrowseWorkDirText}"
-                                  Command="{Binding BrowseWorkDirCommand}" />
+              <Grid Grid.Row="1">
+                <Border Padding="22"
+                        IsVisible="{Binding !HasSelectedNode}">
+                  <StackPanel Spacing="10" VerticalAlignment="Center">
+                    <ctl:EmptyStateArt Kind="Workspace" Width="132" Height="100" HorizontalAlignment="Center" />
+                    <TextBlock Text="{Binding NoNodeSelectedText}"
+                               Classes="caption" TextAlignment="Center"
+                               TextWrapping="Wrap" HorizontalAlignment="Center" />
+                  </StackPanel>
+                </Border>
+
+                <ScrollViewer IsVisible="{Binding IsNodeDetailsTab}">
+                  <StackPanel IsVisible="{Binding HasSelectedNode}" Spacing="0">
+                  <Border Classes="inspector-group" Padding="14,6,14,12">
+                    <StackPanel Spacing="9">
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding NodeNameLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.Name, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeNameLabel}" />
+                      </Grid>
+                      <StackPanel Spacing="9" IsVisible="{Binding IsSelectedStartNode}">
+                        <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                          <TextBlock Grid.Column="0" Classes="k" Text="{Binding WorkDirLabel}" />
+                          <Grid Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox Grid.Column="0" Text="{Binding SelectedNode.WorkDir, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding WorkDirLabel}"
+                                     PlaceholderText="{Binding WorkDirPlaceholder}" />
+                            <Button Grid.Column="1" Classes="secondary"
+                                    Content="{Binding BrowseWorkDirText}"
+                                    Command="{Binding BrowseWorkDirCommand}" />
+                          </Grid>
                         </Grid>
-                        <TextBlock Text="{Binding UserNoteLabel}" Classes="caption" />
-                        <TextBox Text="{Binding SelectedNode.UserNote, Mode=TwoWay}" AutomationProperties.Name="{Binding UserNoteLabel}"
-                                 AcceptsReturn="True"
-                                 TextWrapping="Wrap"
-                                 MinHeight="56"
-                                 PlaceholderText="{Binding UserNotePlaceholder}" />
+                        <StackPanel Spacing="4">
+                          <TextBlock Text="{Binding UserNoteLabel}" Classes="caption" />
+                          <TextBox Text="{Binding SelectedNode.UserNote, Mode=TwoWay}" AutomationProperties.Name="{Binding UserNoteLabel}"
+                                   AcceptsReturn="True"
+                                   TextWrapping="Wrap"
+                                   MinHeight="56"
+                                   PlaceholderText="{Binding UserNotePlaceholder}" />
+                        </StackPanel>
                         <CheckBox IsChecked="{Binding SelectedNode.ExposedAsTool, Mode=TwoWay}"
                                   Content="{Binding ExposeToolLabel}" />
                       </StackPanel>
                     </StackPanel>
                   </Border>
 
-                  <Border Classes="panel-section" Padding="0,0,0,16" IsVisible="{Binding IsSelectedStartNode}">
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                      <StackPanel Grid.Column="0" Spacing="3">
-                        <TextBlock Text="{Binding RunFromStartText}" Classes="subtitle" />
-                        <TextBlock Text="{Binding SelectedNode.WorkDir}" Classes="caption" TextWrapping="Wrap" />
-                      </StackPanel>
-                      <Button Grid.Column="1" Classes="primary" Content="{Binding RunText}" Command="{Binding RunSelectedNodeCommand}" />
-                    </Grid>
-                  </Border>
-
                   <!-- 文档读：path + include_content（后端 WorkflowDocumentReadConfig） -->
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsDocumentNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsDocumentNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding ImportFileLabel}" Classes="subtitle" />
                       <TextBlock Text="{Binding ImportFileHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -1214,111 +1665,144 @@
                   </Border>
 
                   <!-- 搜索：query_alias + limit（后端 project search） -->
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsSearchNode}">
-                    <StackPanel Spacing="8">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsSearchNode}">
+                    <StackPanel Spacing="9">
                       <TextBlock Text="{Binding SearchNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding SearchNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
-                      <TextBlock Text="{Binding QueryAliasLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.QueryAlias, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding QueryAliasLabel}"
-                               PlaceholderText="{Binding SearchQueryPlaceholder}" />
-                      <TextBlock Text="{Binding SearchLimitLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.SearchLimit, Mode=TwoWay}" Width="100" HorizontalAlignment="Left"  AutomationProperties.Name="{Binding SearchLimitLabel}" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding QueryAliasLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.QueryAlias, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding QueryAliasLabel}"
+                                 PlaceholderText="{Binding SearchQueryPlaceholder}" />
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding SearchLimitLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.SearchLimit, Mode=TwoWay}" Width="100" HorizontalAlignment="Left" AutomationProperties.Name="{Binding SearchLimitLabel}" />
+                      </Grid>
                     </StackPanel>
                   </Border>
 
                   <!-- 条件：input_alias / operator / expected -->
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsConditionNode}">
-                    <StackPanel Spacing="8">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsConditionNode}">
+                    <StackPanel Spacing="9">
                       <TextBlock Text="{Binding ConditionNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ConditionNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
-                      <TextBlock Text="{Binding ConditionInputAliasLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ConditionInputAlias, Mode=TwoWay}" Classes="mono"  AutomationProperties.Name="{Binding ConditionInputAliasLabel}" />
-                      <TextBlock Text="{Binding ConditionOperatorLabel}" Classes="caption" />
-                      <ComboBox ItemsSource="{x:Static vm:WorkflowNodeViewModel.ConditionOperators}"
-                                SelectedItem="{Binding SelectedNode.ConditionOperator, Mode=TwoWay}"
-                                HorizontalAlignment="Left" MinWidth="140" />
-                      <TextBlock Text="{Binding ConditionExpectedLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ConditionExpected, Mode=TwoWay}" AutomationProperties.Name="{Binding ConditionExpectedLabel}"
-                               PlaceholderText="{Binding ConditionExpectedPlaceholder}" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding ConditionInputAliasLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.ConditionInputAlias, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding ConditionInputAliasLabel}" />
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding ConditionOperatorLabel}" />
+                        <ComboBox Grid.Column="1" ItemsSource="{x:Static vm:WorkflowNodeViewModel.ConditionOperators}"
+                                  SelectedItem="{Binding SelectedNode.ConditionOperator, Mode=TwoWay}"
+                                  HorizontalAlignment="Left" MinWidth="140" />
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding ConditionExpectedLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.ConditionExpected, Mode=TwoWay}" AutomationProperties.Name="{Binding ConditionExpectedLabel}"
+                                 PlaceholderText="{Binding ConditionExpectedPlaceholder}" />
+                      </Grid>
                     </StackPanel>
                   </Border>
 
                   <!-- 循环：max_iterations + stop_condition -->
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsLoopNode}">
-                    <StackPanel Spacing="8">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsLoopNode}">
+                    <StackPanel Spacing="9">
                       <TextBlock Text="{Binding LoopNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding LoopNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
-                      <TextBlock Text="{Binding MaxIterationsLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.MaxIterations, Mode=TwoWay}" Width="100" HorizontalAlignment="Left"  AutomationProperties.Name="{Binding MaxIterationsLabel}" />
-                      <TextBlock Text="{Binding NodeTimeoutText}" Classes="caption" />
-                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                        <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}"  AutomationProperties.Name="{Binding NodeTimeoutText}" />
-                        <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding MaxIterationsLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.MaxIterations, Mode=TwoWay}" Width="100" HorizontalAlignment="Left" AutomationProperties.Name="{Binding MaxIterationsLabel}" />
                       </Grid>
-                      <TextBlock Text="{Binding StopInputAliasLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.StopInputAlias, Mode=TwoWay}" Classes="mono"  AutomationProperties.Name="{Binding StopInputAliasLabel}" />
-                      <TextBlock Text="{Binding StopExpectedLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.StopExpected, Mode=TwoWay}"  AutomationProperties.Name="{Binding StopExpectedLabel}" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding NodeTimeoutText}" />
+                        <Grid Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                          <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeTimeoutText}" />
+                          <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
+                        </Grid>
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding StopInputAliasLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.StopInputAlias, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding StopInputAliasLabel}" />
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding StopExpectedLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.StopExpected, Mode=TwoWay}" AutomationProperties.Name="{Binding StopExpectedLabel}" />
+                      </Grid>
                     </StackPanel>
                   </Border>
 
                   <!-- 审批：approval_id + auto_approve -->
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsApprovalNode}">
-                    <StackPanel Spacing="8">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsApprovalNode}">
+                    <StackPanel Spacing="9">
                       <TextBlock Text="{Binding ApprovalNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ApprovalNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
-                      <TextBlock Text="{Binding ApprovalIdLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ApprovalId, Mode=TwoWay}" Classes="mono"  AutomationProperties.Name="{Binding ApprovalIdLabel}" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding ApprovalIdLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.ApprovalId, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding ApprovalIdLabel}" />
+                      </Grid>
                       <CheckBox IsChecked="{Binding SelectedNode.AutoApprove, Mode=TwoWay}"
                                 Content="{Binding AutoApproveText}" />
                     </StackPanel>
                   </Border>
 
                   <!-- 导出：artifact_id / format / title -->
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsExportNode}">
-                    <StackPanel Spacing="8">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsExportNode}">
+                    <StackPanel Spacing="9">
                       <TextBlock Text="{Binding ExportNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding ExportNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
-                      <TextBlock Text="{Binding ExportArtifactIdLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ExportArtifactId, Mode=TwoWay}" Classes="mono"  AutomationProperties.Name="{Binding ExportArtifactIdLabel}" />
-                      <TextBlock Text="{Binding ExportFormatLabel}" Classes="caption" />
-                      <ComboBox ItemsSource="{x:Static vm:WorkflowNodeViewModel.ExportFormats}"
-                                SelectedItem="{Binding SelectedNode.ExportFormat, Mode=TwoWay}"
-                                HorizontalAlignment="Left" MinWidth="140" />
-                      <TextBlock Text="{Binding ExportTitleLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.ExportTitle, Mode=TwoWay}"  AutomationProperties.Name="{Binding ExportTitleLabel}" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding ExportArtifactIdLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.ExportArtifactId, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding ExportArtifactIdLabel}" />
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding ExportFormatLabel}" />
+                        <ComboBox Grid.Column="1" ItemsSource="{x:Static vm:WorkflowNodeViewModel.ExportFormats}"
+                                  SelectedItem="{Binding SelectedNode.ExportFormat, Mode=TwoWay}"
+                                  HorizontalAlignment="Left" MinWidth="140" />
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding ExportTitleLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.ExportTitle, Mode=TwoWay}" AutomationProperties.Name="{Binding ExportTitleLabel}" />
+                      </Grid>
                     </StackPanel>
                   </Border>
 
                   <!-- Summarizer：与 Rust WorkflowSummarizerNodeConfig 同字段，保存前由后端统一校验 -->
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.IsSummarizerNode}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsSummarizerNode}">
                     <StackPanel Spacing="8">
                       <TextBlock Text="{Binding SummarizerNodeTitle}" Classes="subtitle" />
                       <TextBlock Text="{Binding SummarizerNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
-                      <TextBlock Text="{Binding SummarizerChapterSelectorLabel}" Classes="caption"
-                                 IsVisible="{Binding HasSummarizerChapterChoices}" />
-                      <ComboBox ItemsSource="{Binding SummarizerChapterOptions}"
-                                SelectedItem="{Binding SelectedSummarizerChapterOption, Mode=TwoWay}"
-                                PlaceholderText="{Binding SummarizerChapterSelectorPlaceholder}"
-                                HorizontalAlignment="Stretch"
-                                IsVisible="{Binding HasSummarizerChapterChoices}">
-                        <ComboBox.ItemTemplate>
-                          <DataTemplate DataType="{x:Type vm:SummarizerChapterOption}">
-                            <TextBlock Text="{Binding DisplayTitle}" TextTrimming="CharacterEllipsis" />
-                          </DataTemplate>
-                        </ComboBox.ItemTemplate>
-                      </ComboBox>
-                      <TextBlock Text="{Binding SummarizerChapterIdLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.SummarizerChapterId, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterIdLabel}"
-                               Classes="mono"
-                               PlaceholderText="{Binding SummarizerChapterIdPlaceholder}" />
-                      <TextBlock Text="{Binding SummarizerChapterDocumentIdLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.SummarizerChapterDocumentId, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterDocumentIdLabel}"
-                               Classes="mono"
-                               PlaceholderText="{Binding SummarizerChapterDocumentIdPlaceholder}" />
-                      <TextBlock Text="{Binding SummarizerChapterTextAliasLabel}" Classes="caption" />
-                      <TextBox Text="{Binding SelectedNode.SummarizerChapterTextAlias, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterTextAliasLabel}"
-                               Classes="mono" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12"
+                            IsVisible="{Binding HasSummarizerChapterChoices}">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding SummarizerChapterSelectorLabel}" />
+                        <ComboBox Grid.Column="1" ItemsSource="{Binding SummarizerChapterOptions}"
+                                  SelectedItem="{Binding SelectedSummarizerChapterOption, Mode=TwoWay}"
+                                  PlaceholderText="{Binding SummarizerChapterSelectorPlaceholder}"
+                                  HorizontalAlignment="Stretch">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:SummarizerChapterOption}">
+                              <TextBlock Text="{Binding DisplayTitle}" TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding SummarizerChapterIdLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.SummarizerChapterId, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterIdLabel}"
+                                 Classes="mono"
+                                 PlaceholderText="{Binding SummarizerChapterIdPlaceholder}" />
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding SummarizerChapterDocumentIdLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.SummarizerChapterDocumentId, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterDocumentIdLabel}"
+                                 Classes="mono"
+                                 PlaceholderText="{Binding SummarizerChapterDocumentIdPlaceholder}" />
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0" Classes="k" Text="{Binding SummarizerChapterTextAliasLabel}" />
+                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.SummarizerChapterTextAlias, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterTextAliasLabel}"
+                                 Classes="mono" />
+                      </Grid>
                       <TextBlock Text="{Binding SummarizerChapterTextAliasHint}"
                                  Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <CheckBox IsChecked="{Binding SelectedNode.SummarizerAutoMode, Mode=TwoWay}"
@@ -1327,37 +1811,50 @@
                   </Border>
 
                   <!-- 数据入口：可建可删 -->
-                  <Border Classes="panel-section" Padding="0,0,0,18"
+                  <Border Classes="inspector-group" Padding="14,6,14,12"
                           IsVisible="{Binding SelectedNode.ShowDataInPinEditor}">
-                    <StackPanel Spacing="8">
-                      <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                    <StackPanel Spacing="9">
+                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <TextBlock Grid.Column="0" Text="{Binding DataInPinsLabel}" Classes="subtitle" VerticalAlignment="Center" />
-                        <Button Grid.Column="1" Classes="secondary" Padding="10,4"
-                                Content="{Binding AddDataInPinText}"
-                                Command="{Binding SelectedNode.AddDataInPinCommand}" />
-                        <Button Grid.Column="2" Classes="subtle" Padding="10,4"
-                                Content="{Binding RemoveDataInPinText}"
-                                Command="{Binding SelectedNode.RemoveDataInPinCommand}" />
+                        <Button Grid.Column="1" Classes="icon-btn"
+                                ToolTip.Tip="{Binding AddDataInPinText}"
+                                AutomationProperties.Name="{Binding AddDataInPinText}"
+                                Command="{Binding SelectedNode.AddDataInPinCommand}">
+                          <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Add}" />
+                        </Button>
                       </Grid>
                       <ItemsControl ItemsSource="{Binding SelectedNode.DataInPins}">
+                        <ItemsControl.ItemsPanel>
+                          <ItemsPanelTemplate>
+                            <StackPanel Spacing="5" />
+                          </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
                           <DataTemplate DataType="{x:Type vm:NodeDataInPinViewModel}">
-                            <Grid ColumnDefinitions="*,Auto" Margin="0,2" ColumnSpacing="8">
-                              <TextBlock Grid.Column="0" Text="{Binding Handle}" Classes="caption mono" VerticalAlignment="Center" />
-                              <Button Grid.Column="1" Classes="icon-btn"
-                                      ToolTip.Tip="{Binding $parent[UserControl].DataContext.RemoveDataInPinText}"
-                                      AutomationProperties.Name="{Binding $parent[UserControl].DataContext.RemoveDataInPinText}"
-                                      Command="{Binding RemoveCommand}">
-                                <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Close}" />
-                              </Button>
-                            </Grid>
+                            <Border Classes="inspector-object-row" Padding="9,6">
+                              <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                                <Ellipse Grid.Column="0" Width="10" Height="10"
+                                         Fill="Transparent"
+                                         Stroke="{DynamicResource Ariadne.EdgeData}"
+                                         StrokeThickness="1.5"
+                                         VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{Binding Handle}"
+                                           Classes="caption mono" VerticalAlignment="Center" />
+                                <Button Grid.Column="2" Classes="icon-btn"
+                                        ToolTip.Tip="{Binding $parent[UserControl].DataContext.RemoveDataInPinText}"
+                                        AutomationProperties.Name="{Binding $parent[UserControl].DataContext.RemoveDataInPinText}"
+                                        Command="{Binding RemoveCommand}">
+                                  <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Close}" />
+                                </Button>
+                              </Grid>
+                            </Border>
                           </DataTemplate>
                         </ItemsControl.ItemTemplate>
                       </ItemsControl>
                     </StackPanel>
                   </Border>
 
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding SelectedNode.ShowPromptEditor}">
+                  <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.ShowPromptEditor}">
                     <StackPanel Spacing="10">
                       <TextBlock Text="{Binding PromptTemplateText}" Classes="subtitle" />
                       <TextBox Text="{Binding SelectedNode.PromptTemplate, Mode=TwoWay}" AutomationProperties.Name="{Binding PromptTemplateText}"
@@ -1365,161 +1862,261 @@
                                TextWrapping="Wrap"
                                MinHeight="128"
                                Classes="detail-editor" />
-                      <Grid ColumnDefinitions="1.2*,0.8*" ColumnSpacing="10">
-                        <StackPanel Grid.Column="0" Spacing="4">
-                          <TextBlock Text="{Binding ModelIdText}" Classes="caption" />
-                          <ComboBox ItemsSource="{Binding AvailableModelOptions}"
-                                    SelectedItem="{Binding SelectedNodeModelOption, Mode=TwoWay}"
-                                    PlaceholderText="{Binding ModelSelectorPlaceholder}"
-                                    HorizontalAlignment="Stretch">
-                            <ComboBox.ItemTemplate>
-                              <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
-                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
-                              </DataTemplate>
-                            </ComboBox.ItemTemplate>
-                          </ComboBox>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Spacing="4">
-                          <TextBlock Text="{Binding NodeBudgetText}" Classes="caption" />
-                          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="4">
-                            <TextBlock Grid.Column="0" Text="$" Classes="caption" VerticalAlignment="Center" />
-                            <TextBox Grid.Column="1" Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeBudgetText}"
-                                     PlaceholderText="{Binding OptionalPlaceholder}" />
-                          </Grid>
-                        </StackPanel>
+                      <!-- 模型/预算/超时/断点：拆掉两列挤压网格，改行内属性表（与其余检查器分区同一语汇），
+                           每项独占一行、键左值右，不再挤在一起。 -->
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Classes="k" Text="{Binding ModelIdText}" />
+                        <ComboBox Grid.Column="1" ItemsSource="{Binding AvailableModelOptions}"
+                                  SelectedItem="{Binding SelectedNodeModelOption, Mode=TwoWay}"
+                                  PlaceholderText="{Binding ModelSelectorPlaceholder}"
+                                  HorizontalAlignment="Stretch">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
+                              <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
                       </Grid>
-                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                        <StackPanel Grid.Column="0" Spacing="4">
-                          <TextBlock Text="{Binding NodeTimeoutText}" Classes="caption" />
-                          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                            <TextBox Grid.Column="0" Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}"  AutomationProperties.Name="{Binding NodeTimeoutText}" />
-                            <TextBlock Grid.Column="1" Text="{Binding SecondsUnitText}" Classes="caption" VerticalAlignment="Center" />
-                          </Grid>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Bottom">
-                          <CheckBox IsChecked="{Binding SelectedNode.BreakpointEnabled, Mode=TwoWay}" Content="{Binding BreakpointText}" />
-                          <Button Classes="secondary" Content="{Binding SaveText}" Command="{Binding ToggleBreakpointCommand}" />
-                        </StackPanel>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Classes="k" Text="{Binding NodeBudgetText}" />
+                        <!-- $ 叠在输入框内左侧（不占网格列），字段左缘与上一行下拉框对齐 -->
+                        <Panel Grid.Column="1">
+                          <TextBox Text="{Binding SelectedNode.BudgetUsd, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeBudgetText}"
+                                   Padding="22,5,10,5"
+                                   PlaceholderText="{Binding OptionalPlaceholder}" />
+                          <TextBlock Text="$" Classes="unit"
+                                     HorizontalAlignment="Left" Margin="10,0,0,0" />
+                        </Panel>
                       </Grid>
-                      <Button Classes="primary" Content="{Binding ApplyNodeConfigText}" HorizontalAlignment="Right" Command="{Binding ApplyNodeConfigCommand}" />
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Classes="k" Text="{Binding NodeTimeoutText}" />
+                        <!-- 单位「秒」叠在输入框内右侧，字段右缘与其它行齐平 -->
+                        <Panel Grid.Column="1">
+                          <TextBox Text="{Binding SelectedNode.TimeoutSecondsText, Mode=TwoWay}" AutomationProperties.Name="{Binding NodeTimeoutText}"
+                                   Padding="10,5,32,5" />
+                          <TextBlock Text="{Binding SecondsUnitText}" Classes="unit"
+                                     HorizontalAlignment="Right" Margin="0,0,10,0" />
+                        </Panel>
+                      </Grid>
+                      <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
+                        <TextBlock Classes="k" Text="{Binding BreakpointText}" />
+                        <!-- 「保存断点」按钮已并入下方「保存节点配置」：一行两个动作既挤又重复。 -->
+                        <CheckBox Grid.Column="1"
+                                  IsChecked="{Binding SelectedNode.BreakpointEnabled, Mode=TwoWay}"
+                                  VerticalAlignment="Center"
+                                  AutomationProperties.Name="{Binding BreakpointText}" />
+                      </Grid>
+                      <Button Classes="primary" Content="{Binding ApplyNodeConfigText}" HorizontalAlignment="Stretch" Command="{Binding ApplyNodeConfigCommand}" />
                     </StackPanel>
                   </Border>
+                  <!-- 导出所选片段 / 批注 / 删除全部迁到画布右键菜单，子工作流迁到右上角工具条；
+                       检查器不再有底部动作分栏。 -->
+                  </StackPanel>
+                </ScrollViewer>
 
-                  <!-- 只显示与当前选中节点相关的边；点边也会选中端点节点 -->
-                  <Border Classes="panel-section" Padding="0,0,0,18" IsVisible="{Binding HasRelatedEdges}">
-                    <StackPanel Spacing="10">
-                      <Grid ColumnDefinitions="*,Auto">
-                        <TextBlock Grid.Column="0" Text="{Binding EdgeDetailsText}" Classes="subtitle" />
-                        <Border Grid.Column="1" Classes="chip" Padding="8,2">
+                <ScrollViewer IsVisible="{Binding IsEdgeDetailsTab}">
+                  <StackPanel IsVisible="{Binding HasSelectedNode}" Spacing="0">
+                    <Border Padding="14,13"
+                            Classes="dock-rail-header">
+                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                        <StackPanel Grid.Column="0" Spacing="2">
+                          <TextBlock Text="{Binding EdgeDetailsText}"
+                                     FontSize="13" FontWeight="SemiBold" />
+                          <TextBlock Text="{Binding SelectedNodeTitle}"
+                                     Classes="caption" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <Border Grid.Column="1" Classes="chip" Padding="8,2" VerticalAlignment="Center">
                           <TextBlock Text="{Binding EdgeCountText}" Classes="caption" />
                         </Border>
                       </Grid>
-                      <ItemsControl ItemsSource="{Binding RelatedEdges}">
-                        <ItemsControl.ItemTemplate>
-                          <DataTemplate DataType="{x:Type vm:WorkflowEdgeViewModel}">
-                            <Button Classes="nav" ctl:SelectedClass.IsSelected="{Binding IsSelected}" Command="{Binding SelectCommand}" HorizontalContentAlignment="Stretch">
-                              <StackPanel Spacing="2">
-                                <TextBlock Text="{Binding Title}" TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding KindDisplay}" Classes="caption" />
+                    </Border>
+
+                    <Border Padding="20,24"
+                            IsVisible="{Binding !HasRelatedEdges}">
+                      <StackPanel Spacing="8" HorizontalAlignment="Center">
+                        <ctl:EmptyStateArt Kind="Workspace" Width="112" Height="82" />
+                        <TextBlock Text="{Binding EdgeDetailsText}"
+                                   Classes="caption" TextAlignment="Center" />
+                      </StackPanel>
+                    </Border>
+
+                    <ItemsControl ItemsSource="{Binding RelatedEdges}"
+                                  Margin="10,8"
+                                  IsVisible="{Binding HasRelatedEdges}">
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                          <StackPanel Spacing="3" />
+                        </ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type vm:WorkflowEdgeViewModel}">
+                          <Button Classes="inspector-edge-row"
+                                  ctl:SelectedClass.IsSelected="{Binding IsSelected}"
+                                  Command="{Binding SelectCommand}">
+                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="9">
+                              <Grid Grid.Column="0" Width="16" Height="16" VerticalAlignment="Center">
+                                <Ellipse Width="11" Height="11"
+                                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                                         Fill="Transparent"
+                                         Stroke="{DynamicResource Ariadne.EdgeData}"
+                                         StrokeThickness="1.5"
+                                         IsVisible="{Binding IsData}" />
+                                <Border Width="11" Height="11" CornerRadius="2.5"
+                                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                                        Background="Transparent"
+                                        BorderBrush="{DynamicResource Ariadne.EdgeCommunication}"
+                                        BorderThickness="1.5"
+                                        IsVisible="{Binding IsCommunication}" />
+                                <Path Width="12" Height="12" Stretch="Uniform"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                                      Fill="Transparent"
+                                      Stroke="{DynamicResource Ariadne.EdgeControl}"
+                                      StrokeThickness="1.4"
+                                      Data="M4.1,2.4 Q3,1.9 3,3.2 L3,10.8 Q3,12.1 4.1,11.6 L11.4,8.1 Q13.2,7 11.4,5.9 Z"
+                                      IsVisible="{Binding IsControl}" />
+                              </Grid>
+                              <StackPanel Grid.Column="1" Spacing="1">
+                                <TextBlock Text="{Binding Title}"
+                                           FontSize="12" FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding KindDisplay}"
+                                           Classes="caption" />
                               </StackPanel>
-                            </Button>
-                          </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                      </ItemsControl>
-                      <Border Classes="soft-panel" Padding="12" IsVisible="{Binding ShowEdgeConfigPanel}">
-                        <StackPanel Spacing="8">
-                          <TextBlock Text="{Binding SelectedEdge.KindDisplay}" Classes="caption" FontWeight="SemiBold" />
-                          <!-- 数据边：可改句柄/别名 -->
-                          <Grid ColumnDefinitions="*,*" ColumnSpacing="8" IsVisible="{Binding SelectedEdge.ShowHandleFields}">
+                              <Path Grid.Column="2" Classes="icon"
+                                    Width="12" Height="12"
+                                    Data="{StaticResource Ariadne.Icon.ChevronRight}"
+                                    VerticalAlignment="Center" Opacity="0.55" />
+                            </Grid>
+                          </Button>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- 去填色外壳：这块原本是「Elevated 实底盒 + 内含 chip + 两个
+                         object-row」共 4 层，在一列 inspector-group 里格外突兀。
+                         同级分区就该用同一种呈现，靠留白分组即可。 -->
+                    <Border Classes="inspector-group"
+                            Padding="14,6,14,16"
+                            IsVisible="{Binding ShowEdgeConfigPanel}">
+                      <StackPanel Spacing="12">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                          <TextBlock Grid.Column="0"
+                                     Text="{Binding SelectedEdge.Title}"
+                                     FontSize="13" FontWeight="SemiBold"
+                                     TextTrimming="CharacterEllipsis" />
+                          <!-- 边类型：去掉描边胶囊，用强调色小字自解释 -->
+                          <TextBlock Grid.Column="1"
+                                     Text="{Binding SelectedEdge.KindDisplay}"
+                                     Classes="inspector-label"
+                                     Foreground="{DynamicResource Ariadne.AccentPrimary}"
+                                     VerticalAlignment="Center" />
+                        </Grid>
+
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="8"
+                              IsVisible="{Binding SelectedEdge.ShowHandleFields}">
+                          <StackPanel Grid.Column="0" Spacing="4">
+                            <TextBlock Text="{Binding SourceAliasText}" Classes="caption" />
+                            <TextBox Text="{Binding SelectedEdge.SourceHandle, Mode=TwoWay}"
+                                     AutomationProperties.Name="{Binding SourceAliasText}" />
+                          </StackPanel>
+                          <StackPanel Grid.Column="1" Spacing="4">
+                            <TextBlock Text="{Binding TargetAliasText}" Classes="caption" />
+                            <TextBox Text="{Binding SelectedEdge.TargetHandle, Mode=TwoWay}"
+                                     AutomationProperties.Name="{Binding TargetAliasText}" />
+                          </StackPanel>
+                        </Grid>
+
+                        <StackPanel Spacing="4" IsVisible="{Binding SelectedEdge.ShowLabelField}">
+                          <TextBlock Text="{Binding EdgeLabelText}" Classes="caption" />
+                          <TextBox Text="{Binding SelectedEdge.Label, Mode=TwoWay}"
+                                   AutomationProperties.Name="{Binding EdgeLabelText}" />
+                        </StackPanel>
+
+                        <StackPanel IsVisible="{Binding SelectedEdge.ShowCommunicationFields}" Spacing="10">
+                          <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
                             <StackPanel Grid.Column="0" Spacing="4">
-                              <TextBlock Text="{Binding SourceAliasText}" Classes="caption" />
-                              <TextBox Text="{Binding SelectedEdge.SourceHandle, Mode=TwoWay}"  AutomationProperties.Name="{Binding SourceAliasText}" />
+                              <TextBlock Text="{Binding ForwardAliasText}" Classes="caption" />
+                              <TextBox Text="{Binding SelectedEdge.ForwardAlias, Mode=TwoWay}"
+                                       AutomationProperties.Name="{Binding ForwardAliasText}" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Spacing="4">
-                              <TextBlock Text="{Binding TargetAliasText}" Classes="caption" />
-                              <TextBox Text="{Binding SelectedEdge.TargetHandle, Mode=TwoWay}"  AutomationProperties.Name="{Binding TargetAliasText}" />
+                              <TextBlock Text="{Binding ReverseAliasText}" Classes="caption" />
+                              <TextBox Text="{Binding SelectedEdge.ReverseAlias, Mode=TwoWay}"
+                                       AutomationProperties.Name="{Binding ReverseAliasText}" />
                             </StackPanel>
                           </Grid>
-                          <!-- 通用标签（执行/数据/通信均可） -->
-                          <StackPanel Spacing="4" IsVisible="{Binding SelectedEdge.ShowLabelField}">
-                            <TextBlock Text="{Binding EdgeLabelText}" Classes="caption" />
-                            <TextBox Text="{Binding SelectedEdge.Label, Mode=TwoWay}"  AutomationProperties.Name="{Binding EdgeLabelText}" />
-                          </StackPanel>
-                          <!-- 仅通信边：双向 alias / 模板 / 次数 -->
-                          <StackPanel IsVisible="{Binding SelectedEdge.ShowCommunicationFields}" Spacing="8">
-                            <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
-                              <StackPanel Grid.Column="0" Spacing="4">
-                                <TextBlock Text="{Binding ForwardAliasText}" Classes="caption" />
-                                <TextBox Text="{Binding SelectedEdge.ForwardAlias, Mode=TwoWay}"  AutomationProperties.Name="{Binding ForwardAliasText}" />
-                              </StackPanel>
-                              <StackPanel Grid.Column="1" Spacing="4">
-                                <TextBlock Text="{Binding ReverseAliasText}" Classes="caption" />
-                                <TextBox Text="{Binding SelectedEdge.ReverseAlias, Mode=TwoWay}"  AutomationProperties.Name="{Binding ReverseAliasText}" />
-                              </StackPanel>
-                            </Grid>
-                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                              <TextBlock Grid.Column="0" Text="{Binding ForwardTemplateText}" Classes="caption" VerticalAlignment="Center" />
-                              <Button Grid.Column="1" Classes="secondary" Padding="8,3" Content="{Binding InsertForwardVariableText}" Command="{Binding InsertForwardTemplateVariableCommand}" />
-                            </Grid>
-                            <TextBox Text="{Binding SelectedEdge.ForwardTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76"  AutomationProperties.Name="{Binding ForwardTemplateText}" />
-                            <Border Classes="layer" Padding="10,7">
-                              <StackPanel Spacing="3">
-                                <TextBlock Text="{Binding TemplatePreviewText}" Classes="caption" />
-                                <TextBlock Text="{Binding SelectedEdge.ForwardTemplatePreview}" TextWrapping="Wrap" FontSize="12" />
-                              </StackPanel>
-                            </Border>
-                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                              <TextBlock Grid.Column="0" Text="{Binding ReverseTemplateText}" Classes="caption" VerticalAlignment="Center" />
-                              <Button Grid.Column="1" Classes="secondary" Padding="8,3" Content="{Binding InsertReverseVariableText}" Command="{Binding InsertReverseTemplateVariableCommand}" />
-                            </Grid>
-                            <TextBox Text="{Binding SelectedEdge.ReverseTemplate, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76"  AutomationProperties.Name="{Binding ReverseTemplateText}" />
-                            <Border Classes="layer" Padding="10,7">
-                              <StackPanel Spacing="3">
-                                <TextBlock Text="{Binding TemplatePreviewText}" Classes="caption" />
-                                <TextBlock Text="{Binding SelectedEdge.ReverseTemplatePreview}" TextWrapping="Wrap" FontSize="12" />
-                              </StackPanel>
-                            </Border>
-                            <TextBlock Text="{Binding MaxCommunicationCountText}" Classes="caption" />
-                            <TextBox Text="{Binding SelectedEdge.MaxCommunicationCount, Mode=TwoWay}"  AutomationProperties.Name="{Binding MaxCommunicationCountText}" />
-                          </StackPanel>
-                          <Button Classes="secondary" HorizontalAlignment="Right" Content="{Binding ApplyEdgeConfigText}" Command="{Binding SaveEdgeConfigCommand}" />
-                        </StackPanel>
-                      </Border>
-                    </StackPanel>
-                  </Border>
 
-                  <StackPanel Spacing="10">
-                    <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
-                      <Button Grid.Column="0" Classes="secondary" Content="{Binding ExportSelectionText}" Command="{Binding ExportSelectionCommand}" />
-                      <Button Grid.Column="1" Classes="secondary" Content="{Binding SubworkflowText}" Command="{Binding PackSelectionCommand}" />
-                    </Grid>
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                      <TextBox Grid.Column="0" Text="{Binding AnnotationTitle, Mode=TwoWay}" PlaceholderText="{Binding AnnotationTitlePlaceholder}"  AutomationProperties.Name="{Binding AnnotationTitlePlaceholder}" />
-                      <Button Grid.Column="1" Classes="secondary" Content="{Binding AddAnnotationText}" Command="{Binding AddAnnotationCommand}" />
-                    </Grid>
-                    <Button Classes="danger" Content="{Binding DeleteText}" HorizontalAlignment="Stretch" Command="{Binding DeleteSelectedNodeCommand}" />
+                          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBlock Grid.Column="0" Text="{Binding ForwardTemplateText}"
+                                       Classes="caption" VerticalAlignment="Center" />
+                            <Button Grid.Column="1" Classes="secondary" Padding="8,3"
+                                    Content="{Binding InsertForwardVariableText}"
+                                    Command="{Binding InsertForwardTemplateVariableCommand}" />
+                          </Grid>
+                          <TextBox Text="{Binding SelectedEdge.ForwardTemplate, Mode=TwoWay}"
+                                   AcceptsReturn="True" TextWrapping="Wrap" MinHeight="78"
+                                   AutomationProperties.Name="{Binding ForwardTemplateText}" />
+                          <!-- 预览：去描边盒改竖脊行；标签限定为「正向」，
+                               否则同一面板里两处都叫「模板预览」，分不清哪条。 -->
+                          <Border Classes="detail-row" Margin="0,2,0,0">
+                            <StackPanel Spacing="3">
+                              <TextBlock Text="{Binding ForwardTemplatePreviewLabel}" Classes="inspector-label" />
+                              <TextBlock Text="{Binding SelectedEdge.ForwardTemplatePreview}"
+                                         TextWrapping="Wrap" FontSize="12" />
+                            </StackPanel>
+                          </Border>
+
+                          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBlock Grid.Column="0" Text="{Binding ReverseTemplateText}"
+                                       Classes="caption" VerticalAlignment="Center" />
+                            <Button Grid.Column="1" Classes="secondary" Padding="8,3"
+                                    Content="{Binding InsertReverseVariableText}"
+                                    Command="{Binding InsertReverseTemplateVariableCommand}" />
+                          </Grid>
+                          <TextBox Text="{Binding SelectedEdge.ReverseTemplate, Mode=TwoWay}"
+                                   AcceptsReturn="True" TextWrapping="Wrap" MinHeight="78"
+                                   AutomationProperties.Name="{Binding ReverseTemplateText}" />
+                          <Border Classes="detail-row" Margin="0,2,0,0">
+                            <StackPanel Spacing="3">
+                              <TextBlock Text="{Binding ReverseTemplatePreviewLabel}" Classes="inspector-label" />
+                              <TextBlock Text="{Binding SelectedEdge.ReverseTemplatePreview}"
+                                         TextWrapping="Wrap" FontSize="12" />
+                            </StackPanel>
+                          </Border>
+
+                          <StackPanel Spacing="4">
+                            <TextBlock Text="{Binding MaxCommunicationCountText}" Classes="caption" />
+                            <TextBox Text="{Binding SelectedEdge.MaxCommunicationCount, Mode=TwoWay}"
+                                     AutomationProperties.Name="{Binding MaxCommunicationCountText}" />
+                          </StackPanel>
+                        </StackPanel>
+
+                        <Button Classes="primary"
+                                HorizontalAlignment="Right"
+                                Content="{Binding ApplyEdgeConfigText}"
+                                Command="{Binding SaveEdgeConfigCommand}" />
+                      </StackPanel>
+                    </Border>
                   </StackPanel>
-                </StackPanel>
-              </StackPanel>
-            </ScrollViewer>
+                </ScrollViewer>
+              </Grid>
+            </Grid>
           </Grid>
         </DockPanel>
       </Border>
     </Panel>
   </Grid>
 
-  <!-- 节点库拖放 ghost：全页浮层，不被画布 ClipToBounds 裁掉 -->
+  <!-- 节点库拖放指示：全页浮层，不被画布 ClipToBounds 裁掉。
+       拖动中是一枚主题色脉动圆点；松手时展开成卡片轮廓，再由真实节点接管。 -->
   <Canvas x:Name="LibraryDragLayer"
           IsHitTestVisible="False"
           ZIndex="200">
-    <Border x:Name="LibraryDragGhost"
-            IsVisible="False"
-            Classes="library-chip"
-            Padding="12,8"
-            Opacity="0.92"
-            BoxShadow="0 4 16 0 #28000000">
-      <TextBlock x:Name="LibraryDragGhostText" FontSize="12" FontWeight="SemiBold" />
-    </Border>
+    <ctl:DragPulseDot x:Name="LibraryDragGhost"
+                      IsVisible="False"
+                      Width="38"
+                      Height="38"
+                      Radius="5.5" />
   </Canvas>
   </Panel>
 </UserControl>

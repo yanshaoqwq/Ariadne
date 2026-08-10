@@ -120,12 +120,7 @@ pub fn enqueue_open_bootstrap_full_rebuild(
 }
 
 /// F2-b：丢弃与磁盘正文 `source_version` 不一致的检索结果，禁止旧 chunk 冒充当前事实。
-pub fn filter_fresh_retrieval_results(
-    results: Vec<RetrievalResult>,
-) -> CoreResult<Vec<RetrievalResult>> {
-    filter_fresh_retrieval_results_with_knowledge_revision(results, None)
-}
-
+///
 /// 产品组合根在同步 metadata.db 后携带知识 revision，正文与知识分别执行新鲜度校验。
 pub fn filter_fresh_retrieval_results_with_knowledge_revision(
     results: Vec<RetrievalResult>,

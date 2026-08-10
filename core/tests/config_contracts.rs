@@ -1,10 +1,10 @@
 use std::fs;
 
 use ariadne::config::{
-    normalize_git_ignored_path, normalize_project_relative_directory, ConfigStore,
-    MemorySecretStore, ModelConfig, ProjectConfig, ProjectCredentialScope, ProjectLayout,
-    ProviderConfig, SecretRef, SecretValue, AUTO_MODE_CONFIG_FILE, PERMISSIONS_CONFIG_FILE,
-    RAG_CONFIG_FILE,
+    external_qdrant_endpoint, normalize_git_ignored_path, normalize_project_relative_directory,
+    ConfigStore, MemorySecretStore, ModelConfig, ProjectConfig, ProjectCredentialScope,
+    ProjectLayout, ProviderConfig, QdrantAuthMode, SecretRef, SecretValue, SidecarConfig,
+    VectorStoreBackend, AUTO_MODE_CONFIG_FILE, PERMISSIONS_CONFIG_FILE, RAG_CONFIG_FILE,
 };
 use ariadne::contracts::{PermissionPolicy, ProviderCapability, ProviderType};
 
@@ -217,6 +217,58 @@ fn project_credential_scope_isolates_projects_and_provider_ids() {
 
     scope_a.delete_provider_secret("openai").unwrap();
     assert!(scope_a.get_provider_secret("openai").unwrap().is_none());
+}
+
+#[test]
+fn external_qdrant_credentials_are_bound_to_normalized_endpoints() {
+    let project = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let scope = ProjectCredentialScope::new(project.path(), &secrets).unwrap();
+    let endpoint_a = external_qdrant_endpoint(&SidecarConfig {
+        host: "QDRANT.EXAMPLE".to_owned(),
+        port: 6333,
+        use_tls: true,
+        ..SidecarConfig::default()
+    })
+    .unwrap();
+    let endpoint_b = external_qdrant_endpoint(&SidecarConfig {
+        host: "qdrant.example".to_owned(),
+        port: 7443,
+        use_tls: true,
+        ..SidecarConfig::default()
+    })
+    .unwrap();
+
+    assert_eq!(endpoint_a, "https://qdrant.example:6333");
+    scope
+        .set_external_qdrant_secret(&endpoint_a, SecretValue::new("endpoint-a-key"))
+        .unwrap();
+    assert_eq!(
+        scope
+            .get_external_qdrant_secret(&endpoint_a)
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "endpoint-a-key"
+    );
+    assert!(scope
+        .get_external_qdrant_secret(&endpoint_b)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn managed_qdrant_rejects_external_auth_even_while_disabled() {
+    let mut config = ProjectConfig::default();
+    config.rag.vector_store.backend = VectorStoreBackend::QdrantSidecar;
+    config.rag.vector_store.enabled = false;
+    config.rag.vector_store.sidecar.auth_mode = QdrantAuthMode::ApiKey;
+
+    let error = config.validate().unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("managed qdrant sidecar cannot use external"));
 }
 
 /// D4：本地密钥文件必须 atomic_write，避免直接覆盖写半文件。
@@ -467,8 +519,22 @@ fn provider_defaults_require_enabled_executable_provider_and_role_capability() {
     });
     assert!(config.validate().is_ok());
 
+    config.providers.providers[0]
+        .models
+        .retain(|model| model.model_id != "chat");
+    config.providers.providers[0].models.push(ModelConfig {
+        model_id: "tool-agent".to_owned(),
+        capability: ProviderCapability::ToolUse,
+        max_context_tokens: None,
+        input_cost_per_million_tokens: None,
+        output_cost_per_million_tokens: None,
+    });
+    config.providers.default_llm_model_id = Some("tool-agent".to_owned());
+    assert!(config.validate().is_ok());
+
     config.providers.providers[0].provider_type = ProviderType::Other;
-    assert!(config.validate().is_err());
+    // 旧版 Other 配置必须能被读取并在设置页迁移；新的写入路径会拒绝它。
+    assert!(config.validate().is_ok());
 }
 
 #[test]

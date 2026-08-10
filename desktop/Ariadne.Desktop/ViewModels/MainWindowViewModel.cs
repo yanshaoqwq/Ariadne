@@ -14,10 +14,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             .InformationalVersion
         ?? typeof(MainWindowViewModel).Assembly.GetName().Version?.ToString(3)
         ?? "0.0.0";
-    private static readonly string[] ProjectSessionPageIds = { "workspace", "works", "git", "run_logs", "settings" };
+    private static readonly string[] ProjectSessionPageIds = { "workspace", "works", "git", "run_logs", "templates", "settings" };
     private static readonly HashSet<string> RetainedGlobalPageIds = new(StringComparer.Ordinal)
     {
         "settings",
+        "templates",
     };
     private static readonly string[] PreloadedProjectPageIds = { "workspace", "works", "git" };
     /// <summary>无项目时也可进入的页面（侧栏跳过开始页）。</summary>
@@ -94,11 +95,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             CanStartProjectTransition);
         LeaveProjectCommand = new RelayCommand(() => _ = LeaveProjectAsync());
         UserFacingError.RegisterObserver(this);
-        // 标题栏：始终可打开/切换项目
-        SwitchProjectCommand = new RelayCommand(
-            () => _ = RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectAsync),
-            CanStartProjectTransition);
-
         // 上组：创作主流程
         PrimaryNavigationItems = new ObservableCollection<NavigationItemViewModel>
         {
@@ -149,8 +145,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
     public string CreateProjectText => _displayNames.Text("ui.layout.create_project");
 
     public string OpenProjectText => _displayNames.Text("ui.layout.open_project");
-
-    public string SwitchProjectText => _displayNames.Text("ui.layout.switch_project");
 
     public string LeaveProjectText => _displayNames.Text("ui.layout.leave_project");
 
@@ -340,7 +334,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     public bool SidebarCollapsed => !SidebarExpanded;
 
-    public double SidebarWidth => SidebarExpanded ? 204 : 52;
+    public double SidebarWidth => SidebarExpanded ? 224 : 64;
 
     public object CurrentPage
     {
@@ -361,9 +355,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
     public RelayCommand CreateProjectCommand { get; }
 
     public RelayCommand OpenProjectCommand { get; }
-
-    /// <summary>已进入工作台时打开/切换项目（与 Open 同源）。</summary>
-    public RelayCommand SwitchProjectCommand { get; }
 
     public RelayCommand LeaveProjectCommand { get; }
 
@@ -561,7 +552,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         _isProjectTransitionRunning = value;
         CreateProjectCommand.NotifyCanExecuteChanged();
         OpenProjectCommand.NotifyCanExecuteChanged();
-        SwitchProjectCommand.NotifyCanExecuteChanged();
     }
 
     private async Task ShowVersionAsync()
@@ -603,7 +593,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         OnPropertyChanged(nameof(ProjectMenuText));
         OnPropertyChanged(nameof(CreateProjectText));
         OnPropertyChanged(nameof(OpenProjectText));
-        OnPropertyChanged(nameof(SwitchProjectText));
         OnPropertyChanged(nameof(LeaveProjectText));
         OnPropertyChanged(nameof(DiagnosticTitleText));
         OnPropertyChanged(nameof(DiagnosticToggleText));
@@ -807,6 +796,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         if (item is not null)
         {
             await SelectNavigationItemAsync(item).ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>仅供 ARIADNE_UI_START_PAGE 视觉验收入口使用，不触发页面数据加载。</summary>
+    internal void OpenPreviewNavigationItem(string id)
+    {
+        var item = AllNavigationItems().FirstOrDefault(nav => nav.Id == id);
+        if (item is not null)
+        {
+            CommitNavigation(item, GetOrCreatePage(item.Id), persist: false);
         }
     }
 

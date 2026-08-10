@@ -4,6 +4,7 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
@@ -28,6 +29,7 @@ internal sealed record UiPerformanceEvidence(
 
 internal static class ReleaseUiProbe
 {
+    private const string PreviewModeEnvironmentVariable = "ARIADNE_RELEASE_UI_PREVIEW";
     private const int FramesPerNodeCount = 120;
     private const int WarmupFramesPerNodeCount = 12;
     private static readonly TimeSpan InitialInteractionWarmup = TimeSpan.FromSeconds(30);
@@ -41,6 +43,12 @@ internal static class ReleaseUiProbe
     public static bool TryStart(IClassicDesktopStyleApplicationLifetime desktop)
     {
         var args = desktop.Args ?? Array.Empty<string>();
+        if (args.Length >= 1 && string.Equals(args[0], "--canvas-shot", StringComparison.Ordinal))
+        {
+            StartCanvasShot(desktop, args);
+            return true;
+        }
+
         if (args.Length != 2 || !string.Equals(args[0], "--release-ui-probe", StringComparison.Ordinal))
         {
             return false;
@@ -104,6 +112,7 @@ internal static class ReleaseUiProbe
         {
             WriteProgress(outputPath, $"building-{nodeCount}");
             viewModel.LoadReleaseProbeGraph(BuildGraph(nodeCount));
+            ApplyPreviewState(viewModel);
             WriteProgress(outputPath, $"loaded-{nodeCount}");
             view.PrepareReleaseProbe();
             WriteProgress(outputPath, $"prepared-{nodeCount}");
@@ -197,6 +206,87 @@ internal static class ReleaseUiProbe
         WriteProgress(outputPath, "completed");
     }
 
+    private static void ApplyPreviewState(WorkspacePageViewModel viewModel)
+    {
+        var mode = Environment.GetEnvironmentVariable(PreviewModeEnvironmentVariable);
+        if (string.IsNullOrWhiteSpace(mode) || viewModel.Nodes.Count == 0)
+        {
+            return;
+        }
+
+        viewModel.RightPanelColumnWidth = new GridLength(360);
+        if (string.Equals(mode, "edge", StringComparison.OrdinalIgnoreCase))
+        {
+            viewModel.SelectNode(viewModel.Nodes[Math.Min(4, viewModel.Nodes.Count - 1)]);
+            var edge = viewModel.RelatedEdges.FirstOrDefault(item => item.IsData)
+                       ?? viewModel.RelatedEdges.FirstOrDefault();
+            edge?.SelectCommand.TryExecute();
+            return;
+        }
+
+        viewModel.SelectNode(viewModel.Nodes[Math.Min(1, viewModel.Nodes.Count - 1)]);
+        viewModel.ShowNodeDetailsCommand.TryExecute();
+    }
+
+    // --canvas-shot <png> [nodeCount]：渲染一张有代表性的节点画布供视觉验收，不参与性能测量。
+    private static void StartCanvasShot(IClassicDesktopStyleApplicationLifetime desktop, string[] args)
+    {
+        var outputPath = args.Length > 1 ? args[1] : "canvas-preview.png";
+        var nodeCount = args.Length > 2 && int.TryParse(args[2], out var parsed) && parsed > 0 ? parsed : 12;
+
+        var backend = DispatchProxy.Create<IAriadneBackendClient, NullBackendProxy>();
+        var viewModel = new WorkspacePageViewModel(DisplayNameService.Current, backend);
+        var view = new WorkspacePageView { DataContext = viewModel };
+        var window = new Window
+        {
+            Width = 1600,
+            Height = 900,
+            Content = view,
+        };
+        window.Opened += async (_, _) =>
+        {
+            var exitCode = 0;
+            try
+            {
+                var topLevel = TopLevel.GetTopLevel(window)
+                    ?? throw new InvalidOperationException("canvas shot window has no top level");
+                viewModel.LoadReleaseProbeGraph(BuildGraph(nodeCount));
+                view.PrepareReleaseProbe();
+                // 等一帧让节点容器完成布局，再按视口取景并选中一个节点展示选中环与点阵。
+                await NextFrameAsync(topLevel, TimeSpan.FromMinutes(1)).ConfigureAwait(true);
+                viewModel.FitViewCommand.TryExecute();
+                // 放大到可编辑倍率，露出引脚/运行按钮等精度控件，便于目检卡片细节。
+                viewModel.SetCanvasZoom(1.4);
+                viewModel.SelectNode(viewModel.Nodes[Math.Min(2, viewModel.Nodes.Count - 1)]);
+                await NextFrameAsync(topLevel, TimeSpan.FromMinutes(1)).ConfigureAwait(true);
+                await NextFrameAsync(topLevel, TimeSpan.FromMinutes(1)).ConfigureAwait(true);
+                CapturePng(view, outputPath);
+            }
+            catch (Exception)
+            {
+                exitCode = 1;
+            }
+            finally
+            {
+                Environment.Exit(exitCode);
+            }
+        };
+        desktop.MainWindow = window;
+    }
+
+    private static void CapturePng(Visual target, string path)
+    {
+        var size = target.Bounds.Size;
+        var pixelSize = new PixelSize(
+            Math.Max(1, (int)Math.Ceiling(size.Width)),
+            Math.Max(1, (int)Math.Ceiling(size.Height)));
+        using var bitmap = new RenderTargetBitmap(pixelSize, new Vector(96, 96));
+        bitmap.Render(target);
+        var fullPath = Path.GetFullPath(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        bitmap.Save(fullPath);
+    }
+
     private static async Task<FrameSample> MeasureFrameAsync(
         TopLevel topLevel,
         WorkspacePageView view,
@@ -239,7 +329,7 @@ internal static class ReleaseUiProbe
                 index == 0 ? "start" : "llm",
                 $"probe-{index}",
                 new Dictionary<string, object?>(),
-                new CanvasPosition((index % 20) * 180, (index / 20) * 120)))
+                new CanvasPosition((index % 5) * 300, (index / 5) * 200)))
             .ToArray();
         var edges = new List<CanvasEdge>(nodeCount + nodeCount / 4);
         for (var index = 1; index < nodeCount; index++)

@@ -157,7 +157,8 @@
     "library_group": "utility",
     "config_kind": "condition",
     "execution_kind": "builtin",
-    "default_budget_usd": 0.0
+    "default_budget_usd": 0.0,
+    "execution_output_ports": ["exec_out_true", "exec_out_false"]
   },
   {
     "node_type": "loop",

@@ -41,7 +41,7 @@ public sealed class SettingsInputValidationTests
     [Theory]
     [InlineData("writer,unknown,,,")]
     [InlineData("writer,streaming,,,")]
-    [InlineData("writer,tool_use,,,")]
+    [InlineData("writer,vision,,,")]
     [InlineData("writer,llm,,,\nwriter,embedding,,,")]
     public void ModelsRejectUnknownCapabilitiesAndDuplicateIds(string input)
     {

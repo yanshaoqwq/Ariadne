@@ -13,7 +13,9 @@ public static class SettingsNavigationCatalog
         new("automation", "ui.settings.tab.automation"),
         new("permissions", "ui.settings.tab.permissions"),
         new("personalization", "ui.settings.tab.personalization"),
-        new("misc", "ui.settings.tab.misc"),
+        new("retrieval", "ui.settings.tab.retrieval"),
+        new("version_control", "ui.settings.tab.version_control"),
+        new("support", "ui.settings.tab.support"),
     ];
 
     public static readonly IReadOnlyList<SettingsSectionDefinition> Sections =
@@ -24,7 +26,7 @@ public static class SettingsNavigationCatalog
         new("provider", "models", "ProviderSectionAnchor", "ui.settings.section.provider"),
         new("available_models", "models", "AvailableModelsSectionAnchor", "ui.settings.section.available_models"),
         new("embedding", "models", "EmbeddingSectionAnchor", "ui.settings.section.embedding"),
-        new("manual_models", "models", "ManualModelsSectionAnchor", "ui.settings.section.manual_fallback"),
+        new("model_aliases", "presets", "ModelAliasesSectionAnchor", "ui.settings.section.model_aliases"),
         new("node_presets", "presets", "NodePresetsSectionAnchor", "ui.settings.section.node_presets"),
         new("defaults", "presets", "DefaultsSectionAnchor", "ui.settings.section.defaults"),
         new("templates", "presets", "TemplatesSectionAnchor", "ui.settings.section.templates"),
@@ -37,11 +39,11 @@ public static class SettingsNavigationCatalog
         new("language", "personalization", "LanguageSectionAnchor", "ui.settings.section.language"),
         new("theme", "personalization", "ThemeSectionAnchor", "ui.settings.section.theme"),
         new("workspace", "personalization", "WorkspaceSectionAnchor", "ui.settings.section.workspace"),
-        new("tutorial", "misc", "TutorialSectionAnchor", "ui.settings.index.tutorial"),
-        new("app_runtime", "misc", "AppRuntimeSectionAnchor", "ui.settings.section.app_runtime"),
-        new("retrieval", "misc", "RetrievalSectionAnchor", "ui.settings.section.retrieval"),
-        new("git", "misc", "GitSectionAnchor", "ui.settings.section.git"),
-        new("diagnostics", "misc", "DiagnosticsSectionAnchor", "ui.settings.section.diagnostics"),
+        new("retrieval", "retrieval", "RetrievalSectionAnchor", "ui.settings.section.retrieval"),
+        new("app_runtime", "retrieval", "AppRuntimeSectionAnchor", "ui.settings.section.app_runtime"),
+        new("git", "version_control", "GitSectionAnchor", "ui.settings.section.git"),
+        new("diagnostics", "support", "DiagnosticsSectionAnchor", "ui.settings.section.diagnostics"),
+        new("tutorial", "support", "TutorialSectionAnchor", "ui.settings.index.tutorial"),
     ];
 
 }

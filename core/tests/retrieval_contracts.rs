@@ -1228,6 +1228,34 @@ fn qdrant_initialize_rejects_existing_collection_dimension_mismatch() {
 }
 
 #[test]
+fn qdrant_api_key_is_sent_as_a_request_header() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        write_json_response(
+            &mut stream,
+            200,
+            r#"{"result":{"config":{"params":{"vectors":{"size":2,"distance":"Cosine"}}}}}"#,
+        );
+        request
+    });
+    let store =
+        QdrantVectorStore::new_with_api_key(endpoint, "ariadne", 2, Some("endpoint-secret"))
+            .unwrap();
+
+    store.initialize().unwrap();
+    let request = server.join().unwrap();
+
+    assert!(request.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("api-key") && value.trim() == "endpoint-secret"
+        })
+    }));
+}
+
+#[test]
 fn qdrant_health_detects_collection_dimension_drift() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -1397,4 +1425,60 @@ fn write_json_response(stream: &mut TcpStream, status: u16, body: &str) {
         body.len()
     );
     stream.write_all(response.as_bytes()).unwrap();
+}
+
+/// U109：`reranker_enabled` 为真但重排序路由不可解析时，重排序必须单独降级，
+/// **不得**连带击穿整个检索组合根——全文检索仍要能正常构造并返回结果。
+///
+/// 修复前 `ProjectRetrievalRuntime::from_config` 在 reranker 装配处直接 `?`，
+/// 一个只影响排序质量的开关会让全部检索能力停摆，且错误与「重排序」毫无表面关联。
+#[test]
+fn enabled_but_unresolvable_reranker_degrades_without_breaking_retrieval() {
+    let project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+
+    let store = ConfigStore::new(project.path());
+    let mut config = store.load_or_create().unwrap();
+    // 开着重排序，但既没有默认 reranker Provider，也没有任何 reranker 模型。
+    config.rag.reranker_enabled = true;
+    config.rag.vector_store.enabled = false;
+    store.save(&config).unwrap();
+
+    let secrets = MemorySecretStore::default();
+    let runtime = ProjectRetrievalRuntime::open(project.path(), &secrets)
+        .expect("U109：重排序不可用不得阻断检索组合根的构造");
+
+    // 降级原因必须被显式记录，不能静默吞掉。
+    let reason = runtime
+        .reranker_unavailable_reason()
+        .expect("U109：重排序装配失败必须留下可诊断的原因");
+    assert!(
+        reason.contains("reranker"),
+        "降级原因应指明是重排序失败：{reason}"
+    );
+
+    // 且必须在健康检查里表现为 degraded 的 reranker_provider 项。
+    let health = runtime.health_check().expect("健康检查本身不应失败");
+    let reranker_health = health
+        .iter()
+        .find(|item| item.component == "reranker_provider")
+        .expect("U109：开关开着时必须上报 reranker_provider 健康项，不能表现为『没配重排序』");
+    assert_eq!(
+        reranker_health.status,
+        StoreStatus::Degraded,
+        "重排序不可用应为 degraded 而非 unavailable/healthy"
+    );
+    assert_eq!(
+        reranker_health.reason.as_deref(),
+        Some("diagnostics.retrieval.reranker.unavailable"),
+        "reason 必须是纯 display_name key，前端才能本地化"
+    );
+
+    // 关键断言：全文检索链路完全不受影响。
+    let chapter = project.path().join("documents").join("chapter.md");
+    std::fs::create_dir_all(chapter.parent().unwrap()).unwrap();
+    std::fs::write(&chapter, "银色线索藏在旧钟楼的第三层").unwrap();
+    runtime
+        .health_check()
+        .expect("U109：重排序降级后检索运行时仍须整体可用");
 }

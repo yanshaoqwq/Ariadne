@@ -20,11 +20,13 @@ use crate::config::LocalFileSecretStore;
 #[cfg(feature = "system-keychain")]
 use crate::config::SystemKeychainSecretStore;
 use crate::config::{
-    default_permission_tool_controls, policies_from_policy_code, policy_code_from_dual_policy,
-    read_confirmation_policy_settings, AppConfig, AppPermissionsStore, AppRuntimeSettings,
-    AppRuntimeSettingsStore, ApprovalPromptConfig, ConfigStore, GitConfig, ModelConfig,
-    PermissionsConfig, ProjectConfig, ProjectCredentialScope, ProviderCatalogStore, ProviderConfig,
-    RagConfig, SecretStore, SecretValue, WorkflowConfig,
+    default_permission_tool_controls, external_qdrant_endpoint, policies_from_policy_code,
+    policy_code_from_dual_policy, read_confirmation_policy_settings, AppConfig,
+    AppPermissionsStore, AppRuntimeSettings, AppRuntimeSettingsStore, ApprovalPromptConfig,
+    ConfigStore, GitConfig, ModelConfig, PermissionsConfig, ProjectConfig, ProjectCredentialScope,
+    ProviderCatalogStore, ProviderConfig, QdrantAuthMode, RagConfig, SecretProtectionStatus,
+    SecretStore, SecretValue,
+    VectorStoreBackend, WorkflowConfig,
 };
 use crate::contracts::{
     ensure_path_under_root, ApprovalPolicy, ArtifactKind, CoreError, CoreResult, Edge, EdgeId,
@@ -71,8 +73,10 @@ use crate::node_capabilities::{
     EXECUTOR_ADAPTER_TOOL_CAPABILITY, PROJECT_AI_TOOL_CAPABILITY,
 };
 use crate::providers::{
-    web_search_tool_definition, ContentPart, HttpWebSearchProvider, LlmMessage, LlmRole,
-    OpenAiCompatibleLlmProvider, Provider, ProviderProtocol, SearchProvider, ToolDefinition,
+    web_search_tool_definition, ContentPart, HttpWebSearchProvider, LlmMessage, LlmProvider,
+    LlmRole, OpenAiCompatibleLlmProvider, Provider, ProviderCacheKey, ProviderHealth,
+    ProviderHealthReport,
+    ProviderProtocol, ProviderRuntimeRegistry, SearchProvider, ToolDefinition,
     WebSearchToolExecutor, EXECUTOR_ADAPTER_WEB_SEARCH_TOOL, PROJECT_AI_WEB_SEARCH_TOOL,
 };
 use crate::rag::SqliteWritingKnowledgeStore;
@@ -104,13 +108,19 @@ const WORKFLOW_WORKER_LEASE_LOST_ERROR: &str = "workflow worker lease was lost d
 const WORKFLOW_SCHEDULER_LEASE_TTL_MS: u64 = 3_000;
 const WORKFLOW_SCHEDULER_MAX_SLEEP_MS: u64 = 1_000;
 const WORKFLOW_SCHEDULER_MAX_CLAIMS_PER_TICK: usize = 64;
+/// 运行完成回报追加进对话时的 revision CAS 重试上限。
+/// 有界是为了不让通知在并发写入下无限自旋占住调度线程。
+const WORKFLOW_COMPLETION_APPEND_MAX_ATTEMPTS: usize = 8;
 
-pub const WORKFLOW_STATUS_UPDATE_EVENT: &str = "workflow_status_update";
-pub const RUN_LOG_APPENDED_EVENT: &str = "run_log_appended";
-pub const BUDGET_UPDATED_EVENT: &str = "budget_updated";
-pub const CONFIRMATION_CREATED_EVENT: &str = "confirmation_created";
-pub const DIAGNOSTICS_UPDATED_EVENT: &str = "diagnostics_updated";
-pub const TOAST_CREATED_EVENT: &str = "toast_created";
+// U116：原先这里有 6 个 `*_EVENT` 事件名常量（workflow_status_update / run_log_appended /
+// budget_updated / confirmation_created / diagnostics_updated / toast_created），全部零发射点、
+// 桌面端也一个都不监听——它们描述的是一套**从未建成的推送架构**。
+//
+// 实际交付方式是**轮询**：前端调 `get_workflow_events` 按 sequence 增量拉取，
+// CLI 侧由 `ipc.rs` 的 `run_watch_workflow_events` 循环轮询。没有 emit/push 通道。
+//
+// 保留这些常量比删掉更坏：维护者看到 `TOAST_CREATED_EVENT` 会以为存在 toast 推送通道，
+// 照着接线却发现无人接收。若日后真要做推送，应连同通道一起设计，而不是先摆一批名字。
 
 const DEFAULT_PROJECT_ENV: &str = "ARIADNE_PROJECT_ROOT";
 const RECENT_PROJECTS_FILE: &str = "recent_projects.json";
@@ -197,6 +207,21 @@ impl Drop for WorkflowSchedulerHandle {
     }
 }
 
+/// U116：进程内 LLM provider 实例缓存。
+///
+/// 键含「配置+凭据指纹」，所以缓存是**自校验**的：用户改 base_url 或换 key 后
+/// 指纹随即改变、旧条目不再命中。这使得六个「改配置」命令
+/// （`save_provider_key` / `revoke_provider_key` / `rebind_project_provider_key` /
+/// `save_provider_settings` / `save_provider_section_settings` / `remove_provider`）
+/// **都不需要各自挂失效逻辑**——漏挂一处就是「改完 key 后端仍用旧凭据发请求」这种
+/// 静默缺陷，而且以后新增第七个命令还会再漏。
+///
+/// 取成独立句柄类型（而非只挂在 state 上）是因为 `llm_runtime` 这条链路上的函数
+/// 只收 `&dyn SecretStore`，不持有整个 `AriadneAppState`；传句柄可避免为了缓存
+/// 去改动一串公开签名。
+pub type LlmProviderCache =
+    Arc<Mutex<BTreeMap<ProviderCacheKey, Arc<OpenAiCompatibleLlmProvider>>>>;
+
 /// 桌面前端共享状态。project_root 只能由显式环境变量或项目生命周期命令设置。
 #[derive(Clone)]
 pub struct AriadneAppState {
@@ -204,6 +229,10 @@ pub struct AriadneAppState {
     app_state_root: PathBuf,
     secret_store: Arc<dyn SecretStore>,
     retrieval_runtime: Arc<Mutex<Option<Arc<ProjectRetrievalRuntime>>>>,
+    /// U116：进程内 LLM provider 实例缓存，键含配置+凭据指纹（自校验，见
+    /// `ProviderRuntimeRegistry` 说明）。缓存 provider 是为了复用其 HTTP 连接池，
+    /// 并让 `health_check_all` 之类的生命周期能力有统一入口。
+    llm_providers: LlmProviderCache,
     workflow_scheduler: Arc<Mutex<Option<WorkflowSchedulerHandle>>>,
     project_activation: Arc<Mutex<()>>,
     global_settings: Arc<Mutex<()>>,
@@ -220,6 +249,7 @@ impl AriadneAppState {
             app_state_root: app_state_root.into(),
             secret_store,
             retrieval_runtime: Arc::new(Mutex::new(None)),
+            llm_providers: Arc::new(Mutex::new(BTreeMap::new())),
             workflow_scheduler: Arc::new(Mutex::new(None)),
             project_activation: Arc::new(Mutex::new(())),
             global_settings: Arc::new(Mutex::new(())),
@@ -450,6 +480,46 @@ impl AriadneAppState {
         drop(runtime_slot);
         drop(previous);
         Ok(runtime)
+    }
+
+    /// U116：按「配置+凭据指纹」取用 LLM provider 实例，未命中则构造并缓存。
+    ///
+    /// 复用的意义是省掉重建 `reqwest` 连接池；而**正确性**由指纹保证——
+    /// 用户改 base_url / 换 key 后指纹随即改变，旧条目不再命中，
+    /// 因此六个「改配置」命令都不需要各自挂失效逻辑（漏一处即是静默用旧凭据发请求）。
+    /// 返回 LLM provider 缓存句柄，供不持有整个 state 的下游函数取用。
+    pub(crate) fn llm_provider_cache(&self) -> LlmProviderCache {
+        Arc::clone(&self.llm_providers)
+    }
+
+    /// 测试专用：直接取缓存句柄以预置实例。
+    ///
+    /// 「探活项」只在缓存非空时产生，而填充缓存的正常途径是真发一次 LLM 调用——
+    /// 那要打网络、要凭据，与命名/分类这类契约无关。给测试一个显式入口，
+    /// 好过让用例绕道真实网络（慢、不稳、且掩盖被测契约）。
+    pub fn llm_provider_cache_for_tests(&self) -> LlmProviderCache {
+        self.llm_provider_cache()
+    }
+
+    /// U116：对当前已缓存的 LLM provider 逐个做健康检查。
+    ///
+    /// 这是 `ProviderRuntimeRegistry::health_check_all` 在产品侧的落点：
+    /// 此前产品完全没有「统一探活」的入口，用户只能靠真跑一次工作流才知道
+    /// provider 是否可用。
+    pub fn check_llm_provider_health(&self) -> CommandResult<Vec<ProviderHealthReport>> {
+        let cache = self
+            .llm_providers
+            .lock()
+            .map_err(|_| CommandError::internal("llm provider cache lock poisoned"))?;
+        let mut registry = ProviderRuntimeRegistry::default();
+        for (key, provider) in cache.iter() {
+            // 同一 provider_id 在缓存里最多一条（见 cached_llm_provider 的 retain），
+            // 所以这里不会撞 RegistryDuplicate。
+            registry
+                .register_llm(key.provider_id.clone(), Arc::clone(provider) as Arc<dyn LlmProvider>)
+                .map_err(error_to_string)?;
+        }
+        Ok(registry.health_check_all())
     }
 
     /// 配置或凭据变更后原子替换组合根，旧 sidecar 在新运行时就绪后再关闭。
@@ -814,6 +884,14 @@ pub struct RunWorkflowRequest {
     pub start_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub initial_inputs: BTreeMap<String, Value>,
+    /// 工作流变量初值。与 `initial_inputs`（节点端口输入）不同层：
+    /// 变量是整个 run 的可读写状态，端口输入只喂给起始节点。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, Value>,
+    /// 发起本次运行的项目空间 AI 对话 id；人工点「运行」时为 None。
+    /// 终态回报据此定位目标对话，缺了它 AI 启动完就断线。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -826,7 +904,11 @@ pub struct WorkflowRunStarted {
 pub struct BudgetStatus {
     pub budget_usd: f64,
     pub spent_usd: f64,
-    pub preauthorized_usd: f64,
+    /// U112：`None` = 从未设置（Auto Mode 不限额）；`Some(0.0)` = 用户显式设的零额度。
+    /// 不可折叠成裸 `f64`——那会让一次「打开设置页再保存」的空往返
+    /// 把「不限制」静默翻转成「全部暂停」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preauthorized_usd: Option<f64>,
     pub auto_mode_enabled: bool,
 }
 
@@ -868,6 +950,11 @@ pub struct PermissionsSettings {
 pub struct NodePresetSettings {
     #[serde(default)]
     pub presets: Vec<NodeTypePreset>,
+    /// 固定创作角色别名到具体模型身份的全局映射。
+    #[serde(default)]
+    pub model_aliases: BTreeMap<String, ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model_alias: Option<String>,
     /// 空值只用于兼容旧配置，表示沿用项目默认 LLM Provider。
     #[serde(default)]
     pub default_provider_id: String,
@@ -883,6 +970,8 @@ impl Default for NodePresetSettings {
     fn default() -> Self {
         Self {
             presets: default_node_type_presets(),
+            model_aliases: BTreeMap::new(),
+            default_model_alias: None,
             default_provider_id: String::new(),
             default_model_id: default_node_preset_model_id(),
             default_timeout_ms: default_node_preset_timeout_ms(),
@@ -891,10 +980,18 @@ impl Default for NodePresetSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAliasTarget {
+    pub provider_id: String,
+    pub model_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeTypePreset {
     pub node_type: String,
     pub display_name_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_alias: Option<String>,
     /// Provider 与 model_id 共同构成模型身份；空值兼容旧版默认 Provider 语义。
     #[serde(default)]
     pub provider_id: String,
@@ -914,6 +1011,10 @@ struct AppNodeDefaults {
     #[serde(default)]
     presets: Vec<AppNodeTypeDefault>,
     #[serde(default)]
+    model_aliases: BTreeMap<String, ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_model_alias: Option<String>,
+    #[serde(default)]
     default_provider_id: String,
     #[serde(default = "default_node_preset_model_id")]
     default_model_id: String,
@@ -925,6 +1026,8 @@ struct AppNodeDefaults {
 struct AppNodeTypeDefault {
     node_type: String,
     display_name_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_alias: Option<String>,
     #[serde(default)]
     provider_id: String,
     model_id: String,
@@ -959,11 +1062,14 @@ impl AppNodeDefaults {
                 .map(|preset| AppNodeTypeDefault {
                     node_type: preset.node_type.clone(),
                     display_name_key: preset.display_name_key.clone(),
+                    model_alias: preset.model_alias.clone(),
                     provider_id: preset.provider_id.clone(),
                     model_id: preset.model_id.clone(),
                     timeout_ms: preset.timeout_ms,
                 })
                 .collect(),
+            model_aliases: settings.model_aliases.clone(),
+            default_model_alias: settings.default_model_alias.clone(),
             default_provider_id: settings.default_provider_id.clone(),
             default_model_id: settings.default_model_id.clone(),
             default_timeout_ms: settings.default_timeout_ms,
@@ -971,11 +1077,18 @@ impl AppNodeDefaults {
     }
 
     fn validate(&self) -> CommandResult<()> {
-        if self.default_model_id.trim().is_empty() {
-            return Err(CommandError::validation(
-                "default node model id cannot be empty",
-            ));
-        }
+        validate_model_alias_map_shape(&self.model_aliases)?;
+        validate_model_reference_shape(
+            self.default_model_alias.as_deref(),
+            &self.default_provider_id,
+            &self.default_model_id,
+            "default node model",
+        )?;
+        validate_alias_reference(
+            &self.model_aliases,
+            self.default_model_alias.as_deref(),
+            "default node model",
+        )?;
         if self.default_timeout_ms == 0 {
             return Err(CommandError::validation(
                 "default node timeout must be positive",
@@ -985,13 +1098,23 @@ impl AppNodeDefaults {
         for preset in &self.presets {
             if preset.node_type.trim().is_empty()
                 || preset.display_name_key.trim().is_empty()
-                || preset.model_id.trim().is_empty()
                 || preset.timeout_ms == 0
             {
                 return Err(CommandError::validation(
                     "global node defaults contain an incomplete preset",
                 ));
             }
+            validate_model_reference_shape(
+                preset.model_alias.as_deref(),
+                &preset.provider_id,
+                &preset.model_id,
+                &format!("global node default {}", preset.node_type),
+            )?;
+            validate_alias_reference(
+                &self.model_aliases,
+                preset.model_alias.as_deref(),
+                &format!("global node default {}", preset.node_type),
+            )?;
             if !node_types.insert(preset.node_type.as_str()) {
                 return Err(CommandError::validation(format!(
                     "duplicate global node default: {}",
@@ -1035,6 +1158,7 @@ impl ProjectNodePresetOverrides {
                     NodeTypePreset {
                         node_type: preset.node_type,
                         display_name_key: preset.display_name_key,
+                        model_alias: preset.model_alias,
                         provider_id: preset.provider_id,
                         model_id: preset.model_id,
                         timeout_ms: preset.timeout_ms,
@@ -1046,6 +1170,8 @@ impl ProjectNodePresetOverrides {
                     }
                 })
                 .collect(),
+            model_aliases: app.model_aliases,
+            default_model_alias: app.default_model_alias,
             default_provider_id: app.default_provider_id,
             default_model_id: app.default_model_id,
             default_timeout_ms: app.default_timeout_ms,
@@ -1073,6 +1199,15 @@ pub struct AppSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RagSettings {
     pub rag: RagConfig,
+    /// 仅作为本次保存输入；响应与项目配置不会回显明文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qdrant_api_key: Option<String>,
+    /// 显式撤销当前端点的项目作用域凭据。
+    #[serde(default)]
+    pub clear_qdrant_api_key: bool,
+    /// 只读状态：当前端点是否已有凭据。
+    #[serde(default)]
+    pub has_qdrant_api_key: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1094,6 +1229,14 @@ pub struct GitRepositoryStatus {
     pub reason: Option<String>,
     pub diff_line_count: usize,
     pub diff_preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitRepairReport {
+    /// 损坏的 `.git` 被移动到哪里（相对项目根）。用户据此自行取回或删除。
+    pub backup_dir: String,
+    /// 重新初始化后的状态，供前端直接刷新而不必再发一次查询。
+    pub status: GitHealthStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1140,11 +1283,19 @@ pub struct ProviderConfigStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_llm_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_llm_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_embedding_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_embedding_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reranker_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reranker_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_search_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_search_model_id: Option<String>,
     #[serde(default)]
     pub providers: Vec<ProviderKeyStatus>,
 }
@@ -1183,11 +1334,33 @@ pub struct ProviderSettingsUpdate {
     pub make_default_search: bool,
 }
 
+/// 仅用于连接测试的临时 Provider 表单。它绝不能写入项目配置或凭据仓库。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderDraftProbe {
+    pub provider: ProviderSettingsUpdate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderSectionSettings {
     pub provider: ProviderSettingsUpdate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_models: Option<ProviderDefaultModelRoutes>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDefaultModelRoutes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<ModelAliasTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ModelAliasTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1446,6 +1619,20 @@ pub fn list_recent_projects(state: &AriadneAppState) -> CommandResult<Vec<Recent
         .map_err(error_to_string)
 }
 
+pub fn forget_recent_project(
+    state: &AriadneAppState,
+    project_root: String,
+) -> CommandResult<Vec<RecentProjectEntry>> {
+    let _activation = state.lock_project_activation()?;
+    let project_root = project_root.trim();
+    if project_root.is_empty() {
+        return Err(CommandError::validation("project root cannot be empty"));
+    }
+    recent_project_store(state.app_state_root())
+        .forget(project_root)
+        .map_err(error_to_string)
+}
+
 pub fn create_project(
     state: &AriadneAppState,
     project_root: String,
@@ -1561,6 +1748,37 @@ pub fn open_project(
         }
     };
     Ok(current)
+}
+
+pub fn relocate_recent_project(
+    state: &AriadneAppState,
+    previous_project_root: String,
+    project_root: String,
+) -> CommandResult<CurrentProjectStatus> {
+    let _activation = state.lock_project_activation()?;
+    let previous_root = state.project_root()?;
+    let replaced_root = PathBuf::from(previous_project_root.trim());
+    if replaced_root.as_os_str().is_empty() {
+        return Err(CommandError::validation(
+            "previous project root cannot be empty",
+        ));
+    }
+    let project_root = canonicalize_initialized_project_root(Path::new(&project_root))?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "project_open")?;
+    match activate_initialized_project_replacing_recent(
+        state,
+        &project_root,
+        None,
+        &replaced_root,
+    ) {
+        Ok(current) => Ok(current),
+        Err(error) => Err(rollback_existing_project_activation(
+            state,
+            &previous_root,
+            &project_root,
+            error,
+        )),
+    }
 }
 
 pub fn close_project(state: &AriadneAppState) -> CommandResult<()> {
@@ -1722,6 +1940,29 @@ fn activate_initialized_project(
     project_root: &Path,
     name: Option<&str>,
 ) -> CommandResult<CurrentProjectStatus> {
+    activate_initialized_project_inner(state, project_root, name, None)
+}
+
+fn activate_initialized_project_replacing_recent(
+    state: &AriadneAppState,
+    project_root: &Path,
+    name: Option<&str>,
+    replaced_project_root: &Path,
+) -> CommandResult<CurrentProjectStatus> {
+    activate_initialized_project_inner(
+        state,
+        project_root,
+        name,
+        Some(replaced_project_root),
+    )
+}
+
+fn activate_initialized_project_inner(
+    state: &AriadneAppState,
+    project_root: &Path,
+    name: Option<&str>,
+    replaced_project_root: Option<&Path>,
+) -> CommandResult<CurrentProjectStatus> {
     let project_root = canonicalize_initialized_project_root(project_root)?;
     crate::config::bind_project_app_state(&project_root, state.app_state_root())
         .map_err(error_to_string)?;
@@ -1784,7 +2025,11 @@ fn activate_initialized_project(
             candidate_config.app.project_name.clone()
         },
     };
-    if let Err(error) = record_current_project(state.app_state_root(), &current) {
+    if let Err(error) = record_current_project_replacing(
+        state.app_state_root(),
+        &current,
+        replaced_project_root,
+    ) {
         let mut diagnostic = error_to_string(error).diagnostic_text().to_owned();
         if config_changed {
             if let Err(rollback_error) = config_store.save(&original_config) {
@@ -1852,7 +2097,7 @@ fn complete_committed_project_activation(state: &AriadneAppState, project_root: 
             return;
         }
     };
-    let recovery_steps: [(&str, CommandResult<()>); 3] = [
+    let recovery_steps: [(&str, CommandResult<()>); 4] = [
         (
             "confirmation saga recovery",
             recover_confirmation_resolution_sagas(project_root).map(|_| ()),
@@ -1864,6 +2109,10 @@ fn complete_committed_project_activation(state: &AriadneAppState, project_root: 
         (
             "index worker recovery",
             resume_indexing_worker_for_project(project_root, Arc::clone(&runtime)),
+        ),
+        (
+            "run event retention",
+            prune_terminal_run_events_on_open(project_root).map(|_| ()),
         ),
     ];
     for (stage, result) in recovery_steps {
@@ -1970,7 +2219,10 @@ pub fn import_chapter(
 ) -> CommandResult<ChapterDocumentIndex> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "chapter_import")?;
-    request.source_path = project_path_buf(&project_root, &request.source_path)?;
+    // 源稿在项目外是**正常情况**：作者从下载目录、U 盘、别的写作软件导出目录里挑稿子。
+    // 要求源在项目内等于要求「先手工拷进项目再导入」，导入功能本身就没意义了。
+    // 落点 target_path 仍必须在项目内——那是我们要写入的地方。
+    request.source_path = import_source_path_buf(&project_root, &request.source_path)?;
     request.target_path = project_path_buf(&project_root, &request.target_path)?;
     let mut index = load_chapter_index(&project_root)?;
     if !request.overwrite
@@ -1982,7 +2234,15 @@ pub fn import_chapter(
             "chapter id or target document already exists; explicit overwrite is required",
         ));
     }
-    let documents = document_service(&project_root);
+    // 文档服务的读权限走 readable_file_roots 沙箱，默认只含项目内。源稿在项目外时
+    // 必须把它**所在目录**加进可读根，否则解析放行了、读取仍被拒。
+    // 只加这一次导入用到的那个目录、且只读：不放宽写入根，也不把沙箱本身改宽。
+    let documents = match request.source_path.parent() {
+        Some(source_dir) if !source_dir.starts_with(&project_root) => {
+            document_service_with_extra_readable_root(&project_root, source_dir.to_path_buf())
+        }
+        _ => document_service(&project_root),
+    };
     let report = import_chapter_document(&documents, request).map_err(error_to_string)?;
     index
         .entries
@@ -2031,9 +2291,15 @@ pub fn list_workflow_graphs(state: &AriadneAppState) -> CommandResult<Vec<Workfl
     list_workflow_graphs_impl(&project_root)
 }
 
-pub fn validate_workflow_graph(graph_data: WorkflowGraphData) -> CommandResult<()> {
+pub fn validate_workflow_graph(
+    state: &AriadneAppState,
+    graph_data: WorkflowGraphData,
+) -> CommandResult<()> {
+    // U113：预校验必须用项目真实限制，否则前端放行、保存边界拒绝，用户看到自相矛盾的结果。
+    let project_root = project_root_from_state(state, None)?;
+    let limits = project_workflow_limits(&project_root)?;
     let workflow = graph_to_workflow(graph_data)?;
-    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)
+    validate_workflow_execution_contracts(&workflow, &limits).map_err(error_to_string)
 }
 
 pub fn save_workflow_graph(
@@ -2222,7 +2488,8 @@ pub fn pack_workflow_selection_impl_with_operation_id_and_app_state(
     let mut graph = workflow_to_graph(report.workflow);
     graph.expected_revision = Some(base_revision.clone());
     let prepared_workflow = graph_to_workflow(graph.clone())?;
-    validate_workflow_execution_contracts(&prepared_workflow).map_err(error_to_string)?;
+    validate_workflow_execution_contracts(&prepared_workflow, &project_workflow_limits(project_root)?)
+        .map_err(error_to_string)?;
     let prepared_body =
         serde_json::to_string_pretty(&prepared_workflow).map_err(error_to_string)?;
     let mut prepared_graph = workflow_to_graph(prepared_workflow);
@@ -2334,6 +2601,8 @@ pub fn start_workflow(
             workflow_id,
             start_node_id,
             initial_inputs: BTreeMap::new(),
+            variables: BTreeMap::new(),
+            origin_conversation_id: None,
         },
     )?;
     state.ensure_workflow_scheduler()?;
@@ -2787,7 +3056,10 @@ pub fn save_general_section_settings(
 
 pub fn get_rag_settings(state: &AriadneAppState) -> CommandResult<RagSettings> {
     let project_root = project_root_from_state(state, None)?;
-    get_rag_settings_impl(&project_root)
+    let mut settings = get_rag_settings_impl(&project_root)?;
+    settings.has_qdrant_api_key =
+        has_external_qdrant_api_key(&project_root, state.secret_store.as_ref(), &settings.rag)?;
+    Ok(settings)
 }
 
 pub fn save_rag_settings(
@@ -2797,16 +3069,55 @@ pub fn save_rag_settings(
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "rag_settings_update")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
-    settings.rag.validate().map_err(error_to_string)?;
+    let RagSettings {
+        rag,
+        qdrant_api_key,
+        clear_qdrant_api_key,
+        has_qdrant_api_key: _,
+    } = settings;
+    rag.validate().map_err(error_to_string)?;
     let expected = ConfigStore::new(&project_root)
         .load_or_create()
         .map_err(error_to_string)?;
     let mut candidate = expected.clone();
-    candidate.rag = settings.rag;
+    candidate.rag = rag;
+    candidate.validate().map_err(error_to_string)?;
+
+    let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
+        .map_err(error_to_string)?;
+    let credential_mutation = prepare_external_qdrant_credential_mutation(
+        &credentials,
+        &candidate.rag,
+        qdrant_api_key,
+        clear_qdrant_api_key,
+    )?;
     let saved = candidate.rag.clone();
-    state.commit_retrieval_config(&expected, candidate)?;
+    if let Err(error) = state.commit_retrieval_config(&expected, candidate) {
+        if let Some((endpoint, previous)) = credential_mutation {
+            restore_external_qdrant_secret(&credentials, &endpoint, previous).map_err(
+                |rollback| CommandError::internal(format!(
+                    "failed to apply retrieval settings: {error}; credential rollback failed: {rollback}"
+                )),
+            )?;
+            state.reload_retrieval_runtime().map_err(|rollback| {
+                CommandError::internal(format!(
+                    "failed to apply retrieval settings: {error}; runtime rollback failed: {rollback}"
+                ))
+            })?;
+        }
+        return Err(error);
+    }
     spawn_indexing_worker_for_state(state)?;
-    Ok(RagSettings { rag: saved })
+    Ok(RagSettings {
+        rag: saved.clone(),
+        qdrant_api_key: None,
+        clear_qdrant_api_key: false,
+        has_qdrant_api_key: has_external_qdrant_api_key(
+            &project_root,
+            state.secret_store.as_ref(),
+            &saved,
+        )?,
+    })
 }
 
 pub fn get_workflow_settings(state: &AriadneAppState) -> CommandResult<WorkflowSettings> {
@@ -2848,6 +3159,7 @@ pub fn save_misc_section_settings(
     let _project_mutation = acquire_project_mutation_guard(&project_root, "misc_settings_update")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
     settings.rag.rag.validate().map_err(error_to_string)?;
+    ensure_no_external_qdrant_credential_input(&settings.rag)?;
     let expected = ConfigStore::new(&project_root)
         .load_or_create()
         .map_err(error_to_string)?;
@@ -2862,6 +3174,9 @@ pub fn save_misc_section_settings(
     let saved = MiscSectionSettings {
         rag: RagSettings {
             rag: candidate.rag.clone(),
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
         },
         git: GitSettings {
             git: candidate.git.clone(),
@@ -2889,7 +3204,7 @@ pub fn save_template_repository_settings(
 pub fn update_budget_config(
     state: &AriadneAppState,
     budget_usd: f64,
-    preauthorized_usd: f64,
+    preauthorized_usd: Option<f64>,
 ) -> CommandResult<BudgetStatus> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation =
@@ -3014,11 +3329,11 @@ pub fn save_node_preset_settings_impl(
 fn save_node_preset_settings_with_app_state(
     project_root: &Path,
     app_state_root: &Path,
-    settings: NodePresetSettings,
+    mut settings: NodePresetSettings,
 ) -> CommandResult<NodePresetSettings> {
     let _project_mutation = acquire_project_mutation_guard(project_root, "node_preset_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
-    write_node_preset_settings(project_root, app_state_root, &settings)?;
+    write_node_preset_settings(project_root, app_state_root, &mut settings)?;
     Ok(settings)
 }
 
@@ -3045,6 +3360,31 @@ pub fn fetch_provider_models_with_cancellation(
         provider_id,
         cancellation,
     )
+}
+
+/// 使用未保存的 Provider 表单测试连通性并读取模型目录。
+///
+/// API key 只在本次请求中保留在内存，调用路径不获取写锁、不保存配置，也不触碰
+/// `SecretStore`，以便设置页在保存前安全验证新 Provider。
+pub fn test_provider_draft_with_cancellation(
+    probe: ProviderDraftProbe,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<ProviderModelsResult> {
+    cancellation.check().map_err(CommandError::from)?;
+    let selected = provider_config_from_update(&probe.provider)?;
+    let protocol =
+        ProviderProtocol::from_provider_type(&selected.provider_type).map_err(error_to_string)?;
+    let api_key = probe
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    let fetched = fetch_remote_provider_models(&selected, protocol, api_key, cancellation)?;
+    Ok(ProviderModelsResult {
+        provider_id: selected.provider_id.clone(),
+        models: merge_remote_model_metadata(fetched, &selected.models),
+    })
 }
 
 pub fn fetch_provider_models_with_secrets_impl(
@@ -3502,6 +3842,59 @@ pub fn get_git_repository_status_with_cancellation(
     get_git_repository_status_impl_with_cancellation(&project_root, cancellation)
 }
 
+/// U116：修复损坏的 Git 仓库——备份坏掉的 `.git`，再重新初始化。
+///
+/// 此前 `backup_dir_name` / `reinitialize_repository` 两个原语实现完整却零调用者：
+/// `health_check` 能**检出**损坏（`.git` 存在但 `rev-parse` 失败即 fail-loud），
+/// 却没有任何修复入口，用户只能自己去命令行救。这是产品缺口而非死代码。
+///
+/// 三条安全边界：
+/// - **绝不静默丢历史**：坏掉的 `.git` 是移动到备份目录，不是删除。
+///   备份目录已存在时报错而非覆盖——第二次修复会毁掉第一次的证据。
+/// - **只在真损坏时允许**：仓库健康或根本没有 `.git` 时拒绝执行，
+///   否则一次误点会把好仓库的历史挪走。
+/// - **工作区文件不动**：`git init` 保留工作区，用户的正文一个字都不会丢。
+pub fn repair_git_repository(state: &AriadneAppState) -> CommandResult<GitRepairReport> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "git_repository_repair")?;
+    let cancellation = crate::contracts::ExecutionCancellation::new();
+    let git = git_service_with_cancellation(&project_root, &cancellation);
+
+    let git_dir = project_root.join(".git");
+    if !git_dir.try_exists().map_err(error_to_string)? {
+        return Err(CommandError::validation(
+            "project has no .git directory; nothing to repair",
+        ));
+    }
+    // 健康的仓库不该走修复路径——把好仓库的 .git 挪走是不可逆的破坏。
+    if git.health_check().is_ok() {
+        return Err(CommandError::validation(
+            "git repository is healthy; repair would discard a working history",
+        ));
+    }
+
+    let backup_name = git.backup_dir_name();
+    let backup_dir = project_root.join(&backup_name);
+    if backup_dir.try_exists().map_err(error_to_string)? {
+        return Err(CommandError::conflict(format!(
+            "backup directory already exists: {backup_name}; move or remove it before repairing again"
+        )));
+    }
+    std::fs::rename(&git_dir, &backup_dir).map_err(|error| {
+        CommandError::internal(format!("failed to back up corrupted .git: {error}"))
+    })?;
+
+    git.reinitialize_repository().map_err(error_to_string)?;
+    let status = git
+        .health_check()
+        .map(|report| report.status)
+        .map_err(error_to_string)?;
+    Ok(GitRepairReport {
+        backup_dir: backup_name,
+        status,
+    })
+}
+
 pub fn get_git_branch_graph(
     state: &AriadneAppState,
     limit: Option<usize>,
@@ -3616,6 +4009,53 @@ pub fn restore_to_new_branch_with_cancellation(
     }
 }
 
+/// U118：当前凭据保护状态，设置页据此决定是否弹「设主密码 / 用明文」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretProtectionReport {
+    pub status: SecretProtectionStatus,
+    /// 是否需要用户立刻处置（`Locked` 时保存凭据必失败）。
+    pub requires_setup: bool,
+}
+
+/// U118：读取凭据保护状态。
+pub fn get_secret_protection(state: &AriadneAppState) -> CommandResult<SecretProtectionReport> {
+    let status = state.secret_store.protection_status();
+    Ok(SecretProtectionReport {
+        status,
+        requires_setup: status == SecretProtectionStatus::Locked,
+    })
+}
+
+/// U118：设置本地主密码，凭据自此以密文落盘。
+///
+/// 这条命令的存在本身就是修复的核心：此前错误信息让用户去
+/// 「set a local secret master password」，而那个操作**在产品里不存在**——
+/// IPC 零命令、UI 零入口、文案零条目，GUI 用户照着提示做只会撞墙。
+pub fn set_local_secret_master_password(
+    state: &AriadneAppState,
+    master_password: String,
+) -> CommandResult<SecretProtectionReport> {
+    state
+        .secret_store
+        .set_master_password(SecretValue::new(master_password))
+        .map_err(error_to_string)?;
+    get_secret_protection(state)
+}
+
+/// U118：用户显式接受明文存储。
+///
+/// 独立成一条命令、而非 `set_master_password(None)` 之类的重载：明文是一个
+/// **需要用户明确点头**的选择，把它藏在参数里会让调用点读不出这层含义。
+pub fn allow_unprotected_local_secrets(
+    state: &AriadneAppState,
+) -> CommandResult<SecretProtectionReport> {
+    state
+        .secret_store
+        .allow_unprotected_storage()
+        .map_err(error_to_string)?;
+    get_secret_protection(state)
+}
+
 pub fn get_provider_config(state: &AriadneAppState) -> CommandResult<ProviderConfigStatus> {
     let project_root = project_root_from_state(state, None)?;
     crate::config::bind_project_app_state(&project_root, state.app_state_root())
@@ -3701,6 +4141,67 @@ pub fn save_provider_key(
     }
 }
 
+pub fn revoke_provider_key(
+    state: &AriadneAppState,
+    provider: String,
+) -> CommandResult<ProviderConfigStatus> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "provider_key_revoke")?;
+    let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
+    let _global_settings = state.lock_global_settings()?;
+    let provider = normalize_provider(&provider)?;
+    let config = ConfigStore::with_app_state(&project_root, state.app_state_root())
+        .load_or_create_for_credential_rebind()
+        .map_err(error_to_string)?;
+    if !config
+        .providers
+        .providers
+        .iter()
+        .any(|configured| configured.provider_id == provider)
+    {
+        return Err(CommandError::not_found(format!(
+            "provider is not configured: {provider}"
+        )));
+    }
+    let credentials = ProjectCredentialScope::new(&project_root, state.secret_store.as_ref())
+        .map_err(error_to_string)?;
+    let previous_secret = credentials
+        .get_provider_secret(&provider)
+        .map_err(error_to_string)?;
+    credentials
+        .delete_provider_secret(&provider)
+        .map_err(error_to_string)?;
+    // 凭据已删除，此后任一步失败都要先把它放回去，避免一次失败的撤销把 key 永久销毁。
+    let revoked = provider_config_status_from_config_with_app_state(
+        &project_root,
+        config,
+        state.secret_store.as_ref(),
+        state.app_state_root(),
+    )
+    .and_then(|status| {
+        state.reload_retrieval_runtime()?;
+        Ok(status)
+    });
+    match revoked {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            restore_provider_secret(&credentials, &provider, previous_secret).map_err(
+                |rollback| {
+                    CommandError::internal(format!(
+                        "{error}; provider key revoke rollback failed: {rollback}"
+                    ))
+                },
+            )?;
+            state.reload_retrieval_runtime().map_err(|rollback| {
+                CommandError::internal(format!(
+                    "{error}; provider runtime rollback failed: {rollback}"
+                ))
+            })?;
+            Err(error)
+        }
+    }
+}
+
 /// 为尚不能正常打开的导入/旧项目显式重新绑定 Provider 凭据。
 ///
 /// 该入口不把目标项目设为当前项目，也不会启动任何网络或后台任务。
@@ -3726,7 +4227,7 @@ pub fn save_provider_settings(
         acquire_project_mutation_guard(&project_root, "provider_settings_update")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
     let _global_settings = state.lock_global_settings()?;
-    save_global_provider_settings_under_guards(state, &project_root, update)
+    save_global_provider_settings_under_guards(state, &project_root, update, None)
 }
 
 pub fn save_provider_section_settings(
@@ -3761,6 +4262,7 @@ pub fn save_provider_section_settings(
         state,
         &project_root,
         settings.provider,
+        settings.default_models,
     ) {
         Ok(status) => status,
         Err(error) => {
@@ -3783,6 +4285,7 @@ fn save_global_provider_settings_under_guards(
     state: &AriadneAppState,
     project_root: &Path,
     update: ProviderSettingsUpdate,
+    default_models: Option<ProviderDefaultModelRoutes>,
 ) -> CommandResult<ProviderConfigStatus> {
     crate::config::bind_project_app_state(project_root, state.app_state_root())
         .map_err(error_to_string)?;
@@ -3806,6 +4309,10 @@ fn save_global_provider_settings_under_guards(
             .map_err(error_to_string)?;
         let mut candidate = expected.clone();
         apply_provider_settings_update(&mut candidate, update)?;
+        if let Some(routes) = default_models {
+            apply_provider_default_model_routes(&mut candidate, routes)?;
+        }
+        candidate.validate().map_err(error_to_string)?;
         let status = provider_config_status_from_config_with_app_state(
             project_root,
             candidate.clone(),
@@ -4014,11 +4521,13 @@ pub fn quick_edit_with_cancellation(
     cancellation: &crate::contracts::ExecutionCancellation,
 ) -> CommandResult<QuickEditResult> {
     let project_root = project_root_from_state(state, None)?;
+    let provider_cache = state.llm_provider_cache();
     quick_edit_impl_with_cancellation(
         &project_root,
         state.secret_store.as_ref(),
         request,
         cancellation,
+        Some(&provider_cache),
     )
 }
 
@@ -4068,6 +4577,7 @@ pub fn project_ai_chat_with_cancellation(
     let runner_retrieval = state.retrieval_runtime()?;
     let project_ai_retrieval = Arc::clone(&runner_retrieval);
     let scheduler_state = state.clone();
+    let provider_cache = state.llm_provider_cache();
     let response = project_ai_chat_with_runner(
         &project_root,
         state.secret_store.as_ref(),
@@ -4084,6 +4594,7 @@ pub fn project_ai_chat_with_cancellation(
             scheduler_state.ensure_workflow_scheduler()?;
             Ok(started)
         },
+        Some(&provider_cache),
     )?;
     state.ensure_workflow_scheduler()?;
     Ok(response)
@@ -4236,7 +4747,11 @@ fn install_template_for_active_project(
         load_workflow_definition_with_revision(expected_project_root, None)?;
     normalize_project_canvas_identity(&mut canvas);
     if merge_workflow_into_project_canvas(&mut canvas, source, content_revision_hash(&raw)) {
-        validate_workflow_execution_contracts(&canvas).map_err(error_to_string)?;
+        validate_workflow_execution_contracts(
+            &canvas,
+            &project_workflow_limits(expected_project_root)?,
+        )
+        .map_err(error_to_string)?;
         let mut graph = workflow_to_graph(canvas);
         graph.expected_revision = (!canvas_revision.is_empty()).then_some(canvas_revision);
         save_workflow_graph_locked(expected_project_root, graph)?;
@@ -4281,6 +4796,14 @@ pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<Backend
         Vec::new(),
         retrieval_reports,
     );
+    // U116：把 provider **实际连通性**并入诊断。
+    //
+    // 下面的 `provider_config_diagnostic_items` 只看配置是否自洽（能不能选出
+    // provider/model），答不了「这个 key 现在还能不能用」。此前产品完全没有统一探活
+    // 入口，用户只能靠真跑一次工作流才知道 provider 通不通——一次失败的工作流
+    // 既花钱又要等，还分不清是配置错、凭据过期还是对端故障。
+    report.extend_items(llm_provider_health_diagnostic_items(state));
+    report.extend_items([secret_protection_diagnostic_item(state)]);
     match config {
         Ok(config) => report.extend_items(provider_config_diagnostic_items(
             &config.providers,
@@ -4293,6 +4816,72 @@ pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<Backend
         }]),
     }
     Ok(report)
+}
+
+/// U118：把凭据保护状态做成常驻诊断项。
+///
+/// 为什么明文要报 `Degraded` 而不是 `Healthy`：用户当时点头同意了明文，
+/// 但三个月后未必记得自己的 API Key 正躺在磁盘上。若这里报 Healthy，
+/// 「同意过」就成了一次性的、再也看不见的决定——而诊断面板正是
+/// 「现在这台机器处于什么状态」的唯一常驻答案。
+///
+/// `Locked` 报 `Unavailable`：该状态下保存凭据必定失败，属真实阻断。
+fn secret_protection_diagnostic_item(state: &AriadneAppState) -> DiagnosticItem {
+    let (status, reason) = match state.secret_store.protection_status() {
+        SecretProtectionStatus::Managed => (DiagnosticStatus::Healthy, None),
+        SecretProtectionStatus::Encrypted => (DiagnosticStatus::Healthy, None),
+        // reason 必须是本地化 key（`diagnostics.*` 约定，与 reranker 那条同源）：
+        // 前端 `DiagnosticReasonLabel` 只对该前缀查表，塞裸英文会直接显示给中/日用户。
+        SecretProtectionStatus::Unprotected => (
+            DiagnosticStatus::Degraded,
+            Some("diagnostics.secrets.unprotected".to_owned()),
+        ),
+        SecretProtectionStatus::Locked => (
+            DiagnosticStatus::Unavailable,
+            Some("diagnostics.secrets.locked".to_owned()),
+        ),
+    };
+    DiagnosticItem {
+        component: "secrets.protection".to_owned(),
+        status,
+        reason,
+    }
+}
+
+/// U116：对已缓存的 LLM provider 逐个探活，转成诊断项。
+///
+/// 只探**已缓存**的实例：缓存是按「配置+凭据指纹」建的，里面装的正是当前生效的那批
+/// provider。缓存为空（尚未发起过任何 LLM 调用）时不报任何项——那时既没有实例可探，
+/// 也谈不上健康与否，凭空报一条 Unavailable 只会制造假警报。
+fn llm_provider_health_diagnostic_items(state: &AriadneAppState) -> Vec<DiagnosticItem> {
+    let reports = match state.check_llm_provider_health() {
+        Ok(reports) => reports,
+        // 探活本身失败（锁中毒等）不应把整份诊断带崩：诊断的用途正是排查故障。
+        Err(error) => {
+            return vec![DiagnosticItem {
+                component: "providers.llm.reachability".to_owned(),
+                status: DiagnosticStatus::Unavailable,
+                reason: Some(error.diagnostic.unwrap_or(error.message_key)),
+            }]
+        }
+    };
+    reports
+        .into_iter()
+        .map(|report| {
+            let (status, reason) = match report.health {
+                ProviderHealth::Healthy => (DiagnosticStatus::Healthy, None),
+                ProviderHealth::Degraded { reason } => (DiagnosticStatus::Degraded, Some(reason)),
+                ProviderHealth::Unhealthy { reason } => {
+                    (DiagnosticStatus::Unavailable, Some(reason))
+                }
+            };
+            DiagnosticItem {
+                component: format!("providers.llm.reachability.{}", report.provider_id),
+                status,
+                reason,
+            }
+        })
+        .collect()
 }
 
 fn provider_config_diagnostic_items(
@@ -4313,7 +4902,9 @@ fn provider_config_diagnostic_items(
         }),
     }
 
-    match select_llm_provider(providers).and_then(|provider| select_llm_model(&provider)) {
+    match select_llm_provider(providers)
+        .and_then(|provider| select_llm_model(&provider, providers.default_llm_model_id.as_deref()))
+    {
         Ok(model) => items.push(DiagnosticItem {
             component: "providers.llm.default".to_owned(),
             status: DiagnosticStatus::Healthy,
@@ -4853,7 +5444,8 @@ fn load_project_canvas_locked(project_root: &Path) -> CommandResult<WorkflowGrap
     }
 
     if changed {
-        validate_workflow_execution_contracts(&canvas).map_err(error_to_string)?;
+        validate_workflow_execution_contracts(&canvas, &project_workflow_limits(project_root)?)
+            .map_err(error_to_string)?;
         let mut graph = workflow_to_graph(canvas);
         graph.expected_revision = (!canvas_revision.is_empty()).then_some(canvas_revision);
         return save_workflow_graph_locked(project_root, graph);
@@ -4901,7 +5493,8 @@ fn save_workflow_graph_locked(
 ) -> CommandResult<WorkflowGraphData> {
     let expected_revision = graph_data.expected_revision.clone();
     let workflow = graph_to_workflow(graph_data)?;
-    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
+    validate_workflow_execution_contracts(&workflow, &project_workflow_limits(project_root)?)
+        .map_err(error_to_string)?;
     let path = workflow_path(project_root, Some(workflow.id.as_str().to_owned()))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(error_to_string)?;
@@ -5410,7 +6003,8 @@ fn prepare_workflow_run_state(
             "initial_inputs require start_node_id",
         ));
     }
-    validate_workflow_execution_contracts(&workflow).map_err(error_to_string)?;
+    validate_workflow_execution_contracts(&workflow, &project_workflow_limits(project_root)?)
+        .map_err(error_to_string)?;
     let document_root = workflow_document_root(project_root, &workflow, start_node_id.as_deref())?;
     let dependency_plan =
         compile_workflow_runtime_dependency_plan(project_root, secrets, &workflow)?;
@@ -5440,6 +6034,20 @@ fn prepare_workflow_run_state(
         None
     };
     let mut runtime = WorkflowRuntime::new(&workflow, run_id).map_err(error_to_string)?;
+    // 变量注入必须在 preflight 之前：类型不符或必填留空要在建 run 之前就失败，
+    // 而不是先把 run 落进 runtime.db 再报错。
+    if !request.variables.is_empty() {
+        runtime
+            .inject_variables(
+                &request.variables,
+                crate::workflow::WorkflowVariableSource::ProjectAi,
+            )
+            .map_err(error_to_string)?;
+    }
+    runtime
+        .ensure_required_variables_present()
+        .map_err(error_to_string)?;
+    runtime.state.origin_conversation_id = request.origin_conversation_id.clone();
     runtime.state.prepared_workflow = Some(workflow.clone());
     runtime.state.prepared_dependency_plan = Some(
         serde_json::to_value(freeze_workflow_runtime_dependency_plan(&dependency_plan))
@@ -5909,6 +6517,43 @@ struct WorkflowNodeSearchBindings {
     project_search: Option<(Arc<ProjectRetrievalRuntime>, ToolDefinition)>,
     web_search: Option<(Arc<HttpWebSearchProvider>, ToolDefinition)>,
     permission_policy: PermissionPolicy,
+    /// U108：该节点经权限过滤后允许下发的 Module 9 写作工具名。
+    /// 与检索工具共用同一套 `node_tool_control_enabled` 判定，
+    /// 权限页上这批开关自此真正生效，不再是空接线。
+    writing_tools: BTreeSet<String>,
+}
+
+/// U108：按 tool_controls 过滤该写作节点可下发的工具名。
+///
+/// 只处理写作执行器自己承接的工具（`WritingToolExecutor::handles_tool`）——
+/// `*-search` 归项目检索装配、`*-web-search` 已在 `web_search` 分支判定过，
+/// 避免同一个开关被两处解释。
+fn workflow_writing_tools_for_node(
+    type_name: &str,
+    controls: &BTreeMap<String, BTreeMap<String, Option<bool>>>,
+    presets: &NodePresetSettings,
+) -> BTreeSet<String> {
+    let Some(agent) = crate::rag::models::WritingAgentKind::from_node_type(type_name) else {
+        return BTreeSet::new();
+    };
+    let prompts = match crate::rag::resources::load_prompt_resources() {
+        Ok(prompts) => prompts,
+        // 内置 prompt 资源不可读属于打包缺陷，此处降级为「不下发写作工具」，
+        // 真实错误由 tool_definitions_for_agent 在装配时 fail-loud。
+        Err(_) => return BTreeSet::new(),
+    };
+    let Ok(definitions) = crate::rag::tools::tool_definitions_for_agent(agent, &prompts) else {
+        return BTreeSet::new();
+    };
+    definitions
+        .into_iter()
+        .map(|tool| tool.name)
+        .filter(|tool| crate::rag::tools::WritingToolExecutor::handles_tool(tool))
+        .filter(|tool| !tool.ends_with("-web-search"))
+        .filter(|tool| {
+            node_tool_control_enabled(controls, presets, type_name, type_name, tool)
+        })
+        .collect()
 }
 
 fn workflow_node_search_bindings(
@@ -5951,6 +6596,7 @@ fn workflow_node_search_bindings(
         project_search,
         web_search,
         permission_policy,
+        writing_tools: workflow_writing_tools_for_node(type_name, controls, presets),
     }
 }
 
@@ -6000,7 +6646,22 @@ fn execute_workflow_runtime(
     std::fs::create_dir_all(document_root.join("planning")).map_err(error_to_string)?;
     let ledger = Arc::new(SqliteCostLedger::open(project_root).map_err(error_to_string)?);
     let tool_controls = normalize_tool_controls(project_config.permissions.tool_controls.clone());
-    let max_tool_rounds = project_config.workflow.max_tool_rounds;
+    // U113：节点超时回落、loop 上限与 tool-use 轮次共用同一份项目限制。
+    let workflow_limits = project_config.workflow.execution_limits();
+    // U126：日预算此前只约束快速编辑与项目问答，对工作流零约束——而工作流是
+    // 主力消费路径。这里把它接进节点执行前的门禁。
+    let daily_budget_limits =
+        budget_limits_from_global_budget(read_budget_config(project_root)?.budget_usd);
+    let auto_mode_config = project_config.auto_mode.clone();
+    // U117：确认项策略在运行开始时锁定一次。
+    // 放进 handler 闭包会让每个节点重读一遍配置文件，且同一次运行中途
+    // 改设置会导致前后节点用不同策略——与 dependency plan 的冻结语义相悖。
+    let writing_confirmation_policy = crate::workflow::load_writing_confirmation_policy(
+        project_root,
+        auto_mode_config.enabled_by_default,
+    )
+    .map_err(|error| CommandError::internal(error.to_string()))?
+    .0;
     let retrieval_runtime = if requires_project_retrieval {
         Some(match retrieval_runtime {
             Some(runtime) => runtime,
@@ -6045,6 +6706,15 @@ fn execute_workflow_runtime(
                 retrieval_runtime.as_ref(),
                 web_search_runtime.as_ref(),
             );
+            // U108：写作节点要访问项目写作知识库与章节正文，二者都由 project_root
+            // 定位；闭包是 move 的，这里先把根路径复制进去。
+            let writing_agent = crate::rag::models::WritingAgentKind::from_node_type(type_name);
+            let writing_root = project_root.to_path_buf();
+            // U126：日预算门禁所需的数据，随闭包移动。
+            let daily_budget_limits = daily_budget_limits.clone();
+            let auto_mode_config = auto_mode_config.clone();
+            let writing_confirmation_policy = writing_confirmation_policy.clone();
+            let writing_document_root = document_root.to_path_buf();
             external
                 .register_handler_with_policy(
                     type_name,
@@ -6056,8 +6726,29 @@ fn execute_workflow_runtime(
                             llm_routes.as_ref(),
                             llm_providers.as_ref(),
                         )?;
+                        // U126：每次 LLM 调用前检查日预算。放在路由之后、调用之前，
+                        // 这样节点不会先花掉钱再报错。
+                        ensure_workflow_daily_budget_allows_call(
+                            ledger.as_ref(),
+                            &daily_budget_limits,
+                            &auto_mode_config,
+                        )?;
+                        // U108：写作节点在每次执行时重新加载知识库与正文，
+                        // 保证 find 看到的是当前状态、行号 patch 基于最新版本。
+                        let writing_context = match writing_agent {
+                            Some(agent) if !search_bindings.writing_tools.is_empty() => Some(
+                                load_workflow_writing_context(
+                                    &writing_root,
+                                    &writing_document_root,
+                                    agent,
+                                    &request,
+                                )?,
+                            ),
+                            _ => None,
+                        };
                         if search_bindings.project_search.is_none()
                             && search_bindings.web_search.is_none()
+                            && writing_context.is_none()
                         {
                             return execute_llm_node_with_defaults(
                                 request,
@@ -6067,7 +6758,10 @@ fn execute_workflow_runtime(
                                 Some(&route.model_id),
                             );
                         }
-                        execute_llm_node_with_search_tools(
+                        // 落盘需要 operation 身份，而 request 会被下面的调用消费掉。
+                        let request_operation_id = request.operation_id.clone();
+                        let request_hash = request.request_hash.clone();
+                        let output = execute_llm_node_with_search_tools(
                             request,
                             provider,
                             ledger.as_ref(),
@@ -6087,9 +6781,53 @@ fn execute_workflow_runtime(
                                         )
                                     },
                                 ),
-                                max_tool_rounds,
+                                writing_tools: writing_context.as_ref().map(|context| {
+                                    crate::workflow::WorkflowWritingToolOptions {
+                                        agent: context.agent,
+                                        allowed_tools: search_bindings.writing_tools.clone(),
+                                        knowledge: &context.knowledge,
+                                        document: context.document_context(),
+                                        chapter_id: context.chapter_id.as_deref(),
+                                        confirmation_policy: writing_confirmation_policy
+                                            .clone(),
+                                        auto_mode: crate::contracts::AutoModeState {
+                                            enabled: auto_mode_config.enabled_by_default,
+                                            preauthorized_budget_usd: auto_mode_config
+                                                .preauthorized_budget_usd,
+                                        },
+                                        // U108 阶段 3：不传会话 = 写作产出不落盘。
+                                        patch_session: context
+                                            .document
+                                            .as_ref()
+                                            .map(|document| document.patch_session.clone()),
+                                    }
+                                }),
+                                limits: workflow_limits,
                             },
-                        )
+                        );
+
+                        // U121：register 类工具写的是内存知识库，必须在节点结束时落盘，
+                        // 否则「登记伏笔/人物」在节点返回的瞬间就丢了。
+                        //
+                        // 只在本节点确实装配了写作工具时落盘：纯 LLM 节点没有 writing_context，
+                        // 不该在它的执行路径上触碰知识库。
+                        //
+                        // 落盘带 operation receipt（与 summarizer 同一套幂等机制），
+                        // 因此节点重放不会把同一次注册写成两条。
+                        match (&writing_context, &output) {
+                            (Some(context), Ok(node_output)) => {
+                                persist_workflow_writing_knowledge(
+                                    &writing_root,
+                                    &context.knowledge,
+                                    &request_operation_id,
+                                    &request_hash,
+                                    node_output,
+                                )?;
+                            }
+                            // 节点失败时不落盘：失败路径的知识库可能只写了一半。
+                            _ => {}
+                        }
+                        output
                     }),
                 )
                 .map_err(error_to_string)?;
@@ -6129,6 +6867,7 @@ fn execute_workflow_runtime(
                                 provider,
                                 ledger.as_ref(),
                                 &summarizer_root,
+                                &workflow_limits,
                             );
                         }
                         execute_summarizer_node_with_search_tools(
@@ -6150,7 +6889,7 @@ fn execute_workflow_runtime(
                                         tool.clone(),
                                     )
                                 }),
-                            max_tool_rounds,
+                            &workflow_limits,
                         )
                     }),
                 )
@@ -6234,9 +6973,119 @@ fn execute_workflow_runtime(
     } else {
         store
     };
-    runtime
+    let status = runtime
         .run_persisted(workflow, &mut executor, &store)
-        .map_err(error_to_string)
+        .map_err(error_to_string)?;
+
+    // 运行完成回报：项目空间 AI 启动的运行到达终态后，必须把结果送回发起对话。
+    // 放在这里而不是 runtime 内部，是因为 runtime 不该依赖对话存储；
+    // 这里是「执行一次工作流」的唯一收口，两条启动路径（直启 / 工具调用）
+    // 和 Resume 后的终态都会经过它。
+    //
+    // 回报失败不改变运行结果：稿子已经写出来了，不能因为通知没送达就把成功
+    // 的运行标成失败。但也不能静默 —— 打到 stderr 便于排查。
+    if let Some(report) = runtime.run_completion_report() {
+        if let Err(error) = deliver_workflow_run_completion(project_root, &report) {
+            eprintln!(
+                "[ariadne] workflow run completion report undelivered for {}/{}: {error}",
+                report.workflow_id.as_str(),
+                report.run_id.as_str()
+            );
+        }
+    }
+
+    Ok(status)
+}
+
+/// 把运行完成回报写进发起对话。
+///
+/// 用 `assistant` 角色而非 `user`：这条消息陈述的是系统侧发生的事实，
+/// 不是人说的话。伪装成用户发言会污染后续轮次的对话语义。
+///
+/// 措辞在这里组装而不在 runtime：core 的 runtime 层不该硬编码展示文案，
+/// 而对话内容必须是自然语言 —— 这里是两者的边界。
+fn deliver_workflow_run_completion(
+    project_root: &Path,
+    report: &crate::workflow::WorkflowRunCompletionReport,
+) -> CommandResult<()> {
+    let store = ProjectAiConversationStore::open(project_root).map_err(CommandError::from)?;
+    let content = workflow_run_completion_message(report);
+
+    // revision CAS 重试：完成回报是系统通知，不是用户编辑。撞上并发修订时
+    // 应当重读最新 revision 再追加，而不是像用户提交那样报冲突让人重试 ——
+    // 没有人在等着点「重试」。
+    for _ in 0..WORKFLOW_COMPLETION_APPEND_MAX_ATTEMPTS {
+        let snapshot = store
+            .load(&report.conversation_id)
+            .map_err(CommandError::from)?;
+        match store
+            .append_messages(
+                &report.conversation_id,
+                snapshot.revision,
+                &[("assistant".to_owned(), content.clone())],
+            )
+            .map_err(CommandError::from)?
+        {
+            ProjectAiAppendOutcome::Saved { .. } => return Ok(()),
+            ProjectAiAppendOutcome::RevisionConflict { .. } => continue,
+        }
+    }
+
+    Err(CommandError::conflict(format!(
+        "workflow run completion report could not be appended to conversation {} after {} attempts",
+        report.conversation_id, WORKFLOW_COMPLETION_APPEND_MAX_ATTEMPTS
+    )))
+}
+
+/// 完成回报的自然语言措辞。
+///
+/// 只陈述事实，不替 AI 决定下一步 —— 决定权在 AI 那边，这里多写一句
+/// 「请继续下一章」会把编排逻辑埋进文案里。
+fn workflow_run_completion_message(
+    report: &crate::workflow::WorkflowRunCompletionReport,
+) -> String {
+    let status = match report.status {
+        crate::contracts::RunStatus::Succeeded => "已完成",
+        crate::contracts::RunStatus::Failed => "已失败",
+        crate::contracts::RunStatus::Paused => "已暂停",
+        _ => "状态未知",
+    };
+    let mut lines = vec![format!(
+        "[工作流运行回报] 工作流 {} 的运行 {} {}。",
+        report.workflow_id.as_str(),
+        report.run_id.as_str(),
+        status
+    )];
+
+    if let Some(reason) = report.pause_reason.as_deref() {
+        lines.push(format!("暂停原因：{reason}"));
+    }
+    if let Some(reason) = report.stop_reason.as_deref() {
+        lines.push(format!("停止原因：{reason}"));
+    }
+    if let Some(failure) = report.failure.as_ref() {
+        lines.push(format!(
+            "失败详情：{}（阶段 {}）。建议：{}",
+            failure.message, failure.stage, failure.recovery_suggestion
+        ));
+    }
+    if !report.variables.is_empty() {
+        let rendered = report
+            .variables
+            .iter()
+            .map(|(name, value)| match value {
+                Value::String(text) => format!("{name}={text}"),
+                other => format!("{name}={other}"),
+            })
+            .collect::<Vec<_>>()
+            .join("，");
+        lines.push(format!("变量终值：{rendered}"));
+    }
+    if !report.artifacts.is_empty() {
+        lines.push(format!("产出：{}", report.artifacts.join("，")));
+    }
+
+    lines.join("\n")
 }
 
 fn inject_start_node_initial_inputs(
@@ -6359,6 +7208,13 @@ fn compile_workflow_llm_execution_plan(
 ) -> CommandResult<WorkflowLlmExecutionPlan> {
     let mut node_routes = BTreeMap::new();
     let mut providers = BTreeMap::new();
+    let default_model_reference = resolve_model_reference(
+        &node_presets.model_aliases,
+        node_presets.default_model_alias.as_deref(),
+        &node_presets.default_provider_id,
+        &node_presets.default_model_id,
+        "default node model",
+    )?;
 
     for node in workflow
         .nodes
@@ -6385,11 +7241,19 @@ fn compile_workflow_llm_execution_plan(
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let preset = node_type_preset(node_presets, &node.type_name);
-        let preset_provider_id = preset
-            .map(|preset| preset.provider_id.trim())
-            .filter(|value| !value.is_empty());
-        let default_provider_id = (!node_presets.default_provider_id.trim().is_empty())
-            .then(|| node_presets.default_provider_id.trim());
+        let preset_model_reference = preset
+            .map(|preset| {
+                resolve_model_reference(
+                    &node_presets.model_aliases,
+                    preset.model_alias.as_deref(),
+                    &preset.provider_id,
+                    &preset.model_id,
+                    &format!("preset {}", preset.node_type),
+                )
+            })
+            .transpose()?;
+        let preset_provider_id = preset_model_reference.and_then(|reference| reference.0);
+        let default_provider_id = default_model_reference.0;
         // 任一节点级字段出现即进入显式覆盖层；缺失的另一半只从项目默认补齐，
         // 不能再拼入可能属于其它 Provider 的节点类型预设。
         let preferred_provider_id = configured_provider_id.or_else(|| {
@@ -6430,11 +7294,8 @@ fn compile_workflow_llm_execution_plan(
             )));
         }
 
-        let preset_model_id = preset
-            .map(|preset| preset.model_id.trim())
-            .filter(|value| !value.is_empty());
-        let default_model_id = (!node_presets.default_model_id.trim().is_empty())
-            .then(|| node_presets.default_model_id.trim());
+        let preset_model_id = preset_model_reference.and_then(|reference| reference.1);
+        let default_model_id = default_model_reference.1;
         let preferred_model_id = configured_model_id.or_else(|| {
             if configured_provider_id.is_some() {
                 None
@@ -6458,7 +7319,13 @@ fn compile_workflow_llm_execution_plan(
                 })?
                 .clone()
         } else {
-            select_llm_model(&provider_config)?
+            select_llm_model(
+                &provider_config,
+                default_llm_model_id_for(
+                    &project_config.providers,
+                    &provider_config.provider_id,
+                ),
+            )?
         };
         if !matches!(
             model_config.capability,
@@ -6621,13 +7488,20 @@ pub fn get_budget_status_impl(project_root: &Path) -> CommandResult<BudgetStatus
     let config = config_store.load_or_create().map_err(error_to_string)?;
     let budget_config = read_budget_config(project_root)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
+    // U126：`budget_usd` 是**日**预算（文案「今日累计花费上限」），
+    // 而这里原先用 `CostQuery::default()`（无时间窗口）取的是项目**全历史**累计。
+    // 两个口径塞进同一个分数（`ui.layout.budget_status` = `${spent}/${budget}`），
+    // 用久了必然显示超限。改为与预算判定同口径的今日窗口。
     let spent_usd = ledger
-        .total_cost(&CostQuery::default())
+        .total_cost(&CostQuery {
+            start_ms: Some(crate::costs::start_of_local_day_ms(workflow_lease_now_ms()?)),
+            ..CostQuery::default()
+        })
         .map_err(error_to_string)?;
     Ok(BudgetStatus {
         budget_usd: budget_config.budget_usd,
         spent_usd,
-        preauthorized_usd: config.auto_mode.preauthorized_budget_usd.unwrap_or(0.0),
+        preauthorized_usd: config.auto_mode.preauthorized_budget_usd,
         auto_mode_enabled: config.auto_mode.enabled_by_default,
     })
 }
@@ -6763,16 +7637,26 @@ pub fn get_rag_settings_impl(project_root: &Path) -> CommandResult<RagSettings> 
     let config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
-    Ok(RagSettings { rag: config.rag })
+    Ok(RagSettings {
+        rag: config.rag,
+        qdrant_api_key: None,
+        clear_qdrant_api_key: false,
+        has_qdrant_api_key: false,
+    })
 }
 
 pub fn save_rag_settings_impl(project_root: &Path, settings: RagSettings) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "rag_settings_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
+    ensure_no_external_qdrant_credential_input(&settings)?;
     settings.rag.validate().map_err(error_to_string)?;
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
+    // U109：reranker/向量是跨分区字段——开关在 RAG 配置里，路由在 Provider 配置里。
+    // 只在「本次保存把它打开」时前置校验，用户才能在勾选当下就看到缺失的默认路由；
+    // 已经开着的历史配置不因这次保存被追加阻断（避免锁死设置页）。
+    ensure_enabled_retrieval_routes_resolvable(&config, &settings.rag)?;
     config.rag = settings.rag;
     config_store.save(&config).map_err(error_to_string)
 }
@@ -6961,20 +7845,20 @@ fn display_name_language_pack_file_name(lang: &str) -> String {
 pub fn update_budget_config_impl(
     project_root: &Path,
     budget_usd: f64,
-    preauthorized_usd: f64,
+    preauthorized_usd: Option<f64>,
 ) -> CommandResult<()> {
     let _project_mutation = acquire_project_mutation_guard(project_root, "budget_settings_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     validate_money("budget_usd", budget_usd)?;
-    validate_money("preauthorized_usd", preauthorized_usd)?;
+    if let Some(preauthorized_usd) = preauthorized_usd {
+        validate_money("preauthorized_usd", preauthorized_usd)?;
+    }
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
-    // 0.0 表示无限制（映射为 None），避免 exceeds(Some(0.0), positive) 阻断所有调用
-    config.auto_mode.preauthorized_budget_usd = if preauthorized_usd > 0.0 {
-        Some(preauthorized_usd)
-    } else {
-        None
-    };
+    // U112：`Some(0.0)` 是「零自动支出额度」这一显式意图，必须原样保存——
+    // 规整成 None 会静默解除用户刻意设的零额度，属安全性倒退。
+    // `None` 表示调用方没有提交该字段（未设置 / 原样回传），同样原样保留。
+    config.auto_mode.preauthorized_budget_usd = preauthorized_usd;
     config_store.save(&config).map_err(error_to_string)?;
     write_budget_config(project_root, &BudgetConfigFile { budget_usd })
 }
@@ -7044,7 +7928,9 @@ fn save_automation_settings_impl_with_app_state_and_workflow(
         acquire_project_mutation_guard(project_root, "automation_settings_save")?;
     let _provider_references = acquire_provider_reference_graph_guard(project_root)?;
     validate_money("budget_usd", settings.budget.budget_usd)?;
-    validate_money("preauthorized_usd", settings.budget.preauthorized_usd)?;
+    if let Some(preauthorized_usd) = settings.budget.preauthorized_usd {
+        validate_money("preauthorized_usd", preauthorized_usd)?;
+    }
 
     let config_store = ConfigStore::with_app_state(project_root, app_state_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
@@ -7052,11 +7938,9 @@ fn save_automation_settings_impl_with_app_state_and_workflow(
         workflow.validate().map_err(error_to_string)?;
         config.workflow = workflow;
     }
-    config.auto_mode.preauthorized_budget_usd = if settings.budget.preauthorized_usd > 0.0 {
-        Some(settings.budget.preauthorized_usd)
-    } else {
-        None
-    };
+    // U112：与 update_budget_config_impl 一致——Some(0.0) 是显式零额度，None 是未设置，
+    // 两者都原样保存，绝不互相折叠。
+    config.auto_mode.preauthorized_budget_usd = settings.budget.preauthorized_usd;
     config.auto_mode.enabled_by_default = settings.budget.auto_mode_enabled;
 
     let mut normalized_settings = Vec::new();
@@ -7486,21 +8370,38 @@ fn resolve_confirmation_impl_with_claim(
         }
     };
 
-    let runtime_confirmation = runtime_state
-        .confirmations
-        .get(&request.confirmation_id)
-        .ok_or_else(|| {
-            CommandError::not_found(format!(
-                "confirmation item not found: {}",
-                request.confirmation_id
-            ))
-        })?;
-    let confirmation = confirmation_log_entry_from_runtime(
-        runtime_confirmation,
-        request.review_reason.as_deref(),
-        &request.workflow_id,
-        &request.run_id,
-    );
+    let confirmation = {
+        let runtime_confirmation = runtime_state
+            .confirmations
+            .get(&request.confirmation_id)
+            .ok_or_else(|| {
+                CommandError::not_found(format!(
+                    "confirmation item not found: {}",
+                    request.confirmation_id
+                ))
+            })?;
+        confirmation_log_entry_from_runtime(
+            runtime_confirmation,
+            request.review_reason.as_deref(),
+            &request.workflow_id,
+            &request.run_id,
+        )
+    };
+
+    // U108 阶段 3：审批通过后把 patch 写回磁盘。
+    //
+    // 位置由四条约束共同定死：
+    // - 在 `commit_confirmation_resolution` **之后**——只有确认项状态已落库为
+    //   Approved，写回门禁才会放行（之前读到的还是 Pending，必被拒）；
+    // - 在 `claim_resume` **之前**——它会把 run 置为可续跑并 spawn worker 跑
+    //   下游节点，那些节点可能读同一个文件，patch 必须先落盘；
+    // - 在 `_project_mutation` guard 之内——`apply_patch` 自己取的是共享锁，
+    //   可重入，不死锁；
+    // - 在本函数而**不是** resume worker 里——`resolve_confirmation_impl`
+    //   释放 lease 且从不续跑，放 worker 里等于 headless 路径永远不落盘。
+    let runtime_state =
+        apply_resolved_confirmation_patch(project_root, &store, &request.confirmation_id, runtime_state)?;
+
     let owner_id = format!("worker-{}", new_run_id()?.as_str());
     let lease = match store
         .claim_resume(
@@ -7569,6 +8470,38 @@ fn resolve_confirmation_impl_with_claim(
         },
         lease,
     ))
+}
+
+/// C1：打开项目时清理超期的终态 run 事件，避免历史无限膨胀。
+///
+/// 只删**追加事件**（`workflow_run_events` / `workflow_run_legacy_events`），
+/// `state_json` 快照保留——运行列表、状态与审计仍完整，丢的只是逐条事件流。
+///
+/// 放在打开项目而不是每次运行结束：清理是维护动作，不该挂在用户等待的
+/// 关键路径上；且按「超过保留窗口」而非「每次删一点」，语义更好解释。
+///
+/// `run_event_retention_days == 0` 表示不清理（与 `budget_usd` 的 0 语义一致）。
+/// 失败只记日志不上抛——它是可延后的维护，绝不能挡住项目打开。
+fn prune_terminal_run_events_on_open(project_root: &Path) -> CommandResult<usize> {
+    let retention_days = ConfigStore::new(project_root)
+        .load()
+        .map(|config| config.workflow.run_event_retention_days)
+        .unwrap_or_else(|_| 0);
+    if retention_days == 0 {
+        return Ok(0);
+    }
+    // 运行态库尚未创建（新项目从未跑过工作流）时不算失败。
+    if !project_root
+        .join(crate::workflow::RUNTIME_DB_FILE)
+        .exists()
+    {
+        return Ok(0);
+    }
+    let max_age_ms = u64::from(retention_days).saturating_mul(24 * 60 * 60 * 1000);
+    SqliteWorkflowRuntimeStore::open(project_root)
+        .map_err(error_to_string)?
+        .prune_terminal_run_events(max_age_ms)
+        .map_err(error_to_string)
 }
 
 /// F14：打开项目时前向恢复 knowledge/runtime 跨库确认 saga，并重放日志投影。
@@ -7911,9 +8844,13 @@ fn provider_config_status_from_config_with_app_state(
             .iter()
             .any(|provider| provider.provider == "gemini" && provider.has_key),
         default_llm_provider_id: config.providers.default_llm_provider_id,
+        default_llm_model_id: config.providers.default_llm_model_id,
         default_embedding_provider_id: config.providers.default_embedding_provider_id,
+        default_embedding_model_id: config.providers.default_embedding_model_id,
         default_reranker_provider_id: config.providers.default_reranker_provider_id,
+        default_reranker_model_id: config.providers.default_reranker_model_id,
         default_search_provider_id: config.providers.default_search_provider_id,
+        default_search_model_id: config.providers.default_search_model_id,
         providers,
     })
 }
@@ -8014,6 +8951,16 @@ fn provider_preset_references(
         .collect::<HashSet<_>>();
     let settings = read_node_preset_settings(project_root)?;
     let mut references = Vec::new();
+    for (alias, target) in &settings.model_aliases {
+        if target.provider_id == provider_id {
+            references.push(ProviderRemovalReference {
+                reference_type: "model_alias".to_owned(),
+                owner_id: alias.clone(),
+                node_id: None,
+                model_id: Some(target.model_id.clone()),
+            });
+        }
+    }
     let mut add_reference = |owner_id: String, configured_provider: &str, model_id: &str| {
         let exact_provider = configured_provider.trim() == provider_id;
         let legacy_unique_model = configured_provider.trim().is_empty()
@@ -8136,16 +9083,36 @@ fn collect_workflow_provider_references(
 }
 
 fn clear_provider_defaults(config: &mut ProjectConfig, provider_id: &str) {
-    for configured in [
-        &mut config.providers.default_llm_provider_id,
-        &mut config.providers.default_embedding_provider_id,
-        &mut config.providers.default_reranker_provider_id,
-        &mut config.providers.default_search_provider_id,
-    ] {
-        if configured.as_deref() == Some(provider_id) {
-            *configured = None;
+    fn clear(
+        configured_provider: &mut Option<String>,
+        configured_model: &mut Option<String>,
+        provider_id: &str,
+    ) {
+        if configured_provider.as_deref() == Some(provider_id) {
+            *configured_provider = None;
+            *configured_model = None;
         }
     }
+    clear(
+        &mut config.providers.default_llm_provider_id,
+        &mut config.providers.default_llm_model_id,
+        provider_id,
+    );
+    clear(
+        &mut config.providers.default_embedding_provider_id,
+        &mut config.providers.default_embedding_model_id,
+        provider_id,
+    );
+    clear(
+        &mut config.providers.default_reranker_provider_id,
+        &mut config.providers.default_reranker_model_id,
+        provider_id,
+    );
+    clear(
+        &mut config.providers.default_search_provider_id,
+        &mut config.providers.default_search_model_id,
+        provider_id,
+    );
 }
 
 fn clear_removed_provider_key_status(status: &mut ProviderConfigStatus, provider_id: &str) {
@@ -8222,6 +9189,7 @@ pub fn save_provider_settings_impl(
     let config_store = ConfigStore::new(project_root);
     let mut config = config_store.load_or_create().map_err(error_to_string)?;
     apply_provider_settings_update(&mut config, update)?;
+    config.validate().map_err(error_to_string)?;
     config_store.save(&config).map_err(error_to_string)
 }
 
@@ -8259,12 +9227,173 @@ fn restore_provider_secret(
     }
 }
 
+/// U109：检索能力开关一旦从关变开，其默认 Provider 路由必须当场可解析。
+/// 保存边界拒绝，用户就能在设置页立刻定位问题，而不是等到运行工作流才失败。
+fn ensure_enabled_retrieval_routes_resolvable(
+    current: &ProjectConfig,
+    next: &RagConfig,
+) -> CommandResult<()> {
+    let providers = &current.providers;
+    if next.reranker_enabled && !current.rag.reranker_enabled {
+        providers
+            .ensure_capability_route_resolvable(
+                "reranker",
+                providers.default_reranker_provider_id.as_deref(),
+                providers.default_reranker_model_id.as_deref(),
+                ProviderCapability::Reranker,
+            )
+            .map_err(error_to_string)?;
+    }
+    if next.vector_store.enabled && !current.rag.vector_store.enabled {
+        providers
+            .ensure_capability_route_resolvable(
+                "embedding",
+                providers.default_embedding_provider_id.as_deref(),
+                providers.default_embedding_model_id.as_deref(),
+                ProviderCapability::Embedding,
+            )
+            .map_err(error_to_string)?;
+    }
+    Ok(())
+}
+
+fn ensure_no_external_qdrant_credential_input(settings: &RagSettings) -> CommandResult<()> {
+    if settings.qdrant_api_key.is_some() || settings.clear_qdrant_api_key {
+        return Err(CommandError::validation(
+            "external qdrant credentials require the application secret store",
+        ));
+    }
+    Ok(())
+}
+
+fn has_external_qdrant_api_key(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    rag: &RagConfig,
+) -> CommandResult<bool> {
+    if rag.vector_store.backend != VectorStoreBackend::ExternalQdrant
+        || rag.vector_store.sidecar.auth_mode != QdrantAuthMode::ApiKey
+    {
+        return Ok(false);
+    }
+    let endpoint = external_qdrant_endpoint(&rag.vector_store.sidecar).map_err(error_to_string)?;
+    let credentials =
+        ProjectCredentialScope::new(project_root, secrets).map_err(error_to_string)?;
+    credentials
+        .get_external_qdrant_secret(&endpoint)
+        .map(|secret| secret.is_some())
+        .map_err(error_to_string)
+}
+
+/// 在候选运行时创建前准备端点凭据；返回值用于提交失败后的精确恢复。
+fn prepare_external_qdrant_credential_mutation(
+    credentials: &ProjectCredentialScope<'_>,
+    rag: &RagConfig,
+    qdrant_api_key: Option<String>,
+    clear_qdrant_api_key: bool,
+) -> CommandResult<Option<(String, Option<SecretValue>)>> {
+    if qdrant_api_key.is_some() && clear_qdrant_api_key {
+        return Err(CommandError::validation(
+            "external qdrant API key cannot be replaced and removed in one request",
+        )
+        .with_context("qdrant_api_key", "retrieval", "replace_credential"));
+    }
+    if rag.vector_store.backend != VectorStoreBackend::ExternalQdrant {
+        if qdrant_api_key.is_some() || clear_qdrant_api_key {
+            return Err(CommandError::validation(
+                "external qdrant credentials require the external qdrant backend",
+            )
+            .with_context("vector_backend", "retrieval", "edit_field"));
+        }
+        return Ok(None);
+    }
+
+    let endpoint = external_qdrant_endpoint(&rag.vector_store.sidecar).map_err(|error| {
+        error_to_string(error).with_context("qdrant_host", "retrieval", "edit_field")
+    })?;
+    let previous = credentials
+        .get_external_qdrant_secret(&endpoint)
+        .map_err(error_to_string)?;
+    let mut mutation = None;
+
+    if let Some(api_key) = qdrant_api_key {
+        if rag.vector_store.sidecar.auth_mode != QdrantAuthMode::ApiKey {
+            return Err(CommandError::validation(
+                "external qdrant API key requires API key authentication mode",
+            )
+            .with_context("qdrant_auth_mode", "retrieval", "edit_field"));
+        }
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err(
+                CommandError::validation("external qdrant API key cannot be empty").with_context(
+                    "qdrant_api_key",
+                    "retrieval",
+                    "replace_credential",
+                ),
+            );
+        }
+        credentials
+            .set_external_qdrant_secret(&endpoint, SecretValue::new(api_key))
+            .map_err(error_to_string)?;
+        mutation = Some((endpoint.clone(), previous.clone()));
+    } else if clear_qdrant_api_key {
+        if rag.vector_store.sidecar.auth_mode == QdrantAuthMode::ApiKey {
+            return Err(CommandError::validation(
+                "external qdrant API key cannot be removed while API key authentication is enabled",
+            )
+            .with_context("qdrant_auth_mode", "retrieval", "edit_field"));
+        }
+        if previous.is_some() {
+            credentials
+                .delete_external_qdrant_secret(&endpoint)
+                .map_err(error_to_string)?;
+            mutation = Some((endpoint.clone(), previous.clone()));
+        }
+    }
+
+    if rag.vector_store.sidecar.auth_mode == QdrantAuthMode::ApiKey
+        && credentials
+            .get_external_qdrant_secret(&endpoint)
+            .map_err(error_to_string)?
+            .is_none()
+    {
+        return Err(CommandError::validation(
+            "external qdrant API key is not configured for this endpoint",
+        )
+        .with_context("qdrant_api_key", "retrieval", "replace_credential"));
+    }
+    Ok(mutation)
+}
+
+fn restore_external_qdrant_secret(
+    credentials: &ProjectCredentialScope<'_>,
+    endpoint: &str,
+    previous: Option<SecretValue>,
+) -> CommandResult<()> {
+    match previous {
+        Some(secret) => credentials
+            .set_external_qdrant_secret(endpoint, secret)
+            .map_err(error_to_string),
+        None => credentials
+            .delete_external_qdrant_secret(endpoint)
+            .map_err(error_to_string),
+    }
+}
+
 fn apply_provider_settings_update(
     config: &mut ProjectConfig,
     update: ProviderSettingsUpdate,
 ) -> CommandResult<()> {
     let provider_config = provider_config_from_update(&update)?;
     let provider_id = provider_config.provider_id.clone();
+    // U107：LLM 默认路由与运行时 `select_llm_model` 一样先取 Llm、再回落 ToolUse，
+    // 否则只有 tool_use 模型的 Provider 勾选「设为默认 LLM」会留下空的默认模型。
+    let default_llm_model = first_model_id(&provider_config, ProviderCapability::Llm)
+        .or_else(|| first_model_id(&provider_config, ProviderCapability::ToolUse));
+    let default_embedding_model = first_model_id(&provider_config, ProviderCapability::Embedding);
+    let default_reranker_model = first_model_id(&provider_config, ProviderCapability::Reranker);
+    let default_search_model = first_model_id(&provider_config, ProviderCapability::Search);
     if let Some(index) = config
         .providers
         .providers
@@ -8281,40 +9410,106 @@ fn apply_provider_settings_update(
         .insert(provider_id.clone());
     apply_provider_default_choice(
         &mut config.providers.default_llm_provider_id,
+        &mut config.providers.default_llm_model_id,
         &provider_id,
+        default_llm_model,
         update.make_default_llm,
     );
     apply_provider_default_choice(
         &mut config.providers.default_embedding_provider_id,
+        &mut config.providers.default_embedding_model_id,
         &provider_id,
+        default_embedding_model,
         update.make_default_embedding,
     );
     apply_provider_default_choice(
         &mut config.providers.default_reranker_provider_id,
+        &mut config.providers.default_reranker_model_id,
         &provider_id,
+        default_reranker_model,
         update.make_default_reranker,
     );
     apply_provider_default_choice(
         &mut config.providers.default_search_provider_id,
+        &mut config.providers.default_search_model_id,
         &provider_id,
+        default_search_model,
         update.make_default_search,
     );
-    config.validate().map_err(error_to_string)
+    Ok(())
+}
+
+fn apply_provider_default_model_routes(
+    config: &mut ProjectConfig,
+    routes: ProviderDefaultModelRoutes,
+) -> CommandResult<()> {
+    fn apply(
+        provider_id: &mut Option<String>,
+        model_id: &mut Option<String>,
+        target: Option<ModelAliasTarget>,
+    ) {
+        if let Some(target) = target {
+            *provider_id = Some(target.provider_id);
+            *model_id = Some(target.model_id);
+        } else {
+            *provider_id = None;
+            *model_id = None;
+        }
+    }
+
+    apply(
+        &mut config.providers.default_llm_provider_id,
+        &mut config.providers.default_llm_model_id,
+        routes.llm,
+    );
+    apply(
+        &mut config.providers.default_embedding_provider_id,
+        &mut config.providers.default_embedding_model_id,
+        routes.embedding,
+    );
+    apply(
+        &mut config.providers.default_reranker_provider_id,
+        &mut config.providers.default_reranker_model_id,
+        routes.reranker,
+    );
+    apply(
+        &mut config.providers.default_search_provider_id,
+        &mut config.providers.default_search_model_id,
+        routes.search,
+    );
+    Ok(())
 }
 
 fn apply_provider_default_choice(
     configured: &mut Option<String>,
+    configured_model: &mut Option<String>,
     provider_id: &str,
+    model_id: Option<String>,
     selected: bool,
 ) {
     if selected {
         *configured = Some(provider_id.to_owned());
+        *configured_model = model_id;
     } else if configured.as_deref() == Some(provider_id) {
         *configured = None;
+        *configured_model = None;
     }
 }
 
+fn first_model_id(provider: &ProviderConfig, capability: ProviderCapability) -> Option<String> {
+    provider
+        .models
+        .iter()
+        .find(|model| model.capability == capability)
+        .map(|model| model.model_id.clone())
+}
+
 fn provider_config_from_update(update: &ProviderSettingsUpdate) -> CommandResult<ProviderConfig> {
+    if matches!(update.provider_type, ProviderType::Other) {
+        return Err(CommandError::validation(
+            "provider_type other is retained for legacy migration only and cannot be saved",
+        ));
+    }
     let provider_config = ProviderConfig {
         provider_id: normalize_provider(&update.provider_id)?,
         provider_type: update.provider_type.clone(),
@@ -8343,6 +9538,8 @@ pub fn quick_edit_impl(
         secrets,
         request,
         &crate::contracts::ExecutionCancellation::new(),
+        // 无 state 的直调路径（测试与非桌面入口）不共享缓存，行为与接线前一致。
+        None,
     )
 }
 
@@ -8351,13 +9548,14 @@ pub fn quick_edit_impl_with_cancellation(
     secrets: &dyn SecretStore,
     request: QuickEditRequest,
     cancellation: &crate::contracts::ExecutionCancellation,
+    provider_cache: Option<&LlmProviderCache>,
 ) -> CommandResult<QuickEditResult> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "quick_edit")?;
-    let runtime = llm_runtime(project_root, secrets)?;
+    let runtime = llm_runtime(project_root, secrets, provider_cache)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
     let service = LlmService::new(&ledger, runtime.auto_mode.clone());
-    QuickEditService::new(service, &runtime.provider, runtime.config)
+    QuickEditService::new(service, runtime.provider.as_ref(), runtime.config)
         .quick_edit_with_cancellation(
             &request.selected_text,
             &request.instruction,
@@ -8387,6 +9585,7 @@ pub fn project_ai_chat_impl(
                 "project AI workflow start requires the application runtime",
             ))
         },
+        None,
     )
 }
 
@@ -8422,6 +9621,7 @@ fn project_ai_chat_with_runner(
     retrieval: Arc<ProjectRetrievalRuntime>,
     cancellation: &crate::contracts::ExecutionCancellation,
     workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
+    provider_cache: Option<&LlmProviderCache>,
 ) -> CommandResult<ProjectAiResponse> {
     validate_project_root(project_root)?;
     let _project_mutation = acquire_project_mutation_guard(project_root, "project_ai_chat")?;
@@ -8515,6 +9715,9 @@ fn project_ai_chat_with_runner(
             workflow_id,
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: BTreeMap::new(),
+            // 由项目空间 AI 发起：终态要回报给这个对话，否则 AI 无从得知结果。
+            origin_conversation_id: Some(conversation_id.clone()),
         })?)
     } else {
         None
@@ -8551,6 +9754,7 @@ fn project_ai_chat_with_runner(
         let (answer, tool_workflow_run, context_window) = project_ai_answer(
             project_root,
             secrets,
+            provider_cache,
             &structured_memory,
             &summary_chunks,
             &resolved_references,
@@ -8560,6 +9764,7 @@ fn project_ai_chat_with_runner(
             retrieval.as_ref(),
             cancellation,
             workflow_runner,
+            &conversation_id,
         )?;
         if workflow_run.is_none() {
             workflow_run = tool_workflow_run;
@@ -8814,6 +10019,7 @@ const LIST_START_NODES_TOOL: &str = "list_start_nodes";
 fn project_ai_answer(
     project_root: &Path,
     secrets: &dyn SecretStore,
+    provider_cache: Option<&LlmProviderCache>,
     project_memory: &[ProjectAiMemoryEntry],
     conversation_summaries: &[ProjectAiSummaryChunk],
     references: &[ProjectReference],
@@ -8823,8 +10029,9 @@ fn project_ai_answer(
     retrieval: &ProjectRetrievalRuntime,
     cancellation: &crate::contracts::ExecutionCancellation,
     workflow_runner: &mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
+    conversation_id: &str,
 ) -> CommandResult<(String, Option<WorkflowRunStarted>, ProjectAiContextWindow)> {
-    let runtime = llm_runtime(project_root, secrets)?;
+    let runtime = llm_runtime(project_root, secrets, provider_cache)?;
     let ledger = SqliteCostLedger::open(project_root).map_err(error_to_string)?;
     let service = LlmService::new(&ledger, runtime.auto_mode.clone());
     let context_window = project_ai_context_window(
@@ -8879,7 +10086,7 @@ fn project_ai_answer(
     for round in 0..=max_rounds {
         let report = service
             .complete_basic(
-                &runtime.provider,
+                runtime.provider.as_ref(),
                 LlmRunRequest {
                     config: config.clone(),
                     messages: messages.clone(),
@@ -8923,6 +10130,7 @@ fn project_ai_answer(
                 queried_start_nodes: &mut queried_start_nodes,
                 workflow_runner,
                 tool_workflow_run: &mut tool_workflow_run,
+                origin_conversation_id: conversation_id,
             };
             let output = project_ai_execute_tool_call(
                 call.name.as_str(),
@@ -8960,6 +10168,9 @@ struct ProjectAiToolExecutionState<'a> {
     queried_start_nodes: &'a mut bool,
     workflow_runner: &'a mut dyn FnMut(RunWorkflowRequest) -> CommandResult<WorkflowRunStarted>,
     tool_workflow_run: &'a mut Option<WorkflowRunStarted>,
+    /// 本轮对话 id。AI 通过工具启动工作流时要写进 run state，
+    /// 终态才知道回报给谁。
+    origin_conversation_id: &'a str,
 }
 
 fn project_ai_execute_tool_call(
@@ -9081,11 +10292,16 @@ fn project_ai_execute_tool_call(
         });
     }
 
-    let initial_inputs = workflow_tool_initial_inputs(arguments.clone())?;
+    // 工具参数里 `variables` 这个保留键走变量通道，其余键仍是起始节点端口输入。
+    // 两者不同层：变量是整个 run 的可读写状态，端口输入只喂给起始节点。
+    let (variables, port_arguments) = split_workflow_tool_variables(arguments.clone())?;
+    let initial_inputs = workflow_tool_initial_inputs(port_arguments)?;
     let started = (state.workflow_runner)(RunWorkflowRequest {
         workflow_id: tool.workflow_id.clone(),
         start_node_id: Some(tool.start_node_id.clone()),
         initial_inputs,
+        variables,
+        origin_conversation_id: Some(state.origin_conversation_id.to_owned()),
     })?;
     *state.tool_workflow_run = Some(started.clone());
     Ok(ToolExecutionOutput {
@@ -9391,6 +10607,37 @@ fn empty_tool_input_schema() -> Value {
     })
 }
 
+/// 从工具参数里分出工作流变量与起始节点端口输入。
+///
+/// `variables` 是保留键：它下面的对象是工作流变量初值，其余键仍按端口输入处理。
+/// 分成两层而不是混在一起，是因为二者生命周期不同 —— 变量是整个 run 的可读写
+/// 状态（循环会改写它），端口输入只喂给起始节点一次。
+fn split_workflow_tool_variables(
+    arguments: Value,
+) -> CommandResult<(BTreeMap<String, Value>, Value)> {
+    let Value::Object(mut map) = arguments else {
+        // 非对象形态交给 workflow_tool_initial_inputs 报错，这里不重复判类型。
+        return Ok((BTreeMap::new(), arguments));
+    };
+
+    let Some(raw) = map.remove("variables") else {
+        return Ok((BTreeMap::new(), Value::Object(map)));
+    };
+
+    let variables = match raw {
+        Value::Object(values) => values.into_iter().collect(),
+        Value::Null => BTreeMap::new(),
+        other => {
+            return Err(CommandError::validation(format!(
+                "workflow tool `variables` must be a JSON object, got {}",
+                json_value_kind(&other)
+            )))
+        }
+    };
+
+    Ok((variables, Value::Object(map)))
+}
+
 fn workflow_tool_initial_inputs(arguments: Value) -> CommandResult<BTreeMap<String, Value>> {
     match arguments {
         Value::Object(map) => Ok(map.into_iter().collect()),
@@ -9611,12 +10858,17 @@ pub fn recent_project_store(app_state_root: &Path) -> ProjectRegistryStore {
     ProjectRegistryStore::new(app_state_root.join(RECENT_PROJECTS_FILE))
 }
 
-fn record_current_project(
+fn record_current_project_replacing(
     app_state_root: &Path,
     current: &CurrentProjectStatus,
+    replaced_project_root: Option<&Path>,
 ) -> CommandResult<Vec<RecentProjectEntry>> {
     recent_project_store(app_state_root)
-        .record_opened(current.project_name.clone(), current.project_root.clone())
+        .record_opened_replacing(
+            current.project_name.clone(),
+            current.project_root.clone(),
+            replaced_project_root,
+        )
         .map_err(error_to_string)
 }
 
@@ -9863,19 +11115,14 @@ fn read_app_node_defaults_unlocked(
 fn write_node_preset_settings(
     project_root: &Path,
     app_state_root: &Path,
-    settings: &NodePresetSettings,
+    settings: &mut NodePresetSettings,
 ) -> CommandResult<()> {
     validate_project_root(project_root)?;
     let configured_models = configured_models_for_presets(project_root)?;
-    for preset in &settings.presets {
+    validate_and_normalize_model_aliases(&configured_models, &mut settings.model_aliases)?;
+    for preset in &mut settings.presets {
         if preset.node_type.trim().is_empty() {
             return Err(CommandError::validation("node_type cannot be empty"));
-        }
-        if preset.model_id.trim().is_empty() {
-            return Err(CommandError::validation(format!(
-                "model_id cannot be empty for node_type {}",
-                preset.node_type
-            )));
         }
         if preset.timeout_ms == 0 {
             return Err(CommandError::validation(format!(
@@ -9884,20 +11131,21 @@ fn write_node_preset_settings(
             )));
         }
         validate_money("budget_usd", preset.budget_usd)?;
-        ensure_preset_model_is_configured(
+        normalize_model_reference(
             &configured_models,
-            &preset.provider_id,
-            &preset.model_id,
+            &settings.model_aliases,
+            &mut preset.model_alias,
+            &mut preset.provider_id,
+            &mut preset.model_id,
             &format!("preset {}", preset.node_type),
         )?;
     }
-    if settings.default_model_id.trim().is_empty() {
-        return Err(CommandError::validation("default_model_id cannot be empty"));
-    }
-    ensure_preset_model_is_configured(
+    normalize_model_reference(
         &configured_models,
-        &settings.default_provider_id,
-        &settings.default_model_id,
+        &settings.model_aliases,
+        &mut settings.default_model_alias,
+        &mut settings.default_provider_id,
+        &mut settings.default_model_id,
         "default_model_id",
     )?;
     if settings.default_timeout_ms == 0 {
@@ -9954,12 +11202,19 @@ fn configured_models_for_presets(
         .providers
         .providers
         .into_iter()
+        .filter(|provider| provider.enabled)
         .map(|provider| {
             (
                 provider.provider_id,
                 provider
                     .models
                     .into_iter()
+                    .filter(|model| {
+                        matches!(
+                            model.capability,
+                            ProviderCapability::Llm | ProviderCapability::ToolUse
+                        )
+                    })
                     .map(|model| model.model_id)
                     .collect(),
             )
@@ -9972,9 +11227,9 @@ fn ensure_preset_model_is_configured(
     provider_id: &str,
     model_id: &str,
     field: &str,
-) -> CommandResult<()> {
+) -> CommandResult<Option<String>> {
     if configured_models.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let provider_id = provider_id.trim();
     let model_id = model_id.trim();
@@ -9985,7 +11240,7 @@ fn ensure_preset_model_is_configured(
             ))
         })?;
         if models.contains(model_id) {
-            return Ok(());
+            return Ok(Some(provider_id.to_owned()));
         }
         return Err(CommandError::validation(format!(
             "{field} references a model that is not configured for Provider {provider_id}: {model_id}"
@@ -9998,7 +11253,7 @@ fn ensure_preset_model_is_configured(
         .map(|(provider, _)| provider.as_str())
         .collect::<Vec<_>>();
     if matches.len() == 1 {
-        return Ok(());
+        return Ok(Some(matches[0].to_owned()));
     }
     if matches.len() > 1 {
         return Err(CommandError::validation(format!(
@@ -10008,6 +11263,162 @@ fn ensure_preset_model_is_configured(
     Err(CommandError::validation(format!(
         "{field} references a model that is not configured in model settings: {model_id}"
     )))
+}
+
+const FIXED_MODEL_ALIAS_IDS: [&str; 3] = ["planning", "writing", "review"];
+
+fn is_fixed_model_alias(alias: &str) -> bool {
+    FIXED_MODEL_ALIAS_IDS.contains(&alias)
+}
+
+fn validate_model_alias_map_shape(
+    model_aliases: &BTreeMap<String, ModelAliasTarget>,
+) -> CommandResult<()> {
+    for (alias, target) in model_aliases {
+        if !is_fixed_model_alias(alias) {
+            return Err(CommandError::validation(format!(
+                "unsupported model alias: {alias}"
+            )));
+        }
+        if alias.trim() != alias
+            || target.provider_id.trim().is_empty()
+            || target.model_id.trim().is_empty()
+        {
+            return Err(CommandError::validation(format!(
+                "model alias {alias} must reference a provider and model"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_model_reference_shape(
+    model_alias: Option<&str>,
+    provider_id: &str,
+    model_id: &str,
+    field: &str,
+) -> CommandResult<()> {
+    match model_alias {
+        Some(alias) if alias.trim().is_empty() || !is_fixed_model_alias(alias) => Err(
+            CommandError::validation(format!("{field} references an unsupported model alias")),
+        ),
+        Some(_) if !provider_id.trim().is_empty() || !model_id.trim().is_empty() => {
+            Err(CommandError::validation(format!(
+                "{field} cannot reference a model alias and a concrete model at the same time"
+            )))
+        }
+        Some(_) => Ok(()),
+        None if model_id.trim().is_empty() => Err(CommandError::validation(format!(
+            "{field} model id cannot be empty"
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn validate_alias_reference(
+    model_aliases: &BTreeMap<String, ModelAliasTarget>,
+    model_alias: Option<&str>,
+    field: &str,
+) -> CommandResult<()> {
+    if let Some(alias) = model_alias {
+        if !model_aliases.contains_key(alias) {
+            return Err(CommandError::validation(format!(
+                "{field} references an unconfigured model alias: {alias}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_and_normalize_model_aliases(
+    configured_models: &BTreeMap<String, HashSet<String>>,
+    model_aliases: &mut BTreeMap<String, ModelAliasTarget>,
+) -> CommandResult<()> {
+    validate_model_alias_map_shape(model_aliases)?;
+    if !model_aliases.is_empty() && configured_models.is_empty() {
+        return Err(CommandError::validation(
+            "model aliases require at least one enabled LLM-capable provider model",
+        ));
+    }
+    for (alias, target) in model_aliases {
+        let provider_id = target.provider_id.trim().to_owned();
+        let model_id = target.model_id.trim().to_owned();
+        let configured_provider = ensure_preset_model_is_configured(
+            configured_models,
+            &provider_id,
+            &model_id,
+            &format!("model alias {alias}"),
+        )?
+        .ok_or_else(|| {
+            CommandError::validation(format!(
+                "model alias {alias} requires an enabled LLM-capable provider model"
+            ))
+        })?;
+        target.provider_id = configured_provider;
+        target.model_id = model_id;
+    }
+    Ok(())
+}
+
+fn normalize_model_reference(
+    configured_models: &BTreeMap<String, HashSet<String>>,
+    model_aliases: &BTreeMap<String, ModelAliasTarget>,
+    model_alias: &mut Option<String>,
+    provider_id: &mut String,
+    model_id: &mut String,
+    field: &str,
+) -> CommandResult<()> {
+    if let Some(alias) = model_alias.as_deref() {
+        validate_model_reference_shape(Some(alias), provider_id, model_id, field)?;
+        validate_alias_reference(model_aliases, Some(alias), field)?;
+        *model_alias = Some(alias.trim().to_owned());
+        provider_id.clear();
+        model_id.clear();
+        return Ok(());
+    }
+
+    validate_model_reference_shape(None, provider_id, model_id, field)?;
+    let normalized_model_id = model_id.trim().to_owned();
+    let configured_provider = ensure_preset_model_is_configured(
+        configured_models,
+        provider_id,
+        &normalized_model_id,
+        field,
+    )?;
+    if provider_id.trim().is_empty() {
+        if let Some(provider) = configured_provider {
+            *provider_id = provider;
+        }
+    } else {
+        *provider_id = provider_id.trim().to_owned();
+    }
+    *model_id = normalized_model_id;
+    Ok(())
+}
+
+fn resolve_model_reference<'a>(
+    model_aliases: &'a BTreeMap<String, ModelAliasTarget>,
+    model_alias: Option<&str>,
+    provider_id: &'a str,
+    model_id: &'a str,
+    field: &str,
+) -> CommandResult<(Option<&'a str>, Option<&'a str>)> {
+    validate_model_reference_shape(model_alias, provider_id, model_id, field)?;
+    if let Some(alias) = model_alias {
+        let target = model_aliases.get(alias).ok_or_else(|| {
+            CommandError::validation(format!(
+                "{field} references an unconfigured model alias: {alias}"
+            ))
+        })?;
+        return Ok((
+            Some(target.provider_id.trim()),
+            Some(target.model_id.trim()),
+        ));
+    }
+    Ok((
+        (!provider_id.trim().is_empty()).then_some(provider_id.trim()),
+        Some(model_id.trim()),
+    ))
 }
 
 fn default_node_preset_model_id() -> String {
@@ -10024,6 +11435,7 @@ fn default_node_type_presets() -> Vec<NodeTypePreset> {
         .map(|entry| NodeTypePreset {
             node_type: entry.preset_type.clone(),
             display_name_key: entry.display_name_key.clone(),
+            model_alias: None,
             provider_id: String::new(),
             model_id: default_node_preset_model_id(),
             timeout_ms: default_node_preset_timeout_ms(),
@@ -11078,7 +12490,7 @@ fn validate_template_url(url: &str) -> CommandResult<()> {
 }
 
 struct CommandLlmRuntime {
-    provider: OpenAiCompatibleLlmProvider,
+    provider: Arc<OpenAiCompatibleLlmProvider>,
     config: LlmServiceConfig,
     auto_mode: crate::config::AutoModeConfig,
 }
@@ -11150,13 +12562,55 @@ fn select_web_search_provider(
         })
 }
 
-fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<CommandLlmRuntime> {
+/// U116：按「配置+凭据指纹」取用 LLM provider，未命中则构造并缓存。
+///
+/// 复用是为了省掉重建 `reqwest` 连接池；**正确性由指纹保证**——配置或凭据一变，
+/// 键就变、旧条目自然不再命中，因此调用方不需要在改配置时记得手工失效。
+fn cached_llm_provider(
+    cache: Option<&LlmProviderCache>,
+    provider: &ProviderConfig,
+    api_key: Option<&str>,
+) -> CommandResult<Arc<OpenAiCompatibleLlmProvider>> {
+    let build = || -> CommandResult<Arc<OpenAiCompatibleLlmProvider>> {
+        Ok(Arc::new(
+            OpenAiCompatibleLlmProvider::new(provider.clone(), api_key.map(str::to_owned))
+                .map_err(error_to_string)?,
+        ))
+    };
+    // 没有缓存句柄时（例如直接以 project_root 调用的测试路径）退化为直接构造，
+    // 行为与接线前一致。
+    let Some(cache) = cache else {
+        return build();
+    };
+    let key = ProviderCacheKey::new(provider, api_key).map_err(error_to_string)?;
+    let mut cache = cache
+        .lock()
+        .map_err(|_| CommandError::internal("llm provider cache lock poisoned"))?;
+    if let Some(existing) = cache.get(&key) {
+        return Ok(Arc::clone(existing));
+    }
+    // 同一 provider_id 的旧指纹条目此刻即可丢弃：配置已变，它不会再被命中，
+    // 留着只会让缓存随用户改配置的次数无界增长。
+    cache.retain(|cached, _| cached.provider_id != key.provider_id);
+    let built = build()?;
+    cache.insert(key, Arc::clone(&built));
+    Ok(built)
+}
+
+fn llm_runtime(
+    project_root: &Path,
+    secrets: &dyn SecretStore,
+    provider_cache: Option<&LlmProviderCache>,
+) -> CommandResult<CommandLlmRuntime> {
     validate_project_root(project_root)?;
     let project_config = ConfigStore::new(project_root)
         .load_or_create()
         .map_err(error_to_string)?;
     let provider_config = select_llm_provider(&project_config.providers)?;
-    let model_config = select_llm_model(&provider_config)?;
+    let model_config = select_llm_model(
+        &provider_config,
+        default_llm_model_id_for(&project_config.providers, &provider_config.provider_id),
+    )?;
     if provider_config.api_key.is_some() {
         return Err(CommandError::permission(format!(
             "provider '{}' contains an untrusted project SecretRef; re-enter the credential before LLM use",
@@ -11168,8 +12622,7 @@ fn llm_runtime(project_root: &Path, secrets: &dyn SecretStore) -> CommandResult<
         .get_provider_secret(&provider_config.provider_id)
         .map_err(error_to_string)?
         .map(|value| value.expose_secret().to_owned());
-    let provider = OpenAiCompatibleLlmProvider::new(provider_config.clone(), api_key)
-        .map_err(error_to_string)?;
+    let provider = cached_llm_provider(provider_cache, &provider_config, api_key.as_deref())?;
     let budget_config = read_budget_config(project_root)?;
     let mut config =
         LlmServiceConfig::new(provider_config.provider_id, model_config.model_id.clone())
@@ -11214,11 +12667,49 @@ fn select_llm_provider(
         .ok_or_else(|| CommandError::not_found("no enabled LLM provider is configured"))
 }
 
-fn select_llm_model(provider: &ProviderConfig) -> CommandResult<ModelConfig> {
-    provider
-        .models
-        .iter()
-        .find(|model| model.capability == ProviderCapability::Llm)
+/// 默认模型 id 只对项目默认 LLM Provider 生效；换成别的 Provider 时应回退到它自己的首个 LLM 模型。
+fn default_llm_model_id_for<'a>(
+    providers: &'a crate::config::ProvidersConfig,
+    provider_id: &str,
+) -> Option<&'a str> {
+    providers
+        .default_llm_provider_id
+        .as_deref()
+        .filter(|default_provider| *default_provider == provider_id)
+        .and_then(|_| providers.default_llm_model_id.as_deref())
+}
+
+fn select_llm_model(
+    provider: &ProviderConfig,
+    configured_model_id: Option<&str>,
+) -> CommandResult<ModelConfig> {
+    let configured = configured_model_id
+        .map(|model_id| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.model_id == model_id)
+                .filter(|model| {
+                    matches!(
+                        model.capability,
+                        ProviderCapability::Llm | ProviderCapability::ToolUse
+                    )
+                })
+                .ok_or_else(|| {
+                    CommandError::not_found(format!(
+                        "default LLM model is missing or not LLM-capable: {}/{}",
+                        provider.provider_id, model_id
+                    ))
+                })
+        })
+        .transpose()?;
+    configured
+        .or_else(|| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.capability == ProviderCapability::Llm)
+        })
         .or_else(|| {
             provider
                 .models
@@ -11286,6 +12777,23 @@ fn document_service(project_root: &Path) -> FileDocumentService {
     )
 }
 
+/// 项目文档服务，额外允许读取一个项目外目录。
+///
+/// 只给导入源稿用：作者在文件选择器里挑了项目外的稿子，读取它必须有可读根。
+/// 刻意只加**只读**根、且只加这一次用到的那个目录 —— 不动 `writable_file_roots`，
+/// 也不把默认沙箱改宽，免得别的路径顺带获得项目外读权限。
+fn document_service_with_extra_readable_root(
+    project_root: &Path,
+    readable_root: PathBuf,
+) -> FileDocumentService {
+    let artifact_root = project_root.join(".runtime").join("artifacts");
+    let mut permissions = project_document_permission(project_root);
+    permissions.readable_file_roots.push(artifact_root.clone());
+    permissions.writable_file_roots.push(artifact_root.clone());
+    permissions.readable_file_roots.push(readable_root);
+    FileDocumentService::new(permissions, artifact_root)
+}
+
 fn configured_document_service(project_root: &Path) -> CommandResult<FileDocumentService> {
     let layout = project_layout(project_root)?;
     layout
@@ -11296,6 +12804,245 @@ fn configured_document_service(project_root: &Path) -> CommandResult<FileDocumen
         project_root.join(".runtime").join("artifacts"),
         Some(layout.exports),
     ))
+}
+
+/// U108：写作节点单次执行所需的运行期上下文。
+///
+/// 持有正文的 owned 副本，`document_context()` 再借出给 `WritingToolExecutor`——
+/// 因为后者的 `WriterDocumentContext` 借用 `&str`，正文必须活得比它久。
+struct WorkflowWritingContext {
+    agent: crate::rag::models::WritingAgentKind,
+    knowledge: crate::rag::MemoryWritingKnowledgeBase,
+    document: Option<WorkflowWritingDocument>,
+    /// U114：上下文装配的归属键，来自节点 config 的 `chapter_id`。
+    /// 未声明时不装配上下文（提示词里若有占位符会 fail-loud）。
+    chapter_id: Option<String>,
+}
+
+struct WorkflowWritingDocument {
+    document_id: String,
+    base_version: String,
+    text: String,
+    scope: crate::rag::tools::WritingDocumentScope,
+    /// U108 阶段 3：节点开始时建立的 patch 会话，行号工具据此累积改动。
+    ///
+    /// 它的 `document_id` 是**绝对**路径，与上面那个相对的 `document_id`
+    /// 刻意不同：`DocumentService::apply_patch` 直接把 patch 的 document_id
+    /// 当文件路径用（`documents/service.rs`），而路径沙箱对相对路径一律拒绝；
+    /// 相对值则是给 LLM 比对工具参数用的（`resolve_line_patch_target`）。
+    patch_session: crate::rag::line_patch::PatchSession,
+}
+
+impl WorkflowWritingContext {
+    /// 借出当前文档上下文；节点未指名文档时返回 None，写入类工具随之不下发。
+    fn document_context(&self) -> Option<crate::rag::tools::WriterDocumentContext<'_>> {
+        self.document
+            .as_ref()
+            .map(|document| crate::rag::tools::WriterDocumentContext {
+                document_id: &document.document_id,
+                base_version: Some(&document.base_version),
+                text: &document.text,
+                scope: document.scope,
+            })
+    }
+}
+
+/// U108：按节点 config 指定的 `document_id` 从磁盘读取正文，并加载写作知识库。
+///
+/// 正文走磁盘而非上游端口，符合项目「引用式数据流」原则——百万字正文不经
+/// workflow 边传递。每次节点执行都重新读取，保证行号 patch 基于最新版本。
+/// U121：把写作节点执行期间累积的知识库变更落盘。
+///
+/// register 类工具（`*-register`）改的是 `load_workflow_writing_context` 交给
+/// executor 的**内存**知识库。若不在节点收尾时保存，用户登记的伏笔、人物关系
+/// 会在节点返回的瞬间消失——工具返回值显示成功，库里什么也没有。
+///
+/// 幂等性与 summarizer 同源：带 `operation_id` + `request_hash` 的回执，
+/// 同一次操作重放时 `save_knowledge_with_operation` 会识别出既有回执并跳过，
+/// 不会把一条注册写成两条。
+fn persist_workflow_writing_knowledge(
+    project_root: &Path,
+    knowledge: &crate::rag::MemoryWritingKnowledgeBase,
+    operation_id: &str,
+    request_hash: &str,
+    output: &crate::workflow::WorkflowNodeExecutionOutput,
+) -> CoreResult<()> {
+    let store = crate::rag::store::SqliteWritingKnowledgeStore::open(project_root)?;
+    store.save_knowledge_with_operation(
+        knowledge,
+        operation_id,
+        request_hash,
+        &serde_json::to_value(output)?,
+        &crate::contracts::ExecutionCancellation::new(),
+    )
+}
+
+/// U126：工作流节点执行前的日预算门禁。
+///
+/// 此前日预算（`budget_usd` → `BudgetLimits::daily_usd`）只在 `llm_runtime()` 里
+/// 生效，而它的调用方仅 `quick_edit_impl` 与 `project_ai_answer`。工作流 LLM 节点
+/// 走 `integration.rs` 的 `executor.complete_llm` **绕过 `LlmService`**，
+/// `ProviderExecutor` 又只记账不判定——于是用户设的「日预算 $5」对主力消费路径
+/// 零约束，一个 50 章的循环工作流能跑到账户欠费。
+///
+/// **`CostQuery` 刻意不带 `run_id`**：日预算是跨运行的当日累计上限。若限定到本次
+/// run，用户连开 N 个工作流即可绕过——每个 run 各自从 0 起算。
+/// （`llm/service.rs` 的 `spent_in_window` 带 `run_id` 是因为那是 quick_edit /
+/// project_ai 的单次会话语境，照抄到这里会留下同样的口子。）
+fn ensure_workflow_daily_budget_allows_call(
+    ledger: &SqliteCostLedger,
+    limits: &crate::costs::BudgetLimits,
+    auto_mode: &crate::config::AutoModeConfig,
+) -> CoreResult<()> {
+    // 未设日预算时 `daily_usd` 为 None，此处无需查账本。
+    if limits.daily_usd.is_none() && auto_mode.preauthorized_budget_usd.is_none() {
+        return Ok(());
+    }
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| CoreError::validation(format!("system time before epoch: {error}")))?
+            .as_millis(),
+    )
+    .map_err(|_| CoreError::validation("timestamp exceeds u64 range"))?;
+    let day_start = crate::costs::start_of_local_day_ms(now_ms);
+    let query = CostQuery {
+        start_ms: Some(day_start),
+        // 见上：绝不能带 run_id。
+        ..CostQuery::default()
+    };
+    let spent_today = ledger.total_cost(&query)?;
+    // 用今日已发生调用的平均成本估算本次；今日还没调用过就退化为 0
+    // （首次调用无从估算，此时只要 spent_today 未超即放行）。
+    let today_calls = ledger.list_costs(&query)?.len();
+    let last_call_cost = (today_calls > 0).then(|| spent_today / today_calls as f64);
+
+    // `evaluate_budget` 判的是「本次调用**之后**会不会超」（内部按
+    // spent_today + requested 比较）。这里拿不到本次调用的真实成本——它由
+    // provider 响应回填——所以用「上一次调用的成本」作为本次的近似。
+    //
+    // 为什么必须给个非零估算：若传 0，判定退化成「已经超了才拦」，
+    // 那么最后一次把额度打穿的调用总是能过去，日预算实际比设定值多花一次。
+    // 宁可保守一点提前拦，也不要让用户在超支之后才收到通知。
+    let projected = last_call_cost.unwrap_or(0.0).max(0.0);
+    let decision = crate::costs::evaluate_budget(
+        limits,
+        auto_mode,
+        crate::costs::BudgetUsage {
+            requested_usd: projected,
+            spent_today_usd: spent_today,
+            spent_this_month_usd: spent_today,
+        },
+    );
+    if decision.action == crate::costs::BudgetAction::Pause {
+        return Err(CoreError::validation(format!(
+            "workflow paused by budget: {} (spent today ${spent_today:.4})",
+            decision
+                .reason
+                .unwrap_or_else(|| "daily budget exhausted".to_owned())
+        )));
+    }
+    Ok(())
+}
+
+fn load_workflow_writing_context(
+    project_root: &Path,
+    document_root: &Path,
+    agent: crate::rag::models::WritingAgentKind,
+    request: &crate::workflow::WorkflowNodeExecutionRequest,
+) -> CoreResult<WorkflowWritingContext> {
+    let store = crate::rag::store::SqliteWritingKnowledgeStore::open(project_root)?;
+    let knowledge = store.load_knowledge()?;
+
+    let config =
+        serde_json::from_value::<crate::workflow::WorkflowLlmNodeConfig>(request.config.clone())?;
+    // U114：章节 id 是上下文装配的归属键（章节概括、伏笔都按它归档）。
+    // 缺省时不装配上下文，节点行为与接线前一致。
+    let chapter_id = config
+        .chapter_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let document_id = config
+        .document_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(document_id) = document_id else {
+        return Ok(WorkflowWritingContext {
+            agent,
+            knowledge,
+            chapter_id,
+            document: None,
+        });
+    };
+
+    // 作用域决定该 agent 能改哪类文件；`WritingToolExecutor` 会用它拒绝越权写入。
+    let scope = writing_document_scope_for_agent(agent).ok_or_else(|| {
+        CoreError::validation(format!(
+            "agent {} does not support line patch tools; remove document_id from the node",
+            agent.node_type()
+        ))
+    })?;
+
+    let path = document_root.join(document_id);
+    crate::contracts::ensure_path_under_root(document_root, &path)?;
+    let documents = document_service_with_artifacts(
+        document_root,
+        project_root.join(".runtime").join("artifacts"),
+        None,
+    );
+    let content = documents.open_document(crate::documents::DocumentReadRequest {
+        path: path.clone(),
+        format: None,
+    })?;
+
+    // U108 阶段 3：节点一开始就建 patch 会话。行号工具的改动累积在这里，
+    // 节点结束时提交成一个最终 patch 随确认项持久化，审批通过后落盘。
+    // 不建会话 = 改动只存在于工具返回值里，节点一结束就没了。
+    //
+    // document_id 用**绝对** path：apply_patch 直接拿它当文件路径，
+    // 相对路径会被路径沙箱拒绝（normalize_absolute_path 对非绝对返回 None）。
+    let patch_session = crate::rag::line_patch::PatchSession::new(
+        path.to_string_lossy().as_ref(),
+        Some(content.metadata.version.clone()),
+        content.content.clone(),
+    )?;
+
+    Ok(WorkflowWritingContext {
+        agent,
+        knowledge,
+        chapter_id,
+        document: Some(WorkflowWritingDocument {
+            document_id: document_id.to_owned(),
+            base_version: content.metadata.version,
+            text: content.content,
+            scope,
+            patch_session,
+        }),
+    })
+}
+
+/// U108：agent → 可写文档作用域，与 `创作总结机制` 中的分工一致。
+/// 只读 agent（detail/critic/prudent/summarizer）没有写入作用域，返回 None。
+fn writing_document_scope_for_agent(
+    agent: crate::rag::models::WritingAgentKind,
+) -> Option<crate::rag::tools::WritingDocumentScope> {
+    use crate::rag::models::WritingAgentKind;
+    use crate::rag::tools::WritingDocumentScope;
+    match agent {
+        WritingAgentKind::Outliner => Some(WritingDocumentScope::GlobalOutline),
+        WritingAgentKind::Designer => Some(WritingDocumentScope::StageOutline),
+        WritingAgentKind::Planner => Some(WritingDocumentScope::ChapterOutline),
+        WritingAgentKind::Writer | WritingAgentKind::Polisher => {
+            Some(WritingDocumentScope::ChapterBody)
+        }
+        WritingAgentKind::Detail
+        | WritingAgentKind::Critic
+        | WritingAgentKind::Prudent
+        | WritingAgentKind::Summarizer => None,
+    }
 }
 
 fn document_service_with_artifacts(
@@ -11392,6 +13139,17 @@ fn scan_tree(project_root: &Path, root: &Path) -> CommandResult<DocumentTreeNode
         kind: DocumentTreeNodeKind::Directory,
         children,
     })
+}
+
+/// U113：读取项目的工作流全局限制。图校验、保存边界与运行前预检共用它，
+/// 保证「设置页改了上限」在这三条路径上同时生效，不会出现预校验放行、保存拒绝的分裂。
+fn project_workflow_limits(
+    project_root: &Path,
+) -> CommandResult<crate::contracts::WorkflowExecutionLimits> {
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    Ok(config.workflow.execution_limits())
 }
 
 fn workflow_path(project_root: &Path, workflow_id: Option<String>) -> CommandResult<PathBuf> {
@@ -12141,6 +13899,23 @@ fn project_path(root: &Path, input: &str) -> CommandResult<PathBuf> {
     project_path_buf(root, Path::new(input))
 }
 
+/// 解析导入源稿路径：允许项目外的绝对路径，相对路径仍按项目根解析。
+///
+/// 与 `project_path_buf` 的区别只在**不要求落在项目内** —— 导入的语义就是
+/// 「把外面的稿子搬进来」。仍然拒绝 `..`：那是路径穿越的形状，
+/// 用绝对路径表达项目外位置更明确，也让审计日志读得懂。
+///
+/// 安全边界：`import_chapter` 只经 IPC 暴露给桌面 UI（由人在文件选择器里挑），
+/// **没有**作为 AI 工具暴露。放开这里不会给模型任意读文件的能力。
+fn import_source_path_buf(root: &Path, input: &Path) -> CommandResult<PathBuf> {
+    ensure_no_parent_traversal(input)?;
+    Ok(if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        root.join(input)
+    })
+}
+
 fn project_path_buf(root: &Path, input: &Path) -> CommandResult<PathBuf> {
     let raw = input;
     let path = if raw.is_absolute() {
@@ -12330,6 +14105,79 @@ fn simple_random_u16() -> u16 {
     }
 }
 
+/// U108 阶段 3：确认项解决后，把已审批的 patch 真正写回磁盘。
+///
+/// 装配逻辑放在这里、判定逻辑放在 `workflow::integration`：后者已经有
+/// `apply_confirmed_patch` 和三道运行态门禁，属同一关注点；这里只负责
+/// 把 DocumentService / GitService / WorkflowRuntime 三样东西凑齐。
+///
+/// 返回**写回后**的运行态。调用方必须改用返回值——`apply_confirmed_patch`
+/// 会在成功后把节点标为 `Applied` 并记下 checkpoint_id，那是内存改动；
+/// 不落库的话下次审批同一确认项会**重复写盘一次**
+/// （判重正是靠 `Applied`，见 `ensure_patch_write_back_can_start`）。
+fn apply_resolved_confirmation_patch(
+    project_root: &Path,
+    store: &SqliteWorkflowRuntimeStore,
+    confirmation_id: &str,
+    runtime_state: crate::workflow::WorkflowRunState,
+) -> CommandResult<crate::workflow::WorkflowRunState> {
+    let mut runtime = crate::workflow::WorkflowRuntime::from_state(runtime_state);
+    let documents = document_service(project_root);
+    let git = git_service_with_cancellation(project_root, runtime.cancellation());
+    // U111：`checkpoint_enabled` 的唯一门控点。此前它在全后端零消费点——
+    // 因为建检查点的唯一入口 `apply_confirmed_patch` 生产零调用者，
+    // 给它加门控等于「为不存在的执行路径装开关」。U108 阶段 3 接通写回后
+    // 这条路径才真实存在，开关也才有东西可关。
+    //
+    // 读不到配置时按**建检查点**处理（与 `WorkflowConfig::default` 一致）：
+    // 检查点是可回滚的安全网，配置异常时宁可多留一条 Git 记录。
+    let checkpoint_enabled = ConfigStore::new(project_root)
+        .load()
+        .map(|config| config.workflow.checkpoint_enabled)
+        .unwrap_or(true);
+    let outcome = crate::workflow::integration::apply_approved_patch_for_confirmation(
+        &mut runtime,
+        &documents,
+        Some(&git),
+        confirmation_id,
+        checkpoint_enabled,
+    );
+
+    match outcome {
+        // 没有 patch 要写（拒绝、产出类确认项、空 patch）：运行态未被改动，原样返回。
+        Ok(None) => Ok(runtime.state),
+        Ok(Some(_)) => {
+            // 写盘成功。必须落库，否则 Applied 标记丢失 → 重复写盘。
+            store
+                .save_state(&mut runtime.state, None)
+                .map_err(error_to_string)?;
+            Ok(runtime.state)
+        }
+        Err(error) => {
+            // 写回失败与 F14-b 的投影失败**不同**：投影是可重建的，patch 写回不是。
+            // 静默吞掉等于用户以为正文写进去了、其实没有。故标记 Failed 并 fail-loud。
+            let node_id = runtime
+                .state
+                .confirmations
+                .get(confirmation_id)
+                .map(|item| item.node_id.clone());
+            if let Some(node_id) = node_id {
+                if runtime
+                    .mark_patch_write_back_state(
+                        &node_id,
+                        crate::workflow::PatchWriteBackState::Failed,
+                    )
+                    .is_ok()
+                {
+                    // 标记本身失败不改变结论：真正要报给用户的是写回失败。
+                    let _ = store.save_state(&mut runtime.state, None);
+                }
+            }
+            Err(error_to_string(error))
+        }
+    }
+}
+
 #[cfg(test)]
 mod permission_and_preset_resolution_tests {
     use super::*;
@@ -12420,6 +14268,7 @@ mod permission_and_preset_resolution_tests {
         let preset = NodeTypePreset {
             node_type: "writer".to_owned(),
             display_name_key: "agent.writer".to_owned(),
+            model_alias: None,
             provider_id: "preset-provider".to_owned(),
             model_id: "preset-model".to_owned(),
             timeout_ms: 456_000,
@@ -12438,6 +14287,7 @@ mod permission_and_preset_resolution_tests {
             config: json!({"prompt_template":"write"}),
             inputs: Default::default(),
             communication_messages: Vec::new(),
+            variables: Default::default(),
             metadata: Value::Null,
             cancellation: Default::default(),
             dispatch_authorization: Default::default(),
@@ -12463,6 +14313,113 @@ mod permission_and_preset_resolution_tests {
         assert_eq!(explicit.config["model_id"], "node-model");
         assert_eq!(explicit.config["timeout_ms"], 12_000);
         assert_eq!(explicit.config["budget_usd"], 0.2);
+    }
+
+    #[test]
+    fn model_alias_routes_are_resolved_at_plan_compile_and_then_frozen() {
+        let project = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(project.path()).unwrap();
+        let provider = |provider_id: &str, model_id: &str| ProviderConfig {
+            provider_id: provider_id.to_owned(),
+            provider_type: ProviderType::Local,
+            display_name: provider_id.to_owned(),
+            enabled: true,
+            base_url: Some("http://127.0.0.1:9".to_owned()),
+            api_key: None,
+            models: vec![ModelConfig {
+                model_id: model_id.to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+        };
+        let mut project_config = ProjectConfig::default();
+        project_config.providers.providers = vec![
+            provider("planning-v1", "plan-model-v1"),
+            provider("planning-v2", "plan-model-v2"),
+        ];
+        project_config.providers.default_llm_provider_id = Some("planning-v1".to_owned());
+        let workflow = WorkflowDefinition {
+            id: WorkflowId::from("alias-route"),
+            name: "Alias route".to_owned(),
+            nodes: vec![NodeInstance {
+                id: NodeId::from("ask"),
+                type_name: "llm".to_owned(),
+                label: None,
+                config: json!({"prompt_template":"plan"}),
+                position: None,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+        };
+        let mut presets = NodePresetSettings {
+            presets: Vec::new(),
+            default_model_alias: Some("planning".to_owned()),
+            default_provider_id: String::new(),
+            default_model_id: String::new(),
+            ..NodePresetSettings::default()
+        };
+        presets.model_aliases.insert(
+            "planning".to_owned(),
+            ModelAliasTarget {
+                provider_id: "planning-v1".to_owned(),
+                model_id: "plan-model-v1".to_owned(),
+            },
+        );
+        let secrets = crate::config::MemorySecretStore::default();
+
+        let first = compile_workflow_llm_execution_plan(
+            project.path(),
+            &secrets,
+            &workflow,
+            &project_config,
+            &presets,
+        )
+        .unwrap();
+        assert_eq!(first.node_routes["ask"].provider_id, "planning-v1");
+        assert_eq!(first.node_routes["ask"].model_id, "plan-model-v1");
+
+        presets.model_aliases.insert(
+            "planning".to_owned(),
+            ModelAliasTarget {
+                provider_id: "planning-v2".to_owned(),
+                model_id: "plan-model-v2".to_owned(),
+            },
+        );
+        let second = compile_workflow_llm_execution_plan(
+            project.path(),
+            &secrets,
+            &workflow,
+            &project_config,
+            &presets,
+        )
+        .unwrap();
+        assert_eq!(second.node_routes["ask"].provider_id, "planning-v2");
+        assert_eq!(second.node_routes["ask"].model_id, "plan-model-v2");
+        assert_eq!(first.node_routes["ask"].provider_id, "planning-v1");
+
+        let explicit_workflow = WorkflowDefinition {
+            nodes: vec![NodeInstance {
+                config: json!({
+                    "provider_id":"planning-v1",
+                    "model_id":"plan-model-v1",
+                    "prompt_template":"explicit"
+                }),
+                ..workflow.nodes[0].clone()
+            }],
+            ..workflow
+        };
+        let explicit = compile_workflow_llm_execution_plan(
+            project.path(),
+            &secrets,
+            &explicit_workflow,
+            &project_config,
+            &presets,
+        )
+        .unwrap();
+        assert_eq!(explicit.node_routes["ask"].provider_id, "planning-v1");
+        assert_eq!(explicit.node_routes["ask"].model_id, "plan-model-v1");
     }
 
     #[test]
@@ -12770,7 +14727,8 @@ mod permission_and_preset_resolution_tests {
         crate::frontend::initialize_project(temp.path()).unwrap();
         let baseline = ConfigStore::new(temp.path()).load().unwrap();
 
-        for capability in [ProviderCapability::Streaming, ProviderCapability::ToolUse] {
+        // Streaming 没有任何路由消费点，也不在设置页能力下拉中，继续按纯特性标记拒绝。
+        for capability in [ProviderCapability::Streaming] {
             let error = save_provider_settings_impl(
                 temp.path(),
                 ProviderSettingsUpdate {
@@ -12795,6 +14753,118 @@ mod permission_and_preset_resolution_tests {
             .expect_err("feature flags must not be persisted as singular model roles");
             assert!(error.diagnostic_text().contains("executable provider role"));
             assert_eq!(ConfigStore::new(temp.path()).load().unwrap(), baseline);
+        }
+    }
+
+    /// U107：`tool_use` 是设置页正式开放的能力选项，保存边界必须接受，
+    /// 且保存后要能真正充当 LLM 默认路由被运行时解析。
+    #[test]
+    fn provider_updates_accept_tool_use_capability_as_llm_route() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::frontend::initialize_project(temp.path()).unwrap();
+
+        save_provider_settings_impl(
+            temp.path(),
+            ProviderSettingsUpdate {
+                provider_id: "tool-use-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Tool Use Provider".to_owned(),
+                enabled: true,
+                base_url: Some("https://example.invalid/v1".to_owned()),
+                models: vec![ModelConfig {
+                    model_id: "tool-use-model".to_owned(),
+                    capability: ProviderCapability::ToolUse,
+                    max_context_tokens: None,
+                    input_cost_per_million_tokens: None,
+                    output_cost_per_million_tokens: None,
+                }],
+                make_default_llm: true,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+        )
+        .expect("tool_use is an executable LLM role and must persist");
+
+        let config = ConfigStore::new(temp.path()).load().unwrap();
+        let provider = config
+            .providers
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "tool_use_provider")
+            .expect("saved provider must be readable back");
+        assert_eq!(provider.models[0].capability, ProviderCapability::ToolUse);
+        assert_eq!(
+            config.providers.default_llm_provider_id.as_deref(),
+            Some("tool_use_provider")
+        );
+        // tool_use 独占的 Provider 也必须钉住真实默认模型，不能留空路由。
+        assert_eq!(
+            config.providers.default_llm_model_id.as_deref(),
+            Some("tool-use-model")
+        );
+        // 默认路由校验与运行时模型解析都必须把 ToolUse 当作合法 LLM 模型。
+        config
+            .providers
+            .validate()
+            .expect("tool_use model must satisfy the default LLM route contract");
+        let model = select_llm_model(provider, config.providers.default_llm_model_id.as_deref())
+            .expect("runtime must resolve a tool_use model for LLM calls");
+        assert_eq!(model.model_id, "tool-use-model");
+
+        // 存量 tool_use 模型不得锁死该 Provider 的后续任何编辑（U107 衍生后果）。
+        save_provider_settings_impl(
+            temp.path(),
+            ProviderSettingsUpdate {
+                provider_id: "tool-use-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Tool Use Provider Renamed".to_owned(),
+                enabled: true,
+                base_url: Some("https://example.invalid/v1".to_owned()),
+                models: provider.models.clone(),
+                make_default_llm: false,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+        )
+        .expect("existing tool_use models must not lock the provider out of later edits");
+    }
+
+    /// U107：保存边界接受的能力集合必须与设置页下拉选项集合逐项一致，
+    /// 防止任一侧新增/删除选项后再次出现「可选但存不下」的漂移。
+    #[test]
+    fn provider_model_role_acceptance_matches_settings_capability_options() {
+        // 与 SettingsPageViewModel.ProviderCapabilityOptions 的 5 个值一一对应。
+        let dropdown = [
+            ProviderCapability::Llm,
+            ProviderCapability::ToolUse,
+            ProviderCapability::Embedding,
+            ProviderCapability::Reranker,
+            ProviderCapability::Search,
+        ];
+        let all = [
+            ProviderCapability::Llm,
+            ProviderCapability::ToolUse,
+            ProviderCapability::Embedding,
+            ProviderCapability::Reranker,
+            ProviderCapability::Search,
+            ProviderCapability::Streaming,
+        ];
+        for capability in all {
+            let model = ModelConfig {
+                model_id: "probe".to_owned(),
+                capability: capability.clone(),
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            };
+            let accepted = model.validate_provider_model_role().is_ok();
+            let offered = dropdown.contains(&capability);
+            assert_eq!(
+                accepted, offered,
+                "capability {capability:?} acceptance ({accepted}) must match settings dropdown membership ({offered})"
+            );
         }
     }
 }

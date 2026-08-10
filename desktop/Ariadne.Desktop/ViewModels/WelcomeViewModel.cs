@@ -75,6 +75,12 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     public string RetryRecentProjectsText => _displayNames.Text("ui.welcome.retry_recent");
 
+    public string RecentProjectActionsText => _displayNames.Text("ui.welcome.recent.actions");
+
+    public string RelocateRecentProjectText => _displayNames.Text("ui.welcome.recent.relocate");
+
+    public string ForgetRecentProjectText => _displayNames.Text("ui.welcome.recent.forget");
+
     public bool CanStartProjectAction => !_isProjectActionRunning;
 
     public bool HasStatusText => !string.IsNullOrWhiteSpace(StatusText);
@@ -134,8 +140,15 @@ public sealed class WelcomeViewModel : ViewModelBase
         OnPropertyChanged(nameof(EmptyRecentHint));
         OnPropertyChanged(nameof(RecentLoadingText));
         OnPropertyChanged(nameof(RetryRecentProjectsText));
+        OnPropertyChanged(nameof(RecentProjectActionsText));
+        OnPropertyChanged(nameof(RelocateRecentProjectText));
+        OnPropertyChanged(nameof(ForgetRecentProjectText));
         OnPropertyChanged(nameof(RecentCountText));
         OnPropertyChanged(nameof(RecentErrorText));
+        foreach (var item in RecentProjects)
+        {
+            item.RefreshLocalizedUi();
+        }
     }
 
     public string StatusText
@@ -205,6 +218,10 @@ public sealed class WelcomeViewModel : ViewModelBase
         OnPropertyChanged(nameof(CanStartProjectAction));
         CreateProjectCommand.NotifyCanExecuteChanged();
         OpenProjectCommand.NotifyCanExecuteChanged();
+        foreach (var item in RecentProjects)
+        {
+            item.NotifyCanExecuteChanged();
+        }
     }
 
     private async Task RefreshRecentProjectsAsync()
@@ -414,7 +431,112 @@ public sealed class WelcomeViewModel : ViewModelBase
 
     private IReadOnlyList<RecentProjectItemViewModel> WrapRecentProjects(IReadOnlyList<RecentProjectEntry> entries)
     {
-        return entries.Select(entry => new RecentProjectItemViewModel(entry, () => _ = OpenProjectRootAsync(entry.ProjectRoot))).ToArray();
+        return entries.Select(entry => new RecentProjectItemViewModel(
+            entry,
+            _displayNames,
+            () => _ = OpenProjectRootAsync(entry.ProjectRoot),
+            () => _ = RelocateRecentProjectAsync(entry),
+            () => _ = ForgetRecentProjectAsync(entry),
+            () => CanStartProjectAction)).ToArray();
+    }
+
+    private async Task RelocateRecentProjectAsync(RecentProjectEntry entry)
+    {
+        if (_isProjectActionRunning)
+        {
+            return;
+        }
+
+        SetProjectActionRunning(true);
+        try
+        {
+            var root = await _pickProjectFolder(
+                _displayNames.Text("ui.welcome.recent.relocate_picker_title")).ConfigureAwait(true);
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                StatusText = _displayNames.Text("ui.common.cancel");
+                return;
+            }
+            if (!ProjectPathHelper.LooksLikeInitializedProject(root))
+            {
+                await ShowNotProjectDialogAsync(root).ConfigureAwait(true);
+                return;
+            }
+
+            var status = await _backend
+                .RelocateRecentProjectAsync(entry.ProjectRoot, root)
+                .ConfigureAwait(true);
+            await RefreshRecentProjectsAsync().ConfigureAwait(true);
+            StatusText = _displayNames.Format(
+                "ui.welcome.recent.relocated",
+                new Dictionary<string, string> { ["path"] = status.ProjectRoot });
+            if (_projectOpened is not null)
+            {
+                await _projectOpened(status).ConfigureAwait(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+        finally
+        {
+            SetProjectActionRunning(false);
+        }
+    }
+
+    private async Task ForgetRecentProjectAsync(RecentProjectEntry entry)
+    {
+        if (_isProjectActionRunning)
+        {
+            return;
+        }
+
+        var dialog = new ConfirmDialogViewModel(
+            _displayNames.Text("ui.welcome.recent.forget_confirm_title"),
+            _displayNames.Format(
+                "ui.welcome.recent.forget_confirm_message",
+                new Dictionary<string, string>
+                {
+                    ["name"] = entry.Name,
+                    ["path"] = entry.ProjectRoot,
+                }),
+            new[]
+            {
+                new DialogButton(_displayNames.Text("ui.welcome.recent.forget"), DialogButtonVariant.Danger, 0),
+                new DialogButton(_displayNames.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
+            })
+        {
+            CancelResultIndex = 1,
+        };
+        if (await DialogService.Current.ConfirmAsync(dialog).ConfigureAwait(true) != 0)
+        {
+            return;
+        }
+
+        SetProjectActionRunning(true);
+        try
+        {
+            var entries = await _backend
+                .ForgetRecentProjectAsync(entry.ProjectRoot)
+                .ConfigureAwait(true);
+            RecentProjects = WrapRecentProjects(entries);
+            NotifyRecentProjectsChanged();
+            SetRecentState(RecentProjects.Count == 0
+                ? RecentProjectsState.Empty
+                : RecentProjectsState.Content);
+            StatusText = _displayNames.Format(
+                "ui.welcome.recent.forgotten",
+                new Dictionary<string, string> { ["name"] = entry.Name });
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+        finally
+        {
+            SetProjectActionRunning(false);
+        }
     }
 
     private async Task ShowTutorialAsync()
@@ -485,19 +607,7 @@ public sealed class WelcomeViewModel : ViewModelBase
         // 最近列表也可能指向已删/未初始化目录，与「打开」共用本地预检
         if (!ProjectPathHelper.LooksLikeInitializedProject(root))
         {
-            await DialogService.Current.ConfirmAsync(new ConfirmDialogViewModel(
-                _displayNames.Text("ui.dialog.open_project.not_project_title"),
-                _displayNames.Format(
-                    "ui.dialog.open_project.not_project_message",
-                    new Dictionary<string, string> { ["path"] = root }),
-                new[]
-                {
-                    new DialogButton(_displayNames.Text("ui.common.close"), DialogButtonVariant.Primary, 0),
-                })
-            {
-                CancelResultIndex = 0,
-            }).ConfigureAwait(true);
-            StatusText = _displayNames.Text("ui.dialog.open_project.not_project_status");
+            await ShowNotProjectDialogAsync(root).ConfigureAwait(true);
             return;
         }
 
@@ -510,25 +620,77 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
     }
 
+    private async Task ShowNotProjectDialogAsync(string root)
+    {
+        await DialogService.Current.ConfirmAsync(new ConfirmDialogViewModel(
+            _displayNames.Text("ui.dialog.open_project.not_project_title"),
+            _displayNames.Format(
+                "ui.dialog.open_project.not_project_message",
+                new Dictionary<string, string> { ["path"] = root }),
+            new[]
+            {
+                new DialogButton(_displayNames.Text("ui.common.close"), DialogButtonVariant.Primary, 0),
+            })
+        {
+            CancelResultIndex = 0,
+        }).ConfigureAwait(true);
+        StatusText = _displayNames.Text("ui.dialog.open_project.not_project_status");
+    }
+
     internal Task RefreshRecentProjectsForTestsAsync() => RefreshRecentProjectsAsync();
 }
 
-public sealed class RecentProjectItemViewModel
+public sealed class RecentProjectItemViewModel : ViewModelBase
 {
-    public RecentProjectItemViewModel(RecentProjectEntry entry, Action open)
+    private readonly DisplayNameService _displayNames;
+    private readonly ulong _lastOpenedMs;
+
+    public RecentProjectItemViewModel(
+        RecentProjectEntry entry,
+        DisplayNameService displayNames,
+        Action open,
+        Action relocate,
+        Action forget,
+        Func<bool> canInteract)
     {
+        _displayNames = displayNames;
+        _lastOpenedMs = entry.LastOpenedMs;
         Name = entry.Name;
         ProjectRoot = entry.ProjectRoot;
-        LastOpenedAt = FormatLastOpened(entry.LastOpenedMs);
-        OpenCommand = new RelayCommand(open);
+        RefreshLocalizedUi();
+        OpenCommand = new RelayCommand(open, canInteract);
+        RelocateCommand = new RelayCommand(relocate, canInteract);
+        ForgetCommand = new RelayCommand(forget, canInteract);
     }
 
     public string Name { get; }
     public string ProjectRoot { get; }
-    public string? LastOpenedAt { get; }
+    public string? LastOpenedText { get; private set; }
+    public bool HasLastOpened => !string.IsNullOrWhiteSpace(LastOpenedText);
     public RelayCommand OpenCommand { get; }
+    public RelayCommand RelocateCommand { get; }
+    public RelayCommand ForgetCommand { get; }
 
-    private static string? FormatLastOpened(ulong lastOpenedMs)
+    internal void NotifyCanExecuteChanged()
+    {
+        OpenCommand.NotifyCanExecuteChanged();
+        RelocateCommand.NotifyCanExecuteChanged();
+        ForgetCommand.NotifyCanExecuteChanged();
+    }
+
+    internal void RefreshLocalizedUi()
+    {
+        var time = FormatLastOpened(_lastOpenedMs, _displayNames.CurrentLanguage);
+        LastOpenedText = time is null
+            ? null
+            : _displayNames.Format(
+                "ui.welcome.recent.last_opened",
+                new Dictionary<string, string> { ["time"] = time });
+        OnPropertyChanged(nameof(LastOpenedText));
+        OnPropertyChanged(nameof(HasLastOpened));
+    }
+
+    private static string? FormatLastOpened(ulong lastOpenedMs, string language)
     {
         if (lastOpenedMs == 0 || lastOpenedMs > long.MaxValue)
         {
@@ -538,7 +700,13 @@ public sealed class RecentProjectItemViewModel
         try
         {
             var dto = DateTimeOffset.FromUnixTimeMilliseconds((long)lastOpenedMs).ToLocalTime();
-            return dto.ToString("g", CultureInfo.CurrentCulture);
+            var culture = language switch
+            {
+                "en" => CultureInfo.GetCultureInfo("en-US"),
+                "ja" => CultureInfo.GetCultureInfo("ja-JP"),
+                _ => CultureInfo.GetCultureInfo("zh-CN"),
+            };
+            return dto.ToString("g", culture);
         }
         catch (ArgumentOutOfRangeException)
         {

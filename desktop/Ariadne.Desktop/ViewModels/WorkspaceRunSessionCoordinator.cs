@@ -59,11 +59,12 @@ internal sealed class WorkspaceRunSessionCoordinator : IDisposable
     public async Task<WorkflowRunStarted> StartAsync(
         string workflowId,
         string? startNodeId,
+        IReadOnlyDictionary<string, object?>? variables = null,
         CancellationToken cancellationToken = default)
     {
         var identityGeneration = _identityGeneration;
         var started = await _backend
-            .RunWorkflowAsync(workflowId, startNodeId, cancellationToken)
+            .RunWorkflowAsync(workflowId, startNodeId, variables, cancellationToken)
             .ConfigureAwait(true);
         if (identityGeneration != _identityGeneration)
         {

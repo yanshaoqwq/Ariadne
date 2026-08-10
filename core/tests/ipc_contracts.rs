@@ -8,7 +8,8 @@ use ariadne::commands::{
     WorkflowGraphData,
 };
 use ariadne::config::{
-    ConfigStore, MemorySecretStore, ProviderConfig, SecretRef, PROVIDERS_CONFIG_FILE,
+    ConfigStore, MemorySecretStore, ProviderConfig, QdrantAuthMode, SecretRef, VectorStoreBackend,
+    PROVIDERS_CONFIG_FILE,
 };
 use ariadne::contracts::{
     NodeId, PermissionPolicy, ProviderType, RunId, RunStatus, WorkflowEdgeKind, WorkflowId,
@@ -142,6 +143,48 @@ fn ipc_project_lifecycle_creates_enters_and_closes_a_complete_project() {
     );
     assert!(status.ok, "{:?}", status.error);
     assert_eq!(status.data.unwrap()["current_project"]["project_root"], "");
+}
+
+#[test]
+fn ipc_recent_project_forget_and_relocate_are_explicit_registry_operations() {
+    let app_state = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(first.path()).unwrap();
+    ariadne::frontend::initialize_project(second.path()).unwrap();
+    let state = AriadneAppState::new("", app_state.path(), Arc::new(MemorySecretStore::default()));
+
+    let opened = handle_request(
+        &state,
+        IpcRequest {
+            method: "open_project".to_owned(),
+            params: json!({ "project_root": first.path() }),
+        },
+    );
+    assert!(opened.ok, "{:?}", opened.error);
+    let first_root = first.path().canonicalize().unwrap();
+
+    let relocated = handle_request(
+        &state,
+        IpcRequest {
+            method: "relocate_recent_project".to_owned(),
+            params: json!({
+                "previous_project_root": first_root,
+                "project_root": second.path(),
+            }),
+        },
+    );
+    assert!(relocated.ok, "{:?}", relocated.error);
+
+    let forgotten = handle_request(
+        &state,
+        IpcRequest {
+            method: "forget_recent_project".to_owned(),
+            params: json!({ "project_root": second.path().canonicalize().unwrap() }),
+        },
+    );
+    assert!(forgotten.ok, "{:?}", forgotten.error);
+    assert!(forgotten.data.unwrap().as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -1241,6 +1284,50 @@ fn ipc_error_response_includes_stable_error_code() {
 }
 
 #[test]
+fn ipc_settings_error_preserves_field_recovery_and_correlation_context() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let mut config = ConfigStore::new(project.path()).load_or_create().unwrap();
+    config.rag.vector_store.backend = VectorStoreBackend::ExternalQdrant;
+    config.rag.vector_store.sidecar.host = "qdrant.example".to_owned();
+    config.rag.vector_store.sidecar.auth_mode = QdrantAuthMode::ApiKey;
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "save_rag_settings".to_owned(),
+            params: json!({
+                "settings": {
+                    "rag": config.rag,
+                    "qdrant_api_key": null,
+                    "clear_qdrant_api_key": false,
+                    "has_qdrant_api_key": false
+                }
+            }),
+        },
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error_code.as_deref(), Some("validation"));
+    assert_eq!(response.error_field.as_deref(), Some("qdrant_api_key"));
+    assert_eq!(response.error_section.as_deref(), Some("retrieval"));
+    assert_eq!(
+        response.recovery_action.as_deref(),
+        Some("replace_credential")
+    );
+    assert!(response
+        .correlation_id
+        .as_deref()
+        .is_some_and(|value| value.starts_with("err-")));
+}
+
+#[test]
 fn ipc_save_workflow_requires_expected_revision_for_overwrite() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
@@ -1340,4 +1427,159 @@ fn ipc_error_includes_error_key_from_structured_path() {
         .error_key
         .as_ref()
         .is_some_and(|k| k.starts_with("ui.error.")));
+}
+
+/// U118：无系统钥匙链时，保存 Provider 密钥的**完整出路必须真实可达**。
+///
+/// 原缺陷不在「保存失败」本身，而在失败信息指向一个**产品里不存在**的操作：
+/// 它让用户去「设置本地主密码」，而当时 IPC 零命令、UI 零入口、文案零条目。
+/// GUI 用户照着提示做只会撞墙，等于所有需要 API Key 的功能全部不可用。
+///
+/// 所以这条用例走**真实 IPC 派发**：只有命令在派发表里可达，修复才算数。
+/// 单测直接调函数是证明不了这一点的——那正是缺陷能长期存在的原因。
+#[test]
+fn ipc_exposes_a_reachable_way_out_when_keychain_is_unavailable() {
+    let parent = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let project_root = parent.path().join("u118-project");
+    // 用本地文件 store 且不给主密码：等价于 Linux 无 Secret Service 的处境。
+    let secrets = Arc::new(ariadne::config::LocalFileSecretStore::new(
+        app_state.path().join("secrets.json"),
+    ));
+    let state = AriadneAppState::new("", app_state.path(), secrets);
+
+    let created = handle_request(
+        &state,
+        IpcRequest {
+            method: "create_project".to_owned(),
+            params: json!({ "project_root": project_root.to_string_lossy(), "name": "U118" }),
+        },
+    );
+    assert!(created.ok, "{:?}", created.error);
+
+    // 1) 状态可查，且明确告知需要处置——UI 据此才知道要弹窗。
+    let status = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_secret_protection".to_owned(),
+            params: Value::Null,
+        },
+    );
+    assert!(status.ok, "{:?}", status.error);
+    let status = status.data.unwrap();
+    assert_eq!(status["status"], "locked");
+    assert_eq!(status["requires_setup"], true);
+
+    // 2) 出路一：设主密码。命令必须在派发表里真实可达。
+    let unlocked = handle_request(
+        &state,
+        IpcRequest {
+            method: "set_local_secret_master_password".to_owned(),
+            params: json!({ "master_password": "u118-master" }),
+        },
+    );
+    assert!(
+        unlocked.ok,
+        "U118：set_local_secret_master_password 不可达，错误信息仍指向不存在的操作：{:?}",
+        unlocked.error
+    );
+    assert_eq!(unlocked.data.unwrap()["status"], "encrypted");
+
+    // 3) 解锁后保存密钥应当成功——这才是用户真正想做的事。
+    //    save_provider_key 要求 provider 已配置，先建一个。
+    let configured = handle_request(
+        &state,
+        IpcRequest {
+            method: "save_provider_settings".to_owned(),
+            params: json!({
+                "update": {
+                    "provider_id": "openai",
+                    "provider_type": "open_ai_compatible",
+                    "display_name": "OpenAI",
+                    "enabled": true,
+                    "base_url": "https://api.openai.com/v1",
+                    "models": [{
+                        "model_id": "gpt-4.1-mini",
+                        "capability": "llm"
+                    }],
+                    "make_default_llm": true,
+                    "make_default_embedding": false,
+                    "make_default_reranker": false,
+                    "make_default_search": false
+                }
+            }),
+        },
+    );
+    assert!(configured.ok, "{:?}", configured.error);
+
+    let saved = handle_request(
+        &state,
+        IpcRequest {
+            method: "save_provider_key".to_owned(),
+            params: json!({ "provider": "openai", "key": "sk-u118" }),
+        },
+    );
+    assert!(saved.ok, "解锁后保存 Provider 密钥应当成功：{:?}", saved.error);
+
+    // 4) 凭据必须以密文落盘，明文不得出现在文件里。
+    let secrets_file = std::fs::read_to_string(app_state.path().join("secrets.json")).unwrap();
+    assert!(
+        !secrets_file.contains("sk-u118"),
+        "设了主密码后凭据仍以明文落盘"
+    );
+}
+
+/// U118：明文模式必须是**显式选择**，且选择后在诊断里持续可见。
+///
+/// 用户当时点头同意了明文，但三个月后未必记得自己的 API Key 正躺在磁盘上。
+/// 诊断面板是「这台机器现在处于什么状态」的唯一常驻答案，所以明文必须报
+/// `degraded` 而非 `healthy`——否则「同意过」就成了一次性的、再也看不见的决定。
+#[test]
+fn ipc_unprotected_mode_is_opt_in_and_stays_visible_in_diagnostics() {
+    let parent = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    let project_root = parent.path().join("u118-plain");
+    let secrets = Arc::new(ariadne::config::LocalFileSecretStore::new(
+        app_state.path().join("secrets.json"),
+    ));
+    let state = AriadneAppState::new("", app_state.path(), secrets);
+    let created = handle_request(
+        &state,
+        IpcRequest {
+            method: "create_project".to_owned(),
+            params: json!({ "project_root": project_root.to_string_lossy(), "name": "U118P" }),
+        },
+    );
+    assert!(created.ok, "{:?}", created.error);
+
+    let allowed = handle_request(
+        &state,
+        IpcRequest {
+            method: "allow_unprotected_local_secrets".to_owned(),
+            params: Value::Null,
+        },
+    );
+    assert!(allowed.ok, "{:?}", allowed.error);
+    assert_eq!(allowed.data.unwrap()["status"], "unprotected");
+
+    let diagnostics = handle_request(
+        &state,
+        IpcRequest {
+            method: "get_backend_diagnostics".to_owned(),
+            params: Value::Null,
+        },
+    );
+    assert!(diagnostics.ok, "{:?}", diagnostics.error);
+    let items = diagnostics.data.unwrap();
+    let item = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["component"] == "secrets.protection")
+        .cloned()
+        .expect("诊断必须常驻报告凭据保护状态");
+    assert_eq!(
+        item["status"], "degraded",
+        "明文存储必须报 degraded；报 healthy 会让用户以为凭据是受保护的"
+    );
 }

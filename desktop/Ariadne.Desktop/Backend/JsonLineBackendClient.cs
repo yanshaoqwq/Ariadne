@@ -6,6 +6,11 @@ namespace Ariadne.Desktop.Backend;
 
 public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
 {
+    /// <summary>
+    /// 无 BOM 的 UTF-8。JSON-line 协议逐行解析，BOM 会让后端把第一行判为非法 JSON。
+    /// </summary>
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     private readonly string? _backendCommand;
     private readonly string _appStateRoot;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
@@ -39,6 +44,32 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     public Task<IReadOnlyList<RecentProjectEntry>> ListRecentProjectsAsync(CancellationToken cancellationToken = default)
     {
         return InvokeOrEmptyListAsync<RecentProjectEntry>("list_recent_projects", null, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<RecentProjectEntry>> ForgetRecentProjectAsync(
+        string projectRoot,
+        CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredListAsync<RecentProjectEntry>(
+            "forget_recent_project",
+            new { project_root = projectRoot },
+            cancellationToken);
+    }
+
+    public Task<CurrentProjectStatus> RelocateRecentProjectAsync(
+        string previousProjectRoot,
+        string projectRoot,
+        CancellationToken cancellationToken = default)
+    {
+        return InvokeAndRememberProjectAsync<CurrentProjectStatus>(
+            "relocate_recent_project",
+            projectRoot,
+            new
+            {
+                previous_project_root = previousProjectRoot,
+                project_root = projectRoot,
+            },
+            cancellationToken);
     }
 
     public Task<AppStatus?> GetAppStatusAsync(CancellationToken cancellationToken = default)
@@ -132,9 +163,19 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<ProviderModelsResult>("fetch_provider_models", new { provider_id = providerId }, cancellationToken);
     }
 
+    public Task<ProviderModelsResult> TestProviderDraftAsync(ProviderDraftProbe probe, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProviderModelsResult>("test_provider_draft", new { probe }, cancellationToken);
+    }
+
     public Task<ProviderConfigStatus> SaveProviderKeyAsync(string provider, string key, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<ProviderConfigStatus>("save_provider_key", new { provider, key }, cancellationToken);
+    }
+
+    public Task<ProviderConfigStatus> RevokeProviderKeyAsync(string provider, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ProviderConfigStatus>("revoke_provider_key", new { provider }, cancellationToken);
     }
 
     public Task<NodePresetSettings> GetNodePresetSettingsAsync(CancellationToken cancellationToken = default)
@@ -237,13 +278,18 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<MiscSectionSettings>("save_misc_section_settings", new { settings }, cancellationToken);
     }
 
-    public Task<IReadOnlyList<TemplateSummary>> SearchTemplatesAsync(string baseUrl, string query, int page = 0, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<TemplateSummary>> SearchTemplatesAsync(
+        string baseUrl,
+        string query,
+        IReadOnlyList<string> tags,
+        int page = 0,
+        CancellationToken cancellationToken = default)
     {
         return InvokeRequiredListAsync<TemplateSummary>("search_templates", new
         {
             request = new { base_url = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl },
             query,
-            tags = Array.Empty<string>(),
+            tags,
             page,
         }, cancellationToken);
     }
@@ -271,9 +317,16 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         }, cancellationToken);
     }
 
-    public Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default)
+    public Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, IReadOnlyDictionary<string, object?>? variables = null, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<WorkflowRunStarted>("start_workflow", new { workflow_id = workflowId, start_node_id = startNodeId }, cancellationToken);
+        // variables 为空时不发该键：让后端按 #[serde(default)] 取空表，
+        // 避免把 null 当成「显式清空」传下去。
+        return InvokeRequiredAsync<WorkflowRunStarted>("start_workflow", new
+        {
+            workflow_id = workflowId,
+            start_node_id = startNodeId,
+            variables = variables is { Count: > 0 } ? variables : null,
+        }, cancellationToken);
     }
 
     public Task<WorkflowActionResult> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)
@@ -613,7 +666,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<BudgetStatus>("get_budget_status", null, cancellationToken);
     }
 
-    public Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double preauthorizedUsd, CancellationToken cancellationToken = default)
+    public Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double? preauthorizedUsd, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<BudgetStatus>("update_budget_config", new { budget_usd = budgetUsd, preauthorized_usd = preauthorizedUsd }, cancellationToken);
     }
@@ -685,7 +738,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     {
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
-            throw BackendException.Transport("ipc", "backend ipc command not found");
+            throw BackendException.Transport("ipc", BackendCommandMissingDiagnostic());
         }
         var data = await SendRequestAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
         return data is null
@@ -700,7 +753,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     {
         if (string.IsNullOrWhiteSpace(_backendCommand))
         {
-            throw BackendException.Transport("ipc", "backend ipc command not found");
+            throw BackendException.Transport("ipc", BackendCommandMissingDiagnostic());
         }
         await SendRequestAsync<object>(method, parameters, cancellationToken).ConfigureAwait(false);
     }
@@ -738,7 +791,12 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
                 throw BackendException.FromIpcPayload(
                     result.ErrorCode,
                     result.Error ?? "backend command failed",
-                    result.ErrorKey);
+                    result.ErrorKey,
+                    result.ErrorParams,
+                    result.ErrorField,
+                    result.ErrorSection,
+                    result.RecoveryAction,
+                    result.CorrelationId);
             }
             return result.Data;
         }
@@ -819,7 +877,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             ResetBackendProcessLocked();
             if (string.IsNullOrWhiteSpace(_backendCommand))
             {
-                throw BackendException.Transport("ipc", "backend ipc command not found");
+                throw BackendException.Transport("ipc", BackendCommandMissingDiagnostic());
             }
 
             var startInfo = new ProcessStartInfo
@@ -831,9 +889,14 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-                StandardInputEncoding = Encoding.UTF8,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
+                // P0 根因：静态 Encoding.UTF8 带 BOM 前导码，管道不可 seek 时
+                // StreamWriter 会在第一次写入前发出 EF BB BF——后端 serde_json
+                // 对第一条请求报 "expected value at line 1 column 1"，回一个
+                // 无 request_id 的错误，旧版 stdout pump 因此杀死整条连接，
+                // 之后所有按钮都报「无法连接本地后端服务」。必须用无 BOM 编码。
+                StandardInputEncoding = Utf8NoBom,
+                StandardOutputEncoding = Utf8NoBom,
+                StandardErrorEncoding = Utf8NoBom,
             };
             ApplyProjectEnvironment(startInfo);
 
@@ -873,11 +936,26 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
                 {
                     continue;
                 }
-                var envelope = JsonSerializer.Deserialize<BackendResult<JsonElement>>(line, _jsonOptions)
-                    ?? throw BackendException.Transport("ipc", "backend ipc returned invalid json");
-                if (string.IsNullOrWhiteSpace(envelope.RequestId))
+                BackendResult<JsonElement>? envelope;
+                try
                 {
-                    throw BackendException.Transport("ipc", "backend ipc response is missing request id");
+                    envelope = JsonSerializer.Deserialize<BackendResult<JsonElement>>(line, _jsonOptions);
+                }
+                catch (JsonException)
+                {
+                    // 非 JSON 行（sidecar 误把日志写到 stdout、外层包装脚本回显等）
+                    // 不得毒死整条连接：过去这里抛异常会终止 pump，之后**所有**
+                    // 请求都失败并报「无法连接本地后端服务」，整个应用不可用。
+                    _stderrBuffer.AppendLine($"[stdout non-json] {Truncate(line)}");
+                    continue;
+                }
+                if (envelope is null || string.IsNullOrWhiteSpace(envelope.RequestId))
+                {
+                    // 缺 request_id 的响应无法归属到任何等待中的请求。
+                    // 它通常是后端在解析请求失败时回的全局错误——记录下来供诊断，
+                    // 但同样不能终止 pump，否则一次坏输入就让整个会话报废。
+                    _stderrBuffer.AppendLine($"[unattributed response] {Truncate(line)}");
+                    continue;
                 }
                 _responseRouter.TryComplete(envelope.RequestId, line);
             }
@@ -914,6 +992,10 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     {
         return _stderrBuffer.Read().Trim();
     }
+
+    /// <summary>诊断行截断，避免异常长的坏行撑爆 stderr 环形缓冲。</summary>
+    private static string Truncate(string line) =>
+        line.Length <= 500 ? line : line[..500] + "…";
 
     private void ResetBackendProcess()
     {
@@ -997,13 +1079,32 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return DiscoverBackendCommand(AppContext.BaseDirectory, Environment.CurrentDirectory);
     }
 
+    /// <summary>
+    /// sidecar 未找到时的可诊断说明。
+    /// 「无法连接本地后端服务」这一句对排查毫无帮助——用户分不清是没编译 sidecar、
+    /// 启动目录不在源码树内，还是 Release 构建缺少打包。这里把搜索轨迹带出来。
+    /// </summary>
+    private static string BackendCommandMissingDiagnostic()
+    {
+        return LastDiscoveryReport ?? "backend ipc command not found";
+    }
+
+    /// <summary>
+    /// 记录最近一次 sidecar 查找过程，供「后端连不上」时给出可诊断原因。
+    /// 只保存路径，不含任何凭据。
+    /// </summary>
+    internal static string? LastDiscoveryReport { get; private set; }
+
     internal static string? DiscoverBackendCommand(string appBaseDirectory, string currentDirectory)
     {
+        var attempted = new List<string>();
         var packaged = FindPackagedBackendCommand(appBaseDirectory);
         if (packaged is not null)
         {
+            LastDiscoveryReport = null;
             return packaged;
         }
+        attempted.Add($"packaged under {appBaseDirectory}");
 
         var executableNames = OperatingSystem.IsWindows()
             ? new[] { "ariadne-ipc.exe", "ariadne-ipc" }
@@ -1013,21 +1114,38 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         {
             foreach (var executableName in executableNames)
             {
-                foreach (var relativePath in new[]
-                         {
-                             Path.Combine("target", "debug", executableName),
-                             Path.Combine("core", "target", "debug", executableName),
-                         })
+                // 同时搜 debug 与 release：只搜 debug 会让 release 构建必然找不到
+                // sidecar，表现为「所有按钮都连不上后端」。
+                foreach (var profile in new[] { "debug", "release" })
                 {
-                    var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
-                    if (seen.Add(candidate) && File.Exists(candidate))
+                    foreach (var relativePath in new[]
+                             {
+                                 Path.Combine("target", profile, executableName),
+                                 Path.Combine("core", "target", profile, executableName),
+                             })
                     {
-                        return candidate;
+                        var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
+                        if (!seen.Add(candidate))
+                        {
+                            continue;
+                        }
+                        if (File.Exists(candidate))
+                        {
+                            LastDiscoveryReport = null;
+                            return candidate;
+                        }
+                        attempted.Add(candidate);
                     }
                 }
             }
         }
 
+        // 找不到时保留完整搜索轨迹：否则用户只看到「无法连接本地后端服务」，
+        // 无从判断是没编译 sidecar、还是启动目录不在源码树内。
+        LastDiscoveryReport =
+            $"backend ipc executable not found. Set ARIADNE_BACKEND_IPC to its path, "
+            + $"or build it with `cargo build -p ariadne --bin ariadne-ipc`. "
+            + $"Searched {attempted.Count} location(s): {string.Join("; ", attempted.Take(12))}";
         return null;
     }
 

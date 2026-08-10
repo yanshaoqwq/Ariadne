@@ -44,7 +44,7 @@ public sealed class SettingsAccessibilityTests
 
         Assert.Contains("<ListBox ItemsSource=\"{Binding Tabs}\"", view, StringComparison.Ordinal);
         Assert.Contains("SelectedItem=\"{Binding NavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
-        Assert.Contains("ItemsSource=\"{Binding SectionIndexItems}\"", view, StringComparison.Ordinal);
+        Assert.Contains("ItemsSource=\"{Binding CurrentTabSectionIndexItems}\"", view, StringComparison.Ordinal);
         Assert.Contains("SelectedItem=\"{Binding SectionNavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Matches(view, "SelectionMode=\"Single\"").Count);
         Assert.Contains("ScrollToSectionRequested", viewModel, StringComparison.Ordinal);
@@ -53,7 +53,11 @@ public sealed class SettingsAccessibilityTests
         Assert.Contains("ConfirmLeaveIfNeededAsync()", viewModel, StringComparison.Ordinal);
         Assert.Contains("SelectedTab = tab;", viewModel, StringComparison.Ordinal);
         Assert.Contains("SettingsContentScroll.Offset = new Vector", codeBehind, StringComparison.Ordinal);
-        Assert.DoesNotContain("BringIntoView", codeBehind, StringComparison.Ordinal);
+        var scrollStart = codeBehind.IndexOf("private void ScrollToSection(", StringComparison.Ordinal);
+        var scrollEnd = codeBehind.IndexOf("internal int SectionOffsetCommitCountForTests", scrollStart, StringComparison.Ordinal);
+        Assert.True(scrollStart >= 0 && scrollEnd > scrollStart);
+        Assert.DoesNotContain("BringIntoView", codeBehind[scrollStart..scrollEnd], StringComparison.Ordinal);
+        Assert.Contains("target.BringIntoView()", codeBehind, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -81,6 +85,12 @@ public sealed class SettingsAccessibilityTests
         Assert.Equal(
             SettingsNavigationCatalog.Sections.Count,
             SettingsNavigationCatalog.Sections.Select(item => item.Id).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(
+            SettingsNavigationCatalog.Sections.Count,
+            SettingsNavigationCatalog.Sections.Select(item => item.AnchorName).Distinct(StringComparer.Ordinal).Count());
+        Assert.Contains(
+            SettingsNavigationCatalog.Sections,
+            item => item.Id == "model_aliases" && item.AnchorName == "ModelAliasesSectionAnchor");
         Assert.All(
             SettingsNavigationCatalog.Sections,
             item => Assert.Contains($"x:Name=\"{item.AnchorName}\"", view, StringComparison.Ordinal));
@@ -200,17 +210,15 @@ public sealed class SettingsAccessibilityTests
         var view = File.ReadAllText(ResolveDesktopSource("Views", "SettingsPageView.axaml"));
         var viewModel = File.ReadAllText(ResolveDesktopSource("ViewModels", "SettingsPageViewModel.cs"));
         var start = viewModel.IndexOf("internal async Task ShowTutorialAsync()", StringComparison.Ordinal);
-        var end = viewModel.IndexOf("private Task<bool> SaveMiscAsync()", start, StringComparison.Ordinal);
+        var end = viewModel.IndexOf("private Task<bool> SaveRetrievalAsync()", start, StringComparison.Ordinal);
 
         Assert.True(start >= 0 && end > start);
         var action = viewModel[start..end];
-        var miscStart = view.IndexOf("<StackPanel IsVisible=\"{Binding IsMiscSelected}\" Spacing=\"18\">", StringComparison.Ordinal);
-        var tutorialStart = view.IndexOf("Command=\"{Binding ShowTutorialCommand}\"", miscStart, StringComparison.Ordinal);
-        // Editable retrieval/git blocks use Border.IsEnabled (not a wrapping StackPanel).
-        var editableSettingsStart = view.IndexOf("IsEnabled=\"{Binding IsMiscEditable}\"", miscStart, StringComparison.Ordinal);
+        var supportStart = view.IndexOf("<StackPanel IsVisible=\"{Binding IsSupportSelected}\" Spacing=\"18\">", StringComparison.Ordinal);
+        var tutorialStart = view.IndexOf("Command=\"{Binding ShowTutorialCommand}\"", supportStart, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding ShowTutorialCommand}\"", view, StringComparison.Ordinal);
         Assert.Contains("Content=\"{Binding OpenTutorialText}\"", view, StringComparison.Ordinal);
-        Assert.True(miscStart >= 0 && tutorialStart > miscStart && editableSettingsStart > tutorialStart);
+        Assert.True(supportStart >= 0 && tutorialStart > supportStart);
         Assert.Contains("HelpDialogFactory.CreateTutorialDialog(_displayNames)", action, StringComparison.Ordinal);
         Assert.Contains("DialogService.Current", action, StringComparison.Ordinal);
         Assert.DoesNotContain("SaveUiPreferencesAsync", action, StringComparison.Ordinal);

@@ -9,6 +9,13 @@ public interface IAriadneBackendClient
 
     Task<IReadOnlyList<RecentProjectEntry>> ListRecentProjectsAsync(CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<RecentProjectEntry>> ForgetRecentProjectAsync(string projectRoot, CancellationToken cancellationToken = default);
+
+    Task<CurrentProjectStatus> RelocateRecentProjectAsync(
+        string previousProjectRoot,
+        string projectRoot,
+        CancellationToken cancellationToken = default);
+
     Task<AppStatus?> GetAppStatusAsync(CancellationToken cancellationToken = default);
 
     Task<SidebarBadgeCounts> GetSidebarBadgesAsync(CancellationToken cancellationToken = default);
@@ -47,7 +54,11 @@ public interface IAriadneBackendClient
 
     Task<ProviderModelsResult> FetchProviderModelsAsync(string? providerId = null, CancellationToken cancellationToken = default);
 
+    Task<ProviderModelsResult> TestProviderDraftAsync(ProviderDraftProbe probe, CancellationToken cancellationToken = default);
+
     Task<ProviderConfigStatus> SaveProviderKeyAsync(string provider, string key, CancellationToken cancellationToken = default);
+
+    Task<ProviderConfigStatus> RevokeProviderKeyAsync(string provider, CancellationToken cancellationToken = default);
 
     Task<NodePresetSettings> GetNodePresetSettingsAsync(CancellationToken cancellationToken = default);
 
@@ -89,7 +100,12 @@ public interface IAriadneBackendClient
 
     Task<MiscSectionSettings> SaveMiscSectionSettingsAsync(MiscSectionSettings settings, CancellationToken cancellationToken = default);
 
-    Task<IReadOnlyList<TemplateSummary>> SearchTemplatesAsync(string baseUrl, string query, int page = 0, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<TemplateSummary>> SearchTemplatesAsync(
+        string baseUrl,
+        string query,
+        IReadOnlyList<string> tags,
+        int page = 0,
+        CancellationToken cancellationToken = default);
 
     Task<TemplateDetail> GetTemplateDetailAsync(string baseUrl, string id, CancellationToken cancellationToken = default);
 
@@ -99,7 +115,7 @@ public interface IAriadneBackendClient
         string expectedProjectRoot,
         CancellationToken cancellationToken = default);
 
-    Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, CancellationToken cancellationToken = default);
+    Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, IReadOnlyDictionary<string, object?>? variables = null, CancellationToken cancellationToken = default);
 
     Task<WorkflowActionResult> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default);
 
@@ -212,7 +228,7 @@ public interface IAriadneBackendClient
 
     Task<BudgetStatus> GetBudgetStatusAsync(CancellationToken cancellationToken = default);
 
-    Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double preauthorizedUsd, CancellationToken cancellationToken = default);
+    Task<BudgetStatus> UpdateBudgetConfigAsync(double budgetUsd, double? preauthorizedUsd, CancellationToken cancellationToken = default);
 
     Task SetAutoModeAsync(bool enabled, CancellationToken cancellationToken = default);
 

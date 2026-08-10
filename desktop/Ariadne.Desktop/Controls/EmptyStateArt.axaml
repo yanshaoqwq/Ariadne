@@ -1,7 +1,6 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="Ariadne.Desktop.Controls.EmptyStateArt"
-             Width="140" Height="112"
              IsHitTestVisible="False">
   <!-- 模型线描空态 + Accent 重着色；无手写 Path 堆砌 -->
   <Panel>
@@ -11,16 +10,31 @@
            VerticalAlignment="Center" />
 
     <!-- 次要页仍用轻量线描（非三主空态） -->
+    <!-- 欢迎页空态 = Ariadne 之线尚未起头：一个线结 + 一根渐细渐淡的线，
+         线走到一半就散进空白，正对应「还没有最近项目」。
+         不用渐变笔刷（渐变到 Transparent 会在中段发灰），改用三段同色异透明度的
+         首尾相接曲线，控制点保持切线连续，肉眼是一根连贯的线。 -->
     <Viewbox x:Name="WelcomeQuillArt" Stretch="Uniform" IsVisible="False">
-      <Canvas Width="80" Height="64">
-        <Path Stroke="{DynamicResource Ariadne.AccentPrimary}" StrokeThickness="1.7" StrokeLineCap="Round"
-              Data="M38,8 L32,52" />
-        <Path Stroke="{DynamicResource Ariadne.AccentPrimary}" StrokeThickness="1.5" StrokeLineCap="Round"
-              Data="M32,52 L28,58 M32,52 L36,58" />
-        <Path Stroke="{DynamicResource Ariadne.TextSubtle}" StrokeThickness="1.4" StrokeLineCap="Round"
-              Data="M38,10 C48,4 58,12 54,24 C50,34 40,36 34,30 C28,24 30,14 38,10" />
-        <Path Stroke="{DynamicResource Ariadne.AccentPrimary}" StrokeThickness="1.35" StrokeLineCap="Round"
-              Data="M24,36 C32,28 44,30 50,38 C56,46 46,52 38,48 C32,46 28,52 34,56" />
+      <Canvas Width="160" Height="72">
+        <!-- 线结光晕：与首屏品牌徽记同一套光环语汇，让空态与页头呼应 -->
+        <Ellipse Canvas.Left="12" Canvas.Top="30" Width="32" Height="32" Opacity="0.14">
+          <Ellipse.Fill>
+            <RadialGradientBrush GradientOrigin="50%,50%" Center="50%,50%" RadiusX="50%" RadiusY="50%">
+              <GradientStop Offset="0.5" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+              <GradientStop Offset="1" Color="Transparent" />
+            </RadialGradientBrush>
+          </Ellipse.Fill>
+        </Ellipse>
+        <!-- 线结本体：唯一的实心点，是整幅画的重心 -->
+        <Ellipse Canvas.Left="24" Canvas.Top="42" Width="8" Height="8"
+                 Fill="{DynamicResource Ariadne.AccentPrimary}" />
+        <!-- 线的三段：粗→细、实→虚，首尾共点 -->
+        <Path Stroke="{DynamicResource Ariadne.AccentPrimary}" StrokeThickness="2"
+              StrokeLineCap="Round" Data="M28,46 C46,46 50,26 68,24" />
+        <Path Stroke="{DynamicResource Ariadne.AccentPrimary}" StrokeThickness="1.6"
+              StrokeLineCap="Round" Opacity="0.45" Data="M68,24 C86,22 92,44 110,46" />
+        <Path Stroke="{DynamicResource Ariadne.AccentPrimary}" StrokeThickness="1.2"
+              StrokeLineCap="Round" Opacity="0.18" Data="M110,46 C126,48 138,40 150,28" />
       </Canvas>
     </Viewbox>
 

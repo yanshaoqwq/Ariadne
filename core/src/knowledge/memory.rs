@@ -134,13 +134,16 @@ impl KnowledgeRepository for MemoryKnowledgeBase {
 
         match decision.status {
             ApprovalStatus::Approved => {
-                state.fact_ids_by_key.insert(
-                    proposal.candidate.conflict_key(),
-                    proposal.candidate.fact_id.clone(),
-                );
+                // 同值复述不算冲突，会走到这里整体覆盖既有事实。覆盖前先把旧出处
+                // 并进来，否则第 3 章定下的设定被第 40 章复述后，溯源只剩第 40 章。
+                let mut candidate = proposal.candidate;
+                if let Some(previous) = existing.as_ref() {
+                    candidate.fact.merge_sources_from(&previous.fact);
+                }
                 state
-                    .facts_by_id
-                    .insert(proposal.candidate.fact_id.clone(), proposal.candidate);
+                    .fact_ids_by_key
+                    .insert(candidate.conflict_key(), candidate.fact_id.clone());
+                state.facts_by_id.insert(candidate.fact_id.clone(), candidate);
             }
             ApprovalStatus::Conflict => {
                 let existing = existing.ok_or_else(|| {

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,16 @@ pub struct IpcResponse {
     /// Localization key (`ui.error.*`). Desktop prefers this over inventing keys from diagnostics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_key: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub error_params: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_section: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 impl IpcResponse {
@@ -54,6 +66,11 @@ impl IpcResponse {
             error: None,
             error_code: None,
             error_key: None,
+            error_params: Default::default(),
+            error_field: None,
+            error_section: None,
+            recovery_action: None,
+            correlation_id: None,
         }
     }
 
@@ -65,6 +82,11 @@ impl IpcResponse {
             error: error.diagnostic.clone(),
             error_code: Some(error.code.as_str().to_owned()),
             error_key: Some(error.message_key),
+            error_params: error.params,
+            error_field: error.field,
+            error_section: error.section,
+            recovery_action: error.recovery_action,
+            correlation_id: Some(next_error_correlation_id()),
         }
     }
 
@@ -72,6 +94,16 @@ impl IpcResponse {
         self.request_id = request_id;
         self
     }
+}
+
+fn next_error_correlation_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("err-{timestamp:032x}-{sequence:016x}")
 }
 
 pub fn handle_request(state: &AriadneAppState, request: IpcRequest) -> IpcResponse {
@@ -118,7 +150,12 @@ where
         move |request: IpcRequest, cancellation: &crate::contracts::ExecutionCancellation| {
             let changes_project = matches!(
                 request.method.as_str(),
-                "create_project" | "open_project" | "close_project" | "set_project_root"
+                "create_project"
+                    | "open_project"
+                    | "relocate_recent_project"
+                    | "forget_recent_project"
+                    | "close_project"
+                    | "set_project_root"
             );
             let result = if changes_project {
                 project_gate
@@ -191,15 +228,30 @@ where
 
     for line in reader.lines() {
         let line = line?;
+        // 兼容带 BOM 的客户端（.NET 静态 Encoding.UTF8 会在流首发出 EF BB BF）：
+        // BOM 只可能出现在会话第一行，剥掉后按正常 JSON 解析，避免第一条请求
+        // 就吃到 "expected value" 错误并拖垮整条连接。
+        let line = line.trim_start_matches('\u{feff}');
         if line.trim().is_empty() {
             continue;
         }
         let envelope = match serde_json::from_str::<IpcEnvelopeRequest>(&line) {
             Ok(request) => request,
             Err(error) => {
+                // 尽力从坏行里救出 request_id：缺 request_id 的错误响应无法被
+                // 客户端归属到任何等待中的请求，等待方只能靠超时发现失败。
+                let salvaged_request_id = serde_json::from_str::<Value>(&line)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("request_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
                 write_ipc_response(
                     &writer,
-                    &IpcResponse::error(CommandError::validation(error.to_string())),
+                    &IpcResponse::error(CommandError::validation(error.to_string()))
+                        .with_request_id(salvaged_request_id),
                 )?;
                 continue;
             }
@@ -422,6 +474,18 @@ fn dispatch_request(
     cancellation.check().map_err(CommandError::from)?;
     match request.method.as_str() {
         "list_recent_projects" => ok(commands::list_recent_projects(state)?),
+        "forget_recent_project" => {
+            let params: ProjectRootParams = params(request.params)?;
+            ok(commands::forget_recent_project(state, params.project_root)?)
+        }
+        "relocate_recent_project" => {
+            let params: RelocateRecentProjectParams = params(request.params)?;
+            ok(commands::relocate_recent_project(
+                state,
+                params.previous_project_root,
+                params.project_root,
+            )?)
+        }
         "create_project" => {
             let params: ProjectSelectionParams = params(request.params)?;
             ok(commands::create_project(
@@ -505,7 +569,7 @@ fn dispatch_request(
         "list_workflow_graphs" => ok(commands::list_workflow_graphs(state)?),
         "validate_workflow_graph" => {
             let params: WorkflowGraphParams = params(request.params)?;
-            ok(commands::validate_workflow_graph(params.graph_data)?)
+            ok(commands::validate_workflow_graph(state, params.graph_data)?)
         }
         "save_workflow_graph" => {
             let params: WorkflowGraphParams = params(request.params)?;
@@ -594,10 +658,17 @@ fn dispatch_request(
         }
         "start_workflow" => {
             let params: RunWorkflowParams = params(request.params)?;
-            ok(commands::start_workflow(
+            // 走 with_request 而非 start_workflow：执行页填的变量要一起带进去。
+            // 来源标成 ExecutionPage —— hidden 变量因此拒绝从这条路径注入。
+            ok(commands::start_workflow_with_request(
                 state,
-                params.workflow_id,
-                params.start_node_id,
+                commands::RunWorkflowRequest {
+                    workflow_id: params.workflow_id,
+                    start_node_id: params.start_node_id,
+                    initial_inputs: std::collections::BTreeMap::new(),
+                    variables: params.variables,
+                    origin_conversation_id: None,
+                },
             )?)
         }
         "pause_workflow" => {
@@ -751,6 +822,13 @@ fn dispatch_request(
                 cancellation,
             )?)
         }
+        "test_provider_draft" => {
+            let params: ProviderDraftProbeParams = params(request.params)?;
+            ok(commands::test_provider_draft_with_cancellation(
+                params.probe,
+                cancellation,
+            )?)
+        }
         "save_provider_section_settings" => {
             let params: SettingsParam<commands::ProviderSectionSettings> = params(request.params)?;
             ok(commands::save_provider_section_settings(
@@ -802,6 +880,7 @@ fn dispatch_request(
             state,
             cancellation,
         )?),
+        "repair_git_repository" => ok(commands::repair_git_repository(state)?),
         "get_git_branch_graph" => {
             let params: LimitParams = params(request.params)?;
             ok(commands::get_git_branch_graph_with_cancellation(
@@ -828,6 +907,19 @@ fn dispatch_request(
             )?)
         }
         "get_provider_config" => ok(commands::get_provider_config(state)?),
+        // U118：这三条是「无系统钥匙链时保存凭据」的唯一出路。缺了它们，
+        // 存储层报的「请设置主密码」就指向一个不存在的操作（原缺陷正是如此）。
+        "get_secret_protection" => ok(commands::get_secret_protection(state)?),
+        "set_local_secret_master_password" => {
+            let params: SetMasterPasswordParams = params(request.params)?;
+            ok(commands::set_local_secret_master_password(
+                state,
+                params.master_password,
+            )?)
+        }
+        "allow_unprotected_local_secrets" => {
+            ok(commands::allow_unprotected_local_secrets(state)?)
+        }
         "save_provider_key" => {
             let params: SaveProviderKeyParams = params(request.params)?;
             ok(commands::save_provider_key(
@@ -835,6 +927,10 @@ fn dispatch_request(
                 params.provider,
                 params.key,
             )?)
+        }
+        "revoke_provider_key" => {
+            let params: ProviderRemovalParams = params(request.params)?;
+            ok(commands::revoke_provider_key(state, params.provider)?)
         }
         "rebind_project_provider_key" => {
             let params: RebindProviderKeyParams = params(request.params)?;
@@ -979,6 +1075,12 @@ struct ProjectRootParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct RelocateRecentProjectParams {
+    previous_project_root: String,
+    project_root: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChapterIdParams {
     chapter_id: String,
 }
@@ -1056,6 +1158,11 @@ struct ProviderModelsParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProviderDraftProbeParams {
+    probe: commands::ProviderDraftProbe,
+}
+
+#[derive(Debug, Deserialize)]
 struct ProviderRemovalParams {
     provider: String,
 }
@@ -1122,6 +1229,9 @@ struct RunWorkflowParams {
     workflow_id: String,
     #[serde(default)]
     start_node_id: Option<String>,
+    /// 工作流变量初值（执行页表单填的值）。与起始节点端口输入不同层。
+    #[serde(default)]
+    variables: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1151,7 +1261,10 @@ struct RunControlParams {
 #[derive(Debug, Deserialize)]
 struct UpdateBudgetParams {
     budget_usd: f64,
-    preauthorized_usd: f64,
+    /// U112：缺省表示调用方未提交该字段（保持「未设置」），
+    /// 显式 `0` 表示零额度。两者语义不同，不可合并。
+    #[serde(default)]
+    preauthorized_usd: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1179,6 +1292,12 @@ struct MessageParams {
 struct RestoreToNewBranchParams {
     commit_id: String,
     new_branch: String,
+}
+
+/// U118：设置本地主密码的入参。
+#[derive(Debug, Deserialize)]
+struct SetMasterPasswordParams {
+    master_password: String,
 }
 
 #[derive(Debug, Deserialize)]

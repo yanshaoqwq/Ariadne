@@ -58,6 +58,48 @@ pub trait SecretStore: Send + Sync {
     fn get_secret(&self, key_id: &str) -> CoreResult<Option<SecretValue>>;
     /// 删除密钥，不存在时视为成功。
     fn delete_secret(&self, key_id: &str) -> CoreResult<()>;
+
+    /// U118：本存储当前的凭据保护状态，供设置页与诊断展示。
+    ///
+    /// 默认 `Managed`——系统钥匙链与内存存储都由宿主保管，没有「主密码」这一层，
+    /// 也没有明文落盘风险。只有 `LocalFileSecretStore` 需要覆写。
+    fn protection_status(&self) -> SecretProtectionStatus {
+        SecretProtectionStatus::Managed
+    }
+
+    /// U118：运行时设置本地主密码。
+    ///
+    /// 默认返回 `Err`：对不需要主密码的存储，静默成功会让 UI 误以为已加密。
+    fn set_master_password(&self, _master_password: SecretValue) -> CoreResult<()> {
+        Err(CoreError::validation(
+            "this secret store is managed by the host and takes no master password",
+        ))
+    }
+
+    /// U118：用户显式接受明文存储。默认拒绝，理由同上。
+    fn allow_unprotected_storage(&self) -> CoreResult<()> {
+        Err(CoreError::validation(
+            "this secret store is managed by the host and cannot be switched to plain text",
+        ))
+    }
+}
+
+/// U118：凭据保护状态，是设置页与诊断的唯一真相源。
+///
+/// 之所以要把 `Unprotected` 单列而不是并进 `Locked`：用户当时同意了明文，
+/// 三个月后未必记得。诊断必须能持续把这件事说出来，否则「同意过」就变成了
+/// 一次性的、再也看不见的决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretProtectionStatus {
+    /// 由宿主保管（系统钥匙链 / 进程内存），无需主密码。
+    Managed,
+    /// 已设主密码，凭据以密文落盘。
+    Encrypted,
+    /// 用户显式接受明文落盘。
+    Unprotected,
+    /// 既无主密码也无明文许可——此状态下保存凭据会失败。
+    Locked,
 }
 
 /// 把通用 SecretStore 收束为当前项目的 Provider 凭据能力。
@@ -121,6 +163,54 @@ impl<'a> ProjectCredentialScope<'a> {
             .delete_secret(&self.provider_key_id(provider_id)?)
     }
 
+    /// 读取与规范化外部 Qdrant 端点绑定的 API key。端点参与派生，配置改址后不会复用旧密钥。
+    pub fn get_external_qdrant_secret(
+        &self,
+        endpoint_identity: &str,
+    ) -> CoreResult<Option<SecretValue>> {
+        self.secrets
+            .get_secret(&self.external_qdrant_key_id(endpoint_identity)?)
+    }
+
+    /// 写入与外部 Qdrant 端点绑定的 API key。
+    pub fn set_external_qdrant_secret(
+        &self,
+        endpoint_identity: &str,
+        value: SecretValue,
+    ) -> CoreResult<()> {
+        self.secrets.set_secret(
+            &self.external_qdrant_generation_key_id(endpoint_identity)?,
+            SecretValue::new(new_secret_generation()),
+        )?;
+        self.secrets
+            .set_secret(&self.external_qdrant_key_id(endpoint_identity)?, value)
+    }
+
+    /// 删除与外部 Qdrant 端点绑定的 API key。
+    pub fn delete_external_qdrant_secret(&self, endpoint_identity: &str) -> CoreResult<()> {
+        self.secrets.set_secret(
+            &self.external_qdrant_generation_key_id(endpoint_identity)?,
+            SecretValue::new(new_secret_generation()),
+        )?;
+        self.secrets
+            .delete_secret(&self.external_qdrant_key_id(endpoint_identity)?)
+    }
+
+    /// 返回端点凭据代次，使运行时在密钥替换后拒绝复用旧请求客户端。
+    pub fn external_qdrant_secret_generation(&self, endpoint_identity: &str) -> CoreResult<String> {
+        let generation_key = self.external_qdrant_generation_key_id(endpoint_identity)?;
+        if let Some(generation) = self.secrets.get_secret(&generation_key)? {
+            let generation = generation.expose_secret().trim();
+            if !generation.is_empty() {
+                return Ok(generation.to_owned());
+            }
+        }
+        let generation = new_secret_generation();
+        self.secrets
+            .set_secret(&generation_key, SecretValue::new(generation.clone()))?;
+        Ok(generation)
+    }
+
     fn provider_key_id(&self, provider_id: &str) -> CoreResult<String> {
         self.scoped_key_id(provider_id, b"provider\0", "ariadne-credential-v1-")
     }
@@ -133,16 +223,32 @@ impl<'a> ProjectCredentialScope<'a> {
         )
     }
 
-    fn scoped_key_id(&self, provider_id: &str, domain: &[u8], prefix: &str) -> CoreResult<String> {
-        if provider_id.trim().is_empty() {
-            return Err(CoreError::validation("provider_id cannot be empty"));
+    fn external_qdrant_key_id(&self, endpoint_identity: &str) -> CoreResult<String> {
+        self.scoped_key_id(
+            endpoint_identity,
+            b"external-qdrant\0",
+            "ariadne-qdrant-credential-v1-",
+        )
+    }
+
+    fn external_qdrant_generation_key_id(&self, endpoint_identity: &str) -> CoreResult<String> {
+        self.scoped_key_id(
+            endpoint_identity,
+            b"external-qdrant-generation\0",
+            "ariadne-qdrant-credential-generation-v1-",
+        )
+    }
+
+    fn scoped_key_id(&self, identity: &str, domain: &[u8], prefix: &str) -> CoreResult<String> {
+        if identity.trim().is_empty() {
+            return Err(CoreError::validation("credential identity cannot be empty"));
         }
         let mut hasher = Sha256::new();
         hasher.update(b"ariadne-project-credential-v1\0");
         hasher.update(&self.project_identity);
         hasher.update(b"\0");
         hasher.update(domain);
-        hasher.update(provider_id.as_bytes());
+        hasher.update(identity.as_bytes());
         let digest = hasher.finalize();
         let mut encoded = String::with_capacity(digest.len() * 2);
         for byte in digest {
@@ -222,12 +328,45 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
+/// U118：本地密钥文件的保护方式。
+///
+/// 之所以要有 `Unprotected` 这个**显式**变体，而不是让「没有主密码」隐含地退化为
+/// 明文：明文存储必须是用户知情下的选择。若靠缺省行为静默落盘，用户不会知道自己的
+/// API Key 正躺在磁盘上——而这类事一旦发生，用户是最后一个知道的人。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalSecretProtection {
+    /// 主密码加密（Argon2id + ChaCha20-Poly1305）。
+    Encrypted,
+    /// 用户显式接受的明文存储；仅限本机 app state 目录，文件权限 0600。
+    Unprotected,
+}
+
 /// 无系统 keychain 时的本地文件 fallback。只用于用户本机 app state，严禁放进项目配置。
 #[derive(Clone)]
 pub struct LocalFileSecretStore {
     path: PathBuf,
     lock: Arc<RwLock<()>>,
+    /// U118：保护状态必须**运行时可变**。
+    ///
+    /// `SecretStore` 的三个方法都是 `&self`，而 `AriadneAppState.secret_store` 是
+    /// 不可变的 `Arc<dyn SecretStore>`——若把主密码做成不可变字段，用户就只能
+    /// 「退出应用 → 改环境变量 → 重启」，对 GUI 用户等于没修。故收进 RwLock，
+    /// 让 `set_master_password` / `allow_unprotected` 在进程内当场生效。
+    ///
+    /// 用独立锁而非复用文件锁 `lock`：文件锁保护的是**读改写序列**，
+    /// 若与状态共用，解锁期间的任何读都会被阻塞在同一把锁上。
+    state: Arc<RwLock<LocalSecretProtectionState>>,
+}
+
+/// 本地密钥文件的进程内保护状态。
+#[derive(Debug, Default, Clone)]
+struct LocalSecretProtectionState {
     master_password: Option<Arc<[u8]>>,
+    /// 无主密码时是否已获得用户明确许可以明文存储。
+    ///
+    /// 默认 `false`：这样「忘了接线主密码流程」的后果是**保存失败并报错**，
+    /// 而不是静默明文落盘。安全默认值应当让疏漏表现为可见的失败。
+    allow_unprotected: bool,
 }
 
 impl std::fmt::Debug for LocalFileSecretStore {
@@ -237,7 +376,9 @@ impl std::fmt::Debug for LocalFileSecretStore {
             .field("path", &self.path)
             .field(
                 "master_password",
-                &self.master_password.as_ref().map(|_| "[redacted]"),
+                &self
+                    .protection_state()
+                    .and_then(|state| state.master_password.as_ref().map(|_| "[redacted]")),
             )
             .finish()
     }
@@ -248,11 +389,74 @@ impl LocalFileSecretStore {
         Self {
             path: path.into(),
             lock: Arc::new(RwLock::new(())),
-            master_password: std::env::var("ARIADNE_SECRET_MASTER_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| Arc::<[u8]>::from(value.into_bytes())),
+            state: Arc::new(RwLock::new(LocalSecretProtectionState {
+                master_password: std::env::var("ARIADNE_SECRET_MASTER_KEY")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Arc::<[u8]>::from(value.into_bytes())),
+                allow_unprotected: false,
+            })),
         }
+    }
+
+    /// U118：用户显式接受明文存储后构造。
+    ///
+    /// 与 `with_master_password` 并列而非互斥参数，是为了让调用点读起来就能看出
+    /// 选了哪种保护方式——`Option<SecretValue>` 那种写法会把「没密码」和
+    /// 「同意明文」混成同一个 `None`，正是这条缺陷最初的成因。
+    pub fn unprotected(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            lock: Arc::new(RwLock::new(())),
+            state: Arc::new(RwLock::new(LocalSecretProtectionState {
+                master_password: None,
+                allow_unprotected: true,
+            })),
+        }
+    }
+
+    /// 返回当前生效的保护方式，供诊断与 UI 展示。
+    pub fn protection(&self) -> LocalSecretProtection {
+        match self.protection_state() {
+            Some(state) if state.master_password.is_some() => LocalSecretProtection::Encrypted,
+            _ => LocalSecretProtection::Unprotected,
+        }
+    }
+
+    /// 读取保护状态快照；锁中毒时返回 None，由调用方决定降级方式。
+    fn protection_state(&self) -> Option<LocalSecretProtectionState> {
+        self.state.read().ok().map(|state| state.clone())
+    }
+
+    /// U118：运行时设置主密码并立即生效（无需重启）。
+    ///
+    /// 已存在的明文文件不在此刻重写——重写发生在下一次 `set_secret`，
+    /// 那是唯一一个本就要整体落盘的时机。在这里顺手重写等于把「设密码」
+    /// 变成一次隐式的全量写盘，失败时用户会既没设上密码、又丢了原文件。
+    pub fn set_master_password(&self, master_password: SecretValue) -> CoreResult<()> {
+        if master_password.expose_secret().trim().is_empty() {
+            return Err(CoreError::validation(
+                "local secret master password cannot be empty",
+            ));
+        }
+        let mut state = self.state.write().map_err(|_| {
+            CoreError::validation("local secret protection state lock poisoned")
+        })?;
+        state.master_password = Some(Arc::<[u8]>::from(
+            master_password.expose_secret().as_bytes(),
+        ));
+        // 设了密码就不再允许明文：两者并存会让「到底存成了什么」取决于调用顺序。
+        state.allow_unprotected = false;
+        Ok(())
+    }
+
+    /// U118：用户显式接受明文存储。
+    pub fn allow_unprotected(&self) -> CoreResult<()> {
+        let mut state = self.state.write().map_err(|_| {
+            CoreError::validation("local secret protection state lock poisoned")
+        })?;
+        state.allow_unprotected = true;
+        Ok(())
     }
 
     /// 无系统 keychain 时由上层主密码流程显式注入。密码只保存在进程内存中。
@@ -268,24 +472,38 @@ impl LocalFileSecretStore {
         Ok(Self {
             path: path.into(),
             lock: Arc::new(RwLock::new(())),
-            master_password: Some(Arc::<[u8]>::from(
-                master_password.expose_secret().as_bytes(),
-            )),
+            state: Arc::new(RwLock::new(LocalSecretProtectionState {
+                master_password: Some(Arc::<[u8]>::from(
+                    master_password.expose_secret().as_bytes(),
+                )),
+                allow_unprotected: false,
+            })),
         })
     }
 
-    fn master_password(&self) -> CoreResult<&[u8]> {
-        self.master_password.as_deref().ok_or_else(|| {
-            CoreError::validation(
-                "system keychain is unavailable; set a local secret master password before storing provider credentials",
-            )
-        })
+    /// 取主密码；既无密码又未获明文许可时 fail-loud。
+    ///
+    /// U118：**错误信息不得指向产品里不存在的操作**。原文案让用户去
+    /// 「set a local secret master password」，而那个操作当时既无 IPC 命令也无 UI，
+    /// 用户照着做只会撞墙。现在两条出路都是真实可达的命令，故直接写出命令名。
+    fn master_password(&self) -> CoreResult<Arc<[u8]>> {
+        self.protection_state()
+            .and_then(|state| state.master_password.clone())
+            .ok_or_else(|| self.locked_error())
+    }
+
+    /// 「未解锁且未许可明文」的统一错误，两处共用避免文案漂移。
+    fn locked_error(&self) -> CoreError {
+        CoreError::validation(
+            "local secret store is locked: call set_local_secret_master_password to encrypt \
+             credentials, or allow_unprotected_local_secrets to store them in plain text",
+        )
     }
 
     fn read_values(&self) -> CoreResult<BTreeMap<String, String>> {
         match std::fs::read_to_string(&self.path) {
             Ok(content) if content.trim().is_empty() => Ok(BTreeMap::new()),
-            Ok(content) => read_local_secret_file(&content, self.master_password()?),
+            Ok(content) => self.decode_values(&content),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
             Err(error) => Err(CoreError::External {
                 service: "local_secret_store".to_owned(),
@@ -294,12 +512,51 @@ impl LocalFileSecretStore {
         }
     }
 
+    /// 按文件自述的形态解码，而不是按当前进程的模式假定。
+    ///
+    /// 关键点：**是否需要主密码由文件说了算**。用户可能先用明文存了几个 key，
+    /// 之后再设主密码；也可能反过来。若按进程模式去猜，就会出现
+    /// 「加密文件用明文路径读 → 报格式错」这类误导性失败。
+    ///
+    /// **但锁定的 store 不得读取意外出现的明文文件**：那是安全护栏。若有人往
+    /// app state 目录丢了一个明文 secrets.json（迁移/误操作/攻击），锁定的 store
+    /// 应当拒绝，而非静默读出来交给调用方——让调用方去检查保护模式显然太晚了。
+    fn decode_values(&self, content: &str) -> CoreResult<BTreeMap<String, String>> {
+        let protection = self.protection_state().unwrap_or_default();
+        match serde_json::from_str::<LocalSecretFile>(content)? {
+            LocalSecretFile::Envelope(envelope) => {
+                decrypt_local_secret_values(&envelope, &self.master_password()?)
+            }
+            LocalSecretFile::LegacyPlaintext(values) => {
+                // 明文文件可被两类 store 读取：
+                // - 已获明文许可的（用户选了不加密）；
+                // - **持有主密码的**——这是历史明文文件的迁移路径：读出后下一次写入
+                //   即以密文重写（回归见 `..._reads_legacy_plaintext_and_rewrites_encrypted`）。
+                //
+                // 只有「既没密码、也没许可」的锁定 store 才拒绝：若有人往 app state
+                // 目录丢了明文 secrets.json（迁移/误操作/攻击），静默读出来交给调用方
+                // 等于让护栏形同虚设。
+                if protection.master_password.is_none() && !protection.allow_unprotected {
+                    return Err(self.locked_error());
+                }
+                Ok(values)
+            }
+        }
+    }
+
     fn write_values(&self, values: &BTreeMap<String, String>) -> CoreResult<()> {
-        let bytes = serde_json::to_vec_pretty(&encrypt_local_secret_values(
-            values,
-            self.master_password()?,
-        )?)
-        .map_err(CoreError::from)?;
+        let protection = self.protection_state().unwrap_or_default();
+        let bytes = match protection.master_password.as_deref() {
+            Some(password) => {
+                serde_json::to_vec_pretty(&encrypt_local_secret_values(values, password)?)
+                    .map_err(CoreError::from)?
+            }
+            // 无主密码时**必须**已获显式许可；否则报错而不是静默明文落盘。
+            None if protection.allow_unprotected => {
+                serde_json::to_vec_pretty(values).map_err(CoreError::from)?
+            }
+            None => return Err(self.locked_error()),
+        };
         // D4：密钥文件与文档正文共用 atomic_write（临时文件 + rename），避免覆盖写半文件。
         crate::config::store::atomic_write(&self.path, &bytes).map_err(|error| {
             CoreError::External {
@@ -318,6 +575,27 @@ impl LocalFileSecretStore {
 }
 
 impl SecretStore for LocalFileSecretStore {
+    fn protection_status(&self) -> SecretProtectionStatus {
+        let Some(state) = self.protection_state() else {
+            // 锁中毒时按最保守的状态上报：宁可提示用户「已锁定」，
+            // 也不要报成 Encrypted 让人以为凭据安全地加密着。
+            return SecretProtectionStatus::Locked;
+        };
+        match (&state.master_password, state.allow_unprotected) {
+            (Some(_), _) => SecretProtectionStatus::Encrypted,
+            (None, true) => SecretProtectionStatus::Unprotected,
+            (None, false) => SecretProtectionStatus::Locked,
+        }
+    }
+
+    fn set_master_password(&self, master_password: SecretValue) -> CoreResult<()> {
+        LocalFileSecretStore::set_master_password(self, master_password)
+    }
+
+    fn allow_unprotected_storage(&self) -> CoreResult<()> {
+        self.allow_unprotected()
+    }
+
     fn set_secret(&self, key_id: &str, value: SecretValue) -> CoreResult<()> {
         if key_id.trim().is_empty() {
             return Err(CoreError::validation("key_id cannot be empty"));
@@ -385,20 +663,6 @@ enum LocalSecretFile {
     LegacyPlaintext(BTreeMap<String, String>),
 }
 
-fn read_local_secret_file(
-    content: &str,
-    master_password: &[u8],
-) -> CoreResult<BTreeMap<String, String>> {
-    if content.trim().is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    match serde_json::from_str::<LocalSecretFile>(content)? {
-        LocalSecretFile::Envelope(envelope) => {
-            decrypt_local_secret_values(&envelope, master_password)
-        }
-        LocalSecretFile::LegacyPlaintext(values) => Ok(values),
-    }
-}
 
 fn encrypt_local_secret_values(
     values: &BTreeMap<String, String>,
@@ -729,7 +993,7 @@ mod tests {
         let store = LocalFileSecretStore {
             path: path.clone(),
             lock: Arc::new(RwLock::new(())),
-            master_password: None,
+            state: Arc::new(RwLock::new(LocalSecretProtectionState::default())),
         };
 
         assert!(store.get_secret("legacy").is_err());
@@ -817,5 +1081,101 @@ mod tests {
         assert!(file.contains("chacha20poly1305"));
         assert!(!file.contains("old-secret"));
         assert!(!file.contains("new-secret"));
+    }
+
+    /// U118：无密码、无许可的 store **必须拒绝写入**，而不是静默明文落盘。
+    ///
+    /// 这是整条修复的安全底线。若默认行为是明文，任何一处忘了接线保护流程，
+    /// 用户的 API Key 就会悄无声息地躺在磁盘上——而用户是最后一个知道的人。
+    #[test]
+    fn locked_store_refuses_to_write_instead_of_falling_back_to_plaintext() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secrets.json");
+        let store = LocalFileSecretStore {
+            path: path.clone(),
+            lock: Arc::new(RwLock::new(())),
+            state: Arc::new(RwLock::new(LocalSecretProtectionState::default())),
+        };
+
+        let error = store
+            .set_secret("provider", SecretValue::new("sk-should-not-land"))
+            .expect_err("锁定状态下写入必须失败");
+
+        assert!(
+            !path.exists(),
+            "写入被拒时不得留下任何文件，否则半个明文文件比报错更危险"
+        );
+        // 错误必须指向**真实存在**的补救操作：这正是 U118 原缺陷的核心——
+        // 旧文案让用户去做一个产品里根本没有的动作。
+        let message = error.to_string();
+        assert!(
+            message.contains("set_local_secret_master_password")
+                && message.contains("allow_unprotected_local_secrets"),
+            "错误应给出两条真实可达的出路，实际：{message}"
+        );
+    }
+
+    /// U118：运行时设主密码后立即生效，无需重启进程。
+    ///
+    /// 方案 1 的核心诉求。若只能靠启动时的环境变量，GUI 用户就得
+    /// 「退出应用 → 改配置 → 重启」，对他们等于没修。
+    #[test]
+    fn master_password_set_at_runtime_takes_effect_immediately() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secrets.json");
+        let store = LocalFileSecretStore {
+            path: path.clone(),
+            lock: Arc::new(RwLock::new(())),
+            state: Arc::new(RwLock::new(LocalSecretProtectionState::default())),
+        };
+        assert!(store.set_secret("k", SecretValue::new("v")).is_err());
+
+        store
+            .set_master_password(SecretValue::new("runtime-password"))
+            .unwrap();
+
+        store.set_secret("k", SecretValue::new("v")).unwrap();
+        assert_eq!(store.protection(), LocalSecretProtection::Encrypted);
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(file.contains("chacha20poly1305"), "应当以密文落盘");
+        assert!(!file.contains("\"v\""), "明文值不得出现在文件里");
+    }
+
+    /// U118：用户显式接受明文后才允许明文落盘。
+    #[test]
+    fn unprotected_mode_requires_explicit_opt_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secrets.json");
+        let store = LocalFileSecretStore::unprotected(&path);
+
+        store.set_secret("k", SecretValue::new("plain-value")).unwrap();
+
+        assert_eq!(store.protection(), LocalSecretProtection::Unprotected);
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            file.contains("plain-value"),
+            "用户选择明文时就应当是明文——含糊其辞的「半加密」只会给人虚假的安全感"
+        );
+        assert_eq!(
+            store.get_secret("k").unwrap().unwrap().expose_secret(),
+            "plain-value"
+        );
+    }
+
+    /// U118：设了主密码就不再允许明文，避免「存成什么取决于调用顺序」。
+    #[test]
+    fn setting_master_password_revokes_unprotected_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secrets.json");
+        let store = LocalFileSecretStore::unprotected(&path);
+        store
+            .set_master_password(SecretValue::new("now-encrypted"))
+            .unwrap();
+
+        store.set_secret("k", SecretValue::new("v")).unwrap();
+
+        assert_eq!(store.protection(), LocalSecretProtection::Encrypted);
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(!file.contains("\"v\""), "设过密码后不得再明文落盘");
     }
 }

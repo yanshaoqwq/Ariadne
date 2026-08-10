@@ -25,13 +25,21 @@ internal sealed class SettingsInputException : Exception
     public SettingsInputFailure Failure { get; }
     public string FieldKey { get; }
     public int? Line { get; }
+
+    public object? FocusItem { get; private set; }
+
+    public SettingsInputException WithFocusItem(object item)
+    {
+        FocusItem = item;
+        return this;
+    }
 }
 
 internal static class SettingsInputValidation
 {
     private static readonly HashSet<string> ModelCapabilities = new(StringComparer.Ordinal)
     {
-        "llm", "embedding", "reranker", "search",
+        "llm", "embedding", "reranker", "search", "tool_use",
     };
 
     internal static StringComparer PathComparer { get; } =
@@ -75,6 +83,18 @@ internal static class SettingsInputValidation
             throw new SettingsInputException(SettingsInputFailure.NonNegative, fieldKey);
         }
         return value;
+    }
+
+    /// <summary>
+    /// U112：空输入表示「未设置」（不限制），返回 null；填了值则按非负金额校验。
+    ///
+    /// 预授权额度必须区分这两种状态：显式的 <c>0</c> 是零额度（暂停一切有成本调用），
+    /// 「未设置」才是不限制。若把空值折叠成 <c>0</c>，用户只要打开设置页保存一次
+    /// 无关改动，就会把「不限制」静默翻转成「全部暂停」。
+    /// </summary>
+    public static double? OptionalNonNegativeDouble(string? text, string fieldKey)
+    {
+        return string.IsNullOrWhiteSpace(text) ? null : NonNegativeDouble(text, fieldKey);
     }
 
     public static IReadOnlyList<ModelConfig> Models(string? text, string fieldKey)

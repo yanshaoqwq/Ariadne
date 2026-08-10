@@ -100,6 +100,127 @@ public sealed class BackendModelSerializationTests
     }
 
     [Fact]
+    public void NodePresetModels_PreserveAliasMappingsAndReferences()
+    {
+        var settings = new NodePresetSettings(
+            new[]
+            {
+                new NodeTypePreset(
+                    "writer",
+                    "agent.writer",
+                    string.Empty,
+                    300_000,
+                    0.5,
+                    null,
+                    new Dictionary<string, bool?>(),
+                    string.Empty,
+                    "writing"),
+            },
+            string.Empty,
+            300_000,
+            1,
+            string.Empty,
+            new Dictionary<string, ModelAliasTarget>
+            {
+                ["writing"] = new("provider-a", "writer-model"),
+            },
+            "writing");
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+        var json = JsonSerializer.Serialize(settings, options);
+        var roundTrip = JsonSerializer.Deserialize<NodePresetSettings>(json, options);
+
+        Assert.NotNull(roundTrip);
+        Assert.Equal("writing", roundTrip.DefaultModelAlias);
+        Assert.Equal("writer-model", roundTrip.ModelAliases!["writing"].ModelId);
+        Assert.Equal("writing", Assert.Single(roundTrip.Presets).ModelAlias);
+    }
+
+    [Fact]
+    public void RagSettings_PreserveExternalQdrantTlsAuthAndNeverRequireSecretEcho()
+    {
+        const string json = """
+        {
+          "rag": {
+            "schema_version": 1,
+            "vector_store": {
+              "enabled": true,
+              "backend": "external_qdrant",
+              "collection": "ariadne_chunks",
+              "vector_dimensions": 1536,
+              "sidecar": {
+                "host": "qdrant.example",
+                "port": 7443,
+                "use_tls": true,
+                "auth_mode": "api_key",
+                "data_dir": ".indexes/qdrant",
+                "binary_path": "qdrant",
+                "startup_timeout_ms": 10000
+              }
+            },
+            "full_text_store": { "backend": "tantivy", "index_dir": ".indexes/tantivy" },
+            "reranker_enabled": false,
+            "chunk_size_chars": 2000,
+            "chunk_overlap_chars": 200
+          },
+          "has_qdrant_api_key": true
+        }
+        """;
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+        var settings = JsonSerializer.Deserialize<RagSettings>(json, options);
+        var serialized = JsonSerializer.Serialize(settings, options);
+
+        Assert.NotNull(settings);
+        Assert.True(settings.Rag.VectorStore.Sidecar.UseTls);
+        Assert.Equal("api_key", settings.Rag.VectorStore.Sidecar.AuthMode);
+        Assert.True(settings.HasQdrantApiKey);
+        Assert.Null(settings.QdrantApiKey);
+        Assert.DoesNotContain("endpoint-secret", serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BackendResult_PreservesStructuredSettingsFailureContext()
+    {
+        const string json = """
+        {
+          "request_id": "req-1",
+          "ok": false,
+          "error": "credential missing",
+          "error_code": "validation",
+          "error_key": "ui.error.validation",
+          "error_params": { "field": "Qdrant API key" },
+          "error_field": "qdrant_api_key",
+          "error_section": "retrieval",
+          "recovery_action": "replace_credential",
+          "correlation_id": "err-1"
+        }
+        """;
+        var result = JsonSerializer.Deserialize<BackendResult<JsonElement>>(
+            json,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(result);
+        var exception = BackendException.FromIpcPayload(
+            result.ErrorCode,
+            result.Error,
+            result.ErrorKey,
+            result.ErrorParams,
+            result.ErrorField,
+            result.ErrorSection,
+            result.RecoveryAction,
+            result.CorrelationId);
+
+        Assert.Equal("validation", exception.Code);
+        Assert.Equal("ui.error.validation", exception.MessageKey);
+        Assert.Equal("Qdrant API key", exception.Parameters["field"]);
+        Assert.Equal("qdrant_api_key", exception.Field);
+        Assert.Equal("retrieval", exception.Section);
+        Assert.Equal("replace_credential", exception.RecoveryAction);
+        Assert.Equal("err-1", exception.CorrelationId);
+    }
+
+    [Fact]
     public void UiPreferences_PreservesReduceMotionAndDefaultsItOff()
     {
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);

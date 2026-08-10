@@ -81,6 +81,11 @@ pub struct PromptTemplateContext {
     pub parameters: BTreeMap<String, String>,
     pub templates: BTreeMap<String, PromptTemplateManifest>,
     pub input_sources: BTreeMap<String, String>,
+    /// 工作流变量的已渲染文本，对应 `{{var.名字}}`。
+    ///
+    /// 运行期由 runtime 从变量作用域链求值后灌入；这里只保存渲染成字符串的
+    /// 结果，类型校验在 runtime 侧完成，模板层不做隐式转换。
+    pub variables: BTreeMap<String, String>,
 }
 
 impl PromptTemplateContext {
@@ -97,6 +102,7 @@ impl PromptTemplateContext {
             parameters: BTreeMap::new(),
             templates: BTreeMap::new(),
             input_sources: BTreeMap::new(),
+            variables: BTreeMap::new(),
         };
         context
             .system
@@ -126,6 +132,26 @@ impl PromptTemplateContext {
         source: impl Into<String>,
     ) -> Self {
         self.input_sources.insert(variable.into(), source.into());
+        self
+    }
+
+    /// 注入 `{{var.名字}}` 可读的工作流变量当前值。
+    ///
+    /// 取值来自 runtime 的变量作用域，已按「默认值 → AI 注入 → 人工输入 →
+    /// 循环写回」的顺序结算完毕；这里只负责渲染，不再做覆盖判断。
+    /// 数字与布尔按 JSON 字面量转文本（`3`、`true`），字符串取原文而非带引号的
+    /// JSON 形式，避免模板里出现 `"第二章"`。
+    pub fn with_variables(
+        mut self,
+        variables: impl IntoIterator<Item = (String, serde_json::Value)>,
+    ) -> Self {
+        for (name, value) in variables {
+            let rendered = match value {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            };
+            self.variables.insert(name, rendered);
+        }
         self
     }
 }
@@ -239,6 +265,15 @@ fn resolve_variable(
     if let Some(name) = variable.strip_prefix("param.") {
         return context
             .parameters
+            .get(name)
+            .cloned()
+            .ok_or_else(|| missing_variable(variable));
+    }
+    // 工作流变量：未声明的引用报缺失，不静默替换成空串，
+    // 否则「第二章」写成空标题也能一路跑到底。
+    if let Some(name) = variable.strip_prefix("var.") {
+        return context
+            .variables
             .get(name)
             .cloned()
             .ok_or_else(|| missing_variable(variable));

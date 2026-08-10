@@ -588,8 +588,9 @@ public sealed class DesktopUxHelpersTests
     }
 
     /// <summary>
-    /// Product rule: no global TextBox accent focus border; only unified Project AI composer
-    /// (Works + Workspace via shared control) gets theme-color border on focus-within.
+    /// Product rule: Project AI composer (Works + Workspace via shared control) is a single markup
+    /// surface with focus-within accent surface; global TextBox uses the unified fill-slot language
+    /// whose editable signal IS the accent focus border (shipped input design).
     /// </summary>
     [Fact]
     public void ProjectAiComposer_IsUnifiedAndOnlyAccentFocusSurface()
@@ -618,12 +619,13 @@ public sealed class DesktopUxHelpersTests
         var focusWithinSlice = theme.Substring(focusWithinBlock, Math.Min(280, theme.Length - focusWithinBlock));
         Assert.Contains("Ariadne.AccentPrimary", focusWithinSlice, StringComparison.Ordinal);
 
-        // Global TextBox:focus must NOT use AccentPrimary (suppress cheap blue edge).
+        // Global TextBox:focus uses the accent border as the editable signal (shipped input language:
+        // borderless fill slot at rest, accent edge + slot fill on focus).
         var textBoxFocus = theme.IndexOf("TextBox:focus /template/ Border#PART_BorderElement", StringComparison.Ordinal);
-        Assert.True(textBoxFocus >= 0, "expected explicit TextBox:focus style to override Fluent accent");
+        Assert.True(textBoxFocus >= 0, "expected explicit TextBox:focus style");
         var textBoxFocusSlice = theme.Substring(textBoxFocus, Math.Min(220, theme.Length - textBoxFocus));
-        Assert.DoesNotContain("Ariadne.AccentPrimary", textBoxFocusSlice, StringComparison.Ordinal);
-        Assert.Contains("Ariadne.BorderDefault", textBoxFocusSlice, StringComparison.Ordinal);
+        Assert.Contains("Ariadne.AccentPrimary", textBoxFocusSlice, StringComparison.Ordinal);
+        Assert.Contains("Ariadne.InputFill", textBoxFocusSlice, StringComparison.Ordinal);
         Assert.Contains("CaretBrush", theme, StringComparison.Ordinal);
     }
 
@@ -839,7 +841,14 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("x:Key=\"Ariadne.Icon.Close\"", theme, StringComparison.Ordinal);
         Assert.Contains("Button.window-control Path.icon", theme, StringComparison.Ordinal);
         Assert.Contains("Ariadne.AccentPrimary", theme, StringComparison.Ordinal);
-        Assert.Contains("scale(1.08)", theme, StringComparison.Ordinal);
+        // 窗口键悬停不再放大整键 / 不铺底色块：反馈全部落在图标本身
+        // （描边转强调色 + HoverSpin 自转；关闭键转错误色）。按下仍有 scale(0.9) 回馈。
+        Assert.Contains("Button.window-control:pressed", theme, StringComparison.Ordinal);
+        Assert.Contains("scale(0.9)", theme, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Button.window-control.close:pointerover /template/ ContentPresenter",
+            theme,
+            StringComparison.Ordinal);
         Assert.Contains("Path.icon.minimize", theme, StringComparison.Ordinal);
         Assert.Contains("Classes=\"window-control\"", main, StringComparison.Ordinal);
         Assert.Contains("icon minimize", main, StringComparison.Ordinal);
@@ -889,6 +898,11 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("markDraft: !fromConfig.Configured", settings, StringComparison.Ordinal);
         var view = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "SettingsPageView.axaml"));
         Assert.Contains("Text=\"{Binding ProviderScopeHelpText}\"", view, StringComparison.Ordinal);
+        Assert.Contains("TestProviderDraftCommand", settings, StringComparison.Ordinal);
+        Assert.Contains("TestProviderDraftAsync", settings, StringComparison.Ordinal);
+        Assert.Contains("TestProviderDraftText", view, StringComparison.Ordinal);
+        Assert.Contains("IsLegacyOtherProvider", settings, StringComparison.Ordinal);
+        Assert.Contains("LegacyOtherProviderMessage", view, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -924,11 +938,11 @@ public sealed class DesktopUxHelpersTests
         Assert.Single(Regex.Matches(view, "ItemsSource=\\\"\\{Binding Tabs\\}\\\""));
         Assert.Contains("<ListBox ItemsSource=\"{Binding Tabs}\"", view, StringComparison.Ordinal);
         Assert.Contains("SelectedItem=\"{Binding NavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
-        Assert.Contains("ItemsSource=\"{Binding SectionIndexItems}\"", view, StringComparison.Ordinal);
+        Assert.Contains("ItemsSource=\"{Binding CurrentTabSectionIndexItems}\"", view, StringComparison.Ordinal);
         Assert.Contains("SelectedItem=\"{Binding SectionNavigationSelection, Mode=TwoWay}\"", view, StringComparison.Ordinal);
         // Section anchors keep subtitle class; attributes may wrap across lines after layout polish.
         // Includes AppRuntime section added for global Qdrant runtime settings.
-        Assert.Equal(23, Regex.Matches(
+        Assert.Equal(22, Regex.Matches(
             view,
             "Binding [A-Za-z]+SectionTitle",
             RegexOptions.CultureInvariant).Count);
@@ -940,7 +954,14 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("ScrollToSectionRequested", settings, StringComparison.Ordinal);
         Assert.Contains("OnScrollToSectionRequested", codeBehind, StringComparison.Ordinal);
         Assert.Contains("SettingsContentScroll.Offset = new Vector", codeBehind, StringComparison.Ordinal);
-        Assert.DoesNotContain("BringIntoView", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "BringIntoView",
+            codeBehind[(codeBehind.IndexOf("private void ScrollToSection", StringComparison.Ordinal))..],
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "target.BringIntoView();",
+            codeBehind,
+            StringComparison.Ordinal);
         Assert.Contains("OnAttachedToVisualTree", codeBehind, StringComparison.Ordinal);
         Assert.Contains("OnDetachedFromVisualTree", codeBehind, StringComparison.Ordinal);
         Assert.Contains("DetachBehaviors();", codeBehind, StringComparison.Ordinal);
@@ -1031,7 +1052,11 @@ public sealed class DesktopUxHelpersTests
 
         Assert.Contains("HorizontalContentAlignment=\"Stretch\"", composer, StringComparison.Ordinal);
         Assert.Contains("HorizontalAlignment=\"Stretch\"", composer, StringComparison.Ordinal);
-        Assert.Contains("<TextBox Grid.Column=\"0\"", composer, StringComparison.Ordinal);
+        // 输入框改为独占一行、发送键落到它下方右侧：原先两者分列同一行，
+        // 输入框只剩「整框宽度减去发送键」那一截，看到的框比能写的区域宽。
+        // 守卫的是「输入框铺满整框宽度」这条性质，不是它当年在第几列。
+        Assert.Contains("<TextBox Grid.Row=\"1\"", composer, StringComparison.Ordinal);
+        Assert.DoesNotContain("<TextBox Grid.Column=\"0\"", composer, StringComparison.Ordinal);
         Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", works, StringComparison.Ordinal);
         Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", workspace, StringComparison.Ordinal);
         Assert.Contains("HorizontalAlignment=\"Stretch\" />", works, StringComparison.Ordinal);

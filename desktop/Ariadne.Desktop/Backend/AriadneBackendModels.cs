@@ -62,7 +62,12 @@ public sealed record BackendResult<T>(
     [property: JsonPropertyName("data")] T? Data,
     [property: JsonPropertyName("error")] string? Error,
     [property: JsonPropertyName("error_code")] string? ErrorCode = null,
-    [property: JsonPropertyName("error_key")] string? ErrorKey = null);
+    [property: JsonPropertyName("error_key")] string? ErrorKey = null,
+    [property: JsonPropertyName("error_params")] IReadOnlyDictionary<string, string>? ErrorParams = null,
+    [property: JsonPropertyName("error_field")] string? ErrorField = null,
+    [property: JsonPropertyName("error_section")] string? ErrorSection = null,
+    [property: JsonPropertyName("recovery_action")] string? RecoveryAction = null,
+    [property: JsonPropertyName("correlation_id")] string? CorrelationId = null);
 
 public sealed record ProjectInitReport(
     [property: JsonPropertyName("project_root")] string ProjectRoot,
@@ -100,7 +105,11 @@ public sealed record ProviderConfigStatus(
     [property: JsonPropertyName("default_embedding_provider_id")] string? DefaultEmbeddingProviderId,
     [property: JsonPropertyName("default_reranker_provider_id")] string? DefaultRerankerProviderId,
     [property: JsonPropertyName("default_search_provider_id")] string? DefaultSearchProviderId,
-    [property: JsonPropertyName("providers")] IReadOnlyList<ProviderKeyStatus> Providers);
+    [property: JsonPropertyName("providers")] IReadOnlyList<ProviderKeyStatus> Providers,
+    [property: JsonPropertyName("default_llm_model_id")] string? DefaultLlmModelId = null,
+    [property: JsonPropertyName("default_embedding_model_id")] string? DefaultEmbeddingModelId = null,
+    [property: JsonPropertyName("default_reranker_model_id")] string? DefaultRerankerModelId = null,
+    [property: JsonPropertyName("default_search_model_id")] string? DefaultSearchModelId = null);
 
 public sealed record ProviderKeyStatus(
     [property: JsonPropertyName("provider")] string Provider,
@@ -124,9 +133,20 @@ public sealed record ProviderSettingsUpdate(
     [property: JsonPropertyName("make_default_reranker")] bool MakeDefaultReranker,
     [property: JsonPropertyName("make_default_search")] bool MakeDefaultSearch);
 
-public sealed record ProviderSectionSettings(
+public sealed record ProviderDraftProbe(
     [property: JsonPropertyName("provider")] ProviderSettingsUpdate Provider,
     [property: JsonPropertyName("api_key")] string? ApiKey);
+
+public sealed record ProviderSectionSettings(
+    [property: JsonPropertyName("provider")] ProviderSettingsUpdate Provider,
+    [property: JsonPropertyName("api_key")] string? ApiKey,
+    [property: JsonPropertyName("default_models")] ProviderDefaultModelRoutes? DefaultModels = null);
+
+public sealed record ProviderDefaultModelRoutes(
+    [property: JsonPropertyName("llm")] ModelAliasTarget? Llm,
+    [property: JsonPropertyName("embedding")] ModelAliasTarget? Embedding,
+    [property: JsonPropertyName("reranker")] ModelAliasTarget? Reranker,
+    [property: JsonPropertyName("search")] ModelAliasTarget? Search);
 
 public sealed record ProviderRemovalReference(
     [property: JsonPropertyName("reference_type")] string ReferenceType,
@@ -156,7 +176,9 @@ public sealed record ProviderModelsResult(
 public sealed record BudgetStatus(
     [property: JsonPropertyName("budget_usd")] double BudgetUsd,
     [property: JsonPropertyName("spent_usd")] double SpentUsd,
-    [property: JsonPropertyName("preauthorized_usd")] double PreauthorizedUsd,
+    // U112：null = 从未设置（不限制）；0 = 用户显式设定的零额度。
+    // 两者必须可区分，否则一次「打开设置页再保存」会把不限制静默翻成全部暂停。
+    [property: JsonPropertyName("preauthorized_usd")] double? PreauthorizedUsd,
     [property: JsonPropertyName("auto_mode_enabled")] bool AutoModeEnabled);
 
 public sealed record AutomationSettings(
@@ -192,7 +214,13 @@ public sealed record NodePresetSettings(
     [property: JsonPropertyName("default_model_id")] string DefaultModelId,
     [property: JsonPropertyName("default_timeout_ms")] long DefaultTimeoutMs,
     [property: JsonPropertyName("default_budget_usd")] double DefaultBudgetUsd,
-    [property: JsonPropertyName("default_provider_id")] string DefaultProviderId = "");
+    [property: JsonPropertyName("default_provider_id")] string DefaultProviderId = "",
+    [property: JsonPropertyName("model_aliases")] IReadOnlyDictionary<string, ModelAliasTarget>? ModelAliases = null,
+    [property: JsonPropertyName("default_model_alias")] string? DefaultModelAlias = null);
+
+public sealed record ModelAliasTarget(
+    [property: JsonPropertyName("provider_id")] string ProviderId,
+    [property: JsonPropertyName("model_id")] string ModelId);
 
 public sealed record NodeTypePreset(
     [property: JsonPropertyName("node_type")] string NodeType,
@@ -202,7 +230,8 @@ public sealed record NodeTypePreset(
     [property: JsonPropertyName("budget_usd")] double BudgetUsd,
     [property: JsonPropertyName("permission_policy")] PermissionPolicy? PermissionPolicy,
     [property: JsonPropertyName("tool_controls")] IReadOnlyDictionary<string, bool?> ToolControls,
-    [property: JsonPropertyName("provider_id")] string ProviderId = "");
+    [property: JsonPropertyName("provider_id")] string ProviderId = "",
+    [property: JsonPropertyName("model_alias")] string? ModelAlias = null);
 
 public sealed record TemplateRepositorySettings(
     [property: JsonPropertyName("base_url")] string BaseUrl);
@@ -216,7 +245,7 @@ public sealed record WorkflowConfig(
     [property: JsonPropertyName("max_loop_iterations")] int MaxLoopIterations,
     [property: JsonPropertyName("max_tool_rounds")] int MaxToolRounds,
     [property: JsonPropertyName("checkpoint_enabled")] bool CheckpointEnabled,
-    [property: JsonPropertyName("runtime_autosave_ms")] long RuntimeAutosaveMs);
+    [property: JsonPropertyName("run_event_retention_days")] int RunEventRetentionDays);
 
 public sealed record GitSettings(
     [property: JsonPropertyName("git")] GitConfig Git);
@@ -230,7 +259,10 @@ public sealed record GitConfig(
     [property: JsonPropertyName("ignored_paths")] IReadOnlyList<string> IgnoredPaths);
 
 public sealed record RagSettings(
-    [property: JsonPropertyName("rag")] RagConfig Rag);
+    [property: JsonPropertyName("rag")] RagConfig Rag,
+    [property: JsonPropertyName("qdrant_api_key")] string? QdrantApiKey = null,
+    [property: JsonPropertyName("clear_qdrant_api_key")] bool ClearQdrantApiKey = false,
+    [property: JsonPropertyName("has_qdrant_api_key")] bool HasQdrantApiKey = false);
 
 public sealed record MiscSectionSettings(
     [property: JsonPropertyName("rag")] RagSettings Rag,
@@ -256,7 +288,9 @@ public sealed record SidecarConfig(
     [property: JsonPropertyName("port")] int Port,
     [property: JsonPropertyName("data_dir")] string DataDir,
     [property: JsonPropertyName("binary_path")] string BinaryPath,
-    [property: JsonPropertyName("startup_timeout_ms")] long StartupTimeoutMs);
+    [property: JsonPropertyName("startup_timeout_ms")] long StartupTimeoutMs,
+    [property: JsonPropertyName("use_tls")] bool UseTls = false,
+    [property: JsonPropertyName("auth_mode")] string AuthMode = "none");
 
 public sealed record FullTextStoreConfig(
     [property: JsonPropertyName("backend")] string Backend,

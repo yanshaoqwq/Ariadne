@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::contracts::{
-    ArtifactKind, CoreError, CoreResult, DocumentPatch, LoopPolicy, NodeId, PermissionPolicy,
-    PortMap, PortValue, WorkflowDefinition, WorkflowEdgeKind,
+    condition_branch_for_port, ArtifactKind, CoreError, CoreResult, DocumentPatch, LoopPolicy,
+    NodeId, PermissionPolicy, PortMap, PortValue, WorkflowDefinition, WorkflowEdgeKind,
+    WorkflowExecutionLimits, EXECUTION_OUTPUT_PORT_FALSE, EXECUTION_OUTPUT_PORT_TRUE,
 };
 use crate::costs::CostLedger;
 use crate::documents::{
@@ -19,7 +20,7 @@ use crate::git::GitService;
 use crate::llm::{tool_result_message, ToolExecutionContext, ToolExecutor, ToolExecutorRouter};
 use crate::providers::{
     LlmProvider, LlmRequest, LlmResponse, ProviderCallContext, ProviderExecutor, SearchProvider,
-    SearchProviderRequest, ToolDefinition, WebSearchToolExecutor,
+    ToolDefinition, WebSearchToolExecutor,
 };
 use crate::retrieval::{
     validate_product_search_limit, validate_product_search_result_budget, HybridSearch,
@@ -47,7 +48,49 @@ pub struct WorkflowLlmSearchOptions<'a> {
     pub default_model_id: Option<&'a str>,
     pub project_search: Option<(&'a ProjectRetrievalRuntime, ToolDefinition)>,
     pub web_search: Option<(&'a dyn SearchProvider, &'a PermissionPolicy, ToolDefinition)>,
-    pub max_tool_rounds: u32,
+    /// U108：Module 9 写作工具（find/register/行号 patch）的装配参数。
+    /// 为 `None` 时该节点只拿到检索类工具，行为与接线前一致。
+    pub writing_tools: Option<WorkflowWritingToolOptions<'a>>,
+    /// U113：节点超时回落与 tool-use 轮次上限统一从项目全局限制读取，
+    /// 不再由调用方各自传裸值。
+    pub limits: WorkflowExecutionLimits,
+}
+
+/// U108：写作节点把 Module 9 工具下发给模型所需的全部依赖。
+///
+/// 设计约束（对应审查报告列出的三个非重构性阻碍）：
+/// - **正文来源**：由节点 config 的 `document_id` 指名，执行时从磁盘读，
+///   不依赖上游端口传大文本（符合「引用式数据流」原则）。
+/// - **副作用边界**：行号 patch 只产出 `DocumentPatch` 作为工具结果，
+///   由节点输出走确认流落盘，executor 内不直写文件。
+/// - **知识库**：register 类工具写入内存知识库，节点结束后由调用方
+///   在 operation receipt 保护下持久化。
+pub struct WorkflowWritingToolOptions<'a> {
+    /// 该节点对应的写作 agent。
+    pub agent: crate::rag::models::WritingAgentKind,
+    /// 经权限过滤后允许下发的工具名；空集表示不下发任何写作工具。
+    pub allowed_tools: BTreeSet<String>,
+    /// 项目写作知识库（find/register 的数据源）。
+    pub knowledge: &'a crate::rag::MemoryWritingKnowledgeBase,
+    /// 节点声明的可编辑文档；缺省时写入类工具会被自动剔除。
+    pub document: Option<crate::rag::tools::WriterDocumentContext<'a>>,
+    /// U114：本次写作针对的章节 id，上下文装配的归属键。
+    /// 缺省时退化为「不装配上下文」，节点行为与接线前一致。
+    pub chapter_id: Option<&'a str>,
+    /// U117：确认项策略。写作节点产出的确认项据此决定初始状态
+    /// （人工 / 跳过 / Auto Mode 审计）。
+    pub confirmation_policy: crate::rag::models::WritingConfirmationPolicy,
+    /// U117：Auto Mode 状态，决定 `AutoAudit` 是否真的生效。
+    pub auto_mode: crate::contracts::AutoModeState,
+    /// U108 阶段 3：节点运行开始时的正文快照会话。
+    ///
+    /// 挂上它，行号 patch 工具才会把改动累积下来并随确认项持久化；
+    /// 为 `None` 时行号工具只把 patch 返回给模型看，节点结束即丢失——
+    /// 那正是「用户点同意后正文纹丝不动」的缺陷状态。
+    ///
+    /// `document_id` 必须是**绝对**路径：`DocumentService::apply_patch` 直接
+    /// `PathBuf::from(patch.document_id)`，而路径沙箱对相对路径一律拒绝。
+    pub patch_session: Option<crate::rag::line_patch::PatchSession>,
 }
 
 struct RoutedExternalNodeHandler {
@@ -383,6 +426,8 @@ pub struct WorkflowPatchApplyOutcome {
 }
 
 /// 执行确认后的 patch 写回，并同步 runtime 写回状态。
+///
+/// 建 Git 检查点，等价于 `apply_confirmed_patch_with_checkpoint(.., true)`。
 pub fn apply_confirmed_patch(
     runtime: &mut WorkflowRuntime,
     documents: &FileDocumentService,
@@ -391,17 +436,48 @@ pub fn apply_confirmed_patch(
     patch: &DocumentPatch,
     checkpoint_message: Option<&str>,
 ) -> CoreResult<WorkflowPatchApplyOutcome> {
+    apply_confirmed_patch_with_checkpoint(
+        runtime,
+        documents,
+        git,
+        node_id,
+        patch,
+        checkpoint_message,
+        true,
+    )
+}
+
+/// U111：按 `checkpoint_enabled` 决定 patch 写回时建不建 Git 检查点。
+///
+/// `checkpoint_enabled = false` 时**只跳过检查点，正文照常落盘**——
+/// 该开关的语义是「要不要留一条可回滚的 Git 记录」，不是「要不要写正文」。
+/// 把它做成后者等于用一个设置项静默阉割核心功能。
+///
+/// 实现上传 `None` 作为 `PatchCheckpointRequest`：`apply_patch_with_cancellation`
+/// 内部按 `(git, checkpoint_request)` 双 `Some` 才建检查点，任一为 `None` 即跳过。
+/// 这里刻意不改传 `git: None` ——`git` 句柄将来可能有检查点之外的用途，
+/// 用「不给检查点请求」表达意图比「不给 git」更贴合这个开关。
+pub fn apply_confirmed_patch_with_checkpoint(
+    runtime: &mut WorkflowRuntime,
+    documents: &FileDocumentService,
+    git: Option<&GitService>,
+    node_id: &NodeId,
+    patch: &DocumentPatch,
+    checkpoint_message: Option<&str>,
+    checkpoint_enabled: bool,
+) -> CoreResult<WorkflowPatchApplyOutcome> {
     // 写回分成两步：先在 runtime 上做只读校验，再调用 DocumentService
     // 修改文件。只有真实文件写入和 checkpoint 都成功后，才把运行态置为
     // Applied，避免 I/O 失败时留下“已写回”的错误快照。
     runtime.ensure_patch_write_back_can_start(node_id)?;
+    let checkpoint_request = checkpoint_enabled.then(|| PatchCheckpointRequest {
+        node_id: node_id.as_str().to_owned(),
+        message: checkpoint_message.map(str::to_owned),
+    });
     let report = documents.apply_patch_with_cancellation(
         patch,
         git,
-        Some(&PatchCheckpointRequest {
-            node_id: node_id.as_str().to_owned(),
-            message: checkpoint_message.map(str::to_owned),
-        }),
+        checkpoint_request.as_ref(),
         runtime.cancellation(),
     )?;
     runtime.mark_patch_write_back_state(node_id, PatchWriteBackState::Applied)?;
@@ -416,6 +492,78 @@ pub fn apply_confirmed_patch(
         report,
         checkpoint_id,
     })
+}
+
+/// U108 阶段 3：按确认项决议把已审批的 patch 写回磁盘。
+///
+/// 这是「用户点了同意，正文却纹丝不动」的修复点。此前 `apply_confirmed_patch`
+/// 生产零调用者，`resolve_confirmation_impl_with_claim` 只写知识库决议、提交运行态、
+/// 取续跑租约，从不落盘。
+///
+/// 返回 `Ok(None)` 的四种情况都**不是**错误：
+/// - 确认项不存在（并发解决过了）；
+/// - 决议不是通过（拒绝路径必须一个字节都不写）；
+/// - 确认项不带 patch（产出类确认项、summarizer 确认项）；
+/// - patch 为空。
+pub fn apply_approved_patch_for_confirmation(
+    runtime: &mut WorkflowRuntime,
+    documents: &FileDocumentService,
+    git: Option<&GitService>,
+    confirmation_id: &str,
+    checkpoint_enabled: bool,
+) -> CoreResult<Option<WorkflowPatchApplyOutcome>> {
+    let Some(confirmation) = runtime.state.confirmations.get(confirmation_id) else {
+        return Ok(None);
+    };
+    // 只有已通过/已自动审计才写盘。这是 U117 门禁语义的第一道防线；
+    // `apply_confirmed_patch` 内部的 `ensure_patch_write_back_can_start`
+    // 会再查一次（按 node_id + commit_id 配对），刻意冗余——
+    // 「审批通过才落盘」是不可绕过点。
+    if !matches!(
+        confirmation.state,
+        crate::workflow::RuntimeConfirmationState::Approved
+            | crate::workflow::RuntimeConfirmationState::AutoAudited
+    ) {
+        return Ok(None);
+    }
+    let node_id = confirmation.node_id.clone();
+    let Some(commit) = patch_commit_from_confirmation(&confirmation.metadata)? else {
+        return Ok(None);
+    };
+    if commit.patch.is_empty() {
+        return Ok(None);
+    }
+    let message = format!("writing patch approved via {confirmation_id}");
+    apply_confirmed_patch_with_checkpoint(
+        runtime,
+        documents,
+        git,
+        &node_id,
+        &commit.patch,
+        Some(&message),
+        checkpoint_enabled,
+    )
+    .map(Some)
+}
+
+/// 从确认项 metadata 取回 patch commit。
+///
+/// 键不存在返回 `Ok(None)`（该确认项本来就不带 patch）；
+/// 键存在但解不出来则 **fail-loud**——那说明本该有 patch，
+/// 静默跳过等于回到「同意了也不落盘」的缺陷状态。
+fn patch_commit_from_confirmation(
+    metadata: &Value,
+) -> CoreResult<Option<crate::rag::line_patch::PatchSessionCommit>> {
+    let Some(raw) = metadata.get(PATCH_SESSION_COMMIT_METADATA_KEY) else {
+        return Ok(None);
+    };
+    serde_json::from_value(raw.clone())
+        .map(Some)
+        .map_err(|error| {
+            CoreError::validation(format!(
+                "confirmation carries an unreadable patch session commit: {error}"
+            ))
+        })
 }
 
 /// LLM 节点配置。
@@ -433,7 +581,8 @@ pub struct WorkflowLlmNodeConfig {
     pub prompt_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    /// F13：画布/预设写入的节点超时（ms）；未设或 0 时回退默认 120s。
+    /// F13：画布/预设写入的节点超时（ms）；未设或 0 时回退到项目配置的
+    /// `workflow.default_timeout_ms`（U113）。
     /// 兼容桌面历史字符串写入（`"7500"`）与正确 number。
     #[serde(
         default,
@@ -455,6 +604,20 @@ pub struct WorkflowLlmNodeConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub single_call_budget_usd: Option<f64>,
+    /// U114：本节点所写章节的 id，用于从写作知识库装配上下文
+    /// （章节概括、人物与关系当前状态、未回收伏笔等）。
+    ///
+    /// 缺省时退化为「只用节点自己的 prompt_template」——与接线前行为一致，
+    /// 不会让历史工作流因缺字段而失败。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_id: Option<String>,
+    /// U108：写作节点要编辑的文档，相对项目文档根的路径（如 `chapter-01.md`）。
+    ///
+    /// 行号 patch 工具（`*-insert-lines` / `*-replace-lines`）需要正文原文才能
+    /// 把行号换算成字节区间，因此节点必须显式指名文档；未指定时该节点只会拿到
+    /// 只读工具（find/search/web-search），不会下发写入工具。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
 }
 
 fn deserialize_opt_u64_lenient<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -651,6 +814,17 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
             ))
         }
     };
+    // U114/U115：把 Module 9 的上下文装配与提示词渲染接进生产路径。
+    //
+    // 接线前这里直接把 `prompt_template` 原文发给 LLM，于是：
+    //   1. 模板里的 `{{上一章原文}}` 等占位符**以字面量**进入请求（U115）；
+    //   2. 写作节点对这本小说一无所知——没有大纲、没有前文、没有人物设定（U114）；
+    //   3. 行号工具连带不可用：LLM 看不到带行号正文，无从调用
+    //      `writer-insert-lines(after_line=N)`，U108 只接工具是接不通的。
+    //
+    // 装配所需的数据在 U108 里已经全部到手：知识库（人物状态/章节概括/
+    // 未回收伏笔由 assembler 自行派生）与节点指名文档的正文。
+    let prompt = render_writing_node_prompt(&prompt, options.writing_tools.as_ref())?;
     let mut messages = Vec::new();
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(crate::providers::LlmMessage {
@@ -662,7 +836,7 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
     }
     messages.push(crate::providers::LlmMessage::user(prompt));
 
-    let timeout_ms = resolve_node_timeout_ms(config.timeout_ms);
+    let timeout_ms = resolve_node_timeout_ms(config.timeout_ms, &options.limits);
     let single_call_budget_usd =
         resolve_node_single_call_budget_usd(config.budget_usd, config.single_call_budget_usd);
     let mut call_metadata = request.metadata.clone();
@@ -694,7 +868,15 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
         dispatch_authorization: request.dispatch_authorization.clone(),
     };
 
-    if options.project_search.is_none() && options.web_search.is_none() {
+    // U108：写作工具也算「有工具」，否则装配了写作工具的节点仍走无工具快路径。
+    let writing_tool_definitions = match options.writing_tools.as_ref() {
+        Some(writing) => resolve_writing_tool_definitions(writing)?,
+        None => Vec::new(),
+    };
+    if options.project_search.is_none()
+        && options.web_search.is_none()
+        && writing_tool_definitions.is_empty()
+    {
         let response = executor.complete_llm(
             provider,
             &base_context,
@@ -709,10 +891,36 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
             },
         )?;
         enforce_single_call_budget(single_call_budget_usd, response.cost_usd)?;
-        return llm_response_to_output(response);
+        let mut output = llm_response_to_output(response)?;
+        // 这条路径没下发任何工具，故无副作用证据；只补产出类确认项。
+        attach_writing_confirmations(
+            &mut output,
+            options.writing_tools.as_ref(),
+            &request.node_id,
+            &request.operation_id,
+            &[],
+            0,
+            None,
+        )?;
+        return Ok(output);
     }
 
-    if options.max_tool_rounds == 0 || options.max_tool_rounds > 32 {
+    // U117：记录进入工具循环前的登记项基线。
+    // 副作用确认项必须只反映**本次节点**造成的改动——知识库是跨节点复用的，
+    // 拿全量登记项当证据会把别人早先登记的内容也算到本节点头上。
+    let registered_baseline: BTreeSet<String> = match options.writing_tools.as_ref() {
+        Some(writing) => writing
+            .knowledge
+            .registered_changes()?
+            .into_iter()
+            .map(|change| change.change_id)
+            .collect(),
+        None => BTreeSet::new(),
+    };
+    let mut patch_count = 0usize;
+
+    let max_tool_rounds = options.limits.max_tool_rounds;
+    if max_tool_rounds == 0 || max_tool_rounds > 32 {
         return Err(CoreError::validation(
             "search tool max_tool_rounds must be between 1 and 32",
         ));
@@ -744,17 +952,47 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
     {
         tool_router.register(tool.name.clone(), tool_executor)?;
     }
+    // U108：写作工具与检索工具共用同一个 router——`*-search` 归 ProjectSearchToolExecutor，
+    // find/register/行号 patch 归 WritingToolExecutor，按工具名分流。
+    let writing_tool_executor = options.writing_tools.as_ref().map(|writing| {
+        let executor = match writing.document {
+            Some(document) => crate::rag::tools::WritingToolExecutor::with_document(
+                writing.knowledge,
+                document,
+            ),
+            None => crate::rag::tools::WritingToolExecutor::new(writing.knowledge),
+        };
+        // U108 阶段 3：挂上 patch 会话，行号改动才会被累积下来等待审批。
+        let executor = match writing.patch_session.clone() {
+            Some(session) => executor.with_patch_session(session),
+            None => executor,
+        };
+        match options.web_search.as_ref() {
+            // 写作 agent 的 `*-web-search` 由写作执行器自己承接，沿用其
+            // 「搜索结果不自动入库」语义。
+            Some((search_provider, _, _)) => {
+                executor.with_search_provider(*search_provider, base_context.clone())
+            }
+            None => executor,
+        }
+    });
+    if let Some(tool_executor) = writing_tool_executor.as_ref() {
+        for tool in &writing_tool_definitions {
+            tool_router.register(tool.name.clone(), tool_executor)?;
+        }
+    }
     let tools = options
         .project_search
         .iter()
         .map(|(_, tool)| tool.clone())
         .chain(options.web_search.iter().map(|(_, _, tool)| tool.clone()))
+        .chain(writing_tool_definitions.iter().cloned())
         .collect::<Vec<_>>();
     let tool_names = tools
         .iter()
         .map(|tool| tool.name.clone())
         .collect::<Vec<_>>();
-    for round in 0..=options.max_tool_rounds {
+    for round in 0..=max_tool_rounds {
         request.cancellation.check()?;
         let mut round_context = base_context.clone();
         round_context.operation_id = Some(format!("{}:llm-round-{round}", request.operation_id));
@@ -778,9 +1016,36 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
         )?;
         enforce_single_call_budget(single_call_budget_usd, response.cost_usd)?;
         if response.tool_calls.is_empty() {
-            return llm_response_to_output(response);
+            let mut output = llm_response_to_output(response)?;
+            // U108 阶段 3：取出本节点累积的 patch。它必须随确认项一起持久化——
+            // executor 一出作用域，内存里的会话就没了，审批时将无物可写。
+            let patch_commit = match writing_tool_executor.as_ref() {
+                Some(executor) => executor.commit_patch_session()?,
+                None => None,
+            };
+            // 只取基线之后新增的登记项——理由见 registered_baseline 处注释。
+            let registered_new: Vec<String> = match options.writing_tools.as_ref() {
+                Some(writing) => writing
+                    .knowledge
+                    .registered_changes()?
+                    .into_iter()
+                    .map(|change| change.change_id)
+                    .filter(|id| !registered_baseline.contains(id))
+                    .collect(),
+                None => Vec::new(),
+            };
+            attach_writing_confirmations(
+                &mut output,
+                options.writing_tools.as_ref(),
+                &request.node_id,
+                &request.operation_id,
+                &registered_new,
+                patch_count,
+                patch_commit.as_ref(),
+            )?;
+            return Ok(output);
         }
-        if round >= options.max_tool_rounds {
+        if round >= max_tool_rounds {
             return Err(CoreError::validation(
                 "LLM node search tool max rounds exceeded before final answer",
             ));
@@ -797,6 +1062,12 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
                 },
                 call,
             )?;
+            // U117：行号 patch 类工具的产出即副作用证据。
+            // 以工具名判定而非解析返回值：返回值 schema 属工具内部约定，
+            // 在这里解析会让两处实现悄悄漂移。
+            if crate::rag::tools::WritingToolExecutor::is_line_patch_tool(&call.name) {
+                patch_count += 1;
+            }
             messages.push(tool_result_message(call, output));
         }
     }
@@ -805,9 +1076,275 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
     ))
 }
 
-/// F13：节点超时；未配置或 0 时保持历史默认 120s。
-fn resolve_node_timeout_ms(timeout_ms: Option<u64>) -> u64 {
-    timeout_ms.filter(|value| *value > 0).unwrap_or(120_000)
+/// U108：解析该写作节点最终下发给模型的工具定义。
+///
+/// 三层过滤，任一不满足即不下发：
+/// 1. agent 本身声明了该工具（`tool_definitions_for_agent`）；
+/// 2. 权限页的 tool_controls 允许（调用方预先算好放进 `allowed_tools`）；
+/// 3. 写入类工具还要求节点已指名可编辑文档——否则模型会拿到一个必然失败的工具。
+///
+/// `*-search` 一律排除：它由 `ProjectSearchToolExecutor` 承接，
+/// 是否下发取决于 `options.project_search` 是否装配，不走这里。
+/// U114/U115：为写作节点装配小说上下文并渲染提示词模板。
+///
+/// 三条设计约束：
+/// - **非写作节点原样返回**。普通 `llm` 节点没有 agent 身份，也没有知识库，
+///   不能凭空给它装配上下文；`writing_tools` 为 `None` 即直接返回原 prompt，
+///   行为与接线前完全一致。
+/// - **不静默吞掉渲染失败**。`render_prompt_template` 对未知变量报错而非替换成
+///   空串（其 doc 注释明确写了这一点）。但模板里**不含**任何 `{{}}` 时也走
+///   渲染器是安全的——没有占位符就没有未知变量。因此只要模板含占位符且解析
+///   不出来，就 fail-loud 让用户知道哪个变量拼错了，而不是把 `{{上一章原文}}`
+///   当正文喂给模型。
+/// - **上下文来源限于已在手的数据**。知识库（assembler 自行派生人物状态、
+///   章节概括、未回收伏笔）与节点 `document_id` 指名的正文。跨章节的
+///   「上一章原文」需要一套章节→文档的目录约定，尚未确立，故本次不猜测。
+fn render_writing_node_prompt(
+    prompt: &str,
+    writing: Option<&WorkflowWritingToolOptions<'_>>,
+) -> CoreResult<String> {
+    let Some(writing) = writing else {
+        return Ok(prompt.to_owned());
+    };
+    // 没有占位符的模板不必装配上下文，省一次知识库遍历。
+    if !prompt.contains("{{") {
+        return Ok(prompt.to_owned());
+    }
+
+    // 章节 id 是上下文装配的归属键（知识库按章查总结）。模板既然含占位符，
+    // 缺 chapter_id 就无法装配——此时必须 fail-loud 指名该补什么，
+    // 绝不能把 `{{上一章原文}}` 原样喂给模型。
+    let chapter_id = writing.chapter_id.map(str::trim).filter(|value| !value.is_empty())
+        .ok_or_else(|| CoreError::validation(
+            "writing node prompt template contains {{...}} placeholders but the node has no \
+             chapter_id; set chapter_id on the node, or remove the placeholders from the template",
+        ))?;
+
+    let prompts = crate::rag::resources::load_prompt_resources()?;
+    let mut context_request = crate::rag::models::WritingContextRequest {
+        agent: writing.agent,
+        chapter_id: chapter_id.to_owned(),
+        stage_id: None,
+        user_intent: None,
+        global_outline: None,
+        stage_outline: None,
+        previous_stage_outline: None,
+        chapter_summaries: None,
+        outline: None,
+        details: None,
+        previous_chapter_text: None,
+        current_draft_text: None,
+        target_text: None,
+        critic_outputs: None,
+        revision_context: None,
+        template_inputs: BTreeMap::new(),
+        metadata: json!({}),
+    };
+    // 带行号正文是行号 patch 工具的前提：LLM 必须先看到行号，
+    // 才可能调用 `*-insert-lines(after_line=N)`。
+    if let Some(document) = writing.document {
+        context_request.current_draft_text = Some(document.text.to_owned());
+    }
+
+    let bundle = crate::rag::context::WritingContextAssembler::new(writing.knowledge)
+        .assemble(context_request)?;
+    let context = crate::rag::prompt_template::PromptTemplateContext::from_bundle(
+        writing.agent,
+        &prompts,
+        &bundle,
+    )?;
+    crate::rag::prompt_template::render_prompt_template(prompt, &context)
+}
+
+/// U117：把确认项挂到节点输出上；非写作节点原样放过。
+///
+/// 普通 `llm` 节点没有 agent 身份，凭空给它造确认项会把每个模型节点都变成
+/// 待审状态——所以 `writing` 为 `None` 时必须什么都不做，行为与接线前一致。
+fn attach_writing_confirmations(
+    output: &mut WorkflowNodeExecutionOutput,
+    writing: Option<&WorkflowWritingToolOptions<'_>>,
+    node_id: &NodeId,
+    revision_id: &str,
+    registered_change_ids: &[String],
+    patch_count: usize,
+    patch_commit: Option<&crate::rag::line_patch::PatchSessionCommit>,
+) -> CoreResult<()> {
+    let Some(writing) = writing else {
+        return Ok(());
+    };
+    let items =
+        writing_node_confirmations(writing, revision_id, registered_change_ids, patch_count)?;
+    let commit_id = patch_commit.map(patch_session_commit_id);
+    // U108 阶段 3：节点自身也要带 commit id。`ensure_patch_write_back_can_start`
+    // 读的是**节点**上的这个字段；不设的话 `record_node_output` 走不进
+    // `PendingConfirmation` 分支，门禁形同虚设。
+    output.patch_session_commit_id = commit_id.clone();
+    output.confirmations = items
+        .into_iter()
+        .map(|item| {
+            // patch 只挂在正文改动类确认项上。同节点的产出类确认项（如
+            // `PlannerOutput`）不该带 patch——`ensure_patch_confirmation_allows_apply`
+            // 按 (node_id, commit_id) 配对，多条确认项共用一个 commit 会让
+            // 任意一条的决议都能左右落盘。
+            let carries_patch = matches!(
+                item.kind,
+                crate::rag::models::ConfirmationKind::WriterCorrectionPatch
+                    | crate::rag::models::ConfirmationKind::PolisherCorrectionPatch
+            );
+            let (patch_session_commit_id, metadata) = match (carries_patch, patch_commit) {
+                (true, Some(commit)) => (
+                    commit_id.clone(),
+                    merge_patch_commit_metadata(item.metadata, commit)?,
+                ),
+                _ => (None, item.metadata),
+            };
+            Ok(crate::workflow::RuntimeConfirmation {
+                confirmation_id: item.confirmation_id,
+                node_id: node_id.clone(),
+                state: match item.state {
+                    crate::rag::models::ConfirmationState::Pending => {
+                        crate::workflow::RuntimeConfirmationState::Pending
+                    }
+                    crate::rag::models::ConfirmationState::Approved => {
+                        crate::workflow::RuntimeConfirmationState::Approved
+                    }
+                    crate::rag::models::ConfirmationState::Rejected => {
+                        crate::workflow::RuntimeConfirmationState::Rejected
+                    }
+                    crate::rag::models::ConfirmationState::Skipped
+                    | crate::rag::models::ConfirmationState::AutoAudited => {
+                        crate::workflow::RuntimeConfirmationState::AutoAudited
+                    }
+                },
+                artifact_id: None,
+                patch_session_commit_id,
+                metadata,
+            })
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    Ok(())
+}
+
+/// U108 阶段 3：patch 会话提交 id。
+///
+/// 用内容 hash 而非随机数：同一节点重放产生相同 id（幂等），
+/// 而内容不同必然 id 不同——避免门禁把两次不同的 patch 当成同一个。
+fn patch_session_commit_id(commit: &crate::rag::line_patch::PatchSessionCommit) -> String {
+    format!(
+        "patch-{}-{}",
+        commit.base_content_hash, commit.final_content_hash
+    )
+}
+
+/// U108 阶段 3：把 patch commit 塞进确认项 metadata。
+///
+/// 存这里而不是另开一张表：metadata 已随运行态快照落在**同一个事务**里，
+/// 不会出现「运行态说已审批、patch 却不见了」的跨存储不一致。
+/// 体积可控——`commit()` 已把全文压成最小 hunk，存的是改动不是全文。
+fn merge_patch_commit_metadata(
+    metadata: Value,
+    commit: &crate::rag::line_patch::PatchSessionCommit,
+) -> CoreResult<Value> {
+    let mut metadata = match metadata {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    metadata.insert(
+        PATCH_SESSION_COMMIT_METADATA_KEY.to_owned(),
+        serde_json::to_value(commit)?,
+    );
+    Ok(Value::Object(metadata))
+}
+
+/// 确认项 metadata 里存放 patch commit 的键名。
+pub(crate) const PATCH_SESSION_COMMIT_METADATA_KEY: &str = "patch_session_commit";
+
+/// U117：为写作节点的产出补上确认项，使写作结果进入审批门禁。
+///
+/// 修复前这里返回的 `confirmations` 恒为空，而 `PatchWriteBackState` 正是靠
+/// 「有无 Pending 确认项」决定是否拦住落盘（`NotRequested` → 直接写入）。
+/// 于是 8 种写作类确认项从不产出，**写作产出不经审阅直接落地**。
+///
+/// 两类确认项，来源不同：
+/// - **产出类**（outliner/designer/planner/critic/prudent 的 `*Output` / `*Review`）：
+///   只要节点跑完就该产出，与是否调用工具无关；
+/// - **副作用类**（`PlannerRegister` / `WriterCorrectionPatch` /
+///   `PolisherCorrectionPatch`）：只在**确有副作用**时产出，否则会凭空造出
+///   一条永远待审的空确认项，把工作流永久卡在 `PendingConfirmation`。
+///   故以可观测证据为准——register 看知识库新增的登记项，patch 看本轮产生的补丁数。
+fn writing_node_confirmations(
+    writing: &WorkflowWritingToolOptions<'_>,
+    revision_id: &str,
+    registered_change_ids: &[String],
+    patch_count: usize,
+) -> CoreResult<Vec<crate::rag::models::ConfirmationItem>> {
+    use crate::rag::models::ConfirmationKind;
+
+    // 章节 id 是确认项的归属键。写作节点未声明时退化为 agent 名，
+    // 以免因缺一个可选字段就完全不产出确认项——那等于回到缺陷状态。
+    let chapter_id = writing
+        .chapter_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| writing.agent.node_type());
+
+    let mut items = Vec::new();
+    for kind in
+        crate::rag::models::WritingNodeDefinition::confirmation_kinds_for(writing.agent)
+    {
+        // 副作用类：无证据则不产出（理由见函数文档）。
+        let metadata = match kind {
+            ConfirmationKind::PlannerRegister => {
+                if registered_change_ids.is_empty() {
+                    continue;
+                }
+                json!({ "registered_change_ids": registered_change_ids })
+            }
+            ConfirmationKind::WriterCorrectionPatch
+            | ConfirmationKind::PolisherCorrectionPatch => {
+                if patch_count == 0 {
+                    continue;
+                }
+                json!({ "patch_count": patch_count })
+            }
+            _ => json!({ "agent": writing.agent.node_type() }),
+        };
+        items.push(crate::rag::pipeline::build_writing_confirmation(
+            kind,
+            chapter_id,
+            revision_id,
+            metadata,
+            &writing.confirmation_policy,
+            &writing.auto_mode,
+            None,
+        )?);
+    }
+    Ok(items)
+}
+
+fn resolve_writing_tool_definitions(
+    writing: &WorkflowWritingToolOptions<'_>,
+) -> CoreResult<Vec<ToolDefinition>> {
+    if writing.allowed_tools.is_empty() {
+        return Ok(Vec::new());
+    }
+    let prompts = crate::rag::resources::load_prompt_resources()?;
+    let definitions = crate::rag::tools::tool_definitions_for_agent(writing.agent, &prompts)?;
+    Ok(definitions
+        .into_iter()
+        .filter(|tool| crate::rag::tools::WritingToolExecutor::handles_tool(&tool.name))
+        .filter(|tool| writing.allowed_tools.contains(&tool.name))
+        .filter(|tool| {
+            writing.document.is_some()
+                || !crate::rag::tools::WritingToolExecutor::is_line_patch_tool(&tool.name)
+        })
+        .collect())
+}
+
+/// F13/U113：节点未声明超时时回落到项目配置的 `default_timeout_ms`，
+/// 不再硬编码 120s——否则设置页展示的默认值与运行时真实行为长期不一致。
+fn resolve_node_timeout_ms(timeout_ms: Option<u64>, limits: &WorkflowExecutionLimits) -> u64 {
+    limits.resolve_node_timeout_ms(timeout_ms)
 }
 
 /// F13：节点单次预算（画布 `budget_usd` 或预设 `single_call_budget_usd`）。
@@ -935,7 +1472,16 @@ fn default_chapter_text_alias() -> String {
 }
 
 /// 产品级工作流校验：拓扑与节点业务配置只走这一入口，保存、显式校验和运行预检共用。
-pub fn validate_workflow_execution_contracts(workflow: &WorkflowDefinition) -> CoreResult<()> {
+/// 校验工作流的执行契约。
+///
+/// U113：全局限制是执行契约的一部分，因此必须走同一个入口。过去 `max_loop_iterations`
+/// 只存在于零调用者的 `validate_loop_policy` 里，导致越界的 loop 节点在任何路径上
+/// 都不会被拒绝。现在限制随图结构一起校验，新增调用点不可能「忘记」带上它。
+pub fn validate_workflow_execution_contracts(
+    workflow: &WorkflowDefinition,
+    limits: &WorkflowExecutionLimits,
+) -> CoreResult<()> {
+    limits.validate()?;
     workflow.validate_topology()?;
     let node_ids = workflow
         .nodes
@@ -969,16 +1515,32 @@ pub fn validate_workflow_execution_contracts(workflow: &WorkflowDefinition) -> C
                     )));
                 }
                 require_incoming_data_alias(workflow, node, &config.input_alias)?;
+                // U125：condition 的控制出边必须从两个分支引脚之一拉出，且同一引脚
+                // 不得重复连出。旧实现用 `.filter(|edge| edge.alias.is_some())`
+                // 只校验「已填标签」的边——留空的边被整体跳过，而留空正是最常见的
+                // 画法（用户无从知道要填 `true`），于是 condition 恒放行下游。
+                let mut used_branch_ports = BTreeSet::new();
                 for edge in workflow.edges.iter().filter(|edge| {
-                    edge.kind == WorkflowEdgeKind::Control
-                        && edge.from.node_id == node.id
-                        && edge.alias.is_some()
+                    edge.kind == WorkflowEdgeKind::Control && edge.from.node_id == node.id
                 }) {
-                    let selector = edge.alias.as_deref().map(str::trim).unwrap_or_default();
-                    if !matches!(selector, "true" | "false") {
+                    let port_name = edge.from.port_name.trim();
+                    if condition_branch_for_port(port_name).is_none() {
                         return Err(CoreError::validation(format!(
-                            "condition control edge {} requires branch selector true or false",
-                            edge.id.as_str()
+                            "{} node {} control out edge {} must leave from {} or {}, got {}",
+                            node.type_name,
+                            node.id.as_str(),
+                            edge.id.as_str(),
+                            EXECUTION_OUTPUT_PORT_TRUE,
+                            EXECUTION_OUTPUT_PORT_FALSE,
+                            port_name
+                        )));
+                    }
+                    if !used_branch_ports.insert(port_name.to_owned()) {
+                        return Err(CoreError::validation(format!(
+                            "{} node {} has more than one control edge on branch port {}",
+                            node.type_name,
+                            node.id.as_str(),
+                            port_name
                         )));
                     }
                 }
@@ -1005,13 +1567,21 @@ pub fn validate_workflow_execution_contracts(workflow: &WorkflowDefinition) -> C
             "loop" => {
                 let config = serde_json::from_value::<LoopNodeConfig>(node.config.clone())
                     .map_err(|error| node_configuration_error(node, error))?;
+                // U113：loop 节点必须同时满足自身合法性与项目全局上限，
+                // 否则用户在设置页收紧的轮次/超时护栏对真实运行没有约束力。
                 LoopPolicy {
                     max_iterations: config.max_iterations,
                     timeout_ms: config.timeout_ms,
                     budget_limit_usd: config.budget_limit_usd,
                     stop_condition: config.stop_condition.clone(),
                 }
-                .validate()?;
+                .validate_within(limits)
+                .map_err(|error| {
+                    CoreError::validation(format!(
+                        "loop node {} violates workflow limits: {error}",
+                        node.id.as_str()
+                    ))
+                })?;
                 let stop = config.stop_condition.as_object().ok_or_else(|| {
                     CoreError::validation(format!(
                         "loop node {} stop_condition must be an object",
@@ -1077,6 +1647,42 @@ pub fn validate_workflow_execution_contracts(workflow: &WorkflowDefinition) -> C
             _ => {}
         }
     }
+    validate_branch_ports_limited_to_condition_nodes(workflow)?;
+    Ok(())
+}
+
+/// U125：分支引脚是 condition/eval 专属。
+///
+/// `validate_edge_kind`（`contracts/workflow.rs`）为了放开 condition 的两个分支引脚，
+/// 把控制边源引脚从「必须是 `exec_out`」松成「三者之一」。那一层拿不到节点类型，
+/// 所以「普通节点不得使用分支引脚」这条只能在这里补上——否则放开校验的同时
+/// 也放开了「任意节点挂 `exec_out_true` 却永远没有 `branch` 输出」这种画法，
+/// 其下游会永久停在 `Waiting`，表现为工作流静默卡住。
+fn validate_branch_ports_limited_to_condition_nodes(
+    workflow: &WorkflowDefinition,
+) -> CoreResult<()> {
+    let condition_node_ids = workflow
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.type_name.as_str(), "condition" | "eval"))
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    for edge in &workflow.edges {
+        if edge.kind != WorkflowEdgeKind::Control {
+            continue;
+        }
+        if condition_branch_for_port(edge.from.port_name.trim()).is_none() {
+            continue;
+        }
+        if !condition_node_ids.contains(&edge.from.node_id) {
+            return Err(CoreError::validation(format!(
+                "control edge {} leaves from branch port {} but source node {} is not a condition node",
+                edge.id.as_str(),
+                edge.from.port_name.trim(),
+                edge.from.node_id.as_str()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1127,9 +1733,13 @@ fn require_incoming_data_alias(
     Ok(())
 }
 
-/// F17：把项目保存的双模式策略解析为 Summarizer 四步领域策略。
+/// F17 / U117：把项目保存的双模式策略解析为写作领域确认策略。
 /// 未出现的键保留领域默认值；文件存在但无法读取/解析时必须在 provider dispatch 前失败。
-fn load_summarizer_confirmation_policy(
+///
+/// U117：原实现只认四种总结类确认项（其余 `_ => continue` 丢弃），于是设置页里
+/// 「章节大纲确认」「伏笔注册确认」「润色修正文档确认」等 8 项配了也不生效——
+/// 用户在为**永远不会发生的事件**配置策略。现改为覆盖全部 12 种。
+pub(crate) fn load_writing_confirmation_policy(
     project_root: &Path,
     auto_mode: bool,
 ) -> CoreResult<(
@@ -1138,7 +1748,8 @@ fn load_summarizer_confirmation_policy(
 )> {
     use crate::config::{ConfirmationAutoModePolicy, ConfirmationNormalPolicy};
     use crate::rag::models::{
-        confirmation_prompt_key, ConfirmationKind, ConfirmationMode, WritingConfirmationPolicy,
+        confirmation_kind_from_policy_key, confirmation_prompt_key, ConfirmationKind,
+        ConfirmationMode, WritingConfirmationPolicy,
     };
 
     let mut policy = if auto_mode {
@@ -1148,12 +1759,9 @@ fn load_summarizer_confirmation_policy(
     };
     let resources = crate::rag::resources::load_prompt_resources()?;
     let mut approval_prompts = BTreeMap::new();
-    for kind in [
-        ConfirmationKind::SegmentSummary,
-        ConfirmationKind::EventSummary,
-        ConfirmationKind::ChapterSummary,
-        ConfirmationKind::StageSummary,
-    ] {
+    // U117：为**全部** 12 种确认项预载审计 prompt。缺任何一条都会让 Auto Mode
+    // 在真正需要审计时才炸——那时节点已经花掉了 LLM 调用的钱。
+    for kind in ConfirmationKind::ALL {
         let key = confirmation_prompt_key(kind);
         let prompt = resources
             .get(key)
@@ -1167,12 +1775,8 @@ fn load_summarizer_confirmation_policy(
         return Ok((policy, approval_prompts));
     };
     for setting in settings {
-        let kind = match setting.confirmation_kind.as_str() {
-            "segment_summary" => ConfirmationKind::SegmentSummary,
-            "event_summary" => ConfirmationKind::EventSummary,
-            "chapter_summary" => ConfirmationKind::ChapterSummary,
-            "stage_summary" => ConfirmationKind::StageSummary,
-            _ => continue,
+        let Some(kind) = confirmation_kind_from_policy_key(&setting.confirmation_kind) else {
+            continue;
         };
         if !setting.approval_prompt.trim().is_empty() {
             approval_prompts.insert(kind, setting.approval_prompt.trim().to_owned());
@@ -1200,6 +1804,7 @@ pub fn execute_summarizer_node<L: CostLedger>(
     provider: &dyn LlmProvider,
     ledger: &L,
     project_root: &Path,
+    limits: &WorkflowExecutionLimits,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
     execute_summarizer_node_with_optional_search_tools(
         request,
@@ -1208,7 +1813,7 @@ pub fn execute_summarizer_node<L: CostLedger>(
         project_root,
         None,
         None,
-        0,
+        limits,
     )
 }
 
@@ -1219,7 +1824,7 @@ pub fn execute_summarizer_node_with_project_search<L: CostLedger>(
     project_root: &Path,
     retrieval: &ProjectRetrievalRuntime,
     search_tool: ToolDefinition,
-    max_tool_rounds: u32,
+    limits: &WorkflowExecutionLimits,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
     execute_summarizer_node_with_optional_search_tools(
         request,
@@ -1228,7 +1833,7 @@ pub fn execute_summarizer_node_with_project_search<L: CostLedger>(
         project_root,
         Some((retrieval, search_tool)),
         None,
-        max_tool_rounds,
+        limits,
     )
 }
 
@@ -1239,7 +1844,7 @@ pub fn execute_summarizer_node_with_search_tools<L: CostLedger>(
     project_root: &Path,
     project_search: Option<(&ProjectRetrievalRuntime, ToolDefinition)>,
     web_search: Option<(&dyn SearchProvider, &PermissionPolicy, ToolDefinition)>,
-    max_tool_rounds: u32,
+    limits: &WorkflowExecutionLimits,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
     execute_summarizer_node_with_optional_search_tools(
         request,
@@ -1248,7 +1853,7 @@ pub fn execute_summarizer_node_with_search_tools<L: CostLedger>(
         project_root,
         project_search,
         web_search,
-        max_tool_rounds,
+        limits,
     )
 }
 
@@ -1259,7 +1864,7 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
     project_root: &Path,
     project_search: Option<(&ProjectRetrievalRuntime, ToolDefinition)>,
     web_search: Option<(&dyn SearchProvider, &PermissionPolicy, ToolDefinition)>,
-    max_tool_rounds: u32,
+    limits: &WorkflowExecutionLimits,
 ) -> CoreResult<WorkflowNodeExecutionOutput> {
     use crate::contracts::{AutoModeState, RunControl};
     use crate::rag::models::ConfirmationState;
@@ -1286,7 +1891,7 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
     let generation_context = store.load_summary_generation_context(&config.chapter_id)?;
     store.load_summary_working_set(&config.chapter_id, None)?;
     let (policy, approval_prompts) =
-        load_summarizer_confirmation_policy(project_root, config.auto_mode)?;
+        load_writing_confirmation_policy(project_root, config.auto_mode)?;
 
     // 四步总结 → 组装 draft。
     let author_prompt = config
@@ -1301,7 +1906,7 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
                 .filter(|s| !s.trim().is_empty())
                 .cloned()
         });
-    let timeout_ms = resolve_node_timeout_ms(config.timeout_ms);
+    let timeout_ms = resolve_node_timeout_ms(config.timeout_ms, limits);
     let summarizer = SummarizerExecutor::new(
         provider,
         ledger,
@@ -1329,7 +1934,7 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
     );
     let summarizer = match project_search {
         Some((retrieval, search_tool)) => {
-            summarizer.with_project_search(retrieval, search_tool, max_tool_rounds)
+            summarizer.with_project_search(retrieval, search_tool, limits.max_tool_rounds)
         }
         None => summarizer,
     };
@@ -1338,7 +1943,7 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
             search_provider,
             permission_policy,
             search_tool,
-            max_tool_rounds,
+            limits.max_tool_rounds,
         ),
         None => summarizer,
     };
@@ -1477,58 +2082,14 @@ pub fn reconcile_summarizer_operation(
         .transpose()
 }
 
-/// Search 节点配置。
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-pub struct WorkflowSearchNodeConfig {
-    pub provider_id: String,
-    pub query_alias: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-}
+// U116：原有 `WorkflowSearchNodeConfig` + `execute_search_node`（对接外部 SearchProvider）
+// 已删除——两者互相引用、外界零调用，是个闭合的死簇。
+//
+// 留着有害而不只是冗余：节点目录里只有**一个** `search` 节点类型，而它的配置形状是
+// 下面的 `WorkflowProjectSearchNodeConfig`（项目内 RAG 检索 + 新鲜度门禁）。
+// 生产注册的执行器是 `execute_project_retrieval_node_for_project`（`commands.rs:6665`）。
+// 保留一套「配置字段对不上唯一可用节点类型」的旧实现，只会让接线者选错。
 
-/// 执行一次 SearchProvider 节点。
-pub fn execute_search_node<L: CostLedger>(
-    request: WorkflowNodeExecutionRequest,
-    provider: &dyn SearchProvider,
-    ledger: &L,
-) -> CoreResult<WorkflowNodeExecutionOutput> {
-    let config = serde_json::from_value::<WorkflowSearchNodeConfig>(request.config.clone())?;
-    let query = input_text(&request.inputs, &config.query_alias)?;
-    let executor = ProviderExecutor::new(ledger);
-    let response = executor.search(
-        provider,
-        &ProviderCallContext {
-            provider_id: config.provider_id,
-            operation_id: Some(request.operation_id.clone()),
-            workflow_id: Some(request.workflow_id.clone()),
-            run_id: Some(request.run_id.clone()),
-            node_id: Some(request.node_id.clone()),
-            tool_call_id: None,
-            timeout_ms: 60_000,
-            max_retries: 0,
-            metadata: request.metadata.clone(),
-            cancellation: request.cancellation.clone(),
-            // F12-b：搜索节点同样在真实副作用边界复核 control/lease。
-            dispatch_authorization: request.dispatch_authorization.clone(),
-        },
-        SearchProviderRequest {
-            query,
-            limit: config.limit,
-            metadata: request.metadata,
-        },
-    )?;
-    let mut outputs = PortMap::new();
-    outputs.insert(
-        "results".to_owned(),
-        PortValue::inline(json!(response.results)),
-    );
-    outputs.insert("raw".to_owned(), PortValue::inline(response.raw.clone()));
-    Ok(WorkflowNodeExecutionOutput {
-        outputs,
-        metadata: json!({ "cost_usd": response.cost_usd }),
-        ..WorkflowNodeExecutionOutput::default()
-    })
-}
 
 /// 项目内 RAG 搜索节点配置；与外部 Web SearchProvider 明确分离。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -1609,15 +2170,11 @@ pub struct WorkflowDocumentReadConfig {
     pub include_content: bool,
 }
 
-/// 执行文档读取节点。
-pub fn execute_document_read_node(
-    request: WorkflowNodeExecutionRequest,
-    documents: &FileDocumentService,
-) -> CoreResult<WorkflowNodeExecutionOutput> {
-    execute_document_read_node_with_root(request, documents, None)
-}
-
 /// 执行文档读取节点，并把相对路径锚定到指定工作目录。
+///
+/// U116：曾有一个不带 root 的 `execute_document_read_node` 薄包装（root 传 `None`
+/// = **不设读取边界**），生产从不走它，已删。新调用方一律用本函数并显式给出
+/// `work_root`——「忘记传边界」不该是一个能通过编译的选项。
 pub fn execute_document_read_node_with_root(
     request: WorkflowNodeExecutionRequest,
     documents: &FileDocumentService,

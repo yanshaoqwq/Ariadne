@@ -9,8 +9,9 @@ use crate::contracts::{
 
 /// Skill manifest 文件名。
 pub const SKILL_MANIFEST_FILE: &str = "skill.json";
-/// 旧 LLM/HTTP/WASM 执行适配器沿用的 manifest 文件名，后续迁移时替代 Skill 命名。
-pub const EXECUTOR_ADAPTER_MANIFEST_FILE: &str = SKILL_MANIFEST_FILE;
+// U116：原有 `EXECUTOR_ADAPTER_MANIFEST_FILE`（= SKILL_MANIFEST_FILE）已删除，零引用。
+// 它的注释称「后续迁移时替代 Skill 命名」，但迁移方向实际相反：`SKILL_MANIFEST_FILE`
+// 有 16 处在用，这个别名 0 处。留着只会让人以为重命名正在进行中。
 /// PromptTemplate manifest 文件名。
 pub const PROMPT_TEMPLATE_MANIFEST_FILE: &str = "prompt_template.json";
 /// Workflow 模板 manifest 文件名。
@@ -286,14 +287,13 @@ pub struct SkillBackendOutput {
     pub elapsed_ms: u64,
 }
 
-/// 旧 Skill manifest 的工程新名称；保留类型别名以便分阶段迁移调用方。
-pub type ExecutorAdapterManifest = SkillManifest;
-/// 旧 Skill executor 配置的工程新名称。
-pub type ExecutorAdapterConfig = SkillExecutorConfig;
-/// 旧 Skill 运行请求的工程新名称。
-pub type ExecutorAdapterRunRequest = SkillRunRequest;
-/// 旧 Skill 运行输出的工程新名称。
-pub type ExecutorAdapterRunOutput = SkillRunOutput;
+// U116：原有 4 个 `ExecutorAdapter*` 类型别名（Manifest / Config / RunRequest / RunOutput）
+// 已删除，全部零引用。它们的注释称「保留类型别名以便分阶段迁移调用方」，但那场迁移
+// **从未发生且方向相反**——底层真名 `Skill*` 有 18–30 处在用，别名 0 处。
+//
+// 注意：`executor_adapter` 作为**节点类型/命令**的术语仍然是活的
+// （`node_capabilities.rs` 的 `EXECUTOR_ADAPTER_NODE_PREFIX`、
+// `register_executor_adapters_for_project` 等），删掉的只是这套没人用的类型别名。
 
 /// SemVer 版本号，PromptTemplate 和 Workflow 都使用同一解析规则。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

@@ -32,6 +32,8 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
     private bool _hasMore;
     private bool _isLoadingMore;
     private bool _isMarkingRead;
+    private bool _isClearingFilters;
+    private RunLogItemViewModel? _selectedLog;
     private int _loadGeneration;
 
     public RunLogPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
@@ -61,6 +63,8 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync());
         LoadMoreCommand = new RelayCommand(() => _ = LoadMoreAsync(), () => HasMore && !IsLoadingMore);
         MarkReadCommand = new RelayCommand(() => _ = MarkReadAsync(), () => !IsMarkingRead && Logs.Any(log => log.IsUnread));
+        ClearFiltersCommand = new RelayCommand(ClearFilters, () => HasActiveFilter);
+        CopySelectedCommand = new RelayCommand(() => _ = CopySelectedAsync(), () => SelectedLog is not null);
     }
 
     public string Title => _displayNames.Text("ui.run_log.title");
@@ -83,6 +87,8 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
     public string NodeFilterText => _displayNames.Text("ui.run_log.filter.node");
     public string LoadMoreText => _displayNames.Text("ui.run_log.load_more");
     public string LoadingMoreText => _displayNames.Text("ui.run_log.loading_more");
+    public string ClearFiltersText => _displayNames.Text("ui.run_log.clear_filters");
+    public string CopySelectedText => _displayNames.Text("ui.run_log.copy_selected");
 
     public string EmptyText => _displayNames.Text("ui.run_log.empty");
     public string EmptyTitle => _loadState == PageLoadState.IdleNeedProject
@@ -109,12 +115,6 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         || !string.IsNullOrWhiteSpace(RunIdFilter)
         || !string.IsNullOrWhiteSpace(NodeIdFilter);
 
-    public string LevelInfoText => _displayNames.Text("ui.level.info");
-
-    public string LevelWarningText => _displayNames.Text("ui.level.warning");
-
-    public string LevelErrorText => _displayNames.Text("ui.level.error");
-
     public ObservableCollection<RunLogItemViewModel> Logs { get; }
 
     public ObservableCollection<RunLogLevelOption> LevelOptions { get; }
@@ -128,6 +128,24 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
     public RelayCommand MarkReadCommand { get; }
 
     public RelayCommand LoadMoreCommand { get; }
+
+    public RelayCommand ClearFiltersCommand { get; }
+
+    public RelayCommand CopySelectedCommand { get; }
+
+    public Func<string, Task>? RequestCopyText { get; set; }
+
+    public RunLogItemViewModel? SelectedLog
+    {
+        get => _selectedLog;
+        set
+        {
+            if (SetProperty(ref _selectedLog, value))
+            {
+                CopySelectedCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
 
     public string SearchQuery
     {
@@ -149,7 +167,10 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
             if (SetProperty(ref _selectedLevel, value))
             {
                 NotifyFilterChanged();
-                _ = RefreshAsync();
+                if (!_isClearingFilters)
+                {
+                    _ = RefreshAsync();
+                }
             }
         }
     }
@@ -162,7 +183,10 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
             if (SetProperty(ref _selectedKind, value))
             {
                 NotifyFilterChanged();
-                _ = RefreshAsync();
+                if (!_isClearingFilters)
+                {
+                    _ = RefreshAsync();
+                }
             }
         }
     }
@@ -278,6 +302,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         if (!_backend.HasProjectRoot)
         {
             Logs.Clear();
+            SelectedLog = null;
             HasMore = false;
             ErrorText = string.Empty;
             StatusText = string.Empty;
@@ -300,6 +325,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
 
             var page = logs.Take(PageSize).ToArray();
             Logs.Clear();
+            SelectedLog = null;
             foreach (var log in page)
             {
                 Logs.Add(new RunLogItemViewModel(log, _displayNames));
@@ -446,6 +472,62 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         OnPropertyChanged(nameof(MarkReadText));
         OnPropertyChanged(nameof(EmptyTitle));
         OnPropertyChanged(nameof(EmptyHint));
+        ClearFiltersCommand.NotifyCanExecuteChanged();
+    }
+
+    private void ClearFilters()
+    {
+        if (!HasActiveFilter)
+        {
+            return;
+        }
+
+        _isClearingFilters = true;
+        try
+        {
+            SearchQuery = string.Empty;
+            SelectedLevel = string.Empty;
+            SelectedKind = string.Empty;
+            WorkflowIdFilter = string.Empty;
+            RunIdFilter = string.Empty;
+            NodeIdFilter = string.Empty;
+        }
+        finally
+        {
+            _isClearingFilters = false;
+        }
+        _ = RefreshAsync();
+    }
+
+    private async Task CopySelectedAsync()
+    {
+        var selected = SelectedLog;
+        if (selected is null || RequestCopyText is null)
+        {
+            return;
+        }
+        var text = string.Join(
+            " ",
+            new[]
+            {
+                selected.TimestampText,
+                selected.LevelText,
+                selected.KindText,
+                selected.Message,
+                selected.ContextText,
+            }.Where(value => !string.IsNullOrWhiteSpace(value)));
+        // 命令 fire-and-forget 调用本方法，剪贴板失败的异常无人观察，需就地转成状态文案。
+        try
+        {
+            await RequestCopyText(text).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+            return;
+        }
+
+        StatusText = _displayNames.Text("ui.run_log.copied");
     }
 
     private static string? NullIfWhiteSpace(string? value)
@@ -515,6 +597,7 @@ public sealed class RunLogItemViewModel : ViewModelBase
     public string? NodeId { get; }
     public string TimestampText { get; }
     public string KindText { get; private set; } = string.Empty;
+    public string LevelText { get; private set; } = string.Empty;
     public string ContextText { get; private set; } = string.Empty;
     public string UnreadText { get; private set; } = string.Empty;
     public bool HasContext { get; private set; }
@@ -527,6 +610,8 @@ public sealed class RunLogItemViewModel : ViewModelBase
     internal void RefreshLocalizedUi(DisplayNameService names)
     {
         KindText = names.Text($"ui.run_log.kind.{Kind.ToLowerInvariant()}");
+        var level = Level.ToLowerInvariant() == "warn" ? "warning" : Level.ToLowerInvariant();
+        LevelText = names.Text($"ui.level.{level}");
         UnreadText = names.Text("ui.run_log.unread");
         var context = new List<string>();
         AddContext(context, names, "ui.run_log.context.workflow", WorkflowId);

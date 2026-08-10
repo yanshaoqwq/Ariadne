@@ -15,7 +15,8 @@ use ariadne::providers::{
     resolve_base_url, EmbeddingProvider, EmbeddingRequest, HttpEmbeddingProvider,
     HttpRerankerProvider, HttpWebSearchProvider, LlmMessage, LlmProvider, LlmRequest, LlmResponse,
     OpenAiCompatibleLlmProvider, Provider, ProviderCallContext, ProviderExecutor, ProviderHealth,
-    ProviderKind, ProviderProtocol, ProviderRuntimeRegistry, RerankRequest, RerankerProvider,
+    ProviderCacheKey, ProviderKind, ProviderProtocol, ProviderRuntimeRegistry, RerankRequest,
+    RerankerProvider,
     SearchProvider, SearchProviderRequest, ToolUseEnvelope,
 };
 use serde_json::{json, Value};
@@ -1183,4 +1184,99 @@ fn http_web_search_provider_calls_responses_api_and_returns_citations() {
     assert!(response.results[0]
         .snippet
         .contains("current public summary"));
+}
+
+/// U116：provider 实例缓存的键必须随**配置**变化。
+///
+/// 这条是「缓存自校验」的核心保障。若键只含 `provider_id`，用户改完 base_url
+/// 后端仍会拿旧实例发请求——请求照发、只是发去了旧地址，**没有任何报错**。
+/// 六个改配置命令各自挂失效能解决，但漏一处就是这个静默缺陷，
+/// 且以后新增第七个命令还会再漏；所以改由指纹兜住。
+#[test]
+fn provider_cache_key_changes_when_base_url_changes() {
+    let before = ProviderCacheKey::new(
+        &cache_key_provider_config("https://api.example.com"),
+        Some("sk-same"),
+    )
+    .expect("构造缓存键应当成功");
+    let after = ProviderCacheKey::new(
+        &cache_key_provider_config("https://api.other.com"),
+        Some("sk-same"),
+    )
+    .expect("构造缓存键应当成功");
+
+    assert_eq!(
+        before.provider_id, after.provider_id,
+        "同一个 provider_id 才有「命中旧实例」的风险，这条前提必须成立"
+    );
+    assert_ne!(
+        before.fingerprint, after.fingerprint,
+        "U116：改了 base_url 但缓存指纹没变——旧 provider 实例会继续命中，\
+         请求被静默发往旧地址"
+    );
+}
+
+/// U116：换 API key 必须让缓存失效。
+///
+/// 单独立一条而不与 base_url 合并：凭据**不在** `ProviderConfig` 里，
+/// 走的是另一条哈希输入。只测配置那条会漏掉「revoke/rebind key 后仍用旧凭据」。
+#[test]
+fn provider_cache_key_changes_when_credential_changes() {
+    let config = cache_key_provider_config("https://api.example.com");
+    let before = ProviderCacheKey::new(&config, Some("sk-old")).expect("构造缓存键应当成功");
+    let after = ProviderCacheKey::new(&config, Some("sk-new")).expect("构造缓存键应当成功");
+
+    assert_ne!(
+        before.fingerprint, after.fingerprint,
+        "U116：换了 API key 但缓存指纹没变——后端会继续用旧凭据发请求"
+    );
+}
+
+/// 「无凭据」与「有凭据」不得撞哈希。
+///
+/// 撤销 key 后若指纹与「带 key」相同，缓存会把已撤销的实例继续交出去——
+/// 等于撤销无效。分隔符（`\x00credential\x00`）正是为这条而加。
+#[test]
+fn provider_cache_key_distinguishes_missing_credential_from_present_one() {
+    let config = cache_key_provider_config("https://api.example.com");
+    let without = ProviderCacheKey::new(&config, None).expect("构造缓存键应当成功");
+    let with = ProviderCacheKey::new(&config, Some("<none>")).expect("构造缓存键应当成功");
+
+    assert_ne!(
+        without.fingerprint, with.fingerprint,
+        "撤销凭据后指纹与「key 恰好是 <none> 字面量」相同——\
+         已撤销的实例会被继续复用，撤销形同无效"
+    );
+}
+
+/// 配置与凭据都不变时，指纹必须稳定——否则缓存永不命中，等于没做缓存。
+#[test]
+fn provider_cache_key_is_stable_for_identical_inputs() {
+    let config = cache_key_provider_config("https://api.example.com");
+    let first = ProviderCacheKey::new(&config, Some("sk-same")).expect("构造缓存键应当成功");
+    let second = ProviderCacheKey::new(&config, Some("sk-same")).expect("构造缓存键应当成功");
+
+    assert_eq!(
+        first, second,
+        "同样的配置与凭据必须给出同一个键，否则每次调用都新建实例、缓存零收益"
+    );
+}
+
+/// 缓存键测试专用的最小 provider 配置。
+fn cache_key_provider_config(base_url: &str) -> ProviderConfig {
+    ProviderConfig {
+        provider_id: "primary".to_owned(),
+        provider_type: ProviderType::OpenAiCompatible,
+        display_name: "Primary".to_owned(),
+        enabled: true,
+        base_url: Some(base_url.to_owned()),
+        api_key: None,
+        models: vec![ModelConfig {
+            model_id: "m".to_owned(),
+            capability: ProviderCapability::Llm,
+            max_context_tokens: None,
+            input_cost_per_million_tokens: Some(1.0),
+            output_cost_per_million_tokens: Some(2.0),
+        }],
+    }
 }

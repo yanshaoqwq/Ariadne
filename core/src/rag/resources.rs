@@ -81,7 +81,8 @@ pub fn validate_prompt_resources(resources: &PromptResources) -> crate::contract
         "tool.writer_search", // writer-search 工具提示词
         "tool.writer_web_search",
         "tool.writer_insert_lines",  // writer-insert-lines 工具提示词
-        "tool.writer_replace_lines", // writer-replace-lines 工具提示词
+        "tool.writer_replace_lines",
+        "tool.writer_rewrite_file", // U123：整章重写 // writer-replace-lines 工具提示词
         "tool.critic_find",          // critic-find 工具提示词
         "tool.critic_search",        // critic-search 工具提示词
         "tool.critic_web_search",
@@ -92,7 +93,8 @@ pub fn validate_prompt_resources(resources: &PromptResources) -> crate::contract
         "tool.polisher_search", // polisher-search 工具提示词
         "tool.polisher_web_search",
         "tool.polisher_insert_lines", // polisher-insert-lines 工具提示词
-        "tool.polisher_replace_lines", // polisher-replace-lines 工具提示词
+        "tool.polisher_replace_lines",
+        "tool.polisher_rewrite_file", // U123：整章重写 // polisher-replace-lines 工具提示词
         "tool.summarizer_search",     // summarizer-search 工具提示词
         "tool.summarizer_web_search",
         "auto_audit.planning_output",  // 规划节点输出自动审计提示词

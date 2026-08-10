@@ -629,7 +629,45 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public string QuickEditDiff
     {
         get => _quickEditDiff;
-        set => SetProperty(ref _quickEditDiff, value);
+        set
+        {
+            if (SetProperty(ref _quickEditDiff, value))
+            {
+                RebuildQuickEditDiffLines();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 快速编辑 diff 的行级投影，供统一视图（一行红一行绿）渲染。
+    ///
+    /// 之所以不直接把整段 diff 文本丢进一个只读 TextBox：那是纯文本，
+    /// 增删行没有任何视觉区分，用户要逐字比对才知道改了什么；
+    /// 而项目本身已在主题里备好 <c>Ariadne.DiffAddBackground</c> /
+    /// <c>Ariadne.DiffRemoveBackground</c>（亮/暗两套都有），此前全仓无人使用。
+    /// </summary>
+    public ObservableCollection<QuickEditDiffLineViewModel> QuickEditDiffLines { get; } = new();
+
+    /// <summary>diff 为空时整块不渲染，避免留下一个空白框。</summary>
+    public bool HasQuickEditDiff => QuickEditDiffLines.Count > 0;
+
+    private void RebuildQuickEditDiffLines()
+    {
+        QuickEditDiffLines.Clear();
+        if (!string.IsNullOrEmpty(_quickEditDiff))
+        {
+            // 按 \n 切；后端产出统一用 \n（CRLF 在 save_document_with_policy 收口处已规范化）。
+            foreach (var line in _quickEditDiff.Split('\n'))
+            {
+                // 末尾换行会切出一个空串，跳过它，否则视图底部多一条空行。
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                QuickEditDiffLines.Add(new QuickEditDiffLineViewModel(line));
+            }
+        }
+        OnPropertyChanged(nameof(HasQuickEditDiff));
     }
 
     public bool IsQuickEditGenerating
@@ -1557,12 +1595,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     {
         DocumentBlocks.Clear();
         var index = 0;
+        // U129：块的起始字符偏移必须在切分时累加记录。切完再回头 IndexOf 找不可靠——
+        // 长篇正文里重复段落很常见，按内容反查会命中错误的位置。
+        var offset = 0;
         foreach (var block in SplitDocumentBlocks(content))
         {
             DocumentBlocks.Add(new DocumentBlockViewModel(
                 $"read-block-{index}",
                 index++,
-                block));
+                block,
+                offset));
+            offset += block.Length;
         }
         OnPropertyChanged(nameof(HasDocumentBlocks));
         OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
@@ -2900,6 +2943,60 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
 public sealed record ExportFormatOption(string Value, string Label);
 
+/// <summary>
+/// 快速编辑 diff 的一行。
+///
+/// 后端 <c>simple_diff</c> 产出的是带前缀的行：<c>- </c> 删除、<c>+ </c> 新增、
+/// 两个空格为上下文（含 <c>  ... (N unchanged lines)</c> 这样的折叠标记）。
+/// 这里只做「前缀 → 类别」的翻译，不重新实现 diff 算法——
+/// 算法留在后端一处，前端两处（快速编辑、将来的冲突合并）共用同一份产出，
+/// 避免两套 diff 结果对不上。
+/// </summary>
+public sealed class QuickEditDiffLineViewModel
+{
+    public QuickEditDiffLineViewModel(string rawLine)
+    {
+        if (rawLine.StartsWith("- ", StringComparison.Ordinal))
+        {
+            Kind = QuickEditDiffLineKind.Removed;
+            Text = rawLine[2..];
+        }
+        else if (rawLine.StartsWith("+ ", StringComparison.Ordinal))
+        {
+            Kind = QuickEditDiffLineKind.Added;
+            Text = rawLine[2..];
+        }
+        else
+        {
+            Kind = QuickEditDiffLineKind.Context;
+            // 上下文行带两个空格前缀；行内容本身可能以空格开头，故只剥固定前缀。
+            Text = rawLine.StartsWith("  ", StringComparison.Ordinal) ? rawLine[2..] : rawLine;
+        }
+    }
+
+    public QuickEditDiffLineKind Kind { get; }
+
+    public string Text { get; }
+
+    /// <summary>行首标记。留空而不是省略，是为了让三类行的正文左边缘对齐。</summary>
+    public string Marker => Kind switch
+    {
+        QuickEditDiffLineKind.Removed => "-",
+        QuickEditDiffLineKind.Added => "+",
+        _ => " ",
+    };
+
+    public bool IsRemoved => Kind == QuickEditDiffLineKind.Removed;
+    public bool IsAdded => Kind == QuickEditDiffLineKind.Added;
+}
+
+public enum QuickEditDiffLineKind
+{
+    Context,
+    Added,
+    Removed,
+}
+
 public sealed record EditorTextSelection(int Start, int End, string Text);
 
 /// <summary>只读模式的虚拟化投影；不再承担编辑、选区或光标状态。</summary>
@@ -2908,16 +3005,28 @@ public sealed class DocumentBlockViewModel
     public DocumentBlockViewModel(
         string id,
         int index,
-        string text)
+        string text,
+        int startOffset)
     {
         Id = id;
         Index = index;
         Text = text;
+        StartOffset = startOffset;
     }
 
     public string Id { get; }
     public int Index { get; }
     public string Text { get; }
+    /// <summary>
+    /// U129：该块首字符在**整篇正文**中的偏移。
+    ///
+    /// 阅读模式与编辑器是两套完全不同的滚动坐标系（块索引 vs 行号/像素偏移），
+    /// 唯一能在两者间换算的共同量就是字符偏移。没有它，「切换视图保留位置」
+    /// 只能退化成块级对齐——而块粒度是 4000–6000 字符（约 8–12 屏），差得太远。
+    /// </summary>
+    public int StartOffset { get; }
+    /// <summary>该块末字符之后的偏移（半开区间右端）。</summary>
+    public int EndOffset => StartOffset + Text.Length;
 }
 
 public sealed class WorksTreeItemViewModel : ViewModelBase

@@ -404,7 +404,14 @@ impl MemoryWritingKnowledgeBase {
                     ));
                 }
                 change.status = RegisteredChangeStatus::Deleted;
-                Ok(vec![change.clone()])
+                let deleted = change.clone();
+                // U121：两个容器必须同步退场，否则删掉的伏笔仍被 find 查回。
+                if function == RegisterFunction::Foreshadowing {
+                    if let Some(record) = state.foreshadowing.get_mut(&change_id) {
+                        record.status = ForeshadowingStatus::Abandoned;
+                    }
+                }
+                Ok(vec![deleted])
             }
         }
     }
@@ -435,57 +442,6 @@ impl MemoryWritingKnowledgeBase {
             &mut state.index.segment_changes,
             segment_id,
             change_id.to_owned(),
-        );
-        Ok(())
-    }
-
-    /// 标记伏笔已经在故事段中种植、回收或废弃，并维护双向索引。
-    pub fn apply_foreshadowing_update(&self, update: ForeshadowingUpdate) -> CoreResult<()> {
-        validate_non_empty_local("foreshadowing_id", &update.foreshadowing_id)?;
-        validate_non_empty_local("segment_id", &update.segment_id)?;
-        let mut state = self.lock_state()?;
-        if !state.segments.contains_key(&update.segment_id) {
-            return Err(CoreError::validation(format!(
-                "story segment not found: {}",
-                update.segment_id
-            )));
-        }
-        let record = state
-            .foreshadowing
-            .get_mut(&update.foreshadowing_id)
-            .ok_or_else(|| {
-                CoreError::validation(format!(
-                    "foreshadowing not found: {}",
-                    update.foreshadowing_id
-                ))
-            })?;
-        if !matches!(
-            update.status,
-            ForeshadowingStatus::Planted | ForeshadowingStatus::Recovered
-        ) {
-            return Err(CoreError::validation(
-                "summarizer foreshadowing update only supports planted or recovered",
-            ));
-        }
-        record.status = update.status;
-        match update.status {
-            ForeshadowingStatus::Planted => {
-                push_unique(&mut record.planted_segment_ids, update.segment_id.clone());
-            }
-            ForeshadowingStatus::Recovered => {
-                push_unique(&mut record.recovered_segment_ids, update.segment_id.clone());
-            }
-            ForeshadowingStatus::Planned | ForeshadowingStatus::Abandoned => unreachable!(),
-        }
-        link_unique(
-            &mut state.index.foreshadowing_segments,
-            &update.foreshadowing_id,
-            update.segment_id.clone(),
-        );
-        link_unique(
-            &mut state.index.segment_foreshadowing,
-            &update.segment_id,
-            update.foreshadowing_id,
         );
         Ok(())
     }
@@ -535,45 +491,6 @@ impl MemoryWritingKnowledgeBase {
             .filter(|issue| chapter_id.is_empty() || issue.chapter_id == chapter_id)
             .cloned()
             .collect())
-    }
-
-    /// 根据当前注册项生成未落地问题，避免 Summarizer 静默忽略计划变化。
-    pub fn queue_unrealized_changes_for_chapter(
-        &self,
-        chapter_id: &str,
-    ) -> CoreResult<Vec<PlannerIssue>> {
-        validate_non_empty_local("chapter_id", chapter_id)?;
-        let mut state = self.lock_state()?;
-        let changes: Vec<RegisteredChange> = state
-            .changes
-            .values()
-            .filter(|change| {
-                change.status == RegisteredChangeStatus::Planned
-                    && change.applies_to_chapter(chapter_id)
-            })
-            .cloned()
-            .collect();
-        let mut issues = Vec::new();
-        for change in changes {
-            let issue_id = format!("{chapter_id}::{}", change.change_id);
-            if let Some(existing) = state.issues.get(&issue_id).cloned() {
-                issues.push(existing);
-                continue;
-            }
-            let issue = PlannerIssue {
-                issue_id: issue_id.clone(),
-                change_id: change.change_id,
-                chapter_id: chapter_id.to_owned(),
-                reason: "registered change was not matched to any realized story segment"
-                    .to_owned(),
-                related_sources: Vec::new(),
-                planner_explanation: None,
-                correction_patch: None,
-            };
-            state.issues.insert(issue_id, issue.clone());
-            issues.push(issue);
-        }
-        Ok(issues)
     }
 
     /// 写入确认项。
@@ -801,6 +718,35 @@ impl MemoryWritingKnowledgeBase {
             metadata: Value::Null,
         };
         state.link_structured_register(&change_id, &change.content);
+        // U121：伏笔必须同时进入 `foreshadowing` 容器。
+        //
+        // `find_foreshadowing` 只读 `state.foreshadowing`，而其余注册类知识
+        // （性格/关系/主题锚点）都从 `state.changes` 查。若只写 changes，
+        // planner 埋下的伏笔 writer 永远查不回来——写入即黑洞，且伏笔
+        // 「种植→回收」的整条机制都无从启动（`apply_foreshadowing_update`
+        // 要求记录已存在）。
+        //
+        // 这里用 change_id 作 foreshadowing_id，使两个容器一一对应，
+        // 后续 delete/update 能定位到同一条。
+        if let RegisterContent::Foreshadowing(content) = &change.content {
+            state.foreshadowing.insert(
+                change_id.clone(),
+                ForeshadowingRecord {
+                    foreshadowing_id: change_id.clone(),
+                    title: content.title.clone(),
+                    description: content.description.clone(),
+                    status: ForeshadowingStatus::Planned,
+                    planted_segment_ids: Vec::new(),
+                    recovered_segment_ids: Vec::new(),
+                    // 保留 intended_payoff：它是伏笔的回收目标，
+                    // ForeshadowingRecord 没有对应字段，放 metadata 不丢信息。
+                    metadata: serde_json::json!({
+                        "intended_payoff": content.intended_payoff,
+                        "change_id": change_id,
+                    }),
+                },
+            );
+        }
         state.changes.insert(change_id, change.clone());
         Ok(change)
     }

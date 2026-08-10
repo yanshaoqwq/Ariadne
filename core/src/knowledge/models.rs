@@ -83,6 +83,26 @@ impl VersionedFactValue {
 
         Ok(())
     }
+
+    /// 把既有事实的出处并入本值，保留**全部**出处。
+    ///
+    /// 为什么需要它：同值复述不算冲突（`decide_proposal` 只比 `value`），会走
+    /// Approved 路径整体覆盖既有事实。若不合并，第 3 章定下的设定被第 40 章复述后，
+    /// 溯源只剩第 40 章——**最早的出处丢失**。百万字长篇里这直接意味着
+    /// 「这个设定最早在哪定的」查不回来，改设定时也不知道该回改哪些章。
+    ///
+    /// 取舍：`source_version` 取**本次（较新）**的值，因为它表达「该事实当前依据
+    /// 哪个版本」；而 `sources` 是溯源集合，只增不减。冲突判定本身不动——
+    /// 把 `source_version` 纳入冲突条件会把每次正常复述都打成冲突、堵死审批队列。
+    pub fn merge_sources_from(&mut self, previous: &VersionedFactValue) {
+        for span in &previous.sources {
+            // 按值去重：SourceSpan 是 (document_id, range, version)，同一段原文
+            // 重复登记不应产生重复出处。
+            if !self.sources.contains(span) {
+                self.sources.push(span.clone());
+            }
+        }
+    }
 }
 
 /// 结构化事实记录。

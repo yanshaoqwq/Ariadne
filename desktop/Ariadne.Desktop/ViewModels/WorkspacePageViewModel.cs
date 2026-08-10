@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
 using Ariadne.Desktop.Backend;
@@ -32,7 +33,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _focusRestoreLibraryOpen;
     private bool _focusRestoreRightPanelOpen;
     private bool _isExecutionPanel;
-    private bool _isProjectAiTab = true;
+    private WorkspaceRightPanelTab _rightPanelTab = WorkspaceRightPanelTab.ProjectAi;
     private readonly CanvasViewportSession _canvasViewport = new();
     private string _statusText = string.Empty;
     private bool _hasUnsavedChanges;
@@ -48,6 +49,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _projectCanvasName = "Project Canvas";
     private Dictionary<string, object?> _canvasMetadata = new(StringComparer.Ordinal);
     private string _confirmationReason = string.Empty;
+    private bool _isRejectArmed;
     private WorkflowOperation? _selectedInDoubtOperation;
     private string _inDoubtResponseJson = string.Empty;
     private string _inDoubtStopReason = string.Empty;
@@ -97,12 +99,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         });
         ShowProjectAiCommand = new RelayCommand(() =>
         {
-            IsProjectAiTab = true;
+            SetRightPanelTab(WorkspaceRightPanelTab.ProjectAi);
             IsRightPanelOpen = true;
         });
         ShowNodeDetailsCommand = new RelayCommand(() =>
         {
-            IsProjectAiTab = false;
+            SetRightPanelTab(WorkspaceRightPanelTab.NodeDetails);
+            IsRightPanelOpen = true;
+        });
+        ShowEdgeDetailsCommand = new RelayCommand(() =>
+        {
+            SetRightPanelTab(WorkspaceRightPanelTab.EdgeDetails);
             IsRightPanelOpen = true;
         });
         ReloadProjectCanvasCommand = new RelayCommand(() => _ = ReloadProjectCanvasWithUnsavedCheckAsync());
@@ -136,7 +143,34 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ToggleConfirmationPanelCommand = new RelayCommand(() =>
             IsConfirmationPanelExpanded = !IsConfirmationPanelExpanded);
         ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"), CanResolveConfirmation);
-        RejectConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("reject"), CanResolveConfirmation);
+        // 第一次点击只展开理由输入线；第二次才真正提交拒绝。
+        RejectConfirmationCommand = new RelayCommand(
+            () =>
+            {
+                if (!IsRejectArmed)
+                {
+                    IsRejectArmed = true;
+                    RequestFocusRejectReason?.Invoke();
+                    return;
+                }
+
+                _ = ResolveSelectedConfirmationAsync("reject");
+            },
+            CanResolveConfirmation);
+        CancelRejectConfirmationCommand = new RelayCommand(DisarmReject);
+        // 主按钮：武装态下是退出口（取消拒绝），常态才是确认通过。
+        ApproveOrCancelCommand = new RelayCommand(
+            () =>
+            {
+                if (IsRejectArmed)
+                {
+                    DisarmReject();
+                    return;
+                }
+
+                _ = ResolveSelectedConfirmationAsync("approve");
+            },
+            CanResolveConfirmation);
         RetryInDoubtOperationCommand = new RelayCommand(() => _ = ResolveSelectedInDoubtOperationAsync("retry"), HasSelectedInDoubtOperation);
         UseInDoubtResponseCommand = new RelayCommand(() => _ = ResolveSelectedInDoubtOperationAsync("use_response"), HasSelectedInDoubtOperation);
         StopInDoubtOperationCommand = new RelayCommand(() => _ = ResolveSelectedInDoubtOperationAsync("stop"), HasSelectedInDoubtOperation);
@@ -298,6 +332,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string OptionalPlaceholder => _displayNames.Text("ui.common.optional");
     public string SecondsUnitText => _displayNames.Text("ui.common.unit.seconds");
     public string BreakpointText => _displayNames.Text("ui.workspace.breakpoint");
+    public string SaveBreakpointText => _displayNames.Text("ui.workspace.breakpoint.save");
     public string ApplyNodeConfigText => _displayNames.Text("ui.workspace.apply_node_config");
     public string ExportSelectionText => _displayNames.Text("ui.workspace.export_selection");
     public string AddAnnotationText => _displayNames.Text("ui.workspace.add_annotation");
@@ -321,8 +356,15 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string InsertForwardVariableText => _displayNames.Text("ui.workspace.edge.insert_forward_variable");
     public string InsertReverseVariableText => _displayNames.Text("ui.workspace.edge.insert_reverse_variable");
     public string TemplatePreviewText => _displayNames.Text("ui.workspace.edge.template_preview");
+    // 正/反向预览各自限定标签：同一面板里两处预览若都叫「预览」，无法区分是哪条。
+    public string ForwardTemplatePreviewLabel => _displayNames.Text("ui.workspace.edge.forward_template_preview");
+    public string ReverseTemplatePreviewLabel => _displayNames.Text("ui.workspace.edge.reverse_template_preview");
     public string PortControlInTip => _displayNames.Text("ui.workspace.port.control_in");
     public string PortControlOutTip => _displayNames.Text("ui.workspace.port.control_out");
+    /// <summary>U125：condition「条件成立」分支引脚提示。</summary>
+    public string PortControlOutTrueTip => _displayNames.Text("ui.workspace.port.control_out_true");
+    /// <summary>U125：condition「条件不成立」分支引脚提示。</summary>
+    public string PortControlOutFalseTip => _displayNames.Text("ui.workspace.port.control_out_false");
     public string PortDataInTip => _displayNames.Text("ui.workspace.port.data_in");
     public string PortDataOutTip => _displayNames.Text("ui.workspace.port.data_out");
     public string PortCommunicationTip => _displayNames.Text("ui.workspace.port.communication");
@@ -367,7 +409,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string SummarizerChapterTextAliasLabel => _displayNames.Text("ui.workspace.summarizer.chapter_text_alias");
     public string SummarizerChapterTextAliasHint => _displayNames.Text("ui.workspace.summarizer.chapter_text_alias_hint");
     public string SummarizerAutoModeText => _displayNames.Text("ui.workspace.summarizer.auto_mode");
-    public string DataInPinsLabel => _displayNames.Text("ui.workspace.port.data_in");
+    public string DataInPinsLabel => _displayNames.Text("ui.workspace.pin.data_inputs_label");
     public string AddDataInPinText => _displayNames.Text("ui.workspace.pin.add_data_in");
     public string RemoveDataInPinText => _displayNames.Text("ui.workspace.pin.remove_data_in");
     public string ZoomInText => _displayNames.Text("ui.workspace.zoom_in");
@@ -610,19 +652,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
     public bool IsProjectAiTab
     {
-        get => _isProjectAiTab;
-        set
-        {
-            if (SetProperty(ref _isProjectAiTab, value))
-            {
-                OnPropertyChanged(nameof(IsNodeDetailsTab));
-            }
-        }
+        get => _rightPanelTab == WorkspaceRightPanelTab.ProjectAi;
+        set => SetRightPanelTab(value
+            ? WorkspaceRightPanelTab.ProjectAi
+            : WorkspaceRightPanelTab.NodeDetails);
     }
 
-    public bool IsNodeDetailsTab => !_isProjectAiTab;
+    public bool IsNodeDetailsTab => _rightPanelTab == WorkspaceRightPanelTab.NodeDetails;
+    public bool IsEdgeDetailsTab => _rightPanelTab == WorkspaceRightPanelTab.EdgeDetails;
     public RelayCommand ShowProjectAiCommand { get; }
     public RelayCommand ShowNodeDetailsCommand { get; }
+    public RelayCommand ShowEdgeDetailsCommand { get; }
     public RelayCommand ReloadProjectCanvasCommand { get; }
     public RelayCommand ExportCommand { get; }
     public RelayCommand SaveCommand { get; }
@@ -652,6 +692,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand ToggleConfirmationPanelCommand { get; }
     public RelayCommand ApproveConfirmationCommand { get; }
     public RelayCommand RejectConfirmationCommand { get; }
+    public RelayCommand CancelRejectConfirmationCommand { get; }
+    public RelayCommand ApproveOrCancelCommand { get; }
+
+    /// <summary>View 注入：理由输入线展开后把焦点交给它（沿用作品页快捷改写的做法）。</summary>
+    public Action? RequestFocusRejectReason { get; set; }
+
     public RelayCommand RetryInDoubtOperationCommand { get; }
     public RelayCommand UseInDoubtResponseCommand { get; }
     public RelayCommand StopInDoubtOperationCommand { get; }
@@ -684,6 +730,46 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     internal int ProjectAiHistoryCount => _projectAiHistory.Count;
     public string CurrentRunId => _runSession.RunId;
     public string ConfirmationReason { get => _confirmationReason; set => SetProperty(ref _confirmationReason, value); }
+
+    /// <summary>
+    /// 拒绝已进入「问理由」态：横线已展开，同一按钮变为「确认拒绝」。
+    ///
+    /// 两步而不是弹危险对话框：拒绝本身是可逆的日常审阅动作，弹窗打断阅读；
+    /// 就地展开一条输入线既留住了上下文，又让第二次点击成为那道确认闸口。
+    /// </summary>
+    public bool IsRejectArmed
+    {
+        get => _isRejectArmed;
+        private set
+        {
+            if (SetProperty(ref _isRejectArmed, value))
+            {
+                OnPropertyChanged(nameof(RejectButtonText));
+                OnPropertyChanged(nameof(ApproveButtonText));
+            }
+        }
+    }
+
+    /// <summary>同一个按钮的两态文案：未武装为「拒绝」，武装后为「确认拒绝」。</summary>
+    public string RejectButtonText => IsRejectArmed
+        ? _displayNames.Text("ui.workspace.confirmation.reject.commit")
+        : RejectConfirmationText;
+
+    /// <summary>
+    /// 主按钮两态：常态是「确认通过」，拒绝武装后让位为「取消」。
+    ///
+    /// 不另开一个取消键：武装态下「通过」本就不该被点（要通过就不会先点拒绝），
+    /// 把它借用成退出口，按钮总数不变，手也不用移到新位置。
+    /// </summary>
+    public string ApproveButtonText => IsRejectArmed
+        ? _displayNames.Text("ui.workspace.confirmation.reject.cancel")
+        : ApproveConfirmationText;
+
+    public string RejectReasonPromptText =>
+        _displayNames.Text("ui.workspace.confirmation.reject.reason_prompt");
+
+    public string RejectCancelText =>
+        _displayNames.Text("ui.workspace.confirmation.reject.cancel");
     public string InDoubtResponseJson { get => _inDoubtResponseJson; set => SetProperty(ref _inDoubtResponseJson, value); }
     public string InDoubtStopReason { get => _inDoubtStopReason; set => SetProperty(ref _inDoubtStopReason, value); }
     public string AnnotationTitle { get => _annotationTitle; set => SetProperty(ref _annotationTitle, value); }
@@ -820,6 +906,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             if (SetProperty(ref _selectedConfirmation, value))
             {
+                // 换审阅对象必须解除武装：否则上一项留下的「确认拒绝」态会让
+                // 下一项的第一次点击直接拒绝——那是这个两步设计要防的事。
+                DisarmReject();
                 OnPropertyChanged(nameof(HasSelectedConfirmation));
                 OnPropertyChanged(nameof(HasPendingConfirmations));
                 NotifyConfirmationCommandStates();
@@ -1362,6 +1451,18 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     {
         ApproveConfirmationCommand.NotifyCanExecuteChanged();
         RejectConfirmationCommand.NotifyCanExecuteChanged();
+        ApproveOrCancelCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>
+    /// 收起理由输入线，按钮回到「拒绝」。
+    ///
+    /// 不清空已写的理由：作者写了一段又收起来，再展开时内容还在。
+    /// 理由本身对通过路径也有效（ConfirmationReason 是共用字段）。
+    /// </summary>
+    private void DisarmReject()
+    {
+        IsRejectArmed = false;
     }
 
     public void CaptureCanvasHistory()
@@ -1576,10 +1677,73 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             node.PromptTemplate = Localization.PromptCatalog.ResolveNodePrompt(graphNode.Type);
         }
         node.RestoreDataInPins(ReadStringList(data, "data_in_handles"));
+        // 起始节点才有变量：变量的生命周期是整个 run，挂在其它节点上无从确定归属层。
+        if (node.IsStartNode)
+        {
+            var group = new WorkflowVariableGroupViewModel(
+                _displayNames.Text,
+                _displayNames.Format,
+                RefreshDirtyState);
+            group.Load(ReadVariableDeclarations(data), ReadString(data, "summary_template"));
+            group.RequestGenerateSummary = () => GenerateVariableSummaryAsync(group);
+            node.Variables = group;
+        }
         // 必须保留 tool_enabled / input_aliases 等非 UI 键，否则 SaveWorkflowGraph 会整表冲掉
         node.RetainOpaqueData(data);
         AttachNodeCommands(node);
         return node;
+    }
+
+    /// <summary>
+    /// 让项目空间 AI 起一句摘要句式，写进句式框（作者可再改）。
+    ///
+    /// 复用 project_ai_chat 通道，因此**沿用当前对话上下文**——作者刚在对话里
+    /// 交代过的设定，起句式时能用上。这是与「快捷改写」同一条要求。
+    ///
+    /// 刻意不落进对话气泡：这是一次工具性取值，不是一轮对话；
+    /// 把它塞进历史会污染后续轮次的语义。因此不更新 conversation revision。
+    /// </summary>
+    private async Task GenerateVariableSummaryAsync(WorkflowVariableGroupViewModel group)
+    {
+        try
+        {
+            var prompt = group.BuildGenerateSummaryPrompt();
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                // 提示词资源缺失：明说，而不是发一个空请求。
+                StatusText = _displayNames.Text("ui.workspace.variable_summary_prompt_missing");
+                return;
+            }
+
+            var sessionFence = _runSession.CaptureFence();
+            var result = await _backend.ProjectAiChatAsync(
+                prompt,
+                workflowIdToRun: null,
+                referenceWorkflowId: CurrentWorkflowId,
+                referenceRunId: string.IsNullOrWhiteSpace(CurrentRunId) ? null : CurrentRunId,
+                conversationId: ProjectAiConversationId,
+                conversationRevision: _projectAiConversationRevision)
+                .ConfigureAwait(true);
+            _runSession.ThrowIfStale(sessionFence);
+
+            var sentence = WorkflowVariableRules.CleanGeneratedSummary(result.Answer);
+            if (sentence.Length == 0)
+            {
+                StatusText = _displayNames.Text("ui.workspace.variable_summary_generate_failed");
+                return;
+            }
+
+            group.SummaryTemplate = sentence;
+            StatusText = _displayNames.Text("ui.common.configured");
+        }
+        catch (OperationCanceledException)
+        {
+            // 工作流已切换；迟到的生成结果不得覆盖新会话的句式。
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
     }
 
     private static string CoalescePath(Dictionary<string, object?> data)
@@ -2493,6 +2657,15 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         var sessionFence = _runSession.CaptureFence();
         try
         {
+            // required 变量留空 / 类型填错时不发请求：本地拦住并写明是哪个变量，
+            // 比让后端拒绝再翻译错误更直接。禁用理由必须配文字，不能只灰掉按钮。
+            var blocking = node.Variables?.BlockingReason();
+            if (blocking is not null)
+            {
+                node.StatusText = blocking;
+                StatusText = blocking;
+                return;
+            }
             var startNodeId = node.IsStartNode ? node.Id : null;
             var graph = BuildGraph();
             await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
@@ -2500,7 +2673,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             CaptureSnapshot();
             _runSession.ThrowIfStale(sessionFence);
             var run = await _runSession
-                .StartAsync(workflowId, startNodeId)
+                .StartAsync(workflowId, startNodeId, node.Variables?.BuildStartVariables())
                 .ConfigureAwait(true);
             node.StatusText = UserFacingError.RuntimeStatus(run.Status, _displayNames);
             StatusText = UserFacingError.RuntimeStatus(run.Status, _displayNames);
@@ -3040,14 +3213,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             return;
         }
         var sessionFence = _runSession.CaptureFence();
-        if (string.Equals(decision, "reject", StringComparison.Ordinal)
-            && !await ConfirmDangerAsync(
-                    "ui.dialog.workspace.reject_confirmation.title",
-                    "ui.dialog.workspace.reject_confirmation.message",
-                    "ui.dialog.workspace.reject_confirmation.confirm").ConfigureAwait(true))
-        {
-            return;
-        }
+        // 拒绝不再弹危险对话框：确认闸口已由「展开理由线 → 第二次点击」承担。
+        // 两道确认叠加只会让人闭眼连点，反而削弱那道闸口的意义。
         try
         {
             _runSession.ThrowIfStale(sessionFence);
@@ -3059,6 +3226,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 string.IsNullOrWhiteSpace(ConfirmationReason) ? null : ConfirmationReason).ConfigureAwait(true);
             _runSession.ThrowIfStale(sessionFence);
             StatusText = UserFacingError.RuntimeStatus(result.Workflow.Status, _displayNames);
+            // 已提交：收起理由线并清空理由，下一项从干净状态开始。
+            DisarmReject();
+            ConfirmationReason = string.Empty;
             if (string.Equals(workflowId, CurrentWorkflowId, StringComparison.Ordinal))
             {
                 _runSession.Attach(
@@ -3527,6 +3697,70 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
 
 
+    /// <summary>
+    /// 解析 start 节点上的变量声明。
+    ///
+    /// 走 JsonElement 而非强类型反序列化：节点 data 是 opaque 字典，
+    /// 未知键要原样保留（见 NodeConfigData.CaptureExtra），这里只读不写。
+    /// 解析不出来的条目直接跳过——执行页少一行，比拿半个声明去启动安全。
+    /// </summary>
+    private static IReadOnlyList<WorkflowVariableDeclaration> ReadVariableDeclarations(
+        Dictionary<string, object?> data)
+    {
+        if (!data.TryGetValue("variables", out var raw) || raw is null)
+        {
+            return Array.Empty<WorkflowVariableDeclaration>();
+        }
+
+        if (raw is not JsonElement element || element.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<WorkflowVariableDeclaration>();
+        }
+
+        var declarations = new List<WorkflowVariableDeclaration>();
+        foreach (var item in element.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var name = item.TryGetProperty("name", out var nameElement)
+                ? nameElement.GetString() ?? string.Empty
+                : string.Empty;
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            var kind = item.TryGetProperty("kind", out var kindElement)
+                ? kindElement.GetString() ?? WorkflowVariableRules.KindString
+                : WorkflowVariableRules.KindString;
+
+            object? defaultValue = null;
+            if (item.TryGetProperty("default", out var defaultElement))
+            {
+                defaultValue = defaultElement.ValueKind switch
+                {
+                    JsonValueKind.String => defaultElement.GetString(),
+                    JsonValueKind.Number => defaultElement.GetDouble(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    _ => null,
+                };
+            }
+
+            var required = item.TryGetProperty("required", out var requiredElement)
+                && requiredElement.ValueKind == JsonValueKind.True;
+            var hidden = item.TryGetProperty("hidden", out var hiddenElement)
+                && hiddenElement.ValueKind == JsonValueKind.True;
+
+            declarations.Add(new WorkflowVariableDeclaration(name, kind, defaultValue, required, hidden));
+        }
+
+        return declarations;
+    }
+
     private void SelectEdge(WorkflowEdgeViewModel edge)
     {
         foreach (var item in Edges)
@@ -3534,7 +3768,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             item.IsSelected = item == edge;
         }
         SelectedEdge = edge;
-        IsProjectAiTab = false;
+        SetRightPanelTab(WorkspaceRightPanelTab.EdgeDetails);
         IsRightPanelOpen = true;
 
         // 点边时同步选中一个端点节点，右栏才显示「相关边」配置（符合直觉）
@@ -3556,6 +3790,26 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
 
         RefreshRelatedEdges();
         NotifySelectionCommands();
+    }
+
+    private void SetRightPanelTab(WorkspaceRightPanelTab tab)
+    {
+        if (_rightPanelTab == tab)
+        {
+            return;
+        }
+
+        _rightPanelTab = tab;
+        OnPropertyChanged(nameof(IsProjectAiTab));
+        OnPropertyChanged(nameof(IsNodeDetailsTab));
+        OnPropertyChanged(nameof(IsEdgeDetailsTab));
+    }
+
+    private enum WorkspaceRightPanelTab
+    {
+        ProjectAi,
+        NodeDetails,
+        EdgeDetails,
     }
 
     private void SaveSelectedEdgeConfig()
@@ -3665,6 +3919,13 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 }
             }
             node.SetPortConnected(controlIn, controlOut, dataIn, dataOut, communication);
+            // U125：两个分支引脚各自判定，不能共用上面的 controlOut——
+            // 只连了真分支时，假分支不应被画成已连接。
+            node.SetBranchPortConnected(
+                trueBranch: Edges.Any(edge => edge.Source == node.Id
+                    && string.Equals(edge.SourceHandle, NodePortSpec.ExecOutTrueHandle, StringComparison.OrdinalIgnoreCase)),
+                falseBranch: Edges.Any(edge => edge.Source == node.Id
+                    && string.Equals(edge.SourceHandle, NodePortSpec.ExecOutFalseHandle, StringComparison.OrdinalIgnoreCase)));
             // 各数据入是否已占用
             foreach (var pin in node.DataInPins)
             {
@@ -3805,18 +4066,55 @@ public enum NodePortDirection
 /// <summary>节点上的可视化端口定义，与后端 exec/data/communication 引脚对齐。</summary>
 public static class NodePortSpec
 {
-    /// <summary>节点外框宽（单卡片，引脚在内侧）。与 WorkspacePageView 节点模板一致。</summary>
-    public const double NodeWidth = 200;
-    /// <summary>节点最小高度；多数据入按同一几何模型向下扩展。</summary>
-    public const double MinimumNodeHeight = 96;
-    /// <summary>内侧引脚中心到左右边的内缩（padding 6 + 半宽 7 ≈ 13）。</summary>
-    public const double PinInsetX = 13;
+    /// <summary>节点外框宽（单卡片，引脚在内侧）。与 WorkspacePageView 节点模板一致。
+    /// 232 而非 200：200 宽时内容栏「数据入引脚列 + 加号 + 正文 + 数据出引脚」挤不开，
+    /// 加号会被裁掉一半。</summary>
+    public const double NodeWidth = 232;
+    /// <summary>
+    /// 节点最小高度 = 单个数据入引脚所需高度（首个引脚中心 + 底部安全间距）。
+    /// 原先写死 96，但几何修正后单引脚实际需要 98，写死值会比真实需要还矮，
+    /// 使「最小高」这个概念自相矛盾。改为由同一套几何派生，与
+    /// NodeHeightForDataInputCount(1) 恒等。
+    /// </summary>
+    public const double MinimumNodeHeight = DataPortY + DataPortBottomInset;
+
+    // ==================================================================
+    // 以下常量必须与 WorkspacePageView.axaml 的节点模板逐项对应。
+    // 一旦模板改了 padding / 引脚尺寸而这里没跟着改，连线端点就会与引脚
+    // 错开若干像素（表现为「节点边偏移」）—— 这正是加宽到 232 那次留下的
+    // 回归：模板把标题栏 padding 由 6,7 改成 8,8、执行引脚由 14 改成 16，
+    // 而这里仍按旧值算。因此改为由「有名字的组成部分」推导，不再写死结果，
+    // 并由 NodeEdgeGeometryTests 守住模板与常量的一致性。
+    // ==================================================================
+
+    /// <summary>卡片边框粗细（node-card BorderThickness）。</summary>
+    public const double CardBorderThickness = 1;
+    /// <summary>卡片顶缘 1px 受光亮线（DockPanel.Dock=Top 的玻璃高光）。</summary>
+    public const double CardTopLightLine = 1;
+    /// <summary>标题栏内边距（Border Padding="8,8"）。</summary>
+    public const double TitleBarPadding = 8;
+    /// <summary>执行引脚外框边长（标题栏两端的 pin-glass-soft，16x16）。</summary>
+    public const double ExecPinBox = 16;
+    /// <summary>内容栏左右内边距（Border Padding="6,8" 的水平分量）。</summary>
+    public const double ContentBarPaddingX = 6;
+
+    /// <summary>
+    /// 内侧引脚中心到节点左右边的内缩。
+    /// 执行引脚位于标题栏内：卡片边框 1 + 标题栏 padding 8 + 半个引脚 8 = 17。
+    /// </summary>
+    public const double PinInsetX = CardBorderThickness + TitleBarPadding + (ExecPinBox / 2.0);
     /// <summary>通信口中心 Y：顶行 10px 内、半出卡片上沿。</summary>
     public const double CommPortY = 7;
     /// <summary>卡片上沿（通信行高度）。</summary>
     public const double CardTopOffset = 10;
-    /// <summary>标题栏高度（含 padding 6,7 + 内容 ~16）。</summary>
-    public const double TitleBarHeight = 34;
+    /// <summary>
+    /// 标题行内容高度。模板给标题行设了固定高度，使起始节点（含「运行」按钮，
+    /// 原本 20px 行高）与普通节点（16px）保持一致——否则两类节点的标题栏差 4px，
+    /// 数据口 Y 就无法用单个常量表达。
+    /// </summary>
+    public const double TitleRowHeight = 20;
+    /// <summary>标题栏总高 = 上下 padding + 标题行高。</summary>
+    public const double TitleBarHeight = (TitleBarPadding * 2) + TitleRowHeight;
     /// <summary>内容栏上 padding。</summary>
     public const double ContentBarPaddingY = 8;
     /// <summary>数据引脚外框边长。</summary>
@@ -3826,13 +4124,22 @@ public static class NodePortSpec
     public const double DataPortSpacing = DataPinBox + DataPortGap; // 22
     /// <summary>最后一个数据入中心到节点底边的安全间距，包含列表下方无框添加按钮。</summary>
     public const double DataPortBottomInset = 35;
-    /// <summary>执行口中心 Y（标题行垂直中线）。</summary>
-    public const double ExecPortY = CardTopOffset + 7 + 8; // pad-top + half pin
     /// <summary>
-    /// 首个数据口中心 Y：卡片顶 + 标题栏 + 内容 pad-top + 半 pin。
+    /// 执行口中心 Y = 通信行 + 卡片边框 + 顶缘光边 + 标题栏 pad-top + 半个引脚。
+    /// </summary>
+    public const double ExecPortY =
+        CardTopOffset + CardBorderThickness + CardTopLightLine + TitleBarPadding + (ExecPinBox / 2.0);
+    /// <summary>
+    /// 首个数据口中心 Y：卡片顶 + 边框 + 顶缘光边 + 标题栏 + 内容 pad-top + 半 pin。
     /// 布局：内容栏 VerticalAlignment=Top，ItemsControl Spacing=DataPortGap。
     /// </summary>
-    public const double DataPortY = CardTopOffset + TitleBarHeight + ContentBarPaddingY + (DataPinBox / 2.0);
+    public const double DataPortY = CardTopOffset + CardBorderThickness + CardTopLightLine
+        + TitleBarHeight + ContentBarPaddingY + (DataPinBox / 2.0);
+    /// <summary>
+    /// 数据引脚中心到节点左右边的内缩：卡片边框 1 + 内容栏 padding 6 + 半个 pin 7 = 14。
+    /// 与执行引脚（在标题栏内，padding 8 + 半宽 8）不同，不能共用 PinInsetX。
+    /// </summary>
+    public const double DataPinInsetX = CardBorderThickness + ContentBarPaddingX + (DataPinBox / 2.0);
     public const double HitRadius = 16;
     public const double MiniMapContentWidth = CanvasMiniMapHelpers.ContentWidth;
     public const double MiniMapContentHeight = CanvasMiniMapHelpers.ContentHeight;
@@ -3843,6 +4150,37 @@ public static class NodePortSpec
         NodePortKind.Communication => "communication",
         _ => direction == NodePortDirection.In ? "input" : "output",
     };
+
+    /// <summary>U125：condition 的「条件成立」执行出引脚。与后端常量同名。</summary>
+    public const string ExecOutTrueHandle = "exec_out_true";
+    /// <summary>U125：condition 的「条件不成立」执行出引脚。</summary>
+    public const string ExecOutFalseHandle = "exec_out_false";
+
+    /// <summary>
+    /// U125：两个分支引脚相对标题行中线的垂直错开量（真在上、假在下，等距对称）。
+    ///
+    /// 取 (标题栏总高 - 引脚) / 2 = 10：这是**不越界的最大间距**，两脚中心相距 20、
+    /// 16px 引脚之间留 4px 净空，包络 36 正好等于标题栏总高。
+    /// 原来取 +1（间距 18、净空 2px）时两脚几乎贴成一坨；再往外拉到 +3 则包络 38
+    /// 溢出标题栏、会撞上顶部通信口——BranchPins_StayWithinTitleBar 守的就是这条。
+    /// </summary>
+    public const double BranchPinOffsetY = (TitleBarHeight - ExecPinBox) / 2.0;
+
+    /// <summary>U125：分支引脚名 → 相对通用执行出口中心的 Y 偏移（真在上、假在下）。</summary>
+    public static double BranchPinOffsetFor(string? handle) => (handle ?? string.Empty).Trim() switch
+    {
+        ExecOutTrueHandle => -BranchPinOffsetY,
+        ExecOutFalseHandle => BranchPinOffsetY,
+        _ => 0,
+    };
+
+    /// <summary>U125：是否为 condition 的分支执行出引脚。</summary>
+    public static bool IsBranchExecOutHandle(string? handle)
+    {
+        var name = (handle ?? string.Empty).Trim();
+        return string.Equals(name, ExecOutTrueHandle, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(name, ExecOutFalseHandle, StringComparison.OrdinalIgnoreCase);
+    }
 
     public static string EdgeKindName(NodePortKind kind) => kind switch
     {
@@ -3859,11 +4197,11 @@ public static class NodePortSpec
         NodePortKind.Communication => (NodeWidth / 2.0, CommPortY),
         NodePortKind.Control when direction == NodePortDirection.In => (PinInsetX, ExecPortY),
         NodePortKind.Control => (NodeWidth - PinInsetX, ExecPortY),
-        NodePortKind.Data when direction == NodePortDirection.In => (PinInsetX, DataPortY),
-        _ => (NodeWidth - PinInsetX, DataPortY),
+        NodePortKind.Data when direction == NodePortDirection.In => (DataPinInsetX, DataPortY),
+        _ => (NodeWidth - DataPinInsetX, DataPortY),
     };
 
-    /// <summary>按 handle 名解析中心（支持 data-in-N 多入）。</summary>
+    /// <summary>按 handle 名解析中心（支持 data-in-N 多入、U125 分支执行出）。</summary>
     public static (double X, double Y) LocalCenterForHandle(string? handle)
     {
         if (!TryResolveKind(handle, out var kind, out var direction))
@@ -3874,15 +4212,41 @@ public static class NodePortSpec
         if (kind == NodePortKind.Data && direction == NodePortDirection.In)
         {
             var index = ParseDataInIndex(handle);
-            return (PinInsetX, DataPortY + (index * DataPortSpacing));
+            return (DataPinInsetX, DataPortY + (index * DataPortSpacing));
         }
 
         if (kind == NodePortKind.Data && direction == NodePortDirection.Out)
         {
-            return (NodeWidth - PinInsetX, DataPortY);
+            return (NodeWidth - DataPinInsetX, DataPortY);
+        }
+
+        // U125：分支引脚与通用执行出口同列，只在 Y 上错开。
+        if (IsBranchExecOutHandle(handle))
+        {
+            var (baseX, baseY) = LocalCenter(NodePortKind.Control, NodePortDirection.Out);
+            return (baseX, baseY + BranchPinOffsetFor(handle));
         }
 
         return LocalCenter(kind, direction);
+    }
+
+    /// <summary>
+    /// 循环节点的执行引脚左右互换（出口在左、入口在右），把「回流」画成真正折返的形状。
+    /// 只镜像执行口：数据口与通信口位置不变。
+    /// </summary>
+    public static (double X, double Y) MirrorExecIfLoop(
+        (double X, double Y) center,
+        string? handle,
+        bool mirrored)
+    {
+        if (!mirrored
+            || !TryResolveKind(handle, out var kind, out _)
+            || kind != NodePortKind.Control)
+        {
+            return center;
+        }
+
+        return (NodeWidth - center.X, center.Y);
     }
 
     /// <summary>input → 0；data-in-1 → 1；data-in-N → N。</summary>
@@ -4061,6 +4425,14 @@ public static class NodePortSpec
             direction = NodePortDirection.Out;
             return true;
         }
+        // U125：两个分支执行出引脚同样是控制口。必须在下方 "out*" 兜底分支之前
+        // 命中——否则 exec_out_true 会被当成数据出口，连线类型判定与几何全错。
+        if (IsBranchExecOutHandle(name))
+        {
+            kind = NodePortKind.Control;
+            direction = NodePortDirection.Out;
+            return true;
+        }
         if (string.Equals(name, "communication", StringComparison.OrdinalIgnoreCase))
         {
             kind = NodePortKind.Communication;
@@ -4128,12 +4500,6 @@ public readonly record struct EdgePathSpec(
 
 public sealed class WorkflowNodeViewModel : ViewModelBase
 {
-    private static readonly IBrush TypeStartBrush = new SolidColorBrush(Color.Parse("#0F9D63"));
-    private static readonly IBrush TypeLlmBrush = new SolidColorBrush(Color.Parse("#2563EB"));
-    private static readonly IBrush TypeAgentBrush = new SolidColorBrush(Color.Parse("#2E726B"));
-    private static readonly IBrush TypeUtilityBrush = new SolidColorBrush(Color.Parse("#7C3AED"));
-    private static readonly IBrush TypeControlBrush = new SolidColorBrush(Color.Parse("#D97706"));
-    private static readonly IBrush TypeDefaultBrush = new SolidColorBrush(Color.Parse("#8B939D"));
     private readonly WorkflowNodeCatalogEntry _descriptor;
 
     private readonly Action _markDirty;
@@ -4145,6 +4511,9 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     private bool _exposedAsTool;
     private bool _portControlInConnected;
     private bool _portControlOutConnected;
+    // U125：两个分支引脚各自独立的连接态（不能与 _portControlOutConnected 合并）。
+    private bool _portControlOutTrueConnected;
+    private bool _portControlOutFalseConnected;
     private bool _portDataInConnected;
     private bool _portDataOutConnected;
     private bool _portCommunicationConnected;
@@ -4233,18 +4602,64 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public RelayCommand AddDataInPinCommand { get; }
     public RelayCommand RemoveDataInPinCommand { get; }
     public bool IsStartNode => _descriptor.ConfigKind == "start";
+
+    /// <summary>
+    /// 起始节点的变量组；非起始节点为 null。
+    ///
+    /// 由页面 VM 构造并注入（变量行的文案需要 DisplayNameService，
+    /// 而节点 VM 本身不持有它——沿用本文件既有的「文案留在页面级」惯例）。
+    /// </summary>
+    public WorkflowVariableGroupViewModel? Variables { get; set; }
+
+    /// <summary>没有可见变量时整块不渲染，空变量区只是噪点。</summary>
+    public bool HasVariables => Variables is { HasVariables: true };
     /// <summary>文档读/导入：选路径 → 输出 document/content（后端 path 字段）。</summary>
     public bool IsDocumentNode => _descriptor.ConfigKind == "document";
     /// <summary>兼容旧绑定名；仅文档读，不含 export。</summary>
     public bool IsImportNode => IsDocumentNode;
     public bool IsSearchNode => _descriptor.ConfigKind == "search";
     public bool IsConditionNode => _descriptor.ConfigKind == "condition";
+    /// <summary>
+    /// U125：condition/eval 用两个分支执行出引脚，其它节点用单个通用 exec_out。
+    /// 两者必须互斥——同时出现会让用户既能画分支边又能画通用「恒放行」边，
+    /// 而通用边已被后端保存边界拒绝，用户会撞上一个画得出却存不下的状态。
+    /// （外层可见性仍由页面级 ShowCanvasPrecisionControls 统一控制。）
+    /// </summary>
+    public bool ShowBranchExecOutPins => IsConditionNode;
+
+    /// <summary>非 condition 节点才显示通用执行出引脚。</summary>
+    public bool ShowGenericExecOutPin => !IsConditionNode;
+
+    /// <summary>
+    /// condition 节点不显示数据出引脚。
+    ///
+    /// 它的 passed/reason/branch 输出已由两个分支执行引脚在结构上表达；
+    /// 再挂一个数据出口只会让人以为该把判定结果当数据往下接。
+    /// 数据**入**引脚必须保留：`execute_condition` 要按 input_alias 从 inputs
+    /// 取判定对象，没有它节点直接报 condition input alias missing。
+    ///
+    /// 注意这里只表达「节点类型允不允许」；页面级的
+    /// ShowCanvasPrecisionControls 由视图另外与它取交集，两者不能互相顶替。
+    /// </summary>
+    public bool ShowDataOutPin => !IsConditionNode;
     public bool IsLoopNode => _descriptor.ConfigKind == "loop";
     public bool IsApprovalNode => _descriptor.ConfigKind == "approval";
     public bool IsExportNode => _descriptor.ConfigKind == "export";
     public bool IsSummarizerNode => _descriptor.ConfigKind == "summarizer";
     public bool IsUtilityNode => _descriptor.LibraryGroup == "utility";
     public bool IsAgentNode => _descriptor.HasModelExecution;
+    /// <summary>
+    /// 执行引脚左右互换（目前仅循环节点）。循环把流程送回上游，左右不换的话
+    /// 回流边要绕过整张卡片；换过来后「左出 → 上游、右入 ← 下游」正好顺着回流方向，
+    /// 两个箭头一起朝左，一眼能看出这是个往回走的环。
+    /// 连线端点走视觉树实测（TryGetPortCanvasCenter），所以模板换列即自动跟随；
+    /// 仅首帧未测量时的常量兜底需要同步（见 NodePortSpec.LocalCenter 的 mirrored 重载）。
+    /// </summary>
+    public bool MirrorExecPorts => IsLoopNode;
+    /// <summary>执行入引脚所在列：常规 0（左）、镜像 3（右）。</summary>
+    public int ExecInColumn => MirrorExecPorts ? 3 : 0;
+    /// <summary>执行出引脚所在列：常规 3（右）、镜像 0（左）。</summary>
+    public int ExecOutColumn => MirrorExecPorts ? 0 : 3;
     public bool ShowPromptEditor => IsAgentNode;
     public bool ShowDataInPinEditor => !IsStartNode;
     public ObservableCollection<NodeDataInPinViewModel> DataInPins { get; }
@@ -4491,19 +4906,8 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public bool IsSucceededStatus => ClassifyStatus(StatusText) == NodeRuntimeStatus.Succeeded;
     public bool IsFailedStatus => ClassifyStatus(StatusText) == NodeRuntimeStatus.Failed;
 
-    /// <summary>节点类型色条：入口/代理/控制/工具分色，便于扫读结构。</summary>
-    public IBrush TypeAccentBrush
-    {
-        get
-        {
-            if (_descriptor.ConfigKind == "start") return TypeStartBrush;
-            if (_descriptor.LibraryGroup == "writing") return TypeAgentBrush;
-            if (_descriptor.ConfigKind is "condition" or "loop" or "approval") return TypeControlBrush;
-            if (_descriptor.HasModelExecution) return TypeLlmBrush;
-            if (_descriptor.LibraryGroup == "utility") return TypeUtilityBrush;
-            return TypeDefaultBrush;
-        }
-    }
+    // 节点不再按类型着色/配图：卡片质感全部由主题的「毛玻璃→实心」纵向渐变承担，
+    // 类别信息靠标题文案与检查器表达，避免画布被一堆彩色芯片打花。
 
     public double PortControlInOpacity { get => _portControlInOpacity; private set => SetProperty(ref _portControlInOpacity, value); }
     public double PortControlOutOpacity { get => _portControlOutOpacity; private set => SetProperty(ref _portControlOutOpacity, value); }
@@ -4518,9 +4922,34 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
 
     public bool PortControlInConnected => _portControlInConnected;
     public bool PortControlOutConnected => _portControlOutConnected;
+    /// <summary>U125：condition「真」分支引脚是否已连线（实心/空心）。</summary>
+    public bool PortControlOutTrueConnected => _portControlOutTrueConnected;
+    /// <summary>U125：condition「假」分支引脚是否已连线。</summary>
+    public bool PortControlOutFalseConnected => _portControlOutFalseConnected;
     public bool PortDataInConnected => _portDataInConnected;
     public bool PortDataOutConnected => _portDataOutConnected;
     public bool PortCommunicationConnected => _portCommunicationConnected;
+
+    /// <summary>
+    /// U125：分别刷新两个分支引脚的连接态。
+    ///
+    /// 不能复用 `controlOut` 这一个布尔——两个引脚各自独立连线，
+    /// 合成一个值会让「只连了真分支」的 condition 把假分支也画成实心，
+    /// 用户以为两支都接上了。
+    /// </summary>
+    public void SetBranchPortConnected(bool trueBranch, bool falseBranch)
+    {
+        if (_portControlOutTrueConnected != trueBranch)
+        {
+            _portControlOutTrueConnected = trueBranch;
+            OnPropertyChanged(nameof(PortControlOutTrueConnected));
+        }
+        if (_portControlOutFalseConnected != falseBranch)
+        {
+            _portControlOutFalseConnected = falseBranch;
+            OnPropertyChanged(nameof(PortControlOutFalseConnected));
+        }
+    }
 
     public void SetPortConnected(
         bool controlIn, bool controlOut, bool dataIn, bool dataOut, bool communication)
@@ -4614,6 +5043,15 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public Dictionary<string, object?> BuildUtilityFields()
     {
         var fields = new Dictionary<string, object?>(StringComparer.Ordinal);
+        // 起始节点的摘要句式：作者在执行页改过就要能存回去。
+        // 只有它在 Variables 上（非起始节点没有变量组），所以在这里按类型写出。
+        // 空句式写 null 而非空串：缺省语义是「没有句式，按声明顺序拼」，
+        // 存一个空串会让后端把它当成「句式就是空的」而渲染出一行空白。
+        if (IsStartNode && Variables is { } variables)
+        {
+            var template = variables.SummaryTemplate.Trim();
+            fields["summary_template"] = template.Length == 0 ? null : template;
+        }
         if (IsSummarizerNode)
         {
             fields["provider_id"] = SummarizerProviderId.Trim();
@@ -4937,12 +5375,12 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     public bool ShowHandleFields => IsData;
     public bool ShowLabelField => true;
     public bool ShowCommunicationFields => IsCommunication;
-    /// <summary>W14：选中边加粗；通信边默认略粗。</summary>
+    /// <summary>W14：选中边加粗；通信边默认略粗。点阵背景上略加粗/加不透明以保住可读性。</summary>
     public double StrokeThickness =>
-        IsSelected ? 3.4 : (IsCommunication ? 2.2 : 1.6);
+        IsSelected ? 3.4 : (IsCommunication ? 2.6 : 2.0);
 
     /// <summary>W14：选中边不透明，未选中略淡。</summary>
-    public double StrokeOpacity => IsSelected ? 1.0 : 0.88;
+    public double StrokeOpacity => IsSelected ? 1.0 : 0.95;
     public Geometry EdgePath { get; private set; } = new PathGeometry();
     public double LabelX { get; private set; }
     public double LabelY { get; private set; }
@@ -4997,7 +5435,15 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
         }
     }
 
-    public void UpdateEdgePath(double sourceX, double sourceY, double targetX, double targetY)
+    /// <param name="sourceMirrored">源节点是否镜像执行口（循环节点）。</param>
+    /// <param name="targetMirrored">目标节点是否镜像执行口。</param>
+    public void UpdateEdgePath(
+        double sourceX,
+        double sourceY,
+        double targetX,
+        double targetY,
+        bool sourceMirrored = false,
+        bool targetMirrored = false)
     {
         var sourceResolved = NodePortSpec.TryResolveKind(SourceHandle, out var sourceKind, out _);
         if (!sourceResolved)
@@ -5015,13 +5461,15 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
             targetKind = NodePortKind.Communication;
         }
 
-        // 按 handle 中心起止（支持多数据入索引）
+        // 按 handle 中心起止（支持多数据入索引）；循环节点执行口左右镜像。
         var (sx, sy) = sourceResolved
             ? NodePortSpec.LocalCenterForHandle(SourceHandle)
             : NodePortSpec.LocalCenter(sourceKind, NodePortDirection.Out);
         var (tx, ty) = targetResolved
             ? NodePortSpec.LocalCenterForHandle(TargetHandle)
             : NodePortSpec.LocalCenter(targetKind, NodePortDirection.In);
+        (sx, sy) = NodePortSpec.MirrorExecIfLoop((sx, sy), SourceHandle, sourceMirrored);
+        (tx, ty) = NodePortSpec.MirrorExecIfLoop((tx, ty), TargetHandle, targetMirrored);
 
         var startX = sourceX + sx;
         var startY = sourceY + sy;

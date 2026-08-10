@@ -28,26 +28,28 @@ use ariadne::commands::{
     query_run_logs, quick_edit_impl, register_executor_adapters_for_project, remove_provider,
     resolve_confirmation_impl, resolve_project_references, resolve_workflow_operation_in_doubt,
     restore_to_new_branch, resume_from_node, resume_workflow, run_workflow, run_workflow_impl,
+    stop_workflow,
     save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
     save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
     save_project_canvas_impl, save_provider_key, save_provider_key_impl,
     save_provider_section_settings, save_provider_settings_impl, save_rag_settings_impl,
     save_template_repository_settings, save_template_repository_settings_impl,
     save_workflow_graph_impl, save_workflow_settings_impl, search_project_documents_impl,
-    search_templates, set_project_root, start_workflow_with_request, stop_workflow,
-    update_budget_config_impl, validate_display_name_language_pack, AppSettings, AriadneAppState,
-    AutomationSettings, CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
+    relocate_recent_project, search_templates, set_project_root, start_workflow_with_request,
+    test_provider_draft_with_cancellation, update_budget_config_impl,
+    validate_display_name_language_pack, AppSettings, AriadneAppState, AutomationSettings,
+    CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
     ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, InDoubtDecision,
-    NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
-    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderSectionSettings,
-    ProviderSettingsUpdate, QuickEditRequest, RagSettings, ResolveConfirmationRequest,
-    ResolveInDoubtOperationRequest, ResumeFromNodeRequest, RunLogQuery, TemplateRepositoryRequest,
-    TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
+    ModelAliasTarget, NodePresetSettings, OverrideConfirmationOutputRequest, PermissionsSettings,
+    ProjectAiChatMessage, ProjectAiChatRole, ProjectAiRequest, ProviderDraftProbe,
+    ProviderSectionSettings, ProviderSettingsUpdate, QuickEditRequest, RagSettings,
+    ResolveConfirmationRequest, ResolveInDoubtOperationRequest, ResumeFromNodeRequest, RunLogQuery,
+    TemplateRepositoryRequest, TemplateRepositorySettings, WorkflowGraphData, WorkflowSettings,
 };
 use ariadne::config::{
     AppRuntimeSettings, ConfigStore, MemorySecretStore, ModelConfig, PathWriteLock, ProjectConfig,
-    ProjectCredentialScope, ProviderConfig, SecretRef, SecretStore, SecretValue,
-    PROVIDERS_CONFIG_FILE,
+    ProjectCredentialScope, ProviderConfig, QdrantAuthMode, SecretRef, SecretStore, SecretValue,
+    VectorStoreBackend, PROVIDERS_CONFIG_FILE,
 };
 use ariadne::contracts::{
     ExecutionCancellation, NodeId, NodeInstance, PermissionPolicy, PortValue, ProviderCapability,
@@ -199,7 +201,17 @@ fn project_indexing_worker_consumes_persisted_document_event() {
 
     assert_eq!(process_index_outbox_impl(temp.path()).unwrap(), 1);
 
-    let tantivy = TantivyFullTextStore::open(temp.path().join(".indexes/tantivy")).unwrap();
+    let tantivy_path = temp.path().join(".indexes/tantivy");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let tantivy = loop {
+        match TantivyFullTextStore::open(&tantivy_path) {
+            Ok(store) => break store,
+            Err(error) if error.to_string().contains("LockBusy") && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("failed to reopen Tantivy index: {error}"),
+        }
+    };
     let results = tantivy
         .search(FullTextSearchRequest::new("线索", 10))
         .unwrap();
@@ -309,6 +321,8 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             workflow_id: "f10c-schema".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .expect_err("empty initial_inputs must fail required schema");
@@ -325,6 +339,8 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             workflow_id: "f10c-schema".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs: wrong_type,
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .expect_err("wrong type must fail");
@@ -342,6 +358,8 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             workflow_id: "f10c-schema".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs: unknown,
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .expect_err("unknown property must fail");
@@ -899,6 +917,38 @@ fn project_create_and_open_persist_display_name_in_project_config() {
 }
 
 #[test]
+fn recent_project_relocation_activates_new_root_and_removes_stale_entry() {
+    let app_state = tempfile::tempdir().unwrap();
+    let old_project = tempfile::tempdir().unwrap();
+    let new_project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(old_project.path()).unwrap();
+    ariadne::frontend::initialize_project(new_project.path()).unwrap();
+    let state = AriadneAppState::new(
+        "",
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    open_project(
+        &state,
+        old_project.path().to_string_lossy().into_owned(),
+        Some("Old".to_owned()),
+    )
+    .unwrap();
+
+    let relocated = relocate_recent_project(
+        &state,
+        old_project.path().canonicalize().unwrap().to_string_lossy().into_owned(),
+        new_project.path().to_string_lossy().into_owned(),
+    )
+    .unwrap();
+
+    assert_eq!(relocated.project_root, new_project.path().canonicalize().unwrap());
+    let recent = ariadne::commands::list_recent_projects(&state).unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].path, new_project.path().canonicalize().unwrap());
+}
+
+#[test]
 fn project_open_rejects_corrupt_candidate_workflow_store_before_identity_commit() {
     let project_a = tempfile::tempdir().unwrap();
     let project_b = tempfile::tempdir().unwrap();
@@ -1358,7 +1408,13 @@ fn n8_pack_operation_id_replays_exact_result_and_rejects_reuse_for_other_request
 #[test]
 fn f8_summarizer_graph_is_validated_before_save_and_before_run_creation() {
     let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let app = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
     let valid_graph = WorkflowGraphData {
         workflow_id: "f8-summarizer".to_owned(),
         name: "F8 Summarizer".to_owned(),
@@ -1407,7 +1463,7 @@ fn f8_summarizer_graph_is_validated_before_save_and_before_run_creation() {
         .unwrap()
         .remove("chapter_id");
     let validation_error =
-        ariadne::commands::validate_workflow_graph(invalid_graph.clone()).unwrap_err();
+        ariadne::commands::validate_workflow_graph(&app, invalid_graph.clone()).unwrap_err();
     assert!(validation_error.contains("chapter_id"));
     let save_error = save_workflow_graph_impl(temp.path(), invalid_graph).unwrap_err();
     assert!(save_error.contains("chapter_id"));
@@ -1434,6 +1490,8 @@ fn f8_summarizer_graph_is_validated_before_save_and_before_run_creation() {
             workflow_id: "f8-summarizer".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -1467,6 +1525,8 @@ fn explicit_missing_workflow_id_is_not_loaded_as_default_graph() {
             workflow_id: "missing-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -1964,6 +2024,8 @@ fn run_workflow_executes_document_nodes_with_real_document_service() {
             workflow_id: "doc-flow".to_owned(),
             start_node_id: None,
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2256,6 +2318,8 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
             workflow_id: "multi-start".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2266,6 +2330,8 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
             workflow_id: "multi-start".to_owned(),
             start_node_id: Some("start-extra".to_owned()),
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2384,6 +2450,8 @@ fn async_run_persists_inputs_and_expired_lease_resume_uses_prepared_snapshot() {
             workflow_id: "tool-start".to_owned(),
             start_node_id: Some("start-main".to_owned()),
             initial_inputs,
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2502,6 +2570,8 @@ fn run_workflow_start_node_id_must_reference_start_node() {
             workflow_id: "bad-start".to_owned(),
             start_node_id: Some("read".to_owned()),
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -2543,6 +2613,8 @@ fn run_workflow_llm_node_requires_configured_provider_instead_of_noop() {
             workflow_id: "llm-flow".to_owned(),
             start_node_id: None,
             initial_inputs: std::collections::BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -2670,6 +2742,8 @@ fn workflow_llm_node_routes_to_declared_provider_instead_of_project_default() {
             workflow_id: "declared-provider-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -2686,7 +2760,7 @@ fn workflow_llm_node_routes_to_declared_provider_instead_of_project_default() {
 fn budget_and_provider_commands_do_not_return_secret_values() {
     let temp = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
-    update_budget_config_impl(temp.path(), 25.0, 3.5).unwrap();
+    update_budget_config_impl(temp.path(), 25.0, Some(3.5)).unwrap();
     save_provider_settings_impl(
         temp.path(),
         ProviderSettingsUpdate {
@@ -2733,7 +2807,7 @@ fn budget_and_provider_commands_do_not_return_secret_values() {
     assert_eq!(live_limits.daily_usd, Some(25.0));
 
     assert_eq!(budget.budget_usd, 25.0);
-    assert_eq!(budget.preauthorized_usd, 3.5);
+    assert_eq!(budget.preauthorized_usd, Some(3.5));
     assert!(provider.has_openai_key);
     assert_eq!(provider.default_llm_provider_id.as_deref(), Some("openai"));
     assert_eq!(
@@ -2882,6 +2956,7 @@ fn provider_section_secret_failure_leaves_config_unchanged() {
                 make_default_search: false,
             },
             api_key: Some("new-secret".to_owned()),
+            default_models: None,
         },
     )
     .unwrap_err();
@@ -3351,6 +3426,56 @@ fn moved_project_requires_explicit_provider_credential_rebind() {
 }
 
 #[test]
+fn provider_draft_probe_fetches_models_without_persisting_config_or_key() {
+    let project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let baseline = ConfigStore::new(project.path()).load().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        let body = r#"{"data":[{"id":"draft-model"}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let models = test_provider_draft_with_cancellation(
+        ProviderDraftProbe {
+            provider: ProviderSettingsUpdate {
+                provider_id: "draft-provider".to_owned(),
+                provider_type: ProviderType::OpenAiCompatible,
+                display_name: "Draft provider".to_owned(),
+                enabled: true,
+                base_url: Some(base_url),
+                models: Vec::new(),
+                make_default_llm: false,
+                make_default_embedding: false,
+                make_default_reranker: false,
+                make_default_search: false,
+            },
+            api_key: Some("draft-only-key".to_owned()),
+        },
+        &ExecutionCancellation::new(),
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(models.provider_id, "draft_provider");
+    assert!(models
+        .models
+        .iter()
+        .any(|model| model.model_id == "draft-model"));
+    assert_eq!(ConfigStore::new(project.path()).load().unwrap(), baseline);
+}
+
+#[test]
 fn malicious_project_secret_ref_is_rejected_before_all_provider_network_entrypoints() {
     let project = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(project.path()).unwrap();
@@ -3471,6 +3596,8 @@ fn malicious_project_secret_ref_is_rejected_before_all_provider_network_entrypoi
             workflow_id: "llm-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         }
     )
     .unwrap_err()
@@ -3916,6 +4043,96 @@ fn node_preset_model_identity_rejects_ambiguous_ids_and_preserves_explicit_provi
 }
 
 #[test]
+fn model_aliases_round_trip_update_without_rewriting_preset_references() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    ariadne::config::bind_project_app_state(project.path(), app_state.path()).unwrap();
+    configure_removable_provider(project.path(), "planning", "plan-v1", false);
+    configure_removable_provider(project.path(), "openai", "gpt-4.1-mini", true);
+
+    let mut settings = NodePresetSettings::default();
+    settings.model_aliases.insert(
+        "planning".to_owned(),
+        ModelAliasTarget {
+            provider_id: "planning".to_owned(),
+            model_id: "plan-v1".to_owned(),
+        },
+    );
+    settings.default_model_alias = Some("planning".to_owned());
+    settings.default_provider_id.clear();
+    settings.default_model_id.clear();
+    let writer = settings
+        .presets
+        .iter_mut()
+        .find(|preset| preset.node_type == "writer")
+        .unwrap();
+    writer.model_alias = Some("planning".to_owned());
+    writer.provider_id.clear();
+    writer.model_id.clear();
+
+    save_node_preset_settings_impl(project.path(), settings).unwrap();
+    let loaded = get_node_preset_settings_impl(project.path()).unwrap();
+    assert_eq!(loaded.default_model_alias.as_deref(), Some("planning"));
+    let writer = loaded
+        .presets
+        .iter()
+        .find(|preset| preset.node_type == "writer")
+        .unwrap();
+    assert_eq!(writer.model_alias.as_deref(), Some("planning"));
+    assert!(writer.provider_id.is_empty());
+    assert!(writer.model_id.is_empty());
+
+    let mut updated = loaded.clone();
+    updated.model_aliases.insert(
+        "planning".to_owned(),
+        ModelAliasTarget {
+            provider_id: "openai".to_owned(),
+            model_id: "gpt-4.1-mini".to_owned(),
+        },
+    );
+    save_node_preset_settings_impl(project.path(), updated).unwrap();
+    let reread = get_node_preset_settings_impl(project.path()).unwrap();
+    assert_eq!(reread.model_aliases["planning"].provider_id, "openai");
+    assert_eq!(
+        reread
+            .presets
+            .iter()
+            .find(|preset| preset.node_type == "writer")
+            .unwrap()
+            .model_alias
+            .as_deref(),
+        Some("planning")
+    );
+
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let preview = preview_provider_removal(&state, "openai".to_owned()).unwrap();
+    assert!(preview.blocking_references.iter().any(|reference| {
+        reference.reference_type == "model_alias"
+            && reference.owner_id == "planning"
+            && reference.model_id.as_deref() == Some("gpt-4.1-mini")
+    }));
+}
+
+#[test]
+fn node_preset_settings_reject_unknown_model_alias() {
+    let project = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    configure_removable_provider(project.path(), "openai", "gpt-4.1-mini", true);
+
+    let mut settings = NodePresetSettings::default();
+    settings.default_model_alias = Some("brainstorm".to_owned());
+    settings.default_provider_id.clear();
+    settings.default_model_id.clear();
+    let error = save_node_preset_settings_impl(project.path(), settings).unwrap_err();
+    assert!(error.contains("unsupported model alias"));
+}
+
+#[test]
 fn node_authoring_defaults_are_global_while_budget_and_node_access_overrides_remain_project_scoped()
 {
     let project_a = tempfile::tempdir().unwrap();
@@ -4225,7 +4442,7 @@ fn automation_and_permission_settings_round_trip_config_files() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
     ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
-    update_budget_config_impl(temp.path(), 10.0, 1.0).unwrap();
+    update_budget_config_impl(temp.path(), 10.0, Some(1.0)).unwrap();
     let current = get_automation_settings_impl(temp.path()).unwrap();
     save_automation_settings_impl(
         temp.path(),
@@ -4233,7 +4450,7 @@ fn automation_and_permission_settings_round_trip_config_files() {
             budget: ariadne::commands::BudgetStatus {
                 budget_usd: 20.0,
                 spent_usd: current.budget.spent_usd,
-                preauthorized_usd: 4.0,
+                preauthorized_usd: Some(4.0),
                 auto_mode_enabled: true,
             },
             confirmation_policies: vec![
@@ -4256,7 +4473,7 @@ fn automation_and_permission_settings_round_trip_config_files() {
     let automation = get_automation_settings_impl(temp.path()).unwrap();
 
     assert_eq!(automation.budget.budget_usd, 20.0);
-    assert_eq!(automation.budget.preauthorized_usd, 4.0);
+    assert_eq!(automation.budget.preauthorized_usd, Some(4.0));
     assert!(automation.budget.auto_mode_enabled);
     assert!(automation
         .confirmation_policies
@@ -4350,6 +4567,25 @@ fn automation_and_permission_settings_round_trip_config_files() {
             .get("global")
             .and_then(|scope| scope.get("write")),
         Some(&Some(false))
+    );
+}
+
+#[test]
+fn zero_preauthorized_budget_is_persisted_as_zero_not_unlimited() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+
+    update_budget_config_impl(temp.path(), 10.0, Some(0.0)).unwrap();
+
+    let config = ConfigStore::new(temp.path()).load_or_create().unwrap();
+    assert_eq!(config.auto_mode.preauthorized_budget_usd, Some(0.0));
+    assert_eq!(
+        get_budget_status_impl(temp.path())
+            .unwrap()
+            .preauthorized_usd,
+        Some(0.0),
+        "显式零额度必须在读取侧仍表现为 Some(0.0)，不能退化成『未设置』"
     );
 }
 
@@ -4454,7 +4690,16 @@ fn module_settings_round_trip_config_files() {
     let mut rag = get_rag_settings_impl(temp.path()).unwrap().rag;
     rag.chunk_size_chars = 4096;
     rag.chunk_overlap_chars = 256;
-    save_rag_settings_impl(temp.path(), RagSettings { rag }).unwrap();
+    save_rag_settings_impl(
+        temp.path(),
+        RagSettings {
+            rag,
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
+        },
+    )
+    .unwrap();
     assert_eq!(
         get_rag_settings_impl(temp.path())
             .unwrap()
@@ -4465,7 +4710,6 @@ fn module_settings_round_trip_config_files() {
 
     let mut workflow = get_workflow_settings_impl(temp.path()).unwrap().workflow;
     workflow.max_tool_rounds = 12;
-    workflow.runtime_autosave_ms = 2500;
     save_workflow_settings_impl(temp.path(), WorkflowSettings { workflow }).unwrap();
     assert_eq!(
         get_workflow_settings_impl(temp.path())
@@ -4744,7 +4988,16 @@ fn rag_settings_hot_reload_reuses_open_tantivy_generation() {
     rag.chunk_size_chars = 3072;
     rag.chunk_overlap_chars = 256;
 
-    let saved = ariadne::commands::save_rag_settings(&state, RagSettings { rag }).unwrap();
+    let saved = ariadne::commands::save_rag_settings(
+        &state,
+        RagSettings {
+            rag,
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
+        },
+    )
+    .unwrap();
 
     assert_eq!(saved.rag.chunk_size_chars, 3072);
     assert_eq!(
@@ -4798,7 +5051,16 @@ fn rag_index_configuration_change_is_rejected_while_runtime_arc_is_active() {
     let mut rag = get_rag_settings_impl(project.path()).unwrap().rag;
     rag.chunk_size_chars = 3072;
 
-    let error = ariadne::commands::save_rag_settings(&state, RagSettings { rag }).unwrap_err();
+    let error = ariadne::commands::save_rag_settings(
+        &state,
+        RagSettings {
+            rag,
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
+        },
+    )
+    .unwrap_err();
 
     assert!(error.contains("retrieval operations are active"));
     assert_eq!(
@@ -4809,6 +5071,44 @@ fn rag_index_configuration_change_is_rejected_while_runtime_arc_is_active() {
         2000
     );
     assert_eq!(active_runtime.config().rag.chunk_size_chars, 2000);
+}
+
+#[test]
+fn external_qdrant_api_key_mode_rejects_missing_endpoint_credential() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let mut rag = get_rag_settings_impl(project.path()).unwrap().rag;
+    rag.vector_store.backend = VectorStoreBackend::ExternalQdrant;
+    rag.vector_store.sidecar.host = "qdrant.example".to_owned();
+    rag.vector_store.sidecar.port = 6333;
+    rag.vector_store.sidecar.auth_mode = QdrantAuthMode::ApiKey;
+
+    let error = ariadne::commands::save_rag_settings(
+        &state,
+        RagSettings {
+            rag,
+            qdrant_api_key: None,
+            clear_qdrant_api_key: false,
+            has_qdrant_api_key: false,
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("API key is not configured for this endpoint"));
+    assert_eq!(
+        get_rag_settings_impl(project.path())
+            .unwrap()
+            .rag
+            .vector_store
+            .backend,
+        VectorStoreBackend::QdrantSidecar
+    );
 }
 
 #[test]
@@ -4935,8 +5235,16 @@ fn failed_vector_enable_keeps_config_and_last_good_runtime() {
     rag.vector_store.enabled = true;
 
     for _ in 0..16 {
-        let error = ariadne::commands::save_rag_settings(&state, RagSettings { rag: rag.clone() })
-            .unwrap_err();
+        let error = ariadne::commands::save_rag_settings(
+            &state,
+            RagSettings {
+                rag: rag.clone(),
+                qdrant_api_key: None,
+                clear_qdrant_api_key: false,
+                has_qdrant_api_key: false,
+            },
+        )
+        .unwrap_err();
 
         assert!(
             error.contains("default_embedding_provider_id"),
@@ -5685,6 +5993,8 @@ fn failed_git_restore_persists_maintenance_gate_for_document_writes() {
             workflow_id: "must-not-start".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -6371,6 +6681,8 @@ fn executor_adapter_web_search_uses_project_permission_policy_in_product_workflo
             workflow_id: "adapter-web-search-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -6526,6 +6838,8 @@ fn executor_adapter_llm_routes_to_manifest_provider_instead_of_project_default()
             workflow_id: "manifest-provider-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -6696,6 +7010,8 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             workflow_id: "n25-healthy-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -6726,6 +7042,8 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             workflow_id: "n25-bad-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap_err();
@@ -6754,6 +7072,8 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             workflow_id: "n25-healthy-flow".to_owned(),
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
+            variables: Default::default(),
+            origin_conversation_id: None,
         },
     )
     .unwrap();
@@ -8881,7 +9201,7 @@ fn automation_settings_mid_fail_leaves_journal_and_recover_completes() {
     let baseline = get_automation_settings_impl(&project).unwrap();
     let mut settings = baseline.clone();
     settings.budget.budget_usd = 42.5;
-    settings.budget.preauthorized_usd = 1.0;
+    settings.budget.preauthorized_usd = Some(1.0);
     settings.budget.auto_mode_enabled = true;
 
     save_automation_settings_impl(&project, settings.clone()).unwrap();
@@ -9034,6 +9354,9 @@ fn seed_command_in_doubt_search_run(
             "config": Value::Null,
             "inputs": ariadne::contracts::PortMap::new(),
             "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
+            // 变量参与 request_hash（循环每轮取值不同，不计入会被判成重放）。
+            // 本 fixture 的 workflow 没有变量声明，展平后为空表。
+            "variables": BTreeMap::<String, Value>::new(),
             "metadata": Value::Null,
         }))
         .unwrap(),
@@ -9328,5 +9651,217 @@ fn works_tree_and_chapter_summary_commands_share_official_stage_projection() {
     assert_eq!(
         summary.segments[0].source.document_id,
         "documents/chapter-1.md"
+    );
+}
+
+/// U116：诊断报告里不得凭空冒出 provider 探活项。
+///
+/// 探活只针对**已缓存**的 provider 实例。刚建好的项目一次 LLM 调用都没发过，
+/// 缓存为空——此时若报一条 Unavailable，用户会以为 provider 坏了，
+/// 而实际上只是还没用过。假警报比没有诊断更糟：它会把人引去查根本不存在的故障。
+#[test]
+fn backend_diagnostics_omits_provider_reachability_before_any_llm_call() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+
+    assert!(
+        !report
+            .items
+            .iter()
+            .any(|item| item.component.starts_with("providers.llm.reachability")),
+        "尚未发起过 LLM 调用时不应有探活项，实际项：{:?}",
+        report
+            .items
+            .iter()
+            .map(|item| item.component.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// U116：探活项与「配置是否自洽」项必须可区分。
+///
+/// 两者答的是不同问题：`providers.llm.default` 说的是「能不能选出 provider/model」，
+/// `providers.llm.reachability.*` 说的是「这个 provider 现在通不通」。
+/// 若共用同一 component 名，前端无法分辨，用户看到「providers.llm.default 异常」
+/// 也判断不出该去改配置还是去换 key。
+///
+/// **必须让缓存里真有实例**：探活项只在缓存非空时才产生。若照着「刚建好的项目」
+/// 去断言，命名撞不撞车这条根本不会被执行到——那是一条空转用例
+/// （我第一版就是这样，变异测试把它抓了出来）。所以这里刻意把 provider id
+/// 取成 `default`，正是最容易与 `providers.llm.default` 撞名的那个值。
+#[test]
+fn provider_reachability_items_do_not_collide_with_config_items() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+
+    // provider id 取 `default`：与配置诊断项 `providers.llm.default` 同尾，
+    // 命名一旦复用即刻撞车。
+    save_provider_settings_impl(
+        project.path(),
+        ProviderSettingsUpdate {
+            provider_id: "default".to_owned(),
+            provider_type: ProviderType::OpenAiCompatible,
+            display_name: "Default".to_owned(),
+            enabled: true,
+            base_url: Some("http://127.0.0.1:1/v1".to_owned()),
+            models: vec![ModelConfig {
+                model_id: "m".to_owned(),
+                capability: ProviderCapability::Llm,
+                max_context_tokens: None,
+                input_cost_per_million_tokens: None,
+                output_cost_per_million_tokens: None,
+            }],
+            make_default_llm: true,
+            make_default_embedding: false,
+            make_default_reranker: false,
+            make_default_search: false,
+        },
+    )
+    .unwrap();
+
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    // 直接往缓存里塞一个实例，等价于「已经发起过一次 LLM 调用」。
+    // 走真实 quick_edit 会打网络、且需要凭据，与本条契约无关。
+    let config = ConfigStore::new(project.path()).load_or_create().unwrap();
+    let provider_config = config
+        .providers
+        .providers
+        .iter()
+        .find(|item| item.provider_id == "default")
+        .cloned()
+        .expect("provider 应已保存");
+    let cache = state.llm_provider_cache_for_tests();
+    let key = ariadne::providers::ProviderCacheKey::new(&provider_config, None).unwrap();
+    cache.lock().unwrap().insert(
+        key,
+        Arc::new(
+            ariadne::providers::OpenAiCompatibleLlmProvider::new(provider_config, None).unwrap(),
+        ),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+    let reachability = report
+        .items
+        .iter()
+        .filter(|item| item.component.starts_with("providers.llm.reachability"))
+        .count();
+    assert!(
+        reachability > 0,
+        "缓存已非空，必须产生探活项——否则这条用例又退化成空转。实际项：{:?}",
+        report
+            .items
+            .iter()
+            .map(|item| item.component.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let config_items = report
+        .items
+        .iter()
+        .filter(|item| item.component == "providers.llm.default")
+        .count();
+    assert_eq!(
+        config_items, 1,
+        "配置诊断项应恰好一条；探活项若复用同名会让这里变成多条、两种含义再也分不开。\
+         实际项：{:?}",
+        report
+            .items
+            .iter()
+            .map(|item| item.component.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ════════════════════════════════════════════════════════
+// U116：损坏 Git 仓库的修复入口
+// ════════════════════════════════════════════════════════
+
+/// 损坏仓库修复后：`.git` 重建、坏的那份被**备份**而非删除、工作区文件不动。
+///
+/// 判据取真实文件系统。此前 `backup_dir_name` / `reinitialize_repository`
+/// 两个原语实现完整却零调用者——`health_check` 能检出损坏，却没有修复入口，
+/// 用户只能自己去命令行救。
+#[test]
+fn u116_repair_backs_up_corrupted_git_and_reinitializes() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let app = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    // 用户的正文——修复过程一个字都不能碰。
+    let manuscript = project.path().join("chapter-01.md");
+    std::fs::write(&manuscript, "第一章 雨夜\n").unwrap();
+
+    // 把 .git 打坏：删掉 HEAD 会让 rev-parse 失败，而 .git 目录仍在，
+    // 这正是 health_check 判为「损坏」而非「未初始化」的那条分支。
+    std::fs::remove_file(project.path().join(".git").join("HEAD")).unwrap();
+
+    let report = ariadne::commands::repair_git_repository(&app).expect("损坏仓库应当可修复");
+
+    // 坏的那份必须还在——修复不等于毁尸灭迹，用户可能要从里面捞东西。
+    let backup = project.path().join(&report.backup_dir);
+    assert!(
+        backup.is_dir(),
+        "损坏的 .git 应被备份到 {}，实际不存在",
+        report.backup_dir
+    );
+    assert!(
+        project.path().join(".git").join("HEAD").is_file(),
+        "重新初始化后应有全新的 .git/HEAD"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manuscript).unwrap(),
+        "第一章 雨夜\n",
+        "修复动的是 .git，绝不能碰工作区正文"
+    );
+}
+
+/// 健康仓库必须**拒绝**修复。
+///
+/// 缺了这条防线，一次误点就会把可用仓库的全部历史挪进备份目录——
+/// 那是不可逆的破坏，比「没有修复入口」严重得多。
+#[test]
+fn u116_repair_refuses_to_touch_a_healthy_repository() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let app = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let error = ariadne::commands::repair_git_repository(&app)
+        .expect_err("健康仓库不该允许修复");
+    let diagnostic = format!("{error:?}");
+    assert!(
+        diagnostic.contains("healthy"),
+        "拒绝理由应指明「仓库是健康的」，实际：{diagnostic}"
+    );
+    assert!(
+        project.path().join(".git").join("HEAD").is_file(),
+        "被拒绝后 .git 必须原封不动"
+    );
+    assert!(
+        !project.path().join("git-backup-before-reinit").is_dir(),
+        "被拒绝后不该留下任何备份目录"
     );
 }

@@ -5,32 +5,47 @@
     xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:GitPageViewModel">
-  <Grid ColumnDefinitions="*,Auto" Background="{DynamicResource Ariadne.BackgroundMain}">
+  <!-- 根容器透明：让 MainWindow 底层的径向光晕透上来 -->
+  <Grid ColumnDefinitions="*,Auto" Background="Transparent">
     <Panel Grid.Column="0">
       <Grid RowDefinitions="Auto,Auto,*"
-            Margin="24,18,20,20">
-        <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="16">
-        <StackPanel Grid.Column="0" Spacing="2">
-          <TextBlock Text="{Binding Title}" Classes="title" />
-          <TextBlock Text="{Binding Description}" Classes="caption" TextWrapping="Wrap" />
-        </StackPanel>
-        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top">
-          <TextBlock Text="{Binding OperationStatusText}"
-                     Classes="caption"
-                     VerticalAlignment="Center"
-                     IsVisible="{Binding IsBusy}" />
-          <Button Classes="secondary"
-                  Content="{Binding RefreshText}"
-                  Command="{Binding RefreshCommand}" />
-        </StackPanel>
-        </Grid>
+            Margin="0">
+        <Border Grid.Row="0" Classes="page-header">
+          <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14">
+            <Border Grid.Column="0" Classes="page-header-mark" />
+            <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+              <TextBlock Text="{Binding Title}" Classes="title" />
+              <TextBlock Text="{Binding Description}" Classes="caption" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+              <Border Classes="chip" IsVisible="{Binding IsBusy}">
+                <TextBlock Text="{Binding OperationStatusText}" Classes="caption" />
+              </Border>
+              <Button Classes="secondary btn-compact"
+                      Content="{Binding RefreshText}"
+                      Command="{Binding RefreshCommand}" />
+            </StackPanel>
+          </Grid>
+        </Border>
 
-      <TextBlock Grid.Row="1"
-                 Text="{Binding StatusText}"
-                 Classes="caption"
-                 Margin="0,10,0,10"
-                 TextWrapping="Wrap" />
+        <Border Grid.Row="1"
+                Classes="command-strip"
+                Padding="24,9"
+                IsVisible="{Binding HasStatusText}">
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="9">
+            <Ellipse Grid.Column="0" Width="6" Height="6"
+                     Fill="{DynamicResource Ariadne.AccentPrimary}"
+                     VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1"
+                       Text="{Binding StatusText}"
+                       Classes="caption"
+                       TextWrapping="Wrap"
+                       VerticalAlignment="Center" />
+          </Grid>
+        </Border>
 
+      <!-- 去 card：存档流铺满内容区（ui设计方案「Git 页树图同样去 card」），
+           不再套一层圆角描边盒子；行与行之间靠发丝分隔线分层。 -->
       <Grid Grid.Row="2">
         <ListBox ItemsSource="{Binding Commits}"
                  SelectedItem="{Binding SelectedCommit, Mode=TwoWay}"
@@ -48,32 +63,31 @@
             <Style Selector="ListBoxItem">
               <Setter Property="HorizontalContentAlignment" Value="Stretch" />
               <Setter Property="Padding" Value="0" />
-              <Setter Property="Margin" Value="0,0,0,8" />
-              <Setter Property="MinHeight" Value="78" />
-              <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
+              <Setter Property="Margin" Value="0" />
+              <Setter Property="MinHeight" Value="82" />
+              <Setter Property="Background" Value="Transparent" />
               <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
-              <Setter Property="BorderThickness" Value="1" />
-              <Setter Property="CornerRadius" Value="8" />
+              <Setter Property="BorderThickness" Value="0,0,0,1" />
+              <Setter Property="CornerRadius" Value="0" />
             </Style>
             <Style Selector="ListBoxItem:pointerover">
-              <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
-              <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+              <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
             </Style>
             <Style Selector="ListBoxItem:selected">
               <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
               <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
-              <Setter Property="BorderThickness" Value="2" />
+              <Setter Property="BorderThickness" Value="3,0,0,1" />
             </Style>
             <Style Selector="ListBoxItem:focus">
               <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
-              <Setter Property="BorderThickness" Value="2" />
+              <Setter Property="BorderThickness" Value="3,0,0,1" />
             </Style>
           </ListBox.Styles>
           <ListBox.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:GitHistoryItemViewModel}">
               <Grid ColumnDefinitions="Auto,*"
                     ColumnSpacing="12"
-                    Margin="14,10">
+                    Margin="24,12,20,12">
                 <Grid Grid.Column="0" ColumnDefinitions="Auto,18,64">
                   <Border Grid.Column="0" Width="{Binding LaneOffset}" />
                   <Grid Grid.Column="1">
@@ -156,9 +170,9 @@
           </ListBox.ItemTemplate>
         </ListBox>
 
-        <Border Classes="empty-state" IsVisible="{Binding IsCommitListEmpty}" Margin="0,36,0,0">
-          <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="360">
-            <ctl:EmptyStateArt Kind="GitRag" Width="140" Height="112" HorizontalAlignment="Center" />
+        <Border Classes="empty-state" IsVisible="{Binding IsCommitListEmpty}" VerticalAlignment="Center">
+          <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="420">
+            <ctl:EmptyStateArt Kind="GitRag" Width="210" Height="168" HorizontalAlignment="Center" />
             <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
             <TextBlock Text="{Binding EmptyHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
           </StackPanel>
@@ -177,13 +191,19 @@
             BorderThickness="1,0,0,0"
             IsVisible="{Binding IsRightPanelOpen}">
       <DockPanel>
-        <Grid DockPanel.Dock="Top" ColumnDefinitions="*" Margin="16,14,12,8">
-          <TextBlock Grid.Column="0" Text="{Binding DetailsText}" Classes="subtitle" VerticalAlignment="Center" />
-        </Grid>
+        <!-- 检查器页眉：去掉额外底色与强调色竖条，只留标题 + 底部发丝线。
+             页面已有 page-header-mark，右栏再来一根竖条属于重复语汇。
+             panel-title 保持醒目（它是整栏的标题），分区名另用安静小标签。 -->
+        <Border DockPanel.Dock="Top" Classes="inspector-section">
+          <TextBlock Text="{Binding DetailsText}" Classes="panel-title" VerticalAlignment="Center" />
+        </Border>
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-          <StackPanel Margin="16,0,14,18" Spacing="14">
+          <StackPanel Margin="0,0,0,18" Spacing="0">
+            <!-- 未拿到仓库信息（如未打开项目）时整块隐藏，不留空标签列 -->
+            <Border Classes="inspector-section" IsVisible="{Binding HasRepositoryInfo}">
             <StackPanel Spacing="8">
-              <TextBlock Text="{Binding RepositoryStatusLabel}" Classes="subtitle" />
+              <!-- 原先「仓库状态」既做小节标题又做首行标签，屏上重复两遍；
+                   小节标题去掉，各行标签自解释即可。 -->
               <Grid ColumnDefinitions="88,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding RepositoryStatusLabel}" Classes="subtle" />
                 <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding RepositoryStatusText}" TextWrapping="Wrap" />
@@ -201,11 +221,11 @@
                 <TextBlock Text="{Binding RepositoryReasonText}" TextWrapping="Wrap" />
               </StackPanel>
             </StackPanel>
+            </Border>
 
-            <Separator />
-
+            <Border Classes="inspector-section">
             <StackPanel Spacing="8">
-              <TextBlock Text="{Binding CreateCheckpointText}" Classes="subtitle" />
+              <TextBlock Text="{Binding CreateCheckpointText}" Classes="inspector-label" />
               <TextBox Text="{Binding CheckpointMessage, Mode=TwoWay}"
                        PlaceholderText="{Binding CheckpointPlaceholder}"
                        IsEnabled="{Binding !IsBusy}" />
@@ -214,15 +234,19 @@
                       Content="{Binding CreateCheckpointText}"
                       Command="{Binding CreateCheckpointCommand}" />
             </StackPanel>
+            </Border>
 
-            <Separator />
-
+            <Border Classes="inspector-section">
             <StackPanel Spacing="8">
               <StackPanel Spacing="3">
                 <TextBlock Text="{Binding SummaryLabel}" Classes="subtle" />
                 <TextBlock Text="{Binding SelectedSummary}" TextWrapping="Wrap" />
               </StackPanel>
-              <Grid ColumnDefinitions="96,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="6">
+              <!-- 未选中存档点时整块隐藏：原先会渲染一列「时间/作者/位置标记/类型」
+                   配四个「-」，在右栏里像一张没填完的表单，是本页最难看的地方。
+                   现在只留上面那句「未选择存档点。」，选中后才展开明细。 -->
+              <Grid ColumnDefinitions="96,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="6"
+                    IsVisible="{Binding HasSelection}">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding TimeLabel}" Classes="subtle" />
                 <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding SelectedTime}" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding AuthorLabel}" Classes="subtle" />
@@ -233,7 +257,10 @@
                 <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding SelectedKind}" TextWrapping="Wrap" />
               </Grid>
             </StackPanel>
+            </Border>
 
+            <!-- 回档表单同理：没有选中存档点时无从回档，不该常驻占位 -->
+            <Border Classes="inspector-section" IsVisible="{Binding HasSelection}">
             <StackPanel Spacing="6">
               <TextBlock Text="{Binding RestoreBranchNameText}" Classes="subtle" />
               <TextBox Text="{Binding RestoreBranchName, Mode=TwoWay}" IsEnabled="{Binding !IsBusy}" />
@@ -242,8 +269,10 @@
                       Content="{Binding RestoreNewBranchText}"
                       Command="{Binding RestoreCommand}" />
             </StackPanel>
+            </Border>
 
-            <Expander Header="{Binding TechnicalDetailsText}">
+            <Expander Header="{Binding TechnicalDetailsText}" Margin="16,10"
+                      IsVisible="{Binding HasSelection}">
               <StackPanel Margin="0,8,0,0" Spacing="8">
                 <StackPanel Spacing="3">
                   <TextBlock Text="{Binding CommitLabel}" Classes="subtle" />
@@ -255,12 +284,12 @@
                 </StackPanel>
                 <StackPanel Spacing="3" IsVisible="{Binding HasDiffPreview}">
                   <TextBlock Text="{Binding DiffPreviewLabel}" Classes="subtle" />
-                  <Border Classes="layer" Padding="8">
-                    <TextBlock Text="{Binding DiffPreviewText}"
-                               Classes="mono"
-                               TextWrapping="Wrap"
-                               MaxHeight="220" />
-                  </Border>
+                  <!-- 去盒中盒：diff 预览已在 Expander + 检查器分区内，
+                       第三层描边纯属噪音；等宽字体本身已足够区分。 -->
+                  <TextBlock Text="{Binding DiffPreviewText}"
+                             Classes="mono"
+                             TextWrapping="Wrap"
+                             MaxHeight="220" />
                 </StackPanel>
               </StackPanel>
             </Expander>

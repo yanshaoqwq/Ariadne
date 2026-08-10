@@ -30,6 +30,50 @@ public sealed class RunLogStateTests
         Assert.Contains("run-a", item.ContextText, StringComparison.Ordinal);
         Assert.Contains("writer", item.ContextText, StringComparison.Ordinal);
         Assert.DoesNotContain("[ui.run_log.kind", item.KindText, StringComparison.Ordinal);
+        Assert.Equal("错误", item.LevelText);
+    }
+
+    [Fact]
+    public async Task ClearFilters_ResetsEveryTextFilterAndRefreshesOnce()
+    {
+        var backend = RunLogBackend.Create();
+        var viewModel = new RunLogPageViewModel(DisplayNameService.LoadDefault(), backend.Client)
+        {
+            SearchQuery = "failure",
+            WorkflowIdFilter = "wf",
+            RunIdFilter = "run",
+            NodeIdFilter = "node",
+        };
+
+        Assert.True(viewModel.ClearFiltersCommand.TryExecute());
+        await WaitUntilAsync(() => backend.Queries.Count == 1);
+
+        var query = Assert.Single(backend.Queries);
+        Assert.Null(query.Query);
+        Assert.Null(query.WorkflowId);
+        Assert.Null(query.RunId);
+        Assert.Null(query.NodeId);
+        Assert.False(viewModel.HasActiveFilter);
+    }
+
+    [Fact]
+    public async Task SelectedLog_HasAVisibleCopyActionInsteadOfDeadSelection()
+    {
+        var viewModel = new RunLogPageViewModel(DisplayNameService.LoadDefault(), RunLogBackend.Create().Client);
+        var item = new RunLogItemViewModel(Entry("log-1", 1, unread: false), DisplayNameService.LoadDefault());
+        string? copied = null;
+        viewModel.RequestCopyText = text =>
+        {
+            copied = text;
+            return Task.CompletedTask;
+        };
+        viewModel.SelectedLog = item;
+
+        Assert.True(viewModel.CopySelectedCommand.TryExecute());
+        await WaitUntilAsync(() => copied is not null);
+
+        Assert.Contains("log-1", copied, StringComparison.Ordinal);
+        Assert.Contains(item.LevelText, copied, StringComparison.Ordinal);
     }
 
     [Fact]

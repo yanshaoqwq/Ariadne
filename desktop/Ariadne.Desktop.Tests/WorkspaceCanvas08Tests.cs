@@ -93,11 +93,13 @@ public sealed class WorkspaceCanvas08Tests
         var motion = File.ReadAllText(Path.Combine(ResolveDesktopSource(), "MotionPreferences.cs"));
 
         Assert.Contains("Duration=\"0:0:0.10\"", axaml, StringComparison.Ordinal);
-        Assert.Contains("Duration=\"0:0:0.12\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Duration=\"0:0:0.14\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Duration=\"0:0:0.16\"", axaml, StringComparison.Ordinal);
         Assert.DoesNotContain("IterationCount=\"Infinite\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Grid.canvas-node:pointerover Border.node-card", axaml, StringComparison.Ordinal);
-        Assert.Contains("Grid.canvas-node.selected Border.node-flow-ring", axaml, StringComparison.Ordinal);
+        // 选中环（自定义 SelectionFlowRing，IsActive 绑选中）与卡片共享悬停撬起变换，跟随节点悬浮。
+        Assert.Contains("Grid.canvas-node:pointerover .node-flow-ring", axaml, StringComparison.Ordinal);
+        Assert.Contains("IsActive=\"{Binding IsSelected}\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Button.zoom-readout.motion-pulse", axaml, StringComparison.Ordinal);
         Assert.Contains("Border.viewport-frame.motion-settle", axaml, StringComparison.Ordinal);
         Assert.Contains("UserControl.reduce-motion", axaml, StringComparison.Ordinal);
@@ -205,6 +207,28 @@ public sealed class WorkspaceCanvas08Tests
         Assert.DoesNotContain("public IBrush PortControlInFill", vm, StringComparison.Ordinal);
         Assert.DoesNotContain("public IBrush PortDataOutFill", vm, StringComparison.Ordinal);
         Assert.DoesNotContain("private static readonly IBrush DataBrush", vm, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CanvasNodePorts_KeepSemanticShapes_WithRoundedInteractiveGlyphs()
+    {
+        var axaml = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var theme = File.ReadAllText(Path.Combine(
+            ResolveDesktopSource("Resources", "Styles"),
+            "AriadneTheme.axaml"));
+
+        // 控制流仍为三角形，但三处尖角都由二次曲线收圆。
+        Assert.Contains("Q3,1.9", axaml, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"control-port\"", axaml, StringComparison.Ordinal);
+        // 数据端口保持圆形，通信端口使用圆角方芯，三类语义一眼可分。
+        Assert.Contains("Classes=\"data-port\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Ellipse.data-port.connected", axaml, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"communication-core\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Border.data-port", axaml, StringComparison.Ordinal);
+        Assert.Contains("Border.communication-port.connected Border.communication-core", axaml, StringComparison.Ordinal);
+        // 视觉反馈不改变 14/16px 的稳定命中盒，只在渲染层缩放。
+        Assert.Contains("Border.pin-glass:pointerover", theme, StringComparison.Ordinal);
+        Assert.Contains("RenderTransform\" Value=\"scale(1.16)\"", theme, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -616,7 +640,10 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("SaveProjectCanvasAsync(graph)", source, StringComparison.Ordinal);
         Assert.Contains("_runSession", source, StringComparison.Ordinal);
         Assert.Contains("var workflowId = CurrentWorkflowId;", source, StringComparison.Ordinal);
-        Assert.Contains(".StartAsync(workflowId, startNodeId)", source, StringComparison.Ordinal);
+        // 守卫的是「运行入口走页面级 run session coordinator」这条性质，不是参数列表。
+        // 变量系统给 StartAsync 加了第三个实参（起始节点的变量初值），
+        // 因此只断言前缀，避免每次扩参都要改守卫。
+        Assert.Contains(".StartAsync(workflowId, startNodeId", source, StringComparison.Ordinal);
         Assert.Contains("_runSession.ThrowIfStale(sessionFence)", source, StringComparison.Ordinal);
         Assert.Contains("_runSession.EventsReceived += ApplyWorkflowEvents", source, StringComparison.Ordinal);
         Assert.DoesNotContain("GetWorkflowEventsAsync(CurrentWorkflowId", source, StringComparison.Ordinal);
@@ -930,11 +957,11 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("TryGetControlCenter(sender as Control", view, StringComparison.Ordinal);
         Assert.Contains("TryGetPortCanvasCenter", view, StringComparison.Ordinal);
         Assert.Contains("SyncEdgePosition(edge, source, target)", view, StringComparison.Ordinal);
+        // 兜底（未测量时）路径只允许有一处调用：多处会让首帧与测量帧走不同几何。
+        // 匹配方法名而非整条字面量——调用已改为多行并带镜像标志，写死整行会误报。
         Assert.Equal(
             1,
-            view.Split(
-                "edge.UpdateEdgePath(source.X, source.Y, target.X, target.Y);",
-                StringSplitOptions.None).Length - 1);
+            view.Split("edge.UpdateEdgePath(", StringSplitOptions.None).Length - 1);
         Assert.Contains("string.IsNullOrWhiteSpace(handle)", view, StringComparison.Ordinal);
         Assert.DoesNotContain("else if (FindNodeAt", view, StringComparison.Ordinal);
         Assert.Contains("CancelKeyboardConnection(announce: true)", view, StringComparison.Ordinal);
@@ -976,6 +1003,27 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Single(vm.Nodes);
         Assert.True(vm.IsRightPanelOpen);
         Assert.True(vm.IsNodeDetailsTab);
+    }
+
+    [Fact]
+    public void RightPanelInspector_SeparatesAiNodeAndEdgeModes_InsideExistingDock()
+    {
+        var axaml = File.ReadAllText(Path.Combine(ResolveDesktopSource("Views"), "WorkspacePageView.axaml"));
+        var vm = CreateWorkspaceVm();
+
+        Assert.Contains("x:Name=\"RightPanelHost\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding ShowEdgeDetailsCommand}\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("IsVisible=\"{Binding IsEdgeDetailsTab}\"", axaml, StringComparison.Ordinal);
+        Assert.Contains("Classes=\"inspector-edge-row\"", axaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsVisible=\"False\">\n                    <StackPanel Spacing=\"10\">", axaml, StringComparison.Ordinal);
+
+        Assert.True(vm.IsProjectAiTab);
+        Assert.True(vm.ShowNodeDetailsCommand.TryExecute());
+        Assert.True(vm.IsNodeDetailsTab);
+        Assert.True(vm.ShowEdgeDetailsCommand.TryExecute());
+        Assert.True(vm.IsEdgeDetailsTab);
+        Assert.True(vm.ShowProjectAiCommand.TryExecute());
+        Assert.True(vm.IsProjectAiTab);
     }
 
     [Fact]
