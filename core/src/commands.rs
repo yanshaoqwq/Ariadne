@@ -1232,6 +1232,14 @@ pub struct GitRepositoryStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitRepairReport {
+    /// 损坏的 `.git` 被移动到哪里（相对项目根）。用户据此自行取回或删除。
+    pub backup_dir: String,
+    /// 重新初始化后的状态，供前端直接刷新而不必再发一次查询。
+    pub status: GitHealthStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateRepositorySettings {
     pub base_url: String,
 }
@@ -3832,6 +3840,59 @@ pub fn get_git_repository_status_with_cancellation(
 ) -> CommandResult<GitRepositoryStatus> {
     let project_root = project_root_from_state(state, None)?;
     get_git_repository_status_impl_with_cancellation(&project_root, cancellation)
+}
+
+/// U116：修复损坏的 Git 仓库——备份坏掉的 `.git`，再重新初始化。
+///
+/// 此前 `backup_dir_name` / `reinitialize_repository` 两个原语实现完整却零调用者：
+/// `health_check` 能**检出**损坏（`.git` 存在但 `rev-parse` 失败即 fail-loud），
+/// 却没有任何修复入口，用户只能自己去命令行救。这是产品缺口而非死代码。
+///
+/// 三条安全边界：
+/// - **绝不静默丢历史**：坏掉的 `.git` 是移动到备份目录，不是删除。
+///   备份目录已存在时报错而非覆盖——第二次修复会毁掉第一次的证据。
+/// - **只在真损坏时允许**：仓库健康或根本没有 `.git` 时拒绝执行，
+///   否则一次误点会把好仓库的历史挪走。
+/// - **工作区文件不动**：`git init` 保留工作区，用户的正文一个字都不会丢。
+pub fn repair_git_repository(state: &AriadneAppState) -> CommandResult<GitRepairReport> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "git_repository_repair")?;
+    let cancellation = crate::contracts::ExecutionCancellation::new();
+    let git = git_service_with_cancellation(&project_root, &cancellation);
+
+    let git_dir = project_root.join(".git");
+    if !git_dir.try_exists().map_err(error_to_string)? {
+        return Err(CommandError::validation(
+            "project has no .git directory; nothing to repair",
+        ));
+    }
+    // 健康的仓库不该走修复路径——把好仓库的 .git 挪走是不可逆的破坏。
+    if git.health_check().is_ok() {
+        return Err(CommandError::validation(
+            "git repository is healthy; repair would discard a working history",
+        ));
+    }
+
+    let backup_name = git.backup_dir_name();
+    let backup_dir = project_root.join(&backup_name);
+    if backup_dir.try_exists().map_err(error_to_string)? {
+        return Err(CommandError::conflict(format!(
+            "backup directory already exists: {backup_name}; move or remove it before repairing again"
+        )));
+    }
+    std::fs::rename(&git_dir, &backup_dir).map_err(|error| {
+        CommandError::internal(format!("failed to back up corrupted .git: {error}"))
+    })?;
+
+    git.reinitialize_repository().map_err(error_to_string)?;
+    let status = git
+        .health_check()
+        .map(|report| report.status)
+        .map_err(error_to_string)?;
+    Ok(GitRepairReport {
+        backup_dir: backup_name,
+        status,
+    })
 }
 
 pub fn get_git_branch_graph(

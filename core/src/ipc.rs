@@ -880,6 +880,7 @@ fn dispatch_request(
             state,
             cancellation,
         )?),
+        "repair_git_repository" => ok(commands::repair_git_repository(state)?),
         "get_git_branch_graph" => {
             let params: LimitParams = params(request.params)?;
             ok(commands::get_git_branch_graph_with_cancellation(

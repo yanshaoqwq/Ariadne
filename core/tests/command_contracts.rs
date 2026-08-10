@@ -9785,3 +9785,83 @@ fn provider_reachability_items_do_not_collide_with_config_items() {
             .collect::<Vec<_>>()
     );
 }
+
+// ════════════════════════════════════════════════════════
+// U116：损坏 Git 仓库的修复入口
+// ════════════════════════════════════════════════════════
+
+/// 损坏仓库修复后：`.git` 重建、坏的那份被**备份**而非删除、工作区文件不动。
+///
+/// 判据取真实文件系统。此前 `backup_dir_name` / `reinitialize_repository`
+/// 两个原语实现完整却零调用者——`health_check` 能检出损坏，却没有修复入口，
+/// 用户只能自己去命令行救。
+#[test]
+fn u116_repair_backs_up_corrupted_git_and_reinitializes() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let app = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    // 用户的正文——修复过程一个字都不能碰。
+    let manuscript = project.path().join("chapter-01.md");
+    std::fs::write(&manuscript, "第一章 雨夜\n").unwrap();
+
+    // 把 .git 打坏：删掉 HEAD 会让 rev-parse 失败，而 .git 目录仍在，
+    // 这正是 health_check 判为「损坏」而非「未初始化」的那条分支。
+    std::fs::remove_file(project.path().join(".git").join("HEAD")).unwrap();
+
+    let report = ariadne::commands::repair_git_repository(&app).expect("损坏仓库应当可修复");
+
+    // 坏的那份必须还在——修复不等于毁尸灭迹，用户可能要从里面捞东西。
+    let backup = project.path().join(&report.backup_dir);
+    assert!(
+        backup.is_dir(),
+        "损坏的 .git 应被备份到 {}，实际不存在",
+        report.backup_dir
+    );
+    assert!(
+        project.path().join(".git").join("HEAD").is_file(),
+        "重新初始化后应有全新的 .git/HEAD"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&manuscript).unwrap(),
+        "第一章 雨夜\n",
+        "修复动的是 .git，绝不能碰工作区正文"
+    );
+}
+
+/// 健康仓库必须**拒绝**修复。
+///
+/// 缺了这条防线，一次误点就会把可用仓库的全部历史挪进备份目录——
+/// 那是不可逆的破坏，比「没有修复入口」严重得多。
+#[test]
+fn u116_repair_refuses_to_touch_a_healthy_repository() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+    let app = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let error = ariadne::commands::repair_git_repository(&app)
+        .expect_err("健康仓库不该允许修复");
+    let diagnostic = format!("{error:?}");
+    assert!(
+        diagnostic.contains("healthy"),
+        "拒绝理由应指明「仓库是健康的」，实际：{diagnostic}"
+    );
+    assert!(
+        project.path().join(".git").join("HEAD").is_file(),
+        "被拒绝后 .git 必须原封不动"
+    );
+    assert!(
+        !project.path().join("git-backup-before-reinit").is_dir(),
+        "被拒绝后不该留下任何备份目录"
+    );
+}
