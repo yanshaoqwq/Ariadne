@@ -44,12 +44,9 @@ impl EventEnvelope {
         }
     }
 
-    /// 为事件补充 workflow/run 上下文。
-    pub fn with_run(mut self, workflow_id: WorkflowId, run_id: RunId) -> Self {
-        self.workflow_id = Some(workflow_id);
-        self.run_id = Some(run_id);
-        self
-    }
+    // U116：曾有 `with_run(workflow_id, run_id)` builder，已删。所有发事件的地方
+    // （commands.rs / integration.rs / rest.rs / ledger.rs）都用结构体字面量一次性
+    // 填全 workflow_id 与 run_id，builder 从未被采用；留着两套构造方式只会分裂写法。
 }
 
 /// 核心运行事件类型。

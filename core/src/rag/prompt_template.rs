@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::contracts::{CoreError, CoreResult};
 use crate::rag::models::{WritingAgentKind, WritingContextBundle, WritingContextSection};
 use crate::rag::resources::PromptResources;
-use crate::skills::{stable_text_hash, PromptRenderTrace, PromptTemplateManifest};
+use crate::skills::{PromptRenderTrace, PromptTemplateManifest};
 
 /// 模板内联最大递归深度，防止 PromptTemplate 相互引用造成无限展开。
 const MAX_TEMPLATE_RENDER_DEPTH: usize = 8;
@@ -491,7 +491,7 @@ fn known_section_aliases(section_id: &str) -> &'static [&'static str] {
     }
 }
 
-/// 计算模板文本 hash，供测试和后续 GUI 快速比对使用。
-pub fn prompt_template_hash(template: &str) -> String {
-    stable_text_hash(template)
-}
+// U116：曾有 `prompt_template_hash(template)` 转发到 `skills::stable_text_hash`，已删。
+// 它自称「供测试和 GUI 比对使用」，但两处都没用；真正需要模板 hash 的地方
+// （skills/models.rs 的 original_template_hash、summarizer 的 request_hash）
+// 一律直接调 stable_text_hash。同名转发只会让人以为存在两套 hash 口径。

@@ -344,10 +344,10 @@ fn reserve_available_port(host: &str, requested_port: u16) -> CoreResult<Reserve
     })
 }
 
-/// 检查 host:port 当前是否可绑定。
-pub fn is_port_available(host: &str, port: u16) -> bool {
-    TcpListener::bind((host, port)).is_ok()
-}
+// U116：曾有 `is_port_available(host, port)` = `TcpListener::bind(..).is_ok()`，已删且
+// **不要重新加回来**。它 bind 完立刻 drop listener，检查与实际使用之间存在竞态窗口，
+// 端口会在这段时间里被别人抢走——这正是 `reserve_available_port` 要一路持有 listener
+// 到子进程 spawn 前一刻的原因。留着一个「看起来更简单」的检查函数只会诱导后人退回缺陷版本。
 
 /// 等待 TCP 端口可连接，用于启动后的轻量健康检查。
 pub fn wait_for_tcp_health(host: &str, port: u16, timeout_ms: u64) -> CoreResult<()> {

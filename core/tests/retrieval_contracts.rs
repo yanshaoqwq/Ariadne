@@ -552,6 +552,59 @@ fn vector_index_revision_tracks_embedding_semantics_not_unrelated_provider_field
     ));
 }
 
+/// U116：换 embedding 模型/端点必须与换 vector_store 一样被判定为「换了向量空间」。
+/// 两者的判据必须同源，否则重开 runtime 的判定会漏掉只改 embedding 的那一半，
+/// 让抱着旧 embedder 的 runtime 继续服务新索引。
+#[test]
+fn vector_pipeline_reuse_boundary_covers_embedding_identity_not_only_vector_store() {
+    let mut original = ariadne::config::ProjectConfig::default();
+    original.rag.vector_store.enabled = true;
+    original.rag.vector_store.backend = VectorStoreBackend::ExternalQdrant;
+    original.providers.default_embedding_provider_id = Some("embedding".to_owned());
+    original.providers.providers.push(ProviderConfig {
+        provider_id: "embedding".to_owned(),
+        provider_type: ProviderType::OpenAiCompatible,
+        display_name: "Embedding Provider".to_owned(),
+        enabled: true,
+        base_url: Some("http://127.0.0.1:18080/v1".to_owned()),
+        api_key: None,
+        models: vec![ModelConfig {
+            model_id: "embed-v1".to_owned(),
+            capability: ProviderCapability::Embedding,
+            max_context_tokens: None,
+            input_cost_per_million_tokens: Some(0.1),
+            output_cost_per_million_tokens: None,
+        }],
+    });
+
+    // 只改 embedding 模型：vector_store 完全没动，但向量语义空间已经变了。
+    let mut changed_model = original.clone();
+    changed_model.providers.providers[0].models[0].model_id = "embed-v2".to_owned();
+    assert_eq!(
+        original.rag.vector_store, changed_model.rag.vector_store,
+        "本用例的前提是 vector_store 逐字段相同，只有 embedding 身份变了"
+    );
+    assert!(
+        ProjectRetrievalRuntime::index_configuration_changed(&original, &changed_model),
+        "换 embedding 模型必须触发重建索引"
+    );
+
+    // 与重建判据同源：复用边界也必须认为这是不同的向量流水线。
+    assert!(
+        ProjectRetrievalRuntime::vector_pipeline_configuration_changed(&original, &changed_model),
+        "复用边界漏掉了 embedding 身份，只改模型时旧 runtime 会被错误复用"
+    );
+
+    // 无关字段（显示名、单价）不得让复用边界失效，否则每次改价都白重开一次向量库。
+    let mut renamed = original.clone();
+    renamed.providers.providers[0].display_name = "仅修改显示名".to_owned();
+    renamed.providers.providers[0].models[0].input_cost_per_million_tokens = Some(0.2);
+    assert!(
+        !ProjectRetrievalRuntime::vector_pipeline_configuration_changed(&original, &renamed),
+        "无关字段变化不应判定为换了向量流水线"
+    );
+}
+
 #[test]
 fn project_runtime_executes_configured_embedding_qdrant_and_reranker_chain() {
     let qdrant_listener = TcpListener::bind("127.0.0.1:0").unwrap();

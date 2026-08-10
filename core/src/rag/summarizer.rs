@@ -825,17 +825,10 @@ fn decode_stage_response(value: serde_json::Value) -> CoreResult<(LlmResponse, u
     }
 }
 
-/// 组装并落库：执行四步总结后交给流水线，返回流水线报告。
-/// 这是生产链的顶层入口：Summarizer 节点执行 → 解析 → apply_draft 落库建索引。
-pub fn run_and_apply<L: CostLedger>(
-    executor: &SummarizerExecutor<'_, L>,
-    pipeline: &crate::rag::pipeline::SummaryPipelineExecutor<'_>,
-    chapter_id: &str,
-    chapter_text: &str,
-) -> CoreResult<crate::rag::models::SummaryPipelineReport> {
-    let draft = executor.summarize_chapter(chapter_id, chapter_text)?;
-    pipeline.apply_draft(draft)
-}
+// U116：曾有一个 `run_and_apply(executor, pipeline, ..)` 薄封装把 summarize_chapter 与
+// apply_draft 直接串起来，已删。生产路径（`workflow/integration.rs` 的 summarizer 节点）
+// **必须**在两步之间做四件事：跑 Auto Mode 审计决策、取写锁、复查幂等回执、按 draft
+// 重新加载工作集。省掉这些正是并发下覆盖别人确认决策的原因，所以这个封装无法被接线。
 
 // ── LLM 输出 DTO ─────────────────────────────────────────────────────────────
 

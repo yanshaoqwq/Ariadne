@@ -37,7 +37,6 @@ pub struct ProjectMaintenanceState {
 }
 
 const MAX_ATTEMPTS: u32 = 5;
-const PROJECT_MAINTENANCE_DRAIN_TIMEOUT_MS: u64 = 30_000;
 
 /// 项目普通写的 OS 共享锁；进程退出时由内核自动释放。
 pub struct ProjectMutationGuard {
@@ -114,30 +113,11 @@ impl IndexInvalidationOutbox {
         Ok(ProjectMutationGuard { _lock: lock })
     }
 
-    /// active intent 已持久化后取得独占锁；成功即证明此前普通 mutation 已全部排空。
-    pub fn acquire_maintenance_fence(&self) -> CoreResult<ProjectMaintenanceGuard> {
-        self.acquire_maintenance_fence_with_timeout(Duration::from_millis(
-            PROJECT_MAINTENANCE_DRAIN_TIMEOUT_MS,
-        ))
-    }
-
-    pub fn acquire_maintenance_fence_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> CoreResult<ProjectMaintenanceGuard> {
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            if let Some(guard) = self.try_acquire_maintenance_fence()? {
-                return Ok(guard);
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(CoreError::validation(
-                    "timed out draining active project mutations before maintenance",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
+    // U116：曾有 `acquire_maintenance_fence()` 与 `acquire_maintenance_fence_with_timeout()`
+    // 这对被动阻塞等待的排空入口，已删。生产路径（commands.rs 的
+    // `drain_project_mutations_for_restore`）用下面的 `try_acquire_maintenance_fence`
+    // 自己轮询，因为它必须在**每一轮**里调 `stop_non_terminal_for_restore` 主动停掉未终结的
+    // run——只 sleep 等待遇到长跑工作流会一直等到超时然后失败，永远拿不到 fence。
 
     /// 非阻塞尝试取得 maintenance 独占锁，供需要交替执行停机扫描的维护入口使用。
     pub fn try_acquire_maintenance_fence(&self) -> CoreResult<Option<ProjectMaintenanceGuard>> {

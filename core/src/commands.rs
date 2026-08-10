@@ -25,8 +25,7 @@ use crate::config::{
     AppPermissionsStore, AppRuntimeSettings, AppRuntimeSettingsStore, ApprovalPromptConfig,
     ConfigStore, GitConfig, ModelConfig, PermissionsConfig, ProjectConfig, ProjectCredentialScope,
     ProviderCatalogStore, ProviderConfig, QdrantAuthMode, RagConfig, SecretProtectionStatus,
-    SecretStore, SecretValue,
-    VectorStoreBackend, WorkflowConfig,
+    SecretStore, SecretValue, VectorStoreBackend, WorkflowConfig,
 };
 use crate::contracts::{
     ensure_path_under_root, ApprovalPolicy, ArtifactKind, CoreError, CoreResult, Edge, EdgeId,
@@ -75,9 +74,9 @@ use crate::node_capabilities::{
 use crate::providers::{
     web_search_tool_definition, ContentPart, HttpWebSearchProvider, LlmMessage, LlmProvider,
     LlmRole, OpenAiCompatibleLlmProvider, Provider, ProviderCacheKey, ProviderHealth,
-    ProviderHealthReport,
-    ProviderProtocol, ProviderRuntimeRegistry, SearchProvider, ToolDefinition,
-    WebSearchToolExecutor, EXECUTOR_ADAPTER_WEB_SEARCH_TOOL, PROJECT_AI_WEB_SEARCH_TOOL,
+    ProviderHealthReport, ProviderProtocol, ProviderRuntimeRegistry, SearchProvider,
+    ToolDefinition, WebSearchToolExecutor, EXECUTOR_ADAPTER_WEB_SEARCH_TOOL,
+    PROJECT_AI_WEB_SEARCH_TOOL,
 };
 use crate::rag::SqliteWritingKnowledgeStore;
 use crate::retrieval::{
@@ -516,7 +515,10 @@ impl AriadneAppState {
             // 同一 provider_id 在缓存里最多一条（见 cached_llm_provider 的 retain），
             // 所以这里不会撞 RegistryDuplicate。
             registry
-                .register_llm(key.provider_id.clone(), Arc::clone(provider) as Arc<dyn LlmProvider>)
+                .register_llm(
+                    key.provider_id.clone(),
+                    Arc::clone(provider) as Arc<dyn LlmProvider>,
+                )
                 .map_err(error_to_string)?;
         }
         Ok(registry.health_check_all())
@@ -558,7 +560,10 @@ impl AriadneAppState {
         let vector_store_requires_exclusive_reopen = runtime_slot.as_ref().is_some_and(|runtime| {
             runtime.vector_enabled()
                 && config.rag.vector_store.enabled
-                && !runtime.uses_vector_config(&config.rag.vector_store)
+                && ProjectRetrievalRuntime::vector_pipeline_configuration_changed(
+                    runtime.config(),
+                    &config,
+                )
         });
         if index_changed
             && runtime_slot
@@ -648,7 +653,10 @@ impl AriadneAppState {
         let vector_store_requires_exclusive_reopen = runtime_slot.as_ref().is_some_and(|runtime| {
             runtime.vector_enabled()
                 && candidate_runtime.rag.vector_store.enabled
-                && !runtime.uses_vector_config(&candidate_runtime.rag.vector_store)
+                && ProjectRetrievalRuntime::vector_pipeline_configuration_changed(
+                    runtime.config(),
+                    &candidate_runtime,
+                )
         });
         if index_changed
             && runtime_slot
@@ -1517,11 +1525,10 @@ pub struct ResolveConfirmationResult {
     pub badges: SidebarBadgeCounts,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommandAcknowledgement {
-    pub accepted: bool,
-    pub message: String,
-}
+// U116：曾有 `CommandAcknowledgement { accepted, message }` DTO，已删。它不属于 IPC 协议——
+// 没有任何 command 返回它，ipc.rs 与 desktop/ 也从未反序列化过它。需要「操作已接受」语义的
+// 命令一律返回带实际状态的具体结果类型（如 WorkflowActionResult），布尔+文案的泛化回执
+// 会让前端拿不到后续判断所需的状态。
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateRepositoryRequest {
@@ -1765,12 +1772,8 @@ pub fn relocate_recent_project(
     }
     let project_root = canonicalize_initialized_project_root(Path::new(&project_root))?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "project_open")?;
-    match activate_initialized_project_replacing_recent(
-        state,
-        &project_root,
-        None,
-        &replaced_root,
-    ) {
+    match activate_initialized_project_replacing_recent(state, &project_root, None, &replaced_root)
+    {
         Ok(current) => Ok(current),
         Err(error) => Err(rollback_existing_project_activation(
             state,
@@ -1949,12 +1952,7 @@ fn activate_initialized_project_replacing_recent(
     name: Option<&str>,
     replaced_project_root: &Path,
 ) -> CommandResult<CurrentProjectStatus> {
-    activate_initialized_project_inner(
-        state,
-        project_root,
-        name,
-        Some(replaced_project_root),
-    )
+    activate_initialized_project_inner(state, project_root, name, Some(replaced_project_root))
 }
 
 fn activate_initialized_project_inner(
@@ -2025,11 +2023,9 @@ fn activate_initialized_project_inner(
             candidate_config.app.project_name.clone()
         },
     };
-    if let Err(error) = record_current_project_replacing(
-        state.app_state_root(),
-        &current,
-        replaced_project_root,
-    ) {
+    if let Err(error) =
+        record_current_project_replacing(state.app_state_root(), &current, replaced_project_root)
+    {
         let mut diagnostic = error_to_string(error).diagnostic_text().to_owned();
         if config_changed {
             if let Err(rollback_error) = config_store.save(&original_config) {
@@ -2488,8 +2484,11 @@ pub fn pack_workflow_selection_impl_with_operation_id_and_app_state(
     let mut graph = workflow_to_graph(report.workflow);
     graph.expected_revision = Some(base_revision.clone());
     let prepared_workflow = graph_to_workflow(graph.clone())?;
-    validate_workflow_execution_contracts(&prepared_workflow, &project_workflow_limits(project_root)?)
-        .map_err(error_to_string)?;
+    validate_workflow_execution_contracts(
+        &prepared_workflow,
+        &project_workflow_limits(project_root)?,
+    )
+    .map_err(error_to_string)?;
     let prepared_body =
         serde_json::to_string_pretty(&prepared_workflow).map_err(error_to_string)?;
     let mut prepared_graph = workflow_to_graph(prepared_workflow);
@@ -6550,9 +6549,7 @@ fn workflow_writing_tools_for_node(
         .map(|tool| tool.name)
         .filter(|tool| crate::rag::tools::WritingToolExecutor::handles_tool(tool))
         .filter(|tool| !tool.ends_with("-web-search"))
-        .filter(|tool| {
-            node_tool_control_enabled(controls, presets, type_name, type_name, tool)
-        })
+        .filter(|tool| node_tool_control_enabled(controls, presets, type_name, type_name, tool))
         .collect()
 }
 
@@ -6736,14 +6733,14 @@ fn execute_workflow_runtime(
                         // U108：写作节点在每次执行时重新加载知识库与正文，
                         // 保证 find 看到的是当前状态、行号 patch 基于最新版本。
                         let writing_context = match writing_agent {
-                            Some(agent) if !search_bindings.writing_tools.is_empty() => Some(
-                                load_workflow_writing_context(
+                            Some(agent) if !search_bindings.writing_tools.is_empty() => {
+                                Some(load_workflow_writing_context(
                                     &writing_root,
                                     &writing_document_root,
                                     agent,
                                     &request,
-                                )?,
-                            ),
+                                )?)
+                            }
                             _ => None,
                         };
                         if search_bindings.project_search.is_none()
@@ -6788,8 +6785,7 @@ fn execute_workflow_runtime(
                                         knowledge: &context.knowledge,
                                         document: context.document_context(),
                                         chapter_id: context.chapter_id.as_deref(),
-                                        confirmation_policy: writing_confirmation_policy
-                                            .clone(),
+                                        confirmation_policy: writing_confirmation_policy.clone(),
                                         auto_mode: crate::contracts::AutoModeState {
                                             enabled: auto_mode_config.enabled_by_default,
                                             preauthorized_budget_usd: auto_mode_config
@@ -7321,10 +7317,7 @@ fn compile_workflow_llm_execution_plan(
         } else {
             select_llm_model(
                 &provider_config,
-                default_llm_model_id_for(
-                    &project_config.providers,
-                    &provider_config.provider_id,
-                ),
+                default_llm_model_id_for(&project_config.providers, &provider_config.provider_id),
             )?
         };
         if !matches!(
@@ -8399,8 +8392,12 @@ fn resolve_confirmation_impl_with_claim(
     //   可重入，不死锁；
     // - 在本函数而**不是** resume worker 里——`resolve_confirmation_impl`
     //   释放 lease 且从不续跑，放 worker 里等于 headless 路径永远不落盘。
-    let runtime_state =
-        apply_resolved_confirmation_patch(project_root, &store, &request.confirmation_id, runtime_state)?;
+    let runtime_state = apply_resolved_confirmation_patch(
+        project_root,
+        &store,
+        &request.confirmation_id,
+        runtime_state,
+    )?;
 
     let owner_id = format!("worker-{}", new_run_id()?.as_str());
     let lease = match store
@@ -8491,10 +8488,7 @@ fn prune_terminal_run_events_on_open(project_root: &Path) -> CommandResult<usize
         return Ok(0);
     }
     // 运行态库尚未创建（新项目从未跑过工作流）时不算失败。
-    if !project_root
-        .join(crate::workflow::RUNTIME_DB_FILE)
-        .exists()
-    {
+    if !project_root.join(crate::workflow::RUNTIME_DB_FILE).exists() {
         return Ok(0);
     }
     let max_age_ms = u64::from(retention_days).saturating_mul(24 * 60 * 60 * 1000);

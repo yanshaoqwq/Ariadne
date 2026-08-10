@@ -94,21 +94,11 @@ pub fn estimate_token_cost_range(
     Ok(estimate)
 }
 
-/// 从模型配置读取价格并估算 tool-use 成本区间。
-pub fn estimate_model_config_cost_range(
-    model: &ModelConfig,
-    usage: TokenUsage,
-    tool_use_rounds: Option<u32>,
-) -> CoreResult<CostEstimate> {
-    estimate_token_cost_range(
-        usage,
-        TokenPricing {
-            input_cost_per_million_tokens: model.input_cost_per_million_tokens.unwrap_or(0.0),
-            output_cost_per_million_tokens: model.output_cost_per_million_tokens.unwrap_or(0.0),
-        },
-        tool_use_rounds,
-    )
-}
+// U116：曾有 `estimate_model_config_cost_range(model, usage, rounds)`，只是把 ModelConfig
+// 的两个单价拆进 TokenPricing 再转发给 estimate_token_cost_range，已删。
+// 整个项目没有费用预估的对外命令，display_name.json 里也没有任何预估文案 key
+// （本项目可见文案必须先建 key），即预估界面从未存在过，不是「接线漏了」。
+// 将来真要做预估界面，直接调 estimate_token_cost_range 即可，不必重建这层转发。
 
 #[cfg(test)]
 mod tests {

@@ -215,17 +215,10 @@ impl GitService {
         })
     }
 
-    /// 返回工作区 diff。
-    pub fn diff(&self) -> CoreResult<String> {
-        self.run_git(["diff", "--"])
-    }
-
-    /// 按暂存策略返回工作区 diff，和存档/状态展示排除规则保持一致。
-    pub fn diff_with_policy(&self, policy: &GitStagePolicy) -> CoreResult<String> {
-        let mut args = vec!["diff".to_owned(), "--".to_owned(), ".".to_owned()];
-        args.extend(policy.exclude_pathspecs()?);
-        self.run_git(args)
-    }
+    // U116：曾有 `diff()` 与 `diff_with_policy(policy)` 一次性把整个 diff 读进 String，
+    // 已删且不要重建。取代它们的是下面的 `diff_preview_with_policy`：同样的 pathspec，
+    // 但流式统计行数、只保留限定字符数的预览，并并发排空 stderr 防死锁（C8）。
+    // 百万字项目的一次 diff 足以撑爆内存，"先拿到全文再截断" 是错的顺序。
 
     /// 流式统计完整 diff 行数，但只保留指定字符数的预览，避免大型 diff 整体驻留内存。
     /// Concurrently drains stderr (C8) so a full stderr pipe cannot deadlock stdout read.

@@ -333,13 +333,15 @@ impl ProjectRetrievalRuntime {
         &self.config
     }
 
-    pub fn uses_vector_config(&self, config: &VectorStoreConfig) -> bool {
-        &self.config.rag.vector_store == config
-    }
-
-    /// 判断候选配置是否仍使用同一向量空间与后端；embedding provider/model 也在边界内。
-    pub fn uses_vector_pipeline_config(&self, config: &ProjectConfig) -> bool {
-        vector_pipeline_config_matches(&self.config, config)
+    /// 判断向量流水线身份是否变化：vector_store 之外，embedding provider/端点/模型
+    /// 也在边界内——换了 embedding 就是换了向量语义空间，旧 embedder 不能再服务新索引。
+    /// 与 `index_configuration_changed` 共用 `vector_pipeline_config_matches`，
+    /// 避免「要重建索引」与「要重开 runtime」两处判据漂移（U116）。
+    pub fn vector_pipeline_configuration_changed(
+        previous: &ProjectConfig,
+        candidate: &ProjectConfig,
+    ) -> bool {
+        !vector_pipeline_config_matches(previous, candidate)
     }
 
     /// chunk、全文目录或任一向量空间变化都要求完整重建，禁止新查询打旧索引。

@@ -4,10 +4,10 @@ use std::sync::Arc;
 use crate::contracts::{CoreError, CoreResult, ExecutionCancellation};
 use crate::retrieval::memory::sort_and_limit;
 use crate::retrieval::models::{
-    FullTextSearchRequest, HybridSearchRequest, RerankInput, RetrievalResult, RetrievalSource,
-    StoreHealth, VectorSearchRequest,
+    FullTextSearchRequest, HybridSearchRequest, RetrievalResult, RetrievalSource, StoreHealth,
+    VectorSearchRequest,
 };
-use crate::retrieval::traits::{FullTextStore, HybridSearch, ResultReranker, VectorStore};
+use crate::retrieval::traits::{FullTextStore, HybridSearch, VectorStore};
 
 /// 单次混合检索允许的最大最终返回数量。
 pub const MAX_HYBRID_SEARCH_LIMIT: usize = 10_000;
@@ -20,11 +20,14 @@ pub const MAX_PRODUCT_SEARCH_RESULT_BYTES: usize = 128 * 1024;
 /// Reciprocal Rank Fusion 常量；只依赖后端排名，不混加不同量纲的原始分数。
 const RRF_K: f32 = 60.0;
 
-/// 混合检索引擎，组合向量检索、全文检索和可选 reranker。
+/// 混合检索引擎，组合向量检索与全文检索。
+///
+/// 重排序**不在**引擎内做：`ProjectRetrievalRuntime` 在引擎外面自行扩大候选数并调用
+/// `ProviderExecutor::rerank`，因为重排是一次带计费的 provider 调用，需要 ledger 与
+/// provider context，引擎这一层拿不到。引擎内的 reranker 槽因此被取代，已删（U116）。
 pub struct HybridSearchEngine {
     vector_store: Arc<dyn VectorStore>,
     full_text_store: Arc<dyn FullTextStore>,
-    reranker: Option<Arc<dyn ResultReranker>>,
 }
 
 /// 三路混合检索引擎：Qdrant 向量、Tantivy 全文和 SQLite FTS5 全文。
@@ -32,7 +35,6 @@ pub struct ThreeWayHybridSearchEngine {
     vector_store: Option<Arc<dyn VectorStore>>,
     tantivy_store: Arc<dyn FullTextStore>,
     sqlite_store: Arc<dyn FullTextStore>,
-    reranker: Option<Arc<dyn ResultReranker>>,
 }
 
 impl ThreeWayHybridSearchEngine {
@@ -46,7 +48,6 @@ impl ThreeWayHybridSearchEngine {
             vector_store: Some(vector_store),
             tantivy_store,
             sqlite_store,
-            reranker: None,
         }
     }
 
@@ -59,14 +60,7 @@ impl ThreeWayHybridSearchEngine {
             vector_store: None,
             tantivy_store,
             sqlite_store,
-            reranker: None,
         }
-    }
-
-    /// 为三路混合检索挂载 reranker。
-    pub fn with_reranker(mut self, reranker: Arc<dyn ResultReranker>) -> Self {
-        self.reranker = Some(reranker);
-        self
     }
 
     fn execute_search(
@@ -139,13 +133,6 @@ impl ThreeWayHybridSearchEngine {
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
-        if let Some(reranker) = &self.reranker {
-            return reranker.rerank(RerankInput {
-                query: request.query,
-                results,
-                limit: request.limit,
-            });
-        }
 
         sort_and_limit(&mut results, request.limit);
         Ok(results)
@@ -161,14 +148,7 @@ impl HybridSearchEngine {
         Self {
             vector_store,
             full_text_store,
-            reranker: None,
         }
-    }
-
-    /// 为混合检索引擎挂载 reranker。
-    pub fn with_reranker(mut self, reranker: Arc<dyn ResultReranker>) -> Self {
-        self.reranker = Some(reranker);
-        self
     }
 }
 
@@ -182,7 +162,7 @@ impl HybridSearch for HybridSearchEngine {
         validate_limit(request.limit)?;
         validate_weights(request.vector_weight, request.full_text_weight)?;
 
-        // 先多召回一批候选，再交给 reranker 或最终裁剪，避免过早丢掉可重排结果。
+        // 多召回一批候选再最终裁剪，给 runtime 层的重排留出可排序的余量。
         let candidate_limit = request
             .limit
             .checked_mul(3)
@@ -209,15 +189,6 @@ impl HybridSearch for HybridSearchEngine {
 
         let mut results = combined.into_values().collect::<Vec<_>>();
         sort_and_limit(&mut results, candidate_limit);
-
-        if let Some(reranker) = &self.reranker {
-            // reranker 接收合并后的候选集，负责最终排序和裁剪。
-            return reranker.rerank(RerankInput {
-                query: request.query,
-                results,
-                limit: request.limit,
-            });
-        }
 
         sort_and_limit(&mut results, request.limit);
         Ok(results)
