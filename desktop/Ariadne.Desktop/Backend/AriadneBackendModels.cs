@@ -244,7 +244,8 @@ public sealed record WorkflowConfig(
     [property: JsonPropertyName("default_timeout_ms")] long DefaultTimeoutMs,
     [property: JsonPropertyName("max_loop_iterations")] int MaxLoopIterations,
     [property: JsonPropertyName("max_tool_rounds")] int MaxToolRounds,
-    [property: JsonPropertyName("checkpoint_enabled")] bool CheckpointEnabled);
+    [property: JsonPropertyName("checkpoint_enabled")] bool CheckpointEnabled,
+    [property: JsonPropertyName("run_event_retention_days")] int RunEventRetentionDays);
 
 public sealed record GitSettings(
     [property: JsonPropertyName("git")] GitConfig Git);

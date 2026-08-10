@@ -320,6 +320,7 @@
   "ui.settings.automation.auto_mode": "Auto mode",
   "ui.settings.automation.budget_help": "Daily spend cap (USD). Enter 0 for unlimited.",
   "ui.settings.automation.checkpoint_enabled": "Runtime checkpoints",
+  "ui.settings.automation.run_event_retention_days": "Run event retention (days, 0 = keep all)",
   "ui.settings.automation.confirmation.allow": "Allow",
   "ui.settings.automation.confirmation.allow_by_default": "Allow by default",
   "ui.settings.automation.confirmation.auto_approval": "Auto-approve",

@@ -699,7 +699,7 @@
             <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="RuntimeSectionAnchor" Text="{Binding RuntimeSectionTitle}" Classes="subtitle" />
-                <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="220,*" RowSpacing="12" ColumnSpacing="18">
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding WorkflowDefaultTimeoutLabel}" Classes="secondary" VerticalAlignment="Center" />
                 <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding WorkflowDefaultTimeoutMs, Mode=TwoWay}"
                          AutomationProperties.Name="{Binding WorkflowDefaultTimeoutLabel}" />
@@ -714,6 +714,9 @@
                      状态跃迁同步落盘，按 ms 节流会在崩溃时丢窗口内的跃迁），
                      故选择移除而非接线。 -->
                 <CheckBox Grid.Row="3" Grid.Column="1" IsChecked="{Binding CheckpointEnabled, Mode=TwoWay}" Content="{Binding CheckpointEnabledLabel}" />
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding RunEventRetentionLabel}" Classes="secondary" VerticalAlignment="Center" />
+                <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding RunEventRetentionDays, Mode=TwoWay}"
+                         AutomationProperties.Name="{Binding RunEventRetentionLabel}" />
                 </Grid>
               </StackPanel>
             </Border>

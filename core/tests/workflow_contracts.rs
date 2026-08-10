@@ -45,7 +45,7 @@ use ariadne::workflow::{
     WorkflowNodeExecutionOutput, WorkflowNodeExecutionRequest, WorkflowNodeExecutor,
     WorkflowOperationPolicy, WorkflowOperationRecoveryPolicy, WorkflowOperationResponsePolicy,
     WorkflowOperationStatus, WorkflowResumeClaimResult, WorkflowRunState, WorkflowRuntime,
-    WorkflowRuntimeEventType, WorkflowRuntimeStore, WorkflowStopRequestResult,
+    WorkflowRuntimeEvent, WorkflowRuntimeEventType, WorkflowRuntimeStore, WorkflowStopRequestResult,
 };
 use serde_json::{json, Value};
 use std::sync::{mpsc, Arc, Mutex};
@@ -6925,4 +6925,132 @@ fn f18_corrupt_knowledge_blocks_summarizer_before_provider_call() {
     .unwrap_err();
     assert!(error.to_string().contains("json"));
     assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+}
+
+// ════════════════════════════════════════════════════════
+// C1：终态 run 的事件保留窗口
+// ════════════════════════════════════════════════════════
+
+/// 超过保留窗口的**终态** run，其追加事件必须被清理；`state_json` 快照必须保留。
+///
+/// 判据取真实数据库：清理后 `list_events_since` 读不到事件，但 `load_state`
+/// 仍能拿到完整运行态。只断言「函数返回了删除条数」证明不了这两件事——
+/// 删错表（连快照一起删）同样会返回一个正数。
+#[test]
+fn c1_prune_removes_events_of_expired_terminal_runs_but_keeps_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+
+    let workflow_id = WorkflowId::from("c1-retention");
+    let run_id = RunId::from("run-old");
+    let mut state = WorkflowRunState::new(workflow_id.clone(), run_id.clone());
+    state.structured_events.push(WorkflowRuntimeEvent {
+        sequence: 1,
+        event_type: WorkflowRuntimeEventType::RunStarted,
+        node_id: None,
+        message: "started".to_owned(),
+        metadata: json!({}),
+    });
+    store.create_state(&state).unwrap();
+    state.status = RunStatus::Succeeded;
+    store.save_state(&mut state, None).unwrap();
+
+    // 事件确实入库了，否则下面的「被删掉」无从谈起。
+    let before = store
+        .list_events_since(&workflow_id, &run_id, 0, None)
+        .unwrap()
+        .expect("终态 run 应当可读");
+    assert!(!before.1.is_empty(), "前置条件：事件必须先存在才能验证清理");
+
+    // 把 updated_at_ms 推到很久以前，模拟「这次运行是很早之前跑的」。
+    // 直接改库而非等时间流逝：保留窗口以天计，测试不可能真等。
+    let db = temp.path().join(ariadne::workflow::RUNTIME_DB_FILE);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "UPDATE workflow_runs SET updated_at_ms = 1 WHERE workflow_id = ?1 AND run_id = ?2",
+            rusqlite::params![workflow_id.as_str(), run_id.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let deleted = store.prune_terminal_run_events(24 * 60 * 60 * 1000).unwrap();
+    assert!(deleted > 0, "超期终态 run 的事件应当被删除，实际删除 {deleted} 条");
+
+    let after = store
+        .list_events_since(&workflow_id, &run_id, 0, None)
+        .unwrap()
+        .expect("清理只删事件，运行本身必须还在");
+    assert!(
+        after.1.is_empty(),
+        "超期事件未被清理，实际仍有 {} 条",
+        after.1.len()
+    );
+    assert!(
+        store.load_state(&workflow_id, &run_id).unwrap().is_some(),
+        "清理误删了 state_json 快照——运行列表与审计会一起消失，\
+         而保留窗口的语义只是「不再保留逐条事件流」"
+    );
+}
+
+/// 未到期、或仍在运行的 run，事件一条都不能少。
+///
+/// 与上一条互为反面。只测「会删」的话，一个无差别清空事件表的实现照样通过，
+/// 那会把**正在运行**的工作流的事件流也抹掉。
+#[test]
+fn c1_prune_keeps_events_of_fresh_and_non_terminal_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+
+    // 刚结束的终态 run（未到期）。
+    let fresh_id = RunId::from("run-fresh");
+    let workflow_id = WorkflowId::from("c1-keep");
+    let mut fresh = WorkflowRunState::new(workflow_id.clone(), fresh_id.clone());
+    fresh.structured_events.push(WorkflowRuntimeEvent {
+        sequence: 1,
+        event_type: WorkflowRuntimeEventType::RunStarted,
+        node_id: None,
+        message: "fresh".to_owned(),
+        metadata: json!({}),
+    });
+    store.create_state(&fresh).unwrap();
+    fresh.status = RunStatus::Succeeded;
+    store.save_state(&mut fresh, None).unwrap();
+
+    // 仍在运行的 run，即使很旧也不该被清理——它的事件流正在被人看。
+    let running_id = RunId::from("run-running");
+    let mut running = WorkflowRunState::new(workflow_id.clone(), running_id.clone());
+    running.structured_events.push(WorkflowRuntimeEvent {
+        sequence: 1,
+        event_type: WorkflowRuntimeEventType::RunStarted,
+        node_id: None,
+        message: "running".to_owned(),
+        metadata: json!({}),
+    });
+    store.create_state(&running).unwrap();
+    running.status = RunStatus::Running;
+    store.save_state(&mut running, None).unwrap();
+
+    let db = temp.path().join(ariadne::workflow::RUNTIME_DB_FILE);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "UPDATE workflow_runs SET updated_at_ms = 1 WHERE run_id = ?1",
+            rusqlite::params![running_id.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+
+    store.prune_terminal_run_events(24 * 60 * 60 * 1000).unwrap();
+
+    for (label, run_id) in [("未到期终态", &fresh_id), ("仍在运行", &running_id)] {
+        let events = store
+            .list_events_since(&workflow_id, run_id, 0, None)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{label} 的 run 不该消失"));
+        assert!(
+            !events.1.is_empty(),
+            "{label}的 run 事件被误删——清理只应针对**超期且已终态**的运行"
+        );
+    }
 }

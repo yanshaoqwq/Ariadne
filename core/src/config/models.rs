@@ -1005,6 +1005,16 @@ pub struct WorkflowConfig {
     pub max_tool_rounds: u32,
     #[serde(default = "default_true")]
     pub checkpoint_enabled: bool,
+    /// C1：终态 run 的追加事件保留天数，超期在打开项目时清理。
+    ///
+    /// 每次状态跃迁都往 `workflow_run_events` 插一条（`runtime.rs` 有 24 处
+    /// `record_event`），不清理则历史无限膨胀。清理只删**追加事件**，
+    /// `state_json` 快照保留，故运行列表与审计不受影响。
+    ///
+    /// `0` = 不清理（保留全部历史）。与 `budget_usd` 的 0 语义一致：
+    /// 0 表示不设限制，而非「立即全删」——后者会让一次误填抹掉全部历史。
+    #[serde(default = "default_run_event_retention_days")]
+    pub run_event_retention_days: u32,
 }
 
 impl Default for WorkflowConfig {
@@ -1016,6 +1026,7 @@ impl Default for WorkflowConfig {
             max_loop_iterations: default_max_loop_iterations(),
             max_tool_rounds: default_max_tool_rounds(),
             checkpoint_enabled: true,
+            run_event_retention_days: default_run_event_retention_days(),
         }
     }
 }
@@ -1260,6 +1271,14 @@ fn default_max_loop_iterations() -> u32 {
 /// 默认最大 tool-use 轮次。
 fn default_max_tool_rounds() -> u32 {
     8
+}
+
+/// 默认终态 run 事件保留天数。
+///
+/// 30 天：足够覆盖「上周那次跑崩了，回去看看事件流」这类真实排查需求，
+/// 又不至于让长期使用的项目把 workflow_run_events 撑到几十万行。
+fn default_run_event_retention_days() -> u32 {
+    30
 }
 
 /// 默认 Git 忽略路径。

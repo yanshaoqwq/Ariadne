@@ -2089,7 +2089,7 @@ fn complete_committed_project_activation(state: &AriadneAppState, project_root: 
             return;
         }
     };
-    let recovery_steps: [(&str, CommandResult<()>); 3] = [
+    let recovery_steps: [(&str, CommandResult<()>); 4] = [
         (
             "confirmation saga recovery",
             recover_confirmation_resolution_sagas(project_root).map(|_| ()),
@@ -2101,6 +2101,10 @@ fn complete_committed_project_activation(state: &AriadneAppState, project_root: 
         (
             "index worker recovery",
             resume_indexing_worker_for_project(project_root, Arc::clone(&runtime)),
+        ),
+        (
+            "run event retention",
+            prune_terminal_run_events_on_open(project_root).map(|_| ()),
         ),
     ];
     for (stage, result) in recovery_steps {
@@ -8405,6 +8409,38 @@ fn resolve_confirmation_impl_with_claim(
         },
         lease,
     ))
+}
+
+/// C1：打开项目时清理超期的终态 run 事件，避免历史无限膨胀。
+///
+/// 只删**追加事件**（`workflow_run_events` / `workflow_run_legacy_events`），
+/// `state_json` 快照保留——运行列表、状态与审计仍完整，丢的只是逐条事件流。
+///
+/// 放在打开项目而不是每次运行结束：清理是维护动作，不该挂在用户等待的
+/// 关键路径上；且按「超过保留窗口」而非「每次删一点」，语义更好解释。
+///
+/// `run_event_retention_days == 0` 表示不清理（与 `budget_usd` 的 0 语义一致）。
+/// 失败只记日志不上抛——它是可延后的维护，绝不能挡住项目打开。
+fn prune_terminal_run_events_on_open(project_root: &Path) -> CommandResult<usize> {
+    let retention_days = ConfigStore::new(project_root)
+        .load()
+        .map(|config| config.workflow.run_event_retention_days)
+        .unwrap_or_else(|_| 0);
+    if retention_days == 0 {
+        return Ok(0);
+    }
+    // 运行态库尚未创建（新项目从未跑过工作流）时不算失败。
+    if !project_root
+        .join(crate::workflow::RUNTIME_DB_FILE)
+        .exists()
+    {
+        return Ok(0);
+    }
+    let max_age_ms = u64::from(retention_days).saturating_mul(24 * 60 * 60 * 1000);
+    SqliteWorkflowRuntimeStore::open(project_root)
+        .map_err(error_to_string)?
+        .prune_terminal_run_events(max_age_ms)
+        .map_err(error_to_string)
 }
 
 /// F14：打开项目时前向恢复 knowledge/runtime 跨库确认 saga，并重放日志投影。

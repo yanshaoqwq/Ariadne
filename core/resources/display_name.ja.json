@@ -317,6 +317,7 @@
   "ui.settings.automation.auto_mode": "自動モード",
   "ui.settings.automation.budget_help": "本日の累計上限（ドル）。0 は無制限。",
   "ui.settings.automation.checkpoint_enabled": "実行時チェックポイント",
+  "ui.settings.automation.run_event_retention_days": "実行イベントの保持日数（0 = 削除しない）",
   "ui.settings.automation.confirmation.allow": "許可",
   "ui.settings.automation.confirmation.allow_by_default": "既定で許可",
   "ui.settings.automation.confirmation.auto_approval": "自動承認",

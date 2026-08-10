@@ -143,6 +143,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(MaxLoopIterationsLabel),
         nameof(MaxToolRoundsLabel),
         nameof(CheckpointEnabledLabel),
+        nameof(RunEventRetentionLabel),
         nameof(SaveAutomationText),
         nameof(AllowNetworkText),
         nameof(AllowWebSearchText),
@@ -331,6 +332,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private string _maxLoopIterations = "5";
     private string _maxToolRounds = "8";
     private bool _checkpointEnabled = true;
+    private string _runEventRetentionDays = "30";
 
     private bool _allowNetwork;
     private bool _allowWebSearch;
@@ -1195,6 +1197,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string MaxLoopIterationsLabel => _displayNames.Text("ui.settings.automation.max_loop_iterations");
     public string MaxToolRoundsLabel => _displayNames.Text("ui.settings.automation.max_tool_rounds");
     public string CheckpointEnabledLabel => _displayNames.Text("ui.settings.automation.checkpoint_enabled");
+    public string RunEventRetentionLabel => _displayNames.Text("ui.settings.automation.run_event_retention_days");
     public string SaveAutomationText => _displayNames.Text("ui.settings.automation.save");
 
     public string AllowNetworkText => _displayNames.Text("ui.settings.permissions.allow_network");
@@ -1463,6 +1466,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string MaxLoopIterations { get => _maxLoopIterations; set => SetProperty(ref _maxLoopIterations, value); }
     public string MaxToolRounds { get => _maxToolRounds; set => SetProperty(ref _maxToolRounds, value); }
     public bool CheckpointEnabled { get => _checkpointEnabled; set => SetProperty(ref _checkpointEnabled, value); }
+    public string RunEventRetentionDays { get => _runEventRetentionDays; set => SetProperty(ref _runEventRetentionDays, value); }
 
     public bool AllowNetwork
     {
@@ -2429,6 +2433,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     MaxLoopIterations = value.Item2.Workflow.MaxLoopIterations.ToString();
                     MaxToolRounds = value.Item2.Workflow.MaxToolRounds.ToString();
                     CheckpointEnabled = value.Item2.Workflow.CheckpointEnabled;
+                    RunEventRetentionDays = value.Item2.Workflow.RunEventRetentionDays.ToString(CultureInfo.InvariantCulture);
                 },
                 generation,
                 cancellationToken),
@@ -2712,6 +2717,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 MaxLoopIterations = "5";
                 MaxToolRounds = "8";
                 CheckpointEnabled = true;
+                RunEventRetentionDays = "30";
                 break;
             case "permissions":
                 SelectedPermissionProfile = PermissionProfileOptions.First(item => item.Value == "recommended");
@@ -2800,6 +2806,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     MaxLoopIterations = value.Item2.Workflow.MaxLoopIterations.ToString(CultureInfo.InvariantCulture);
                     MaxToolRounds = value.Item2.Workflow.MaxToolRounds.ToString(CultureInfo.InvariantCulture);
                     CheckpointEnabled = value.Item2.Workflow.CheckpointEnabled;
+                    RunEventRetentionDays = value.Item2.Workflow.RunEventRetentionDays.ToString(CultureInfo.InvariantCulture);
                 }).ConfigureAwait(true),
             "permissions" => await LoadSectionAsync(
                 generation,
@@ -4848,6 +4855,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     saved.Workflow.Workflow.MaxLoopIterations.ToString(CultureInfo.InvariantCulture), value => MaxLoopIterations = value);
                 ApplyCanonicalText(submitted, persisted, nameof(MaxToolRounds),
                     saved.Workflow.Workflow.MaxToolRounds.ToString(CultureInfo.InvariantCulture), value => MaxToolRounds = value);
+                ApplyCanonicalText(submitted, persisted, nameof(RunEventRetentionDays),
+                    saved.Workflow.Workflow.RunEventRetentionDays.ToString(CultureInfo.InvariantCulture), value => RunEventRetentionDays = value);
             }, persisted);
         }
         catch (SettingsInputException ex)
@@ -4903,7 +4912,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             SettingsInputValidation.PositiveInt(
                 MaxToolRounds,
                 "ui.settings.automation.max_tool_rounds"),
-            CheckpointEnabled));
+            CheckpointEnabled,
+            // 0 合法：表示不清理历史事件，故用 NonNegativeInt 而非 PositiveInt。
+            SettingsInputValidation.NonNegativeInt(
+                RunEventRetentionDays,
+                "ui.settings.automation.run_event_retention_days")));
         return new AutomationSectionSettings(automation, workflow);
     }
 
@@ -6615,6 +6628,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             [nameof(MaxLoopIterations)] = MaxLoopIterations,
             [nameof(MaxToolRounds)] = MaxToolRounds,
             [nameof(CheckpointEnabled)] = CheckpointEnabled.ToString(),
+            [nameof(RunEventRetentionDays)] = RunEventRetentionDays,
             [nameof(ConfirmationPolicies)] = confirmationSnapshot,
             [nameof(AllowNetwork)] = AllowNetwork.ToString(),
             [nameof(AllowWebSearch)] = AllowWebSearch.ToString(),
@@ -6702,7 +6716,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             {
                 nameof(BudgetUsd), nameof(PreauthorizedUsd),
                 nameof(WorkflowDefaultTimeoutMs), nameof(MaxLoopIterations), nameof(MaxToolRounds),
-                nameof(CheckpointEnabled), nameof(ConfirmationPolicies),
+                nameof(CheckpointEnabled), nameof(RunEventRetentionDays), nameof(ConfirmationPolicies),
             },
             PermissionsSection => new[]
             {
@@ -7063,7 +7077,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             or nameof(DefaultTimeoutMs) or nameof(DefaultBudgetUsd) or nameof(TemplateRepositoryBaseUrl)
             or nameof(BudgetUsd) or nameof(PreauthorizedUsd)
             or nameof(WorkflowDefaultTimeoutMs) or nameof(MaxLoopIterations) or nameof(MaxToolRounds)
-            or nameof(CheckpointEnabled) or nameof(AllowNetwork)
+            or nameof(CheckpointEnabled) or nameof(RunEventRetentionDays) or nameof(AllowNetwork)
             or nameof(AllowWebSearch) or nameof(AllowHttpSkill) or nameof(AllowWasmNetwork)
             or nameof(AllowSecretRead) or nameof(ReadableRootsText) or nameof(WritableRootsText)
             or nameof(Theme) or nameof(ThemeMainColor) or nameof(ThemeSurfaceColor) or nameof(ThemeBrandColor)

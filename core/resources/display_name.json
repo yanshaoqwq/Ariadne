@@ -391,6 +391,7 @@
   "ui.settings.automation.max_loop_iterations": "最大循环轮次",
   "ui.settings.automation.max_tool_rounds": "最大工具轮次",
   "ui.settings.automation.checkpoint_enabled": "运行时检查点",
+  "ui.settings.automation.run_event_retention_days": "运行事件保留天数（0 = 不清理）",
   "ui.settings.automation.save": "保存自动化配置",
   "ui.settings.permissions.title": "权限控制",
   "ui.settings.permissions.desc": "管理所有项目默认使用的硬权限与工具边界。",
