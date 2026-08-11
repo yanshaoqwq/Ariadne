@@ -328,6 +328,17 @@ impl WritingNodeDefinition {
                 "writing node display_name_key does not match agent",
             ));
         }
+        // U116：默认提示词模板 key 也要校验存在性。
+        //
+        // 这套 key（`node_template.{agent}.default`）由前端 `PromptCatalog` 按同样的
+        // 字符串从 `prompt_list.json` 取默认提示词，而 `default_template_key()` 是它在
+        // Rust 侧的唯一声明。不校验的话，资源文件里少一个 key 只会让前端那个节点
+        // 静默拿不到默认提示词——U123 的 writer/polisher 整文件重写就这么失效过。
+        validate_resource_key(
+            prompts,
+            "default_template_key",
+            self.agent.default_template_key(),
+        )?;
         let expected_tool_names = expected_tool_names(self.agent);
         if self
             .tool_names
@@ -1466,34 +1477,7 @@ pub struct ForeshadowingUpdate {
     pub segment_id: String,
 }
 
-/// Writer 补写 patch 写回后，章节总结流水线需要从受影响步骤重新执行。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SummaryRerunPlan {
-    pub chapter_id: String,
-    pub start_step: SummaryPipelineStep,
-    pub affected_steps: Vec<SummaryPipelineStep>,
-    pub reason: String,
-}
-
-impl SummaryRerunPlan {
-    /// 创建从指定步骤开始的重跑计划。
-    pub fn new(
-        chapter_id: impl Into<String>,
-        start_step: SummaryPipelineStep,
-        reason: impl Into<String>,
-    ) -> crate::contracts::CoreResult<Self> {
-        let chapter_id = chapter_id.into();
-        let reason = reason.into();
-        validate_non_empty("chapter_id", &chapter_id)?;
-        validate_non_empty("reason", &reason)?;
-        Ok(Self {
-            chapter_id,
-            start_step,
-            affected_steps: start_step.affected_steps_from(),
-            reason,
-        })
-    }
-}
+// U116：`SummaryRerunPlan` 随 plan_rerun_after_patch_write_back 一并删除（生产零消费）。
 
 /// 校验非空字符串字段。
 pub(crate) fn validate_non_empty(field: &str, value: &str) -> crate::contracts::CoreResult<()> {

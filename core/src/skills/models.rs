@@ -407,16 +407,11 @@ pub struct PromptTemplateReference {
 }
 
 impl PromptTemplateReference {
-    /// 从 manifest 创建固定版本引用。
-    pub fn from_manifest(manifest: &PromptTemplateManifest) -> CoreResult<Self> {
-        manifest.validate()?;
-        Ok(Self {
-            template_id: manifest.template_id.clone(),
-            version: manifest.version.clone(),
-            content_hash: manifest.content_hash()?,
-            parameters: BTreeMap::new(),
-        })
-    }
+    // U116：曾有 `from_manifest(manifest)`，即「从 manifest 生成固定版本引用」，已删。
+    // 那是**制作模板包**时才需要的方向，产品没有这个功能。生产里
+    // `PromptTemplateReference` 一律从模板包 JSON 反序列化而来，不需要构造器。
+    // 保留本类型与 `validate`：`WorkflowManifest.prompt_templates` 是已落地的模板包
+    // 格式字段（三个官方模板都有该键，目前均为空数组）。
 
     /// 校验引用字段和 SemVer 版本。
     pub fn validate(&self) -> CoreResult<()> {

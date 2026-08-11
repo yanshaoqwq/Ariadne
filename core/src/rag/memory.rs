@@ -47,16 +47,11 @@ impl MemoryWritingKnowledgeBase {
         Ok(())
     }
 
-    /// 删除故事段源记录，并清理章节、事件、注册项和伏笔的双向索引引用。
-    pub fn delete_segment(&self, segment_id: &str) -> CoreResult<Option<StorySegment>> {
-        validate_non_empty_local("segment_id", segment_id)?;
-        let mut state = self.lock_state()?;
-        let removed = state.segments.remove(segment_id);
-        if removed.is_some() {
-            state.remove_segment_links(segment_id);
-        }
-        Ok(removed)
-    }
+    // U116：曾有 `delete_segment(segment_id)`，已删。
+    // 生产删故事段一律是**按章整批替换**：`replace_chapter_summary_entities_on_state`
+    // 内联了逐字同构的逻辑（`state.segments.remove` + `state.remove_segment_links`），
+    // 走 apply_draft → apply_summary_pipeline_transaction 这条真实链路。
+    // 没有「单删一段」的场景，IPC 也没有对应命令。
 
     /// 写入或更新事件，并同步事件与故事段、章节的双向索引。
     pub fn upsert_event(&self, event: StoryEvent) -> CoreResult<()> {
@@ -598,6 +593,17 @@ impl MemoryWritingKnowledgeBase {
     pub fn registered_changes(&self) -> CoreResult<Vec<RegisteredChange>> {
         Ok(self.lock_state()?.changes.values().cloned().collect())
     }
+
+    // U116：以下四个单查 getter（segment / event / registered_change / foreshadowing）
+    // 生产零调用，判定为**保留但不接线**，扫描器再报出来不必重新纠结。
+    //
+    // 生产读知识库只用批量接口（`registered_changes()` 6 处）与写入接口：
+    // 工作流走 `SqliteWritingKnowledgeStore::load_summary_working_set` 一次性取回整章
+    // 工作集，再交给 `SummaryPipelineExecutor`，没有「按 id 取一条」的场景。
+    //
+    // 保留理由：它们是读接口的对称补全（能批量查却不能单查会显得像疏漏），
+    // 且都是锁内单行 clone，不像 `is_port_available` 那种会诱导后人写出竞态的诱饵。
+    // 删它们要连带改三处测试，收益不抵改动面。
 
     /// 查询故事段，默认只返回摘要和来源，不复制正文。
     pub fn segment(&self, segment_id: &str) -> CoreResult<Option<StorySegment>> {

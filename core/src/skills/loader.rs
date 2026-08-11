@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{CoreError, CoreResult, SkillRegistry};
+use crate::contracts::{CoreError, CoreResult};
 use crate::skills::models::{
     PromptTemplateManifest, PromptTemplateReference, PromptTemplateUpdateKind,
     PromptTemplateUpdateStatus, PromptTemplateVersion, SkillManifest, WorkflowManifest,
@@ -33,13 +33,7 @@ pub struct LoadedSkillManifest {
     pub manifest_path: PathBuf,
 }
 
-/// 项目 ExecutorAdapter 覆盖全局同 id manifest 的诊断信息。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillManifestOverride {
-    pub skill_id: String,
-    pub global_manifest_path: PathBuf,
-    pub project_manifest_path: PathBuf,
-}
+// U116：`SkillManifestOverride` 随 detect_overrides 一并删除（全局 skill 目录未落地）。
 
 /// 带来源路径的 PromptTemplate manifest。
 #[derive(Debug, Clone, PartialEq)]
@@ -124,43 +118,17 @@ impl SkillLoader {
         Ok(manifests.into_values().collect())
     }
 
-    /// 加载并生成核心 SkillRegistry。
-    pub fn load_registry(&self) -> CoreResult<SkillRegistry> {
-        let mut registry = SkillRegistry::default();
-        for loaded in self.load_manifests()? {
-            registry.register(loaded.manifest.to_core_definition()?)?;
-        }
-        Ok(registry)
-    }
-
-    /// 返回项目 Skill 覆盖全局 Skill 的诊断列表，加载语义仍保持项目优先。
-    pub fn detect_overrides(&self) -> CoreResult<Vec<SkillManifestOverride>> {
-        let mut global_paths = BTreeMap::new();
-        for root in &self.global_roots {
-            collect_skill_manifest_paths(root, &mut global_paths)?;
-        }
-
-        let mut project_paths = BTreeMap::new();
-        for root in &self.project_roots {
-            collect_skill_manifest_paths(root, &mut project_paths)?;
-        }
-
-        let mut overrides = BTreeMap::new();
-        for (skill_id, project_manifest_path) in project_paths {
-            if let Some(global_manifest_path) = global_paths.get(&skill_id) {
-                overrides.insert(
-                    skill_id.clone(),
-                    SkillManifestOverride {
-                        skill_id,
-                        global_manifest_path: global_manifest_path.clone(),
-                        project_manifest_path,
-                    },
-                );
-            }
-        }
-
-        Ok(overrides.into_values().collect())
-    }
+    // U116：曾有 `load_registry()` 与 `detect_overrides()`，已删。
+    //
+    // `load_registry` 产出 `contracts::SkillRegistry`，而那个注册表 11 个模块全落地后
+    // 仍零消费者——生产装配走 `ExecutorAdapterExecutionPlan::compile(&loader, ids)`，
+    // 只按需加载被引用的 skill，不建全量注册表。
+    //
+    // `detect_overrides` 求「项目 skill 覆盖同名全局 skill」的诊断列表，但生产
+    // **从不设置 global_roots**（只有 `with_project_root`），配置里也只有项目级
+    // `skills_dir`、没有全局 skill 目录。全局那一层从未落地，所以它在生产恒返回空表——
+    // 接线只会产出一个永远为空的诊断项。将来真要做全局 skill 目录，先补配置项与
+    // 装配点，再让覆盖诊断跟上。
 }
 
 /// 建立根目录下一层 manifest 的稳定路径索引；所有 Skill 发现入口共用该顺序。
@@ -540,25 +508,6 @@ fn load_root(
                 manifest_path,
             },
         );
-    }
-    Ok(())
-}
-
-/// 收集根目录下一层 Skill manifest 路径，用于覆盖诊断。
-fn collect_skill_manifest_paths(
-    root: &Path,
-    paths: &mut BTreeMap<String, PathBuf>,
-) -> CoreResult<()> {
-    for manifest_path in skill_manifest_paths(root)? {
-        let manifest = parse_skill_manifest(&manifest_path)?;
-        if let Some(existing) = paths.insert(manifest.skill_id.clone(), manifest_path.clone()) {
-            return Err(CoreError::validation(format!(
-                "duplicate skill manifest for '{}': {} and {}",
-                manifest.skill_id,
-                existing.display(),
-                manifest_path.display()
-            )));
-        }
     }
     Ok(())
 }

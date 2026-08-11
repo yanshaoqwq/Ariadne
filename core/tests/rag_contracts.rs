@@ -657,7 +657,12 @@ fn deleting_segment_cleans_all_reverse_indexes() {
     })
     .unwrap();
 
-    assert!(kb.delete_segment("seg-1").unwrap().is_some());
+    // 按生产路径清掉该章故事段：整批替换为空列表。
+    // 原用例调的 `delete_segment` 已随 U116 删除——生产删段一律走这条整批替换
+    // （`replace_chapter_summary_entities_on_state` 内联了同构的 remove + 清索引），
+    // 没有「单删一段」的场景。这里验证的性质不变：双向索引必须一并清干净。
+    kb.replace_chapter_summary_entities("chapter-1", Vec::new(), Vec::new())
+        .unwrap();
     let index = kb.index_snapshot().unwrap();
 
     assert!(!index.segment_chapter.contains_key("seg-1"));
@@ -1313,18 +1318,22 @@ fn summary_pipeline_links_segments_foreshadowing_stage_and_rerun_plan() {
         ForeshadowingStatus::Planted
     );
 
-    let rerun = executor
-        .plan_rerun_after_patch_write_back("chapter-1", "writer correction patch applied")
-        .unwrap();
-    assert_eq!(rerun.start_step, SummaryPipelineStep::Segment);
+    // 原用例经 `plan_rerun_after_patch_write_back` 间接验证步骤推导表，
+    // 那个函数与它返回的 `SummaryRerunPlan` 已随 U116 删除（生产零消费：
+    // 写回后的续跑走 workflow lease/worker，不走总结流水线的重跑计划）。
+    // 推导表本身仍是活契约，直接测它。
     assert_eq!(
-        rerun.affected_steps,
+        SummaryPipelineStep::Segment.affected_steps_from(),
         vec![
             SummaryPipelineStep::Segment,
             SummaryPipelineStep::Event,
             SummaryPipelineStep::Chapter,
             SummaryPipelineStep::Stage,
         ]
+    );
+    assert_eq!(
+        SummaryPipelineStep::Chapter.affected_steps_from(),
+        vec![SummaryPipelineStep::Chapter, SummaryPipelineStep::Stage]
     );
 }
 

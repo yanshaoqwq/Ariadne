@@ -224,6 +224,20 @@ fn prompt_template_manifest(version: &str, template: &str) -> PromptTemplateMani
     }
 }
 
+/// 构造指向某 manifest 的固定版本引用。
+///
+/// 生产里 `PromptTemplateReference` 一律从模板包 JSON 反序列化而来，因此
+/// `PromptTemplateReference::from_manifest` 已随 U116 删除（那是「制作模板包」的方向，
+/// 产品没有该功能）。测试仍需要造引用，这里按字面量拼，与反序列化结果同形。
+fn template_reference(manifest: &PromptTemplateManifest) -> PromptTemplateReference {
+    PromptTemplateReference {
+        template_id: manifest.template_id.clone(),
+        version: manifest.version.clone(),
+        content_hash: manifest.content_hash().unwrap(),
+        parameters: Default::default(),
+    }
+}
+
 /// 构造测试用 Workflow manifest。
 fn workflow_manifest(reference: PromptTemplateReference) -> WorkflowManifest {
     WorkflowManifest {
@@ -302,14 +316,15 @@ fn skill_loader_prefers_project_manifest_and_generates_ports() {
         .with_global_root(&global)
         .with_project_root(&project);
     let manifests = loader.load_manifests().unwrap();
-    let registry = loader.load_registry().unwrap();
-    let overrides = loader.detect_overrides().unwrap();
-    let definition = registry.get("fetch-info").unwrap();
 
+    // 同 id 时项目 manifest 覆盖全局，且只留一份。
+    // 原用例还断言了 `load_registry()` 与 `detect_overrides()`，两者已随 U116 删除：
+    // 前者产出的 `SkillRegistry` 生产零消费（装配走 ExecutorAdapterExecutionPlan
+    // 按需加载），后者依赖生产从不设置的 global_roots，恒返回空表。
+    // 这里保留真正在生产跑的那部分——`load_manifests` 的覆盖语义。
     assert_eq!(manifests.len(), 1);
+    let definition = manifests[0].manifest.to_core_definition().unwrap();
     assert_eq!(definition.name, "Project Fetch");
-    assert_eq!(overrides.len(), 1);
-    assert_eq!(overrides[0].skill_id, "fetch-info");
     assert_eq!(definition.input_ports[0].name, "query");
     assert_eq!(definition.output_ports[0].name, "result");
 }
@@ -515,7 +530,7 @@ fn prompt_template_loader_resolves_locked_versions_and_update_status() {
     let loader = PromptTemplateLoader::new()
         .with_global_root(&global)
         .with_project_root(&project);
-    let reference = PromptTemplateReference::from_manifest(&project_v1).unwrap();
+    let reference = template_reference(&project_v1);
     let loaded = loader.resolve_reference(&reference).unwrap();
     let status = loader.update_status(&reference).unwrap();
 
@@ -581,7 +596,7 @@ fn workflow_template_loader_imports_workflow_definition() {
     let root = temp.path().join("workflows");
     std::fs::create_dir_all(root.join("basic")).unwrap();
     let template = prompt_template_manifest("1.0.0", "{{param.风格}}地写");
-    let workflow = workflow_manifest(PromptTemplateReference::from_manifest(&template).unwrap());
+    let workflow = workflow_manifest(template_reference(&template));
     std::fs::write(
         root.join("basic").join(WORKFLOW_MANIFEST_FILE),
         serde_json::to_string(&workflow).unwrap(),

@@ -9,7 +9,7 @@ use crate::rag::memory::MemoryWritingKnowledgeBase;
 use crate::rag::models::{
     confirmation_state_activates_knowledge, ConfirmationAuditDecision, ConfirmationItem,
     ConfirmationKind, ConfirmationState, SummaryPipelineDraft, SummaryPipelineReport,
-    SummaryPipelineStep, SummaryRerunPlan, WritingConfirmationPolicy,
+    SummaryPipelineStep, WritingConfirmationPolicy,
 };
 
 /// Summarizer 流水线执行器，消费结构化总结草稿并更新创作知识库。
@@ -251,14 +251,11 @@ impl<'a> SummaryPipelineExecutor<'a> {
         })
     }
 
-    /// Writer 补写 patch 写回已审核正文后，从故事段步骤重跑受影响流水线。
-    pub fn plan_rerun_after_patch_write_back(
-        &self,
-        chapter_id: &str,
-        reason: &str,
-    ) -> CoreResult<SummaryRerunPlan> {
-        SummaryRerunPlan::new(chapter_id, SummaryPipelineStep::Segment, reason)
-    }
+    // U116：曾有 `plan_rerun_after_patch_write_back(chapter_id, reason)`，已删。
+    // 它返回的 `SummaryRerunPlan` 生产**零消费**——写回后的续跑靠 workflow 的
+    // lease/worker（`commands.rs` 里 apply_resolved_confirmation_patch 落盘后
+    // 紧接 claim_resume + spawn_continue_workflow_worker_with_lease），
+    // 与总结流水线的「重跑计划」是两套机制。这条设计整体未接线，不是被等价物取代。
 
     /// 根据确认策略组装确认项（不落库；由单一事务统一写入）。
     fn build_confirmation(
