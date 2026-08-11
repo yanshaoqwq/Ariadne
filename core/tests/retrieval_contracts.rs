@@ -1185,6 +1185,8 @@ fn sidecar_supervisor_reports_crash_as_unavailable() {
         data_dir: temp_dir.path().join("data"),
         log_dir: temp_dir.path().join("logs"),
         startup_timeout_ms: 5_000,
+        max_restarts_per_window: 3,
+        restart_window_ms: 60_000,
     });
 
     let status = supervisor.mark_crashed("process exited").unwrap();
@@ -1245,6 +1247,8 @@ fn sidecar_health_detects_externally_killed_process_instead_of_reporting_cached_
             data_dir: temp_dir.path().join("data"),
             log_dir: temp_dir.path().join("logs"),
             startup_timeout_ms: 1,
+            max_restarts_per_window: 3,
+            restart_window_ms: 60_000,
         },
         ImmediatelyExitingSidecarRunner,
     );
@@ -1335,6 +1339,8 @@ fn sidecar_health_detects_kill_after_healthy_start_when_cache_says_running() {
             data_dir: temp_dir.path().join("data"),
             log_dir: temp_dir.path().join("logs"),
             startup_timeout_ms: 5_000,
+            max_restarts_per_window: 3,
+            restart_window_ms: 60_000,
         },
         ListeningSidecarRunner,
     );
@@ -1389,6 +1395,8 @@ fn sidecar_probe_stays_cheap_enough_for_the_diagnostics_path() {
             data_dir: temp_dir.path().join("data"),
             log_dir: temp_dir.path().join("logs"),
             startup_timeout_ms: 5_000,
+            max_restarts_per_window: 3,
+            restart_window_ms: 60_000,
         },
         ListeningSidecarRunner,
     );
@@ -1430,6 +1438,102 @@ fn sidecar_probe_stays_cheap_enough_for_the_diagnostics_path() {
 /// 长命但从不监听端口的进程：用于构造「进程活着 + 端口不通」这一 Degraded 场景。
 /// `NoopSidecarRunner` 的 `sleep 1` 会在探活前就退出，那样只能测到崩溃分支。
 #[derive(Debug)]
+/// 每次 spawn 都立刻退出，并统计被调用次数——用来验证重启上限真的拦住了 fork 风暴。
+struct CountingFailingSidecarRunner {
+    spawns: Arc<AtomicUsize>,
+}
+
+impl SidecarProcessRunner for CountingFailingSidecarRunner {
+    fn spawn(
+        &self,
+        _config: &QdrantSidecarConfig,
+        _port: u16,
+    ) -> ariadne::contracts::CoreResult<Child> {
+        self.spawns.fetch_add(1, Ordering::SeqCst);
+        Command::new("sh")
+            .arg("-c")
+            .arg("exit 137")
+            .spawn()
+            .map_err(Into::into)
+    }
+}
+
+/// 持久故障下，自动恢复必须被滑动窗口上限截住。
+///
+/// 钉的是安全性质而非功能：sidecar 二进制缺失/端口被占这类故障不会自愈，
+/// 若每次检索都拉起一个必然失败的进程，一次故障就被放大成 fork 风暴。
+#[test]
+fn sidecar_recovery_stops_spawning_after_restart_window_limit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let supervisor = QdrantSidecarSupervisor::with_runner(
+        QdrantSidecarConfig {
+            binary_path: temp_dir.path().join("qdrant"),
+            host: "127.0.0.1".to_owned(),
+            requested_port: 0,
+            data_dir: temp_dir.path().join("data"),
+            log_dir: temp_dir.path().join("logs"),
+            startup_timeout_ms: 200,
+            max_restarts_per_window: 2,
+            restart_window_ms: 60_000,
+        },
+        CountingFailingSidecarRunner {
+            spawns: spawns.clone(),
+        },
+    );
+
+    // 先让它进入「启动过但已死」的状态，恢复路径才会被触发。
+    let _ = supervisor.start();
+    let spawns_after_start = spawns.load(Ordering::SeqCst);
+
+    // 反复恢复，次数远超上限。每轮都要清节流窗口，否则测的是节流不是重启上限。
+    for _ in 0..10 {
+        supervisor.reset_recovery_probe_throttle_for_tests();
+        let _ = supervisor.recover_if_unavailable();
+    }
+
+    let extra = spawns.load(Ordering::SeqCst) - spawns_after_start;
+    assert!(
+        extra <= 2,
+        "持久故障下恢复应被窗口上限截住，实际额外 spawn {extra} 次"
+    );
+}
+
+/// 稳态下恢复路径不能每次检索都做 TCP 探活。
+///
+/// 钉的是性能性质：sidecar 正常时探活恒定返回健康，高频检索反复连接是纯浪费。
+#[test]
+fn sidecar_recovery_probe_is_throttled_between_consecutive_calls() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let supervisor = QdrantSidecarSupervisor::with_runner(
+        QdrantSidecarConfig {
+            binary_path: temp_dir.path().join("qdrant"),
+            host: "127.0.0.1".to_owned(),
+            requested_port: 0,
+            data_dir: temp_dir.path().join("data"),
+            log_dir: temp_dir.path().join("logs"),
+            startup_timeout_ms: 200,
+            max_restarts_per_window: 3,
+            restart_window_ms: 60_000,
+        },
+        ImmediatelyExitingSidecarRunner,
+    );
+    let _ = supervisor.start();
+
+    // 第一次探活到期后立刻再调；窗口内必须直接返回 None，不进 probe。
+    supervisor.reset_recovery_probe_throttle_for_tests();
+    let _ = supervisor.recover_if_unavailable();
+    let started = std::time::Instant::now();
+    let throttled = supervisor.recover_if_unavailable().unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(throttled.is_none(), "节流窗口内不应返回恢复结果");
+    assert!(
+        elapsed < std::time::Duration::from_millis(50),
+        "节流命中时不应付探活代价，实际耗时 {elapsed:?}"
+    );
+}
+
 struct LongLivedSilentSidecarRunner;
 
 impl SidecarProcessRunner for LongLivedSilentSidecarRunner {
@@ -1466,6 +1570,8 @@ fn sidecar_probe_returns_fast_when_process_lives_but_port_is_unreachable() {
             // start() 内部的 wait_for_tcp_health 会等满这个值，故取小；
             // 探活若退回阻塞轮询，用的也是这个值——下面用倍数关系把两者区分开。
             startup_timeout_ms: 300,
+            max_restarts_per_window: 3,
+            restart_window_ms: 60_000,
         },
         // sleep 进程一直活着，但从不监听端口 → try_wait 说活着、TCP 连不上。
         LongLivedSilentSidecarRunner,
@@ -1504,6 +1610,8 @@ fn sidecar_probe_keeps_user_requested_stop_distinct_from_crash() {
             data_dir: temp_dir.path().join("data"),
             log_dir: temp_dir.path().join("logs"),
             startup_timeout_ms: 1,
+            max_restarts_per_window: 3,
+            restart_window_ms: 60_000,
         },
         NoopSidecarRunner,
     );
@@ -1532,6 +1640,8 @@ fn retrieval_recovery_restarts_sidecar_and_rebuilds_indexes() {
             data_dir: temp_dir.path().join("data"),
             log_dir: temp_dir.path().join("logs"),
             startup_timeout_ms: 1,
+            max_restarts_per_window: 3,
+            restart_window_ms: 60_000,
         },
         NoopSidecarRunner,
     );

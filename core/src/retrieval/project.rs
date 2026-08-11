@@ -29,6 +29,7 @@ use crate::retrieval::{
     RetrievalResult, SidecarState, SqliteFullTextStore, StoreHealth, TantivyFullTextStore,
     TextEmbedder, ThreeWayHybridSearchEngine, VectorStore, MAX_HYBRID_SEARCH_LIMIT,
 };
+use crate::retrieval::sidecar::{default_max_restarts_per_window, default_restart_window_ms};
 
 struct ProjectReranker {
     provider: Arc<dyn RerankerProvider>,
@@ -191,6 +192,11 @@ impl ProjectRetrievalRuntime {
                         data_dir,
                         log_dir,
                         startup_timeout_ms: vector_config.sidecar.startup_timeout_ms,
+                        // 自动重启节流取默认（60s 窗口内最多 3 次）。不进 config schema：
+                        // 这是防 fork 风暴的安全下限，不是需要用户调的旋钮，暴露出去
+                        // 反而给了「设成 999 次」这种把自己打死的机会。
+                        max_restarts_per_window: default_max_restarts_per_window(),
+                        restart_window_ms: default_restart_window_ms(),
                     }));
                     let status = supervisor.start()?;
                     if matches!(
@@ -436,6 +442,34 @@ impl ProjectRetrievalRuntime {
         )
     }
 
+    /// 向量检索前尝试恢复崩掉的 sidecar。抽成独立方法而非内联在 `search` 里，
+    /// 是为了让「这条接线存在」本身可被断言：生产默认后端是 `QdrantSidecar`，
+    /// 而集成测试只能用 `ExternalQdrant`（自托管分支要找真二进制、起不来直接 Err），
+    /// 因此内联版本在测试环境里**不可达**——摘掉它没有一条测试会变红。
+    ///
+    /// 恢复放在这里而不是 `health_check` 里：
+    /// - 诊断必须是只读观测，否则「看一眼设置页」就会重启后端服务；
+    /// - 检索是 sidecar 真正被需要的时刻，此时恢复才有意义；
+    /// - 放在 embedding 之前，避免「先付费嵌入、再发现向量库不可用」。
+    ///
+    /// 仅在启用向量检索时执行；纯全文检索不该为 sidecar 付探活成本。
+    /// 探活自带节流（`RECOVERY_PROBE_MIN_INTERVAL_MS`），稳态下只读一个 Instant，
+    /// 重启另有滑动窗口上限兜底，持久故障不会被高频检索放大成 fork 风暴。
+    ///
+    /// 返回值仅供测试断言恢复是否被真正触达，生产路径忽略它。
+    pub(crate) fn recover_sidecar_before_vector_search(&self) -> bool {
+        if self.vector.is_none() {
+            return false;
+        }
+        let Some(sidecar) = &self.sidecar else {
+            return false;
+        };
+        // 恢复失败不阻断检索：可能只是本次拉不起来，让后续真实请求去报错，
+        // 比在这里把一次检索变成启动错误更贴近用户预期。
+        let _ = sidecar.recover_if_unavailable();
+        true
+    }
+
     /// 产品搜索入口：一次授权后生成查询向量、三路召回、磁盘新鲜度过滤和可选 rerank。
     pub fn search(
         &self,
@@ -472,6 +506,8 @@ impl ProjectRetrievalRuntime {
             .operation_id
             .clone()
             .unwrap_or_else(new_retrieval_operation_id);
+        self.recover_sidecar_before_vector_search();
+
         let query_embedding = if let Some(embedder) = &self.embedder {
             let child = child_provider_context(
                 &context,
@@ -798,4 +834,96 @@ fn new_retrieval_operation_id() -> String {
         "project-retrieval-{}-{timestamp_ns}-{sequence}",
         std::process::id()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::retrieval::{MemoryFullTextStore, MemoryVectorStore};
+
+    /// 直接构造组合根，绕开 `from_config`。
+    ///
+    /// 必须绕开：`from_config` 在 `QdrantSidecar` 后端下会去解析真实二进制并 `start()?`，
+    /// 测试机上没有 Qdrant 就直接 `Err`；而唯一能装配成功的 `ExternalQdrant` 后端
+    /// 根本不建 supervisor（`sidecar` 恒为 `None`）。两条路都到不了这条接线，
+    /// 所以只能在同模块内按字段拼装。
+    fn runtime_with_sidecar(
+        root: &Path,
+        vector: Option<Arc<dyn VectorStore>>,
+        sidecar: Option<Arc<QdrantSidecarSupervisor>>,
+    ) -> ProjectRetrievalRuntime {
+        ProjectRetrievalRuntime {
+            project_root: root.to_path_buf(),
+            config: ProjectConfig::default(),
+            outbox: IndexInvalidationOutbox::new(root.join("outbox.db")),
+            tantivy_path: root.join(".indexes").join("tantivy"),
+            sqlite_path: root.join(".indexes").join("full_text.db"),
+            tantivy: Arc::new(MemoryFullTextStore::new()),
+            sqlite: Arc::new(MemoryFullTextStore::new()),
+            vector,
+            embedder: None,
+            reranker: None,
+            reranker_unavailable: None,
+            knowledge_index: KnowledgeIndexSynchronizer::new(root).unwrap(),
+            vector_signature: None,
+            qdrant_credential_generation: None,
+            sidecar,
+            chunk_size_chars: 512,
+            chunk_overlap_chars: 64,
+        }
+    }
+
+    /// 指向不存在的二进制：`spawn` 必然失败，正好用来验证恢复失败不会 panic、
+    /// 也不会把失败冒泡成检索错误。
+    fn unavailable_supervisor(root: &Path) -> Arc<QdrantSidecarSupervisor> {
+        Arc::new(QdrantSidecarSupervisor::new(QdrantSidecarConfig {
+            binary_path: root.join("no-such-qdrant-binary"),
+            host: "127.0.0.1".to_owned(),
+            requested_port: 0,
+            data_dir: root.join("qdrant-data"),
+            log_dir: root.join("qdrant-logs"),
+            startup_timeout_ms: 50,
+            max_restarts_per_window: default_max_restarts_per_window(),
+            restart_window_ms: default_restart_window_ms(),
+        }))
+    }
+
+    #[test]
+    fn vector_search_path_attempts_sidecar_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let sidecar = unavailable_supervisor(&root);
+        sidecar.mark_crashed("test induced crash").unwrap();
+        let runtime = runtime_with_sidecar(
+            &root,
+            Some(Arc::new(MemoryVectorStore::new())),
+            Some(Arc::clone(&sidecar)),
+        );
+
+        assert!(
+            runtime.recover_sidecar_before_vector_search(),
+            "启用向量检索且存在 supervisor 时必须尝试恢复；摘掉这条接线本用例应变红"
+        );
+    }
+
+    #[test]
+    fn full_text_only_search_does_not_touch_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        // 纯全文检索不该为 sidecar 付探活成本：vector 为 None 时直接跳过。
+        let runtime = runtime_with_sidecar(&root, None, Some(unavailable_supervisor(&root)));
+
+        assert!(!runtime.recover_sidecar_before_vector_search());
+    }
+
+    #[test]
+    fn external_qdrant_without_supervisor_is_not_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        // ExternalQdrant 后端没有本地进程可管，恢复应静默跳过而非报错。
+        let runtime =
+            runtime_with_sidecar(&root, Some(Arc::new(MemoryVectorStore::new())), None);
+
+        assert!(!runtime.recover_sidecar_before_vector_search());
+    }
 }

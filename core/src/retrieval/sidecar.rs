@@ -21,6 +21,28 @@ pub struct QdrantSidecarConfig {
     pub data_dir: PathBuf,
     pub log_dir: PathBuf,
     pub startup_timeout_ms: u64,
+    /// 冷却窗口内允许的最大自动重启次数。默认 3。
+    ///
+    /// 节流是**安全需求**而非调优：sidecar 若因磁盘损坏、端口被占、二进制缺失
+    /// 这类持久故障起不来，无节流的自动恢复会在每次诊断刷新时拉起一个必然失败的
+    /// 进程，把故障放大成 fork 风暴。
+    #[serde(default = "default_max_restarts_per_window")]
+    pub max_restarts_per_window: u32,
+    /// 重启计数的滑动窗口长度（毫秒）。默认 60 秒。
+    #[serde(default = "default_restart_window_ms")]
+    pub restart_window_ms: u64,
+}
+
+/// 默认冷却窗口内最多重启 3 次：够覆盖偶发崩溃，又不至于在持久故障下失控。
+/// `pub(crate)` 而非 `pub`：组合根（`retrieval/project.rs`）要用它填字面量，
+/// 但它是 serde 默认值的实现细节，不属于对外契约。
+pub(crate) fn default_max_restarts_per_window() -> u32 {
+    3
+}
+
+/// 默认滑动窗口 60 秒。
+pub(crate) fn default_restart_window_ms() -> u64 {
+    60_000
 }
 
 impl QdrantSidecarConfig {
@@ -136,6 +158,13 @@ pub struct QdrantSidecarSupervisor<R = CommandSidecarProcessRunner> {
     runner: R,
     child: Mutex<Option<Child>>,
     status: Mutex<QdrantSidecarStatus>,
+    /// 滑动窗口内最近一次自动重启的时刻。自动重启失败后记下时间点，
+    /// 供 `allow_auto_restart` 判断窗口内是否已达上限。
+    restart_window: Mutex<Vec<std::time::Instant>>,
+    /// 最近一次**恢复用**探活的时刻，供 `recover_if_unavailable` 节流。
+    /// 只记恢复路径，不记 `probe()`/`health_check()` 的直接调用——
+    /// 诊断路径要的是当下真实状态，不能被检索路径的节流窗口糊住。
+    last_recovery_probe: Mutex<Option<std::time::Instant>>,
 }
 
 impl<R> Drop for QdrantSidecarSupervisor<R> {
@@ -168,6 +197,8 @@ where
             runner,
             child: Mutex::new(None),
             status: Mutex::new(status),
+            restart_window: Mutex::new(Vec::new()),
+            last_recovery_probe: Mutex::new(None),
         }
     }
 
@@ -341,15 +372,79 @@ where
     /// sidecar 不可用或降级时尝试自动重启。
     ///
     /// 依赖 `probe()` 刷新过的状态；直接读缓存会在进程被外部杀掉时永远返回 `None`。
+    ///
+    /// **节流是安全需求**：滑动窗口内达到 `max_restarts_per_window` 上限后拒绝再重启，
+    /// 避免持久故障（磁盘损坏、端口被占、二进制缺失）下每次诊断刷新都拉起一个
+    /// 必然失败的进程，把一次故障放大成 fork 风暴。
+    ///
+    /// **不恢复 `Stopped`**：那是用户主动 stop() 出来的状态，自动拉起等于无视用户的
+    /// 停止意图（比如用户因检索异常决定停用向量检索）。
     pub fn recover_if_unavailable(&self) -> CoreResult<Option<QdrantSidecarStatus>> {
+        if !self.recovery_probe_due()? {
+            return Ok(None);
+        }
         let status = self.probe()?;
         if matches!(
             status.state,
-            SidecarState::Unavailable | SidecarState::Degraded | SidecarState::Stopped
+            SidecarState::Unavailable | SidecarState::Degraded
         ) {
+            if !self.allow_auto_restart()? {
+                return Ok(None);
+            }
             return self.restart().map(Some);
         }
         Ok(None)
+    }
+
+    /// 清掉恢复探活的节流窗口，使下一次 `recover_if_unavailable` 必定真的探活。
+    ///
+    /// 仅供测试：验证「重启上限」时必须逐轮清窗口，否则被截住的是节流而非上限，
+    /// 测试会在缺陷仍在的情况下通过。生产路径不该调用——绕过节流就是绕过性能保护。
+    pub fn reset_recovery_probe_throttle_for_tests(&self) {
+        if let Ok(mut last) = self.last_recovery_probe.lock() {
+            *last = None;
+        }
+    }
+
+    /// 恢复路径本次是否该真的探活。
+    ///
+    /// 到期即**立刻记下时刻**（而不是等 probe 返回后再记）：probe 失败会走 `?` 提前
+    /// 返回，若把记录放在后面，一个持续失败的 sidecar 会让每次检索都重新探活，
+    /// 正好在故障时丢掉节流。
+    fn recovery_probe_due(&self) -> CoreResult<bool> {
+        let mut last = self.last_recovery_probe.lock().map_err(lock_error)?;
+        let now = std::time::Instant::now();
+        if let Some(at) = *last {
+            if now.duration_since(at)
+                < std::time::Duration::from_millis(RECOVERY_PROBE_MIN_INTERVAL_MS)
+            {
+                return Ok(false);
+            }
+        }
+        *last = Some(now);
+        Ok(true)
+    }
+
+    /// 滑动窗口内是否还允许一次自动重启。
+    ///
+    /// 窗口内重启次数达上限时返回 false，并**不重置**窗口——重置会让冷却被
+    /// 一次成功的探活清零，起不到抑制持续故障的作用。
+    fn allow_auto_restart(&self) -> CoreResult<bool> {
+        let mut window = self.restart_window.lock().map_err(lock_error)?;
+        let window_ms = self.config.restart_window_ms;
+        let deadline = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(window_ms));
+        if let Some(deadline) = deadline {
+            window.retain(|at| *at > deadline);
+        } else {
+            // 理论不可能：restart_window_ms 是 u64，极端值溢出才走到这。保守清空。
+            window.clear();
+        }
+        if window.len() >= self.config.max_restarts_per_window as usize {
+            return Ok(false);
+        }
+        window.push(std::time::Instant::now());
+        Ok(true)
     }
 
     /// 返回当前 sidecar 状态快照。
@@ -394,6 +489,16 @@ where
 /// 探活单次 TCP 连接超时。取值权衡：本地回环连接正常在 1ms 内完成，
 /// 500ms 足以覆盖负载高时的抖动；再长会让诊断页明显卡顿。
 const PROBE_CONNECT_TIMEOUT_MS: u64 = 500;
+
+/// 恢复路径两次探活之间的最小间隔。
+///
+/// 检索是高频路径（一章正文可能查十几次），而 sidecar 正常时探活恒定返回健康——
+/// 每次检索都做一次 TCP 连接是纯浪费。2 秒的窗口把稳态成本压到接近零
+/// （只读一个 Instant），同时保证真崩溃后最迟 2 秒内被下一次检索发现。
+///
+/// 不做成配置项：它不改变任何可观测行为（只影响发现延迟的上界），
+/// 暴露出去只会多一个没人知道该填什么的旋钮。
+const RECOVERY_PROBE_MIN_INTERVAL_MS: u64 = 2_000;
 
 /// 单次带超时的 TCP 连通性探测。
 ///
