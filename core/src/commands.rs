@@ -94,11 +94,11 @@ use crate::workflow::{
     merge_workflow_into_project_canvas, normalize_project_canvas_identity,
     validate_workflow_execution_contracts, BuiltinWorkflowNodeExecutor, DocumentWorkflowExportSink,
     RoutedExternalNodeExecutor, RuntimeConfirmation, RuntimeConfirmationState,
-    SqliteWorkflowRuntimeStore, WorkflowExecutionDependencySet, WorkflowLlmNodeConfig,
-    WorkflowLlmSearchOptions, WorkflowRunFailure, WorkflowRunnableClaimResult, WorkflowRuntime,
-    WorkflowRuntimeEvent, WorkflowRuntimeEventType, WorkflowRuntimeStore,
-    WorkflowStopRequestResult, WorkflowWorkerLease, EXECUTOR_ADAPTER_NODE_PREFIX,
-    PROJECT_CANVAS_WORKFLOW_ID,
+    RuntimeRecoveryReport, SqliteWorkflowRuntimeStore, WorkflowExecutionDependencySet,
+    WorkflowLlmNodeConfig, WorkflowLlmSearchOptions, WorkflowRunFailure,
+    WorkflowRunnableClaimResult, WorkflowRuntime, WorkflowRuntimeEvent, WorkflowRuntimeEventType,
+    WorkflowRuntimeStore, WorkflowStopRequestResult, WorkflowWorkerLease,
+    EXECUTOR_ADAPTER_NODE_PREFIX, PROJECT_CANVAS_WORKFLOW_ID,
 };
 
 const WORKFLOW_WORKER_LEASE_TTL_MS: u64 = 30_000;
@@ -4773,6 +4773,51 @@ fn ensure_active_project_identity(
     )))
 }
 
+/// 校验未终态运行快照里记的引用是否仍可解析，供后端诊断展示。
+///
+/// U116：此前 `get_backend_diagnostics` 给 `collect` 传的是死值 `None`，
+/// `workflow_runtime_recovery` 这一项在生产**永不产出**——而前端早已备好完整展示链路
+/// 与中/英/日三语文案，只是永远收不到数据。校验逻辑（`WorkflowRuntime::validate_references`）
+/// 本身也一直是完整的，缺的就是这一处接线。
+///
+/// 只查未终态运行：已 stopped/succeeded/failed 的运行即使引用悬空也无从恢复，
+/// 报出来只会淹没真正需要处理的项。
+///
+/// 诊断绝不因单个运行读取失败而整体失败——那会让一次读盘错误顶掉 provider、
+/// 检索等其它诊断项。读不出来就当没有这一项，宁可少报不可全灭。
+fn workflow_runtime_recovery_report(project_root: &Path) -> Option<RuntimeRecoveryReport> {
+    let store = SqliteWorkflowRuntimeStore::open(project_root).ok()?;
+    let states = store.list_non_terminal_states().ok()?;
+    if states.is_empty() {
+        return None;
+    }
+
+    let git = GitService::new(project_root);
+    let artifact_root = project_root.join(".runtime").join("artifacts");
+    let resolver = crate::workflow::GitRuntimeReferenceResolver::new(artifact_root, &git);
+
+    let mut merged = RuntimeRecoveryReport::new();
+    for state in states {
+        // run_id 要在合并前取出：state 会被 from_state 消费掉。
+        let run_id = state.run_id.as_str().to_owned();
+        let runtime = WorkflowRuntime::from_state(state);
+        let Ok(report) = runtime.validate_references(&resolver) else {
+            continue;
+        };
+        merged.checked_reference_count += report.checked_reference_count;
+        merged.missing_references.extend(report.missing_references);
+        // 逐条加 run 前缀：合并多个运行后，「node writer 失败」这种原因
+        // 不指明是哪个运行的话，用户手上有几个暂停运行就无从下手。
+        merged.degraded_reasons.extend(
+            report
+                .degraded_reasons
+                .into_iter()
+                .map(|reason| format!("run {run_id}: {reason}")),
+        );
+    }
+    Some(merged)
+}
+
 pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<BackendDiagnosticsReport> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "backend_diagnostics")?;
@@ -4791,7 +4836,7 @@ pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<Backend
     };
     let mut report = BackendDiagnosticsReport::collect(
         SqliteWorkflowRuntimeStore::health(&project_root),
-        None,
+        workflow_runtime_recovery_report(&project_root),
         Vec::new(),
         retrieval_reports,
     );

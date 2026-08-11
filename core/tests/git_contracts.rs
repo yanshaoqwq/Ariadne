@@ -104,6 +104,50 @@ fn git_service_creates_archive_and_checkpoint_commits() {
     assert_eq!(commits[1].checkpoint_kind, Some(CheckpointKind::Manual));
 }
 
+/// U116：运行态引用校验靠这个判定 checkpoint / patch commit 是否还在。
+///
+/// 不存在的 id 必须是 false（否则悬空引用永远查不出来），存在的必须是 true
+/// （否则诊断天天误报），空串/非法 revision 既不能报存在也不能变成错误——
+/// 诊断路径上抛错会把整份报告顶掉。
+///
+/// **最关键的是那条 40 位假 hex**：`rev-parse --verify` 不带 `^{commit}` 时
+/// 会把任何合法 hex **原样回显**、根本不查对象存在性，于是每个悬空 id 都被判"健在"，
+/// 校验形同虚设。这条断言是 `^{commit}` 后缀的直接回归（已变异验证：摘掉后缀它立刻变红）。
+/// blob 标签那条则覆盖"对象存在但类型不是 commit"。
+#[test]
+fn commit_existence_check_accepts_real_commits_and_rejects_non_commit_objects() {
+    let (temp_dir, service) = init_test_repo();
+    fs::write(temp_dir.path().join("chapter.md"), "first").unwrap();
+    let archive = service.create_archive_point("draft-1", None).unwrap();
+
+    assert!(service.commit_exists(&archive.commit_id).unwrap());
+    // 合法 hex 但仓库里没有这个对象。
+    assert!(!service
+        .commit_exists("0123456789abcdef0123456789abcdef01234567")
+        .unwrap());
+    // 空串与非法 revision 都不能报存在，也不能变成错误。
+    assert!(!service.commit_exists("").unwrap());
+    assert!(!service.commit_exists("   ").unwrap());
+    assert!(!service.commit_exists("不是一个-revision").unwrap());
+
+    // 指向 blob 的标签：rev-parse --verify 能解析，但它不是 commit，
+    // 拿去恢复必然失败，所以必须报"不存在"。
+    let blob_id = {
+        let output = std::process::Command::new("git")
+            .args(["hash-object", "-w", "chapter.md"])
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    run_git(temp_dir.path(), ["tag", "blob-tag", &blob_id]);
+    assert!(
+        !service.commit_exists("blob-tag").unwrap(),
+        "指向 blob 的标签不是 commit，必须报不存在"
+    );
+}
+
 #[test]
 fn git_history_exposes_time_author_head_and_checkpoint_semantics() {
     let (temp_dir, service) = init_test_repo();

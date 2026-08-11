@@ -372,6 +372,29 @@ impl GitService {
         Ok(())
     }
 
+    /// 判断某个 commit 是否仍存在于本仓库。
+    ///
+    /// 供运行态引用校验用：checkpoint 与 patch session 都以 commit id 记在运行快照里，
+    /// 用户手动 `git gc`/回滚分支后这些 id 会悬空，必须能查出来告诉用户。
+    ///
+    /// 用 `--verify --quiet` 而非 `cat-file`：commit 不存在时前者以退出码 1 静默返回，
+    /// 由 `optional_git_value` 映射成 `None`，不会把"正常的不存在"变成错误。
+    ///
+    /// **`^{commit}` 后缀不可省**（实测确认，摘掉它回归测试立刻变红）：
+    /// 不带它时 `rev-parse --verify` 对任何合法的 40 位 hex **原样回显**、
+    /// 根本不查对象是否存在，于是每个悬空 commit id 都会被判定为"健在"，
+    /// 引用校验彻底失效。加上后缀才强制 Git 解析并确认目标真是一个 commit 对象，
+    /// 顺带也挡住了指向 blob/tree 的标签。
+    pub fn commit_exists(&self, commit_id: &str) -> CoreResult<bool> {
+        if commit_id.trim().is_empty() {
+            return Ok(false);
+        }
+        let spec = format!("{commit_id}^{{commit}}");
+        Ok(self
+            .optional_git_value(["rev-parse", "--verify", "--quiet", spec.as_str()])?
+            .is_some())
+    }
+
     /// 创建 commit；即使没有文件变更，也允许创建 checkpoint。
     fn commit_allow_empty(&self, message: &str) -> CoreResult<String> {
         self.ensure_local_commit_identity()?;

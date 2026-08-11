@@ -322,6 +322,59 @@ impl RuntimeReferenceResolver for FilesystemRuntimeReferenceResolver {
     }
 }
 
+/// 生产用运行态引用解析器：checkpoint / patch commit 直接问 Git。
+///
+/// 与 `FilesystemRuntimeReferenceResolver` 的分工是**信息来源**，不是新旧：
+/// 后者的 commit id 靠 `with_checkpoint`/`with_patch_commit` 由调用方灌入，
+/// 适合测试构造确定场景；诊断跑在真实项目上，没人能预先给出「应该存在哪些 commit」，
+/// 只能反过来拿运行快照里记的 id 去问仓库。
+pub struct GitRuntimeReferenceResolver<'a> {
+    artifact_root: PathBuf,
+    git: &'a GitService,
+}
+
+impl<'a> GitRuntimeReferenceResolver<'a> {
+    /// 创建 Git 引用解析器。
+    pub fn new(artifact_root: impl Into<PathBuf>, git: &'a GitService) -> Self {
+        Self {
+            artifact_root: artifact_root.into(),
+            git,
+        }
+    }
+}
+
+impl RuntimeReferenceResolver for GitRuntimeReferenceResolver<'_> {
+    /// document_id 是规范化绝对路径，按存在性检查。
+    fn document_exists(&self, document_id: &str) -> CoreResult<bool> {
+        Ok(Path::new(document_id).exists())
+    }
+
+    /// chunk 是可重建的索引产物，不构成需要人工恢复的悬空引用。
+    ///
+    /// 返回 `true` 而非 `FilesystemRuntimeReferenceResolver` 的 `false`：那边保守报缺失
+    /// 是为了让测试能断言「未登记即缺失」，而诊断面向用户——把可自动重建的东西
+    /// 报成「引用缺失，需人工恢复」是假警报。当前生产也不产出 `ChunkRef`
+    /// （`PortValue::ChunkRef` 全仓库只有匹配分支、无构造点），这里属防御性分支。
+    fn chunk_exists(&self, _chunk_id: &str) -> CoreResult<bool> {
+        Ok(true)
+    }
+
+    /// artifact_id 按 artifact_root 下相对路径检查。
+    fn artifact_exists(&self, artifact_id: &str) -> CoreResult<bool> {
+        Ok(self.artifact_root.join(artifact_id).exists())
+    }
+
+    /// patch session commit 落在项目仓库里，问 Git 是否还能解析。
+    fn patch_session_commit_exists(&self, patch_session_commit_id: &str) -> CoreResult<bool> {
+        self.git.commit_exists(patch_session_commit_id)
+    }
+
+    /// checkpoint 就是一个 commit，同样问 Git。
+    fn checkpoint_exists(&self, checkpoint_id: &str) -> CoreResult<bool> {
+        self.git.commit_exists(checkpoint_id)
+    }
+}
+
 /// 基于 Documents 模块的 Export sink。
 pub struct DocumentWorkflowExportSink<'a> {
     documents: &'a FileDocumentService,
@@ -956,10 +1009,9 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
     // find/register/行号 patch 归 WritingToolExecutor，按工具名分流。
     let writing_tool_executor = options.writing_tools.as_ref().map(|writing| {
         let executor = match writing.document {
-            Some(document) => crate::rag::tools::WritingToolExecutor::with_document(
-                writing.knowledge,
-                document,
-            ),
+            Some(document) => {
+                crate::rag::tools::WritingToolExecutor::with_document(writing.knowledge, document)
+            }
             None => crate::rag::tools::WritingToolExecutor::new(writing.knowledge),
         };
         // U108 阶段 3：挂上 patch 会话，行号改动才会被累积下来等待审批。
@@ -1114,11 +1166,16 @@ fn render_writing_node_prompt(
     // 章节 id 是上下文装配的归属键（知识库按章查总结）。模板既然含占位符，
     // 缺 chapter_id 就无法装配——此时必须 fail-loud 指名该补什么，
     // 绝不能把 `{{上一章原文}}` 原样喂给模型。
-    let chapter_id = writing.chapter_id.map(str::trim).filter(|value| !value.is_empty())
-        .ok_or_else(|| CoreError::validation(
-            "writing node prompt template contains {{...}} placeholders but the node has no \
+    let chapter_id = writing
+        .chapter_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CoreError::validation(
+                "writing node prompt template contains {{...}} placeholders but the node has no \
              chapter_id; set chapter_id on the node, or remove the placeholders from the template",
-        ))?;
+            )
+        })?;
 
     let prompts = crate::rag::resources::load_prompt_resources()?;
     let mut context_request = crate::rag::models::WritingContextRequest {
@@ -1289,9 +1346,7 @@ fn writing_node_confirmations(
         .unwrap_or_else(|| writing.agent.node_type());
 
     let mut items = Vec::new();
-    for kind in
-        crate::rag::models::WritingNodeDefinition::confirmation_kinds_for(writing.agent)
-    {
+    for kind in crate::rag::models::WritingNodeDefinition::confirmation_kinds_for(writing.agent) {
         // 副作用类：无证据则不产出（理由见函数文档）。
         let metadata = match kind {
             ConfirmationKind::PlannerRegister => {
@@ -1300,8 +1355,7 @@ fn writing_node_confirmations(
                 }
                 json!({ "registered_change_ids": registered_change_ids })
             }
-            ConfirmationKind::WriterCorrectionPatch
-            | ConfirmationKind::PolisherCorrectionPatch => {
+            ConfirmationKind::WriterCorrectionPatch | ConfirmationKind::PolisherCorrectionPatch => {
                 if patch_count == 0 {
                     continue;
                 }
@@ -2089,7 +2143,6 @@ pub fn reconcile_summarizer_operation(
 // 下面的 `WorkflowProjectSearchNodeConfig`（项目内 RAG 检索 + 新鲜度门禁）。
 // 生产注册的执行器是 `execute_project_retrieval_node_for_project`（`commands.rs:6665`）。
 // 保留一套「配置字段对不上唯一可用节点类型」的旧实现，只会让接线者选错。
-
 
 /// 项目内 RAG 搜索节点配置；与外部 Web SearchProvider 明确分离。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]

@@ -25,18 +25,17 @@ use ariadne::commands::{
     mark_workflow_run_failed_with_lease_impl, open_project, override_confirmation_output,
     pack_workflow_selection_impl, pack_workflow_selection_impl_with_operation_id, pause_workflow,
     preview_provider_removal, process_index_outbox_impl, project_ai_chat, project_ai_chat_impl,
-    query_run_logs, quick_edit_impl, register_executor_adapters_for_project, remove_provider,
-    resolve_confirmation_impl, resolve_project_references, resolve_workflow_operation_in_doubt,
-    restore_to_new_branch, resume_from_node, resume_workflow, run_workflow, run_workflow_impl,
-    stop_workflow,
-    save_app_settings_impl, save_automation_settings_impl, save_document_content_impl,
-    save_git_settings_impl, save_node_preset_settings_impl, save_permissions_settings_impl,
-    save_project_canvas_impl, save_provider_key, save_provider_key_impl,
-    save_provider_section_settings, save_provider_settings_impl, save_rag_settings_impl,
-    save_template_repository_settings, save_template_repository_settings_impl,
-    save_workflow_graph_impl, save_workflow_settings_impl, search_project_documents_impl,
-    relocate_recent_project, search_templates, set_project_root, start_workflow_with_request,
-    test_provider_draft_with_cancellation, update_budget_config_impl,
+    query_run_logs, quick_edit_impl, register_executor_adapters_for_project,
+    relocate_recent_project, remove_provider, resolve_confirmation_impl,
+    resolve_project_references, resolve_workflow_operation_in_doubt, restore_to_new_branch,
+    resume_from_node, resume_workflow, run_workflow, run_workflow_impl, save_app_settings_impl,
+    save_automation_settings_impl, save_document_content_impl, save_git_settings_impl,
+    save_node_preset_settings_impl, save_permissions_settings_impl, save_project_canvas_impl,
+    save_provider_key, save_provider_key_impl, save_provider_section_settings,
+    save_provider_settings_impl, save_rag_settings_impl, save_template_repository_settings,
+    save_template_repository_settings_impl, save_workflow_graph_impl, save_workflow_settings_impl,
+    search_project_documents_impl, search_templates, set_project_root, start_workflow_with_request,
+    stop_workflow, test_provider_draft_with_cancellation, update_budget_config_impl,
     validate_display_name_language_pack, AppSettings, AriadneAppState, AutomationSettings,
     CanvasEdge, CanvasNode, ConfirmationAutoModePolicy, ConfirmationDecision,
     ConfirmationNormalPolicy, ConfirmationPolicySetting, GitSettings, InDoubtDecision,
@@ -923,11 +922,7 @@ fn recent_project_relocation_activates_new_root_and_removes_stale_entry() {
     let new_project = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(old_project.path()).unwrap();
     ariadne::frontend::initialize_project(new_project.path()).unwrap();
-    let state = AriadneAppState::new(
-        "",
-        app_state.path(),
-        Arc::new(MemorySecretStore::default()),
-    );
+    let state = AriadneAppState::new("", app_state.path(), Arc::new(MemorySecretStore::default()));
     open_project(
         &state,
         old_project.path().to_string_lossy().into_owned(),
@@ -937,12 +932,20 @@ fn recent_project_relocation_activates_new_root_and_removes_stale_entry() {
 
     let relocated = relocate_recent_project(
         &state,
-        old_project.path().canonicalize().unwrap().to_string_lossy().into_owned(),
+        old_project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
         new_project.path().to_string_lossy().into_owned(),
     )
     .unwrap();
 
-    assert_eq!(relocated.project_root, new_project.path().canonicalize().unwrap());
+    assert_eq!(
+        relocated.project_root,
+        new_project.path().canonicalize().unwrap()
+    );
     let recent = ariadne::commands::list_recent_projects(&state).unwrap();
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].path, new_project.path().canonicalize().unwrap());
@@ -4282,6 +4285,125 @@ fn node_preset_save_waits_for_cross_process_defaults_transaction_lock() {
         .unwrap()
         .is_ok());
     worker.join().unwrap();
+}
+
+/// 造一个仅设置 outputs 的 Paused 节点运行态。
+/// `WorkflowNodeRuntimeState` 没有 `Default`（字段多为运行期必填项，
+/// 给默认值会掩盖忘填），这里集中列全，免得每个用例抄一遍。
+fn paused_node_with_outputs(outputs: ariadne::contracts::PortMap) -> WorkflowNodeRuntimeState {
+    WorkflowNodeRuntimeState {
+        node_id: NodeId::from("writer"),
+        status: RunStatus::Paused,
+        outputs,
+        communication_output: None,
+        communication_control: Default::default(),
+        prompt_trace_hash: None,
+        patch_session_commit_id: None,
+        checkpoint_id: None,
+        patch_write_back_state: None,
+        metadata: Value::Null,
+        error: None,
+        error_state: None,
+        execution_attempts: 0,
+    }
+}
+
+/// U116：引用校验接线的判据取「诊断报告里是否真出现 degraded 项」，
+/// 而不是「能否构造出一个悬空引用」——后者在诊断入口写死 `None` 时照样全绿。
+#[test]
+fn backend_diagnostics_reports_dangling_runtime_document_reference() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+
+    // 造一个 Paused（未终态）运行，其节点输出引用一个不存在的文档。
+    // 终态运行的悬空引用无意义，故生产只扫未终态。
+    // open 收的是项目根，自己拼 RUNTIME_DB_FILE。
+    let store = SqliteWorkflowRuntimeStore::open(project.path()).unwrap();
+    let workflow_id = WorkflowId::from("wf-dangling");
+    let mut run_state =
+        WorkflowRunState::new(workflow_id.clone(), RunId::from("run-dangling-reference"));
+    run_state.start_node_id = Some(NodeId::from("writer"));
+    store.create_state(&run_state).unwrap();
+
+    let missing_document = project.path().join("chapters/已被删除的章节.md");
+    let mut outputs = ariadne::contracts::PortMap::new();
+    outputs.insert(
+        "document".to_owned(),
+        PortValue::document_ref(missing_document.to_string_lossy().into_owned(), None),
+    );
+    run_state
+        .nodes
+        .insert(NodeId::from("writer"), paused_node_with_outputs(outputs));
+    run_state.status = RunStatus::Paused;
+    store.save_state(&mut run_state, None).unwrap();
+
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+
+    let item = report
+        .items
+        .iter()
+        .find(|item| item.component == "workflow_runtime_recovery")
+        .expect("诊断报告必须含 workflow_runtime_recovery 项");
+    assert_eq!(item.status, DiagnosticStatus::Degraded);
+    let reason = item.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("1 runtime references are missing"),
+        "缺失引用数量未上报：{reason}"
+    );
+}
+
+/// 未终态运行的引用都健在时，诊断必须是 Healthy——否则「有 degraded」这个断言
+/// 会在任何实现下都成立，上一条测试就白写了。
+#[test]
+fn backend_diagnostics_reports_healthy_recovery_when_references_resolve() {
+    let project = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(project.path()).unwrap();
+
+    let existing_document = project.path().join("chapters/第一章.md");
+    std::fs::create_dir_all(existing_document.parent().unwrap()).unwrap();
+    std::fs::write(&existing_document, "正文").unwrap();
+
+    let store = SqliteWorkflowRuntimeStore::open(project.path()).unwrap();
+    let mut run_state = WorkflowRunState::new(
+        WorkflowId::from("wf-resolvable"),
+        RunId::from("run-resolvable-reference"),
+    );
+    run_state.start_node_id = Some(NodeId::from("writer"));
+    store.create_state(&run_state).unwrap();
+
+    let mut outputs = ariadne::contracts::PortMap::new();
+    outputs.insert(
+        "document".to_owned(),
+        PortValue::document_ref(existing_document.to_string_lossy().into_owned(), None),
+    );
+    run_state
+        .nodes
+        .insert(NodeId::from("writer"), paused_node_with_outputs(outputs));
+    run_state.status = RunStatus::Paused;
+    store.save_state(&mut run_state, None).unwrap();
+
+    let state = AriadneAppState::new(
+        project.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let report = get_backend_diagnostics(&state).unwrap();
+
+    let item = report
+        .items
+        .iter()
+        .find(|item| item.component == "workflow_runtime_recovery")
+        .expect("诊断报告必须含 workflow_runtime_recovery 项");
+    assert_eq!(item.status, DiagnosticStatus::Healthy, "{:?}", item.reason);
 }
 
 #[test]
@@ -9775,7 +9897,8 @@ fn provider_reachability_items_do_not_collide_with_config_items() {
         .filter(|item| item.component == "providers.llm.default")
         .count();
     assert_eq!(
-        config_items, 1,
+        config_items,
+        1,
         "配置诊断项应恰好一条；探活项若复用同名会让这里变成多条、两种含义再也分不开。\
          实际项：{:?}",
         report
@@ -9849,8 +9972,7 @@ fn u116_repair_refuses_to_touch_a_healthy_repository() {
         Arc::new(MemorySecretStore::default()),
     );
 
-    let error = ariadne::commands::repair_git_repository(&app)
-        .expect_err("健康仓库不该允许修复");
+    let error = ariadne::commands::repair_git_repository(&app).expect_err("健康仓库不该允许修复");
     let diagnostic = format!("{error:?}");
     assert!(
         diagnostic.contains("healthy"),
