@@ -1211,6 +1211,316 @@ impl SidecarProcessRunner for NoopSidecarRunner {
     }
 }
 
+/// 只 spawn 一个立刻退出的进程，用于模拟 sidecar 被 OOM/外部 kill 掉。
+#[derive(Debug)]
+struct ImmediatelyExitingSidecarRunner;
+
+impl SidecarProcessRunner for ImmediatelyExitingSidecarRunner {
+    fn spawn(
+        &self,
+        _config: &QdrantSidecarConfig,
+        _port: u16,
+    ) -> ariadne::contracts::CoreResult<Child> {
+        Command::new("sh")
+            .arg("-c")
+            .arg("exit 137")
+            .spawn()
+            .map_err(Into::into)
+    }
+}
+
+/// 进程被外部杀掉后，诊断必须报不健康。
+///
+/// 回归的是一条会**骗人**的缺陷：`health_check` 曾只读缓存的 status 字段，
+/// 而写入点只有 start/stop/mark_crashed，其中 mark_crashed 生产无人调用。
+/// 于是 sidecar 被 OOM 杀掉后诊断永远显示 healthy，向量检索却已全部静默失败。
+#[test]
+fn sidecar_health_detects_externally_killed_process_instead_of_reporting_cached_running() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let supervisor = QdrantSidecarSupervisor::with_runner(
+        QdrantSidecarConfig {
+            binary_path: temp_dir.path().join("qdrant"),
+            host: "127.0.0.1".to_owned(),
+            requested_port: 0,
+            data_dir: temp_dir.path().join("data"),
+            log_dir: temp_dir.path().join("logs"),
+            startup_timeout_ms: 1,
+        },
+        ImmediatelyExitingSidecarRunner,
+    );
+
+    // start 会拿到一个已经/即将退出的进程；TCP 探测失败使其落在 Degraded。
+    let started = supervisor.start().unwrap();
+    assert_ne!(
+        started.state,
+        SidecarState::Stopped,
+        "start 之后不应是 Stopped，否则本用例没有覆盖到崩溃探测"
+    );
+
+    // 等待子进程确实退出，让 try_wait 能观察到退出码。
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let health = supervisor.health_check().unwrap();
+    assert_eq!(
+        health.status,
+        StoreStatus::Unavailable,
+        "进程已退出时诊断必须报 Unavailable，报 healthy 会让用户看不到检索已失效"
+    );
+    assert_eq!(supervisor.status().unwrap().state, SidecarState::Unavailable);
+    assert!(
+        health
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("exited")),
+        "失败原因要能指出是进程退出，实际为 {:?}",
+        health.reason
+    );
+}
+
+/// spawn 一个真正监听并持续 accept 的进程，使 start() 能判定为 Running。
+/// 用它才能复现最恶劣的场景：先健康运行、缓存写入 Running，之后进程才被杀掉。
+///
+/// **必须持续 accept**：只 listen 不 accept 的话，连接会堆在 backlog 里，
+/// 塞满后触发内核 SYN 重传退避，单次连接要 ~300ms。那是夹具产物而非探活开销，
+/// 会让性能用例给出完全错误的结论（我第一版就踩了这个坑）。
+#[derive(Debug)]
+struct ListeningSidecarRunner;
+
+impl SidecarProcessRunner for ListeningSidecarRunner {
+    fn spawn(
+        &self,
+        _config: &QdrantSidecarConfig,
+        port: u16,
+    ) -> ariadne::contracts::CoreResult<Child> {
+        Command::new("python3")
+            .arg("-c")
+            .arg(format!(
+                "import socket\n\
+                 s=socket.socket()\n\
+                 s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n\
+                 s.bind(('127.0.0.1',{port}))\n\
+                 s.listen(64)\n\
+                 while True:\n\
+                 \x20   c,_=s.accept()\n\
+                 \x20   c.close()"
+            ))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(Into::into)
+    }
+}
+
+/// 最恶劣场景：sidecar 先健康运行（缓存写入 Running），之后被 OOM/外部 kill 掉。
+///
+/// 这才是那条会**骗人**的缺陷的真实形态——缓存停在 Running，
+/// `health_check` 只读缓存就会一直报 healthy，而向量检索早已全部失败。
+/// 上面那个 `..._instead_of_reporting_cached_running` 用例里进程从未成功监听过，
+/// 缓存是 Degraded，掩盖了 healthy 这一最坏结果。
+#[test]
+fn sidecar_health_detects_kill_after_healthy_start_when_cache_says_running() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    // 必须指定具体端口：requested_port=0 会走系统分配路径，
+    // start() 据此判定「端口回退」而置为 Degraded，就覆盖不到 Running 缓存了。
+    // 先探一个空闲端口再立即释放，让 start() 自己去 bind。
+    let free_port = {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let supervisor = QdrantSidecarSupervisor::with_runner(
+        QdrantSidecarConfig {
+            binary_path: temp_dir.path().join("qdrant"),
+            host: "127.0.0.1".to_owned(),
+            requested_port: free_port,
+            data_dir: temp_dir.path().join("data"),
+            log_dir: temp_dir.path().join("logs"),
+            startup_timeout_ms: 5_000,
+        },
+        ListeningSidecarRunner,
+    );
+
+    let started = supervisor.start().unwrap();
+    assert_eq!(
+        started.state,
+        SidecarState::Running,
+        "前提：本用例要求 sidecar 先真正健康运行，否则覆盖不到 cached-Running 这一最坏情形"
+    );
+    assert_eq!(
+        supervisor.health_check().unwrap().status,
+        StoreStatus::Healthy,
+        "健康运行时不应误报故障"
+    );
+
+    // 模拟 OOM killer：直接杀掉子进程，supervisor 不经手，缓存仍是 Running。
+    let pid = started.process_id.expect("running sidecar must expose a pid");
+    Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let health = supervisor.health_check().unwrap();
+    assert_eq!(
+        health.status,
+        StoreStatus::Unavailable,
+        "被杀掉后必须报 Unavailable；报 healthy 正是那条骗人的缺陷"
+    );
+}
+
+
+/// 探活开销必须留在用户无感范围内。
+///
+/// 诊断页每次刷新都会走 `health_check`，探活给它加了一次 `try_wait` 和一次 TCP 连接。
+/// 本用例钉住两种情形的耗时上界，防止后人把探活换成阻塞轮询
+/// （`wait_for_tcp_health` 就是 25ms 一轮直到 startup_timeout_ms，放这里会卡满几秒）。
+#[test]
+fn sidecar_probe_stays_cheap_enough_for_the_diagnostics_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let free_port = {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let supervisor = QdrantSidecarSupervisor::with_runner(
+        QdrantSidecarConfig {
+            binary_path: temp_dir.path().join("qdrant"),
+            host: "127.0.0.1".to_owned(),
+            requested_port: free_port,
+            data_dir: temp_dir.path().join("data"),
+            log_dir: temp_dir.path().join("logs"),
+            startup_timeout_ms: 5_000,
+        },
+        ListeningSidecarRunner,
+    );
+    supervisor.start().unwrap();
+
+    // 情形一：健康运行。这是最常见的路径，每次诊断刷新都会走。
+    let healthy_start = std::time::Instant::now();
+    for _ in 0..20 {
+        supervisor.health_check().unwrap();
+    }
+    let healthy_each = healthy_start.elapsed() / 20;
+    eprintln!("[timing] healthy probe each: {healthy_each:?}");
+    // 实测：try_wait ~1µs + 本地 TCP 连接 ~150µs，合计远在 1ms 内。
+    // 5ms 上界留足 CI 抖动余量，抓的是「退回阻塞轮询」那种数量级退化
+    // （wait_for_tcp_health 是 25ms 一轮直到 startup_timeout_ms，必然撞线）。
+    assert!(
+        healthy_each < std::time::Duration::from_millis(5),
+        "健康态单次探活耗时 {healthy_each:?}，说明退回了阻塞轮询"
+    );
+
+    // 情形二：进程已死。try_wait 立即给出结论，不该等 TCP 超时。
+    let pid = supervisor.status().unwrap().process_id.unwrap();
+    Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let dead_start = std::time::Instant::now();
+    supervisor.health_check().unwrap();
+    let dead_elapsed = dead_start.elapsed();
+    assert!(
+        dead_elapsed < std::time::Duration::from_millis(50),
+        "进程已死时探活耗时 {dead_elapsed:?}；应由 try_wait 立即判定，不该等 TCP 连接超时"
+    );
+}
+
+/// 长命但从不监听端口的进程：用于构造「进程活着 + 端口不通」这一 Degraded 场景。
+/// `NoopSidecarRunner` 的 `sleep 1` 会在探活前就退出，那样只能测到崩溃分支。
+#[derive(Debug)]
+struct LongLivedSilentSidecarRunner;
+
+impl SidecarProcessRunner for LongLivedSilentSidecarRunner {
+    fn spawn(
+        &self,
+        _config: &QdrantSidecarConfig,
+        _port: u16,
+    ) -> ariadne::contracts::CoreResult<Child> {
+        Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(Into::into)
+    }
+}
+
+/// 进程活着但端口不通时，探活必须快速返回而非等满超时。
+///
+/// 这是唯一能暴露「探活退回阻塞轮询」的场景：
+/// 进程已死走 try_wait 立即返回、端口正常第一次连接就成功，两条路径都绕过了轮询代价。
+/// 只有「进程活着 + 端口不通」会真的进到 TCP 失败路径。
+#[test]
+fn sidecar_probe_returns_fast_when_process_lives_but_port_is_unreachable() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let supervisor = QdrantSidecarSupervisor::with_runner(
+        QdrantSidecarConfig {
+            binary_path: temp_dir.path().join("qdrant"),
+            host: "127.0.0.1".to_owned(),
+            requested_port: 0,
+            data_dir: temp_dir.path().join("data"),
+            log_dir: temp_dir.path().join("logs"),
+            // start() 内部的 wait_for_tcp_health 会等满这个值，故取小；
+            // 探活若退回阻塞轮询，用的也是这个值——下面用倍数关系把两者区分开。
+            startup_timeout_ms: 300,
+        },
+        // sleep 进程一直活着，但从不监听端口 → try_wait 说活着、TCP 连不上。
+        LongLivedSilentSidecarRunner,
+    );
+
+    // start 会因端口不通落在 Degraded，但进程是活的、缓存里有端口号。
+    supervisor.start().unwrap();
+
+    let started = std::time::Instant::now();
+    let health = supervisor.health_check().unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        health.status,
+        StoreStatus::Degraded,
+        "进程活着但端口不通应报 Degraded（可能只是负载高），报 Unavailable 会诱发不必要的重启"
+    );
+    // 单次 connect_timeout 到本地未监听端口会立刻收到 RST（µs 级）；
+    // 阻塞轮询则要磨满 startup_timeout_ms=300ms。150ms 卡在两者中间。
+    assert!(
+        elapsed < std::time::Duration::from_millis(150),
+        "探活耗时 {elapsed:?}；退回阻塞轮询会一直磨到 startup_timeout_ms"
+    );
+}
+
+
+/// 用户主动 stop 之后探活不得把「已停止」误报成「崩溃」。
+#[test]
+fn sidecar_probe_keeps_user_requested_stop_distinct_from_crash() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let supervisor = QdrantSidecarSupervisor::with_runner(
+        QdrantSidecarConfig {
+            binary_path: temp_dir.path().join("qdrant"),
+            host: "127.0.0.1".to_owned(),
+            requested_port: 0,
+            data_dir: temp_dir.path().join("data"),
+            log_dir: temp_dir.path().join("logs"),
+            startup_timeout_ms: 1,
+        },
+        NoopSidecarRunner,
+    );
+
+    supervisor.start().unwrap();
+    supervisor.stop().unwrap();
+
+    assert_eq!(
+        supervisor.status().unwrap().state,
+        SidecarState::Stopped,
+        "stop 之后应保持 Stopped"
+    );
+    // 反复探活也不能把主动停止改写成 Unavailable。
+    supervisor.health_check().unwrap();
+    assert_eq!(supervisor.status().unwrap().state, SidecarState::Stopped);
+}
+
 #[test]
 fn retrieval_recovery_restarts_sidecar_and_rebuilds_indexes() {
     let temp_dir = tempfile::tempdir().unwrap();

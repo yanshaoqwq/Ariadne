@@ -1,4 +1,4 @@
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -257,6 +257,81 @@ where
         Ok(status.clone())
     }
 
+    /// 探活并按结果刷新缓存状态，返回刷新后的状态。
+    ///
+    /// **为什么必须探活**：`status` 字段此前只有 `start`/`stop`/`mark_crashed` 三个写入点，
+    /// 而 `mark_crashed` 在生产中没有调用者。sidecar 被 OOM 或外部 kill 掉后没人改状态，
+    /// 缓存会永远停在 `Running`，诊断页显示健康而所有向量检索静默失败——
+    /// 这比"没有自动恢复"更糟，因为它会骗人。
+    ///
+    /// **判据顺序**：先 `try_wait()` 问内核要进程死活（不阻塞、结论权威），
+    /// 只有进程确实活着才做一次 TCP 连接。反过来先连 TCP 的话，
+    /// 进程已死时要白等一个连接超时才能得出结论。
+    ///
+    /// **只观测不恢复**：本函数不重启。诊断是只读路径，让"看一眼设置页"
+    /// 产生重启后端服务的副作用是危险的；恢复由 `recover_if_unavailable` 显式发起。
+    pub fn probe(&self) -> CoreResult<QdrantSidecarStatus> {
+        // Stopped 是我们自己 stop() 出来的确定状态，没有进程可探，探了反而会把
+        // "用户主动停止" 误报成 "崩溃"。
+        {
+            let status = self.status.lock().map_err(lock_error)?;
+            if status.state == SidecarState::Stopped {
+                return Ok(status.clone());
+            }
+        }
+
+        // 先取 child 再取 status，与 stop()/start() 保持同一顺序，避免锁序反转死锁。
+        let exit_reason = {
+            let mut child_slot = self.child.lock().map_err(lock_error)?;
+            match child_slot.as_mut() {
+                // try_wait 返回 Some 表示进程已退出；同时 reap 掉僵尸进程。
+                Some(child) => match child.try_wait()? {
+                    Some(exit_status) => {
+                        *child_slot = None;
+                        Some(format!("sidecar process exited: {exit_status}"))
+                    }
+                    None => None,
+                },
+                // 状态非 Stopped 却没有 child 句柄：进程不由本 supervisor 持有
+                // （外部 Qdrant），只能靠 TCP 判断。
+                None => None,
+            }
+        };
+
+        if let Some(reason) = exit_reason {
+            return self.mark_crashed(reason);
+        }
+
+        let (host, port) = {
+            let status = self.status.lock().map_err(lock_error)?;
+            (status.host.clone(), status.port)
+        };
+        let Some(port) = port else {
+            // 没有端口说明从未成功启动过，保持既有状态不动。
+            return self.status();
+        };
+
+        // 单次带超时连接，绝不能复用 wait_for_tcp_health——那个是 25ms 一轮的阻塞轮询，
+        // 放进诊断路径会让 sidecar 真死时整个设置页卡满 startup_timeout_ms。
+        if let Err(error) = probe_tcp_once(&host, port, PROBE_CONNECT_TIMEOUT_MS) {
+            let mut status = self.status.lock().map_err(lock_error)?;
+            // 进程还在但端口不通：降级而非不可用——可能只是负载高或正在恢复，
+            // 报成 Unavailable 会诱发不必要的重启。
+            status.state = SidecarState::Degraded;
+            status.reason = Some(error.to_string());
+            return Ok(status.clone());
+        }
+
+        let mut status = self.status.lock().map_err(lock_error)?;
+        // 端口通了就清掉旧的失败原因，否则一次瞬时抖动的 reason 会永久粘在诊断上。
+        // 但端口回退导致的 Degraded 要保留：那个降级原因与连通性无关，探活无权清除。
+        if status.state != SidecarState::Degraded || !is_port_fallback_reason(&status.reason) {
+            status.state = SidecarState::Running;
+            status.reason = None;
+        }
+        Ok(status.clone())
+    }
+
     /// 重启 sidecar。
     pub fn restart(&self) -> CoreResult<QdrantSidecarStatus> {
         self.stop()?;
@@ -264,8 +339,10 @@ where
     }
 
     /// sidecar 不可用或降级时尝试自动重启。
+    ///
+    /// 依赖 `probe()` 刷新过的状态；直接读缓存会在进程被外部杀掉时永远返回 `None`。
     pub fn recover_if_unavailable(&self) -> CoreResult<Option<QdrantSidecarStatus>> {
-        let status = self.status()?;
+        let status = self.probe()?;
         if matches!(
             status.state,
             SidecarState::Unavailable | SidecarState::Degraded | SidecarState::Stopped
@@ -281,8 +358,11 @@ where
     }
 
     /// 将 sidecar 状态转换成通用 StoreHealth。
+    ///
+    /// 先探活再转换：只读缓存字段的话，进程被 OOM 杀掉后这里会一直报 healthy。
+    /// 探活开销是一次 `try_wait()` 加一次带超时的 TCP 连接，不阻塞诊断路径。
     pub fn health_check(&self) -> CoreResult<StoreHealth> {
-        let status = self.status()?;
+        let status = self.probe()?;
         let reason = status
             .reason
             .unwrap_or_else(|| "sidecar stopped".to_owned());
@@ -299,13 +379,56 @@ where
     }
 
     /// running/degraded 都表示已有进程状态，不重复启动。
+    ///
+    /// 这里必须探活而非读缓存：进程被外部杀掉后缓存仍是 `Running`，
+    /// `start()` 会据此判定"已在运行"直接返回，`restart()` 也就永远拉不起新进程。
     fn status_if_running(&self) -> CoreResult<Option<QdrantSidecarStatus>> {
-        let status = self.status()?;
+        let status = self.probe()?;
         Ok(
             matches!(status.state, SidecarState::Running | SidecarState::Degraded)
                 .then_some(status),
         )
     }
+}
+
+/// 探活单次 TCP 连接超时。取值权衡：本地回环连接正常在 1ms 内完成，
+/// 500ms 足以覆盖负载高时的抖动；再长会让诊断页明显卡顿。
+const PROBE_CONNECT_TIMEOUT_MS: u64 = 500;
+
+/// 单次带超时的 TCP 连通性探测。
+///
+/// 与 `wait_for_tcp_health` 的区别是**不重试**：那个是启动时等端口就绪的阻塞轮询，
+/// 用在诊断路径上会把 sidecar 已死的情况变成一次 startup_timeout_ms 的卡顿。
+fn probe_tcp_once(host: &str, port: u16, timeout_ms: u64) -> CoreResult<()> {
+    // connect_timeout 需要已解析的 SocketAddr；host 可能是主机名，先解析再连。
+    let mut addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| CoreError::External {
+            service: "qdrant_sidecar".to_owned(),
+            message: format!("cannot resolve {host}:{port}: {error}"),
+        })?;
+    let address = addresses.next().ok_or_else(|| CoreError::External {
+        service: "qdrant_sidecar".to_owned(),
+        message: format!("no socket address resolved for {host}:{port}"),
+    })?;
+
+    TcpStream::connect_timeout(&address, Duration::from_millis(timeout_ms)).map_err(|error| {
+        CoreError::External {
+            service: "qdrant_sidecar".to_owned(),
+            message: format!("sidecar endpoint {host}:{port} is not reachable: {error}"),
+        }
+    })?;
+    Ok(())
+}
+
+/// 判断 degraded 原因是否来自启动期的端口回退。
+///
+/// 端口回退的降级与运行时连通性无关，探活探通了也不能把它清成 Running——
+/// 否则"请求端口被占用"这个用户需要知道的事实会在第一次诊断后凭空消失。
+fn is_port_fallback_reason(reason: &Option<String>) -> bool {
+    reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("requested port "))
 }
 
 /// 选择可用端口；请求端口不可用时回退到系统分配端口。
