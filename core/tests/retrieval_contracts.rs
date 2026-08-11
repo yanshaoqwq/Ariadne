@@ -1270,7 +1270,10 @@ fn sidecar_health_detects_externally_killed_process_instead_of_reporting_cached_
         StoreStatus::Unavailable,
         "进程已退出时诊断必须报 Unavailable，报 healthy 会让用户看不到检索已失效"
     );
-    assert_eq!(supervisor.status().unwrap().state, SidecarState::Unavailable);
+    assert_eq!(
+        supervisor.status().unwrap().state,
+        SidecarState::Unavailable
+    );
     assert!(
         health
             .reason
@@ -1358,7 +1361,9 @@ fn sidecar_health_detects_kill_after_healthy_start_when_cache_says_running() {
     );
 
     // 模拟 OOM killer：直接杀掉子进程，supervisor 不经手，缓存仍是 Running。
-    let pid = started.process_id.expect("running sidecar must expose a pid");
+    let pid = started
+        .process_id
+        .expect("running sidecar must expose a pid");
     Command::new("kill")
         .arg("-9")
         .arg(pid.to_string())
@@ -1373,7 +1378,6 @@ fn sidecar_health_detects_kill_after_healthy_start_when_cache_says_running() {
         "被杀掉后必须报 Unavailable；报 healthy 正是那条骗人的缺陷"
     );
 }
-
 
 /// 探活开销必须留在用户无感范围内。
 ///
@@ -1596,7 +1600,6 @@ fn sidecar_probe_returns_fast_when_process_lives_but_port_is_unreachable() {
         "探活耗时 {elapsed:?}；退回阻塞轮询会一直磨到 startup_timeout_ms"
     );
 }
-
 
 /// 用户主动 stop 之后探活不得把「已停止」误报成「崩溃」。
 #[test]

@@ -17,17 +17,17 @@ use ariadne::documents::{
 };
 use ariadne::frontend::{
     apply_node_detail_patch, apply_quick_edit_patch, build_works_tree, export_chapters_combined,
-    export_chapters_markdown, export_workflow_selection, extract_project_reference_tokens,
-    import_chapter_document, initialize_project, initialize_project_with_app_state,
-    install_workflow_template_manifest, node_has_breakpoint, now_timestamp_ms,
-    pack_workflow_selection, project_ai_context_window, project_document_permission,
-    quick_edit_to_patch, set_node_breakpoint, upsert_canvas_annotation, ArtifactReferenceEntry,
-    CanvasAnnotation, ChapterExportFormat, ChapterImportRequest, ConfirmationLogEntry,
-    ConfirmationLogState, ConfirmationLogStore, FileConfirmationLogStore, NodeDetailPatch,
-    ProjectAiAppendOutcome, ProjectAiChatMessage, ProjectAiChatRole, ProjectAiConversationStore,
-    ProjectMemoryStore, ProjectReferenceKind, ProjectReferenceResolver, ProjectRegistryStore,
-    QuickEditService, TemplateRepositoryClient, UiPreferences, UiPreferencesStore, UiRunLogEntry,
-    UiRunLogFilter, UiRunLogKind, UiRunLogLevel, UiRunLogStore, OFFICIAL_TEMPLATE_REPOSITORY_URL,
+    export_workflow_selection, extract_project_reference_tokens, import_chapter_document,
+    initialize_project, initialize_project_with_app_state, install_workflow_template_manifest,
+    now_timestamp_ms, pack_workflow_selection, project_ai_context_window,
+    project_document_permission, quick_edit_to_patch, set_node_breakpoint,
+    upsert_canvas_annotation, ArtifactReferenceEntry, CanvasAnnotation, ChapterExportFormat,
+    ChapterImportRequest, ConfirmationLogEntry, ConfirmationLogState, ConfirmationLogStore,
+    FileConfirmationLogStore, NodeDetailPatch, ProjectAiAppendOutcome, ProjectAiChatMessage,
+    ProjectAiChatRole, ProjectAiConversationStore, ProjectMemoryStore, ProjectReferenceKind,
+    ProjectReferenceResolver, ProjectRegistryStore, QuickEditService, TemplateRepositoryClient,
+    UiPreferences, UiPreferencesStore, UiRunLogEntry, UiRunLogFilter, UiRunLogKind, UiRunLogLevel,
+    UiRunLogStore, OFFICIAL_TEMPLATE_REPOSITORY_URL,
 };
 use ariadne::llm::{LlmService, LlmServiceConfig};
 use ariadne::providers::{
@@ -249,7 +249,12 @@ fn workflow_breakpoint_helper_updates_node_config() {
 
     set_node_breakpoint(&mut workflow, "a", true).unwrap();
 
-    assert!(node_has_breakpoint(&workflow.nodes[0]));
+    // 直接断言写进 config 的形状，与 `workflow/runtime.rs` 真正执行断点时的读法一致。
+    // 不经封装函数：那层封装已随 U116 删除（生产从不调它，只有此处测试用）。
+    assert_eq!(
+        workflow.nodes[0].config.get("breakpoint"),
+        Some(&Value::Bool(true))
+    );
 }
 
 #[test]
@@ -320,9 +325,9 @@ fn official_template_repository_is_versioned_offline_and_installable() {
     assert_eq!(manifest["minimum_ariadne_version"], "0.1.0");
 
     let temp = tempfile::tempdir().unwrap();
-    let report = client
-        .download_to_workflows("official-novel-starter", temp.path())
-        .unwrap();
+    // 按生产安装路径的两步组合（`commands.rs` 的模板安装同样是 download + install）。
+    // 不用已删的 `download_to_workflows` 封装：它绕过项目身份校验与互斥守卫。
+    let report = install_workflow_template_manifest(manifest.clone(), temp.path(), false).unwrap();
     let loaded = WorkflowTemplateLoader::new()
         .with_project_root(temp.path())
         .get("official-novel-starter", "1.0.0")
@@ -717,7 +722,13 @@ fn project_registry_relocates_and_forgets_entries_without_copying_stale_paths() 
         .unwrap();
     assert_eq!(relocated[0].path, new_root);
     assert!(relocated.iter().all(|entry| entry.path != old_root));
-    assert_eq!(relocated.iter().filter(|entry| entry.name == "Novel").count(), 1);
+    assert_eq!(
+        relocated
+            .iter()
+            .filter(|entry| entry.name == "Novel")
+            .count(),
+        1
+    );
 
     let remaining = registry.forget(&new_root).unwrap();
     assert_eq!(remaining.len(), 1);
@@ -957,7 +968,7 @@ fn run_log_store_generates_toasts_filters_logs_and_badges() {
     assert_eq!(badges.run_logs, 1);
     assert_eq!(badges.confirmations, 1);
     assert_eq!(badges.diagnostics, 1);
-    store.mark_all_read().unwrap();
+    store.mark_read(UiRunLogFilter::default()).unwrap();
     assert_eq!(
         store
             .badge_counts(Some(&confirmations), None)
@@ -1017,7 +1028,7 @@ fn ui_log_stores_migrate_legacy_json_once_and_use_sqlite_indexes() {
     // 再次打开只读取迁移后的 SQLite，不重复导入旧 JSON。
     assert_eq!(confirmations.read_all().unwrap().len(), 1);
     assert_eq!(logs.read_all().unwrap().len(), 1);
-    logs.mark_all_read().unwrap();
+    logs.mark_read(UiRunLogFilter::default()).unwrap();
     assert!(!logs.read_all().unwrap()[0].unread);
 }
 
@@ -1190,11 +1201,13 @@ fn works_service_builds_tree_imports_chapters_and_exports_selected_markdown() {
     let index = ChapterDocumentIndex::new("v1", vec![import.entry.clone()]).unwrap();
     let chapter_stage = BTreeMap::from([("stage1:chapter1".to_owned(), "stage1".to_owned())]);
     let tree = build_works_tree(&index, &chapter_stage, temp.path().join("planning")).unwrap();
-    let export = export_chapters_markdown(
+    // 显式传 format，与生产（`commands.rs` 取 `format.unwrap_or_default()`）同一入口。
+    let export = export_chapters_combined(
         &service,
         &index,
         &["stage1:chapter1".to_owned()],
         "exports/book.md",
+        ChapterExportFormat::Markdown,
     )
     .unwrap();
 

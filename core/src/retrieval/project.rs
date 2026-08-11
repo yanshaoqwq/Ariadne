@@ -20,6 +20,7 @@ use crate::providers::{
     ProviderHealth, RerankRequest, RerankerProvider,
 };
 use crate::retrieval::reranker::apply_rerank_results;
+use crate::retrieval::sidecar::{default_max_restarts_per_window, default_restart_window_ms};
 use crate::retrieval::{
     ensure_search_not_blocked_by_pending_index,
     filter_fresh_retrieval_results_with_knowledge_revision, resolve_qdrant_binary_path,
@@ -29,7 +30,6 @@ use crate::retrieval::{
     RetrievalResult, SidecarState, SqliteFullTextStore, StoreHealth, TantivyFullTextStore,
     TextEmbedder, ThreeWayHybridSearchEngine, VectorStore, MAX_HYBRID_SEARCH_LIMIT,
 };
-use crate::retrieval::sidecar::{default_max_restarts_per_window, default_restart_window_ms};
 
 struct ProjectReranker {
     provider: Arc<dyn RerankerProvider>,
@@ -921,8 +921,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         // ExternalQdrant 后端没有本地进程可管，恢复应静默跳过而非报错。
-        let runtime =
-            runtime_with_sidecar(&root, Some(Arc::new(MemoryVectorStore::new())), None);
+        let runtime = runtime_with_sidecar(&root, Some(Arc::new(MemoryVectorStore::new())), None);
 
         assert!(!runtime.recover_sidecar_before_vector_search());
     }

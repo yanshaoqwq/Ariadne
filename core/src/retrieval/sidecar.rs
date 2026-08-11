@@ -432,8 +432,8 @@ where
     fn allow_auto_restart(&self) -> CoreResult<bool> {
         let mut window = self.restart_window.lock().map_err(lock_error)?;
         let window_ms = self.config.restart_window_ms;
-        let deadline = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_millis(window_ms));
+        let deadline =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_millis(window_ms));
         if let Some(deadline) = deadline {
             window.retain(|at| *at > deadline);
         } else {

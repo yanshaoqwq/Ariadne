@@ -928,10 +928,9 @@ impl UiRunLogStore {
         Ok(entries)
     }
 
-    /// 标记全部日志已读。
-    pub fn mark_all_read(&self) -> CoreResult<()> {
-        self.mark_read(UiRunLogFilter::default()).map(|_| ())
-    }
+    // U116：曾有 `mark_all_read()` = `mark_read(UiRunLogFilter::default())`，已删。
+    // 生产（`commands.rs` 的 mark_run_logs_read）把用户筛选逐字段映射进 `mark_read`，
+    // 全默认筛选只是它的一个特例，被完全覆盖。
 
     /// 仅把与当前筛选匹配的日志标为已读，并返回实际更新条数。
     pub fn mark_read(&self, filter: UiRunLogFilter) -> CoreResult<usize> {
@@ -1547,21 +1546,9 @@ pub fn export_chapters_combined(
     })
 }
 
-/// 合并导出选中章节正文为 Markdown artifact。
-pub fn export_chapters_markdown(
-    documents: &FileDocumentService,
-    index: &ChapterDocumentIndex,
-    selected_chapter_ids: &[String],
-    artifact_id: &str,
-) -> CoreResult<CombinedExportReport> {
-    export_chapters_combined(
-        documents,
-        index,
-        selected_chapter_ids,
-        artifact_id,
-        ChapterExportFormat::Markdown,
-    )
-}
+// U116：曾有 `export_chapters_markdown(...)` 固定传 `ChapterExportFormat::Markdown`，已删。
+// 生产（`commands.rs` 的章节导出）直接调 `export_chapters_combined` 并从用户请求取
+// `format.unwrap_or_default()`，Markdown 只是其中一个取值。
 
 pub(crate) fn render_chapters_markdown(chapters: &[(String, String)]) -> String {
     let mut combined = String::new();
@@ -2318,13 +2305,11 @@ pub fn set_node_breakpoint(
     Ok(())
 }
 
-/// 判断节点是否配置断点。
-pub fn node_has_breakpoint(node: &NodeInstance) -> bool {
-    node.config
-        .get("breakpoint")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
+// U116：曾有 `node_has_breakpoint(node)` 读 `config["breakpoint"]`，已删。
+// 它与 `workflow/runtime.rs` 里真正执行断点的判定**逐字重复**，而生产只走后者。
+// 不能反过来让 runtime 复用本函数：workflow 在依赖序上位于 frontend 之下，
+// 让运行时依赖服务层是方向倒置。删重复品、留执行者，避免两边将来漂移
+// （例如断点语义改成三态时只改了一边）。
 
 /// 导出框选节点及其内部连线，边界连线映射为入口/出口描述。
 pub fn export_workflow_selection(
@@ -2649,15 +2634,10 @@ impl TemplateRepositoryClient {
         )
     }
 
-    /// 下载并写入本地 workflows 目录，写入前校验 WorkflowManifest。
-    pub fn download_to_workflows(
-        &self,
-        id: &str,
-        workflows_root: impl AsRef<Path>,
-    ) -> CoreResult<TemplateInstallReport> {
-        let manifest_value = self.download(id)?;
-        install_workflow_template_manifest(manifest_value, workflows_root, false)
-    }
+    // U116：曾有 `download_to_workflows(id, root)` = `download` + `install_..._manifest`，已删。
+    // **它是危险的捷径而非便利封装**：生产安装路径（`commands.rs` 的模板安装）在两步之间
+    // 还要过项目身份校验、项目互斥守卫、provider 引用图守卫。这个封装把三道闸门全绕过，
+    // 接线会让模板安装绕开并发保护，因此删除而不是复用。
 
     fn send_json<T>(&self, request: reqwest::blocking::RequestBuilder) -> CoreResult<T>
     where
