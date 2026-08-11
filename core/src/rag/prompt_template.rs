@@ -1,76 +1,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::contracts::{CoreError, CoreResult};
 use crate::rag::models::{WritingAgentKind, WritingContextBundle, WritingContextSection};
 use crate::rag::resources::PromptResources;
-use crate::skills::{PromptRenderTrace, PromptTemplateManifest};
+use crate::skills::PromptTemplateManifest;
 
 /// 模板内联最大递归深度，防止 PromptTemplate 相互引用造成无限展开。
 const MAX_TEMPLATE_RENDER_DEPTH: usize = 8;
 
-/// 节点提示词模板的单次备份记录；正文来自用户编辑前的模板快照。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromptTemplateBackup {
-    pub revision: u64,
-    pub template: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// GUI 节点配置中的“提示词”项，保存当前模板和用户编辑历史备份。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NodePromptConfig {
-    pub prompt_key: String,
-    pub default_template_key: String,
-    pub template: String,
-    #[serde(default)]
-    pub backups: Vec<PromptTemplateBackup>,
-}
-
-impl NodePromptConfig {
-    /// 从内置资源创建某个 agent 的默认节点提示词配置。
-    pub fn default_for_agent(
-        agent: WritingAgentKind,
-        prompts: &PromptResources,
-    ) -> CoreResult<Self> {
-        let template = prompt_text(prompts, agent.default_template_key())?;
-        Ok(Self {
-            prompt_key: agent.prompt_key().to_owned(),
-            default_template_key: agent.default_template_key().to_owned(),
-            template,
-            backups: Vec::new(),
-        })
-    }
-
-    /// 备份当前模板后再替换，供 GUI 保存用户编辑时调用。
-    pub fn replace_template(
-        &mut self,
-        next_template: impl Into<String>,
-        reason: Option<String>,
-    ) -> CoreResult<()> {
-        let next_template = next_template.into();
-        if next_template.trim().is_empty() {
-            return Err(CoreError::validation(
-                "node prompt template cannot be empty",
-            ));
-        }
-        let revision = self
-            .backups
-            .last()
-            .map(|backup| backup.revision + 1)
-            .unwrap_or(1);
-        self.backups.push(PromptTemplateBackup {
-            revision,
-            template: self.template.clone(),
-            reason,
-        });
-        self.template = next_template;
-        Ok(())
-    }
-}
+// U116：曾有 `PromptTemplateBackup` / `NodePromptConfig`（含 `default_for_agent`
+// 与 `replace_template`）这一整簇「节点提示词配置 + 编辑历史备份」模型，已删。
+// 生产从不构造 `NodePromptConfig`：默认提示词由前端 `PromptCatalog.ResolveNodePrompt`
+// 解析，用户编辑走 Avalonia 双向绑定直接改字符串，随节点 config 的 `prompt_template`
+// 键保存；Rust 侧只消费那个裸字符串（见 `workflow/integration.rs` 调
+// `render_prompt_template`）。备份历史这个功能在生产不存在，也没有对应 IPC 命令。
+// 连带删除只服务于该类型的 `render_node_prompt` 与 `render_node_prompt_with_trace`。
 
 /// 模板渲染上下文；输入来自节点上下文包和上游数据边 alias。
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -156,45 +102,12 @@ impl PromptTemplateContext {
     }
 }
 
-/// 渲染节点提示词模板，支持 `{{节点提示词}}` 和命名空间形式。
-pub fn render_node_prompt(
-    config: &NodePromptConfig,
-    context: &PromptTemplateContext,
-) -> CoreResult<String> {
-    if config.template.trim().is_empty() {
-        return Err(CoreError::validation(
-            "node prompt template cannot be empty",
-        ));
-    }
-    render_prompt_template(&config.template, context)
-}
-
 /// 渲染任意提示词模板；未知变量会报错，避免静默替换为空字符串。
 pub fn render_prompt_template(
     template: &str,
     context: &PromptTemplateContext,
 ) -> CoreResult<String> {
     render_prompt_template_at_depth(template, context, 0)
-}
-
-/// 渲染模板并返回不含完整 prompt 正文的 trace。
-pub fn render_node_prompt_with_trace(
-    config: &NodePromptConfig,
-    context: &PromptTemplateContext,
-) -> CoreResult<(String, PromptRenderTrace)> {
-    let rendered = render_node_prompt(config, context)?;
-    let dependencies = context
-        .templates
-        .values()
-        .map(crate::skills::PromptTemplateReference::from_manifest)
-        .collect::<CoreResult<Vec<_>>>()?;
-    let trace = PromptRenderTrace::new(
-        &config.template,
-        &rendered,
-        dependencies,
-        context.input_sources.clone(),
-    )?;
-    Ok((rendered, trace))
 }
 
 /// 带递归深度的模板渲染实现。

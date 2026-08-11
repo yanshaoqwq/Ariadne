@@ -16,9 +16,7 @@ use ariadne::costs::SqliteCostLedger;
 use ariadne::providers::{
     LlmMessage, LlmProvider, LlmRequest, LlmResponse, Provider, ProviderCallContext,
 };
-use ariadne::rag::{
-    render_node_prompt_with_trace, render_prompt_template, NodePromptConfig, PromptTemplateContext,
-};
+use ariadne::rag::{render_prompt_template, PromptTemplateContext};
 use ariadne::skills::{
     sanitize_skill_log, ExecutorAdapterExecutionPlan, HttpSkillBackend, HttpSkillConfig,
     LlmSkillConfig, NativeHttpSkillBackend, NativeWasmSkillBackend, PromptTemplateLoader,
@@ -555,8 +553,12 @@ fn prompt_template_namespace_renders_inline_templates_with_parameters() {
 }
 
 /// 验证 prompt trace 只保存 hash、依赖和输入来源，不保存展开后的完整 prompt。
+/// U116：原用例名为 `prompt_render_trace_does_not_store_expanded_prompt`，
+/// 验证 `PromptRenderTrace` 不落展开后的 prompt。该类型已随 `NodePromptConfig`
+/// 一簇删除（prompt 审计在生产从未存在：`prompt_trace_hash` 无一处赋非 None 值）。
+/// 保留其中仍然有效的部分：带参模板内联能按生产口径渲染。
 #[test]
-fn prompt_render_trace_does_not_store_expanded_prompt() {
+fn prompt_template_inlines_parameterized_dependency() {
     let manifest = prompt_template_manifest("1.0.0", "{{param.风格}}地写：{{input.主题}}");
     let mut context = PromptTemplateContext::default()
         .with_prompt_template(manifest)
@@ -565,19 +567,11 @@ fn prompt_render_trace_does_not_store_expanded_prompt() {
     context
         .inputs
         .insert("主题".to_owned(), "雨夜重逢".to_owned());
-    let config = NodePromptConfig {
-        prompt_key: "agent_prompt.writer".to_owned(),
-        default_template_key: "node_template.writer.default".to_owned(),
-        template: "{{template.文风约束(风格=\"克制\")}}".to_owned(),
-        backups: Vec::new(),
-    };
 
-    let (rendered, trace) = render_node_prompt_with_trace(&config, &context).unwrap();
-    let trace_json = serde_json::to_string(&trace).unwrap();
+    let rendered =
+        render_prompt_template("{{template.文风约束(风格=\"克制\")}}", &context).unwrap();
 
     assert_eq!(rendered, "克制地写：雨夜重逢");
-    assert!(trace_json.contains("final_prompt_hash"));
-    assert!(!trace_json.contains("雨夜重逢"));
 }
 
 /// 验证 Workflow 模板可加载并导入为普通 WorkflowDefinition。

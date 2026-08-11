@@ -8,29 +8,26 @@ use ariadne::providers::{
 };
 use ariadne::rag::{
     insert_lines_to_patch, load_display_name_resources, load_prompt_resources,
-    midpoint_segment_number, render_node_prompt, render_prompt_template, replace_lines_to_patch,
+    midpoint_segment_number, render_prompt_template, replace_lines_to_patch,
     search_response_to_writing_response, tool_definitions_for_agent, CharacterTraitContent,
     ConfirmationItem, ConfirmationKind, ConfirmationState, ForeshadowingContent,
     ForeshadowingRecord, ForeshadowingStatus, ForeshadowingUpdate, MemoryWritingKnowledgeBase,
-    NodePromptConfig, PatchSession, PromptTemplateContext, RealizedChangeLink, RegisterContent,
-    RegisterFunction, RegisterOperation, RegisteredChange, RegisteredChangeStatus,
-    SqliteWritingKnowledgeStore, StoryEvent, StoryEventStatus, StorySegment, SummaryPipelineDraft,
-    SummaryPipelineExecutor, SummaryPipelineStep, WriterDocumentContext, WriterInsertLines,
-    WriterReplaceLines, WritingAgentKind, WritingConfirmationPolicy, WritingContextAssembler,
-    WritingContextRequest, WritingDocumentScope, WritingNodeDefinition, WritingToolExecutor,
-    TOOL_CRITIC_FIND, TOOL_CRITIC_SEARCH, TOOL_CRITIC_WEB_SEARCH, TOOL_DESIGNER_FIND,
-    TOOL_DESIGNER_INSERT_LINES, TOOL_DESIGNER_REGISTER, TOOL_DESIGNER_REPLACE_LINES,
-    TOOL_DESIGNER_REWRITE_FILE,
+    PatchSession, PromptTemplateContext, RealizedChangeLink, RegisterContent, RegisterFunction,
+    RegisterOperation, RegisteredChange, RegisteredChangeStatus, SqliteWritingKnowledgeStore,
+    StoryEvent, StoryEventStatus, StorySegment, SummaryPipelineDraft, SummaryPipelineExecutor,
+    SummaryPipelineStep, WriterDocumentContext, WriterInsertLines, WriterReplaceLines,
+    WritingAgentKind, WritingConfirmationPolicy, WritingContextAssembler, WritingContextRequest,
+    WritingDocumentScope, WritingNodeDefinition, WritingToolExecutor, TOOL_CRITIC_FIND,
+    TOOL_CRITIC_SEARCH, TOOL_CRITIC_WEB_SEARCH, TOOL_DESIGNER_FIND, TOOL_DESIGNER_INSERT_LINES,
+    TOOL_DESIGNER_REGISTER, TOOL_DESIGNER_REPLACE_LINES, TOOL_DESIGNER_REWRITE_FILE,
     TOOL_DESIGNER_SEARCH, TOOL_DESIGNER_WEB_SEARCH, TOOL_DETAIL_FIND, TOOL_DETAIL_SEARCH,
     TOOL_DETAIL_WEB_SEARCH, TOOL_OUTLINER_FIND, TOOL_OUTLINER_INSERT_LINES, TOOL_OUTLINER_REGISTER,
     TOOL_OUTLINER_REPLACE_LINES, TOOL_OUTLINER_REWRITE_FILE, TOOL_OUTLINER_SEARCH,
-    TOOL_OUTLINER_WEB_SEARCH, TOOL_PLANNER_FIND,
-    TOOL_PLANNER_INSERT_LINES, TOOL_PLANNER_REGISTER, TOOL_PLANNER_REPLACE_LINES,
-    TOOL_PLANNER_REWRITE_FILE,
-    TOOL_PLANNER_SEARCH, TOOL_PLANNER_WEB_SEARCH, TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH,
-    TOOL_PRUDENT_WEB_SEARCH, TOOL_SUMMARIZER_SEARCH, TOOL_SUMMARIZER_WEB_SEARCH, TOOL_WRITER_FIND,
-    TOOL_WRITER_INSERT_LINES, TOOL_WRITER_REPLACE_LINES, TOOL_WRITER_REWRITE_FILE,
-    TOOL_WRITER_SEARCH,
+    TOOL_OUTLINER_WEB_SEARCH, TOOL_PLANNER_FIND, TOOL_PLANNER_INSERT_LINES, TOOL_PLANNER_REGISTER,
+    TOOL_PLANNER_REPLACE_LINES, TOOL_PLANNER_REWRITE_FILE, TOOL_PLANNER_SEARCH,
+    TOOL_PLANNER_WEB_SEARCH, TOOL_PRUDENT_FIND, TOOL_PRUDENT_SEARCH, TOOL_PRUDENT_WEB_SEARCH,
+    TOOL_SUMMARIZER_SEARCH, TOOL_SUMMARIZER_WEB_SEARCH, TOOL_WRITER_FIND, TOOL_WRITER_INSERT_LINES,
+    TOOL_WRITER_REPLACE_LINES, TOOL_WRITER_REWRITE_FILE, TOOL_WRITER_SEARCH,
     TOOL_WRITER_WEB_SEARCH,
 };
 use serde_json::{json, Value};
@@ -450,27 +447,30 @@ fn node_prompt_template_renders_inline_context_and_alias_inputs() {
             metadata: Value::Null,
         })
         .unwrap();
-    let mut config =
-        NodePromptConfig::default_for_agent(WritingAgentKind::Writer, &prompts).unwrap();
+    // 按生产口径取模板并渲染：前端把默认模板解析成节点 config 里的裸字符串，
+    // Rust 侧只调 render_prompt_template（见 workflow/integration.rs）。
+    // 不再走已删的 NodePromptConfig——那套「配置 + 编辑备份」模型生产从不构造。
+    let writer_template = prompts
+        .get(WritingAgentKind::Writer.default_template_key())
+        .map(|resource| resource.prompt.clone())
+        .unwrap();
     let context =
         PromptTemplateContext::from_bundle(WritingAgentKind::Writer, &prompts, &bundle).unwrap();
-    let rendered = render_node_prompt(&config, &context).unwrap();
+    let rendered = render_prompt_template(&writer_template, &context).unwrap();
 
     assert!(rendered.contains("正式写作"));
     assert!(rendered.contains("上一章原文"));
     assert!(rendered.contains("本章大纲"));
     assert!(rendered.contains("返修上下文"));
 
-    config
-        .replace_template(
-            "{{prompt.节点提示词}}\n{{input.上游补充}}\n{{system.当前章节号}}",
-            Some("用户编辑".to_owned()),
-        )
-        .unwrap();
-    let rendered = render_node_prompt(&config, &context).unwrap();
-    assert!(rendered.contains("来自上游节点的内容"));
-    assert!(rendered.contains("chapter-1"));
-    assert_eq!(config.backups.len(), 1);
+    // 用户改过的模板同样只是一个字符串，走同一个渲染入口。
+    let edited = render_prompt_template(
+        "{{prompt.节点提示词}}\n{{input.上游补充}}\n{{system.当前章节号}}",
+        &context,
+    )
+    .unwrap();
+    assert!(edited.contains("来自上游节点的内容"));
+    assert!(edited.contains("chapter-1"));
 }
 
 /// 验证缺失变量会返回可诊断错误，不会静默替换为空字符串。

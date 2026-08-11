@@ -438,33 +438,13 @@ pub struct PromptTemplateUpdateStatus {
     pub update_kind: PromptTemplateUpdateKind,
 }
 
-/// 单次 prompt 渲染 trace，只保存 hash 和来源映射，不保存展开后的完整 prompt。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PromptRenderTrace {
-    pub original_template_hash: String,
-    #[serde(default)]
-    pub template_dependencies: Vec<PromptTemplateReference>,
-    #[serde(default)]
-    pub input_sources: BTreeMap<String, String>,
-    pub final_prompt_hash: String,
-}
-
-impl PromptRenderTrace {
-    /// 从原始模板、最终 prompt 和依赖信息创建最小可审计 trace。
-    pub fn new(
-        original_template: &str,
-        final_prompt: &str,
-        template_dependencies: Vec<PromptTemplateReference>,
-        input_sources: BTreeMap<String, String>,
-    ) -> CoreResult<Self> {
-        Ok(Self {
-            original_template_hash: stable_text_hash(original_template),
-            template_dependencies,
-            input_sources,
-            final_prompt_hash: stable_text_hash(final_prompt),
-        })
-    }
-}
+// U116：曾有 `PromptRenderTrace`（prompt 渲染可审计 trace），已删。
+// 它的唯一构造点是 `rag::prompt_template::render_node_prompt_with_trace`，
+// 而那条链随 `NodePromptConfig` 一起在生产零调用——prompt 审计能力在生产
+// **从未存在过**（`WorkflowNodeRuntimeState::prompt_trace_hash` 全仓库没有一处
+// 赋非 None 值，只有搬运）。将来真要做 prompt 审计，那个字段是现成的落点，
+// 但不要照抄本类型：它的 `input_sources` 依赖 `PromptTemplateContext::with_input_source`，
+// 后者同样零生产调用，即使接线也会是空表。
 
 /// Workflow 模板 manifest；导入时复制展开为普通工作流定义。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
