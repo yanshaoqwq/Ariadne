@@ -542,7 +542,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<ChapterImportReport>("import_chapter", new { request }, cancellationToken);
     }
 
-    public Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string artifactId, string format = "markdown", CancellationToken cancellationToken = default)
+    public Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string? artifactId = null, string format = "markdown", CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<CombinedExportReport>("export_chapters", new
         {

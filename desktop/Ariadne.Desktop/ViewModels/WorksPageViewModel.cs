@@ -1994,7 +1994,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     {
         try
         {
-            var report = await _backend.ExportChaptersAsync(Array.Empty<string>(), $"combined-{ExportFormat}", ExportFormat).ConfigureAwait(true);
+            // U134：artifactId 传 null，交由后端命名。前端曾传 $"combined-{ExportFormat}"，
+            // 缺 exports/ 前缀导致导出目录设置完全不生效、缺扩展名导致双击打不开、
+            // 固定字符串导致第二次导出静默覆盖第一次。
+            var report = await _backend.ExportChaptersAsync(Array.Empty<string>(), null, ExportFormat).ConfigureAwait(true);
             var path = string.IsNullOrWhiteSpace(report.StorageUri) ? report.ArtifactId : report.StorageUri;
             StatusText = _displayNames.Format("ui.works.export_done", new Dictionary<string, string>
             {

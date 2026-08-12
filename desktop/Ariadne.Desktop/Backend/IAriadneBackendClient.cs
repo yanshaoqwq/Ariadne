@@ -190,7 +190,15 @@ public interface IAriadneBackendClient
 
     Task<ChapterImportReport> ImportChapterAsync(ChapterImportRequest request, CancellationToken cancellationToken = default);
 
-    Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string artifactId, string format = "markdown", CancellationToken cancellationToken = default);
+    /// <summary>
+    /// 合并导出章节。
+    ///
+    /// U134：<paramref name="artifactId"/> 传 null 时由**后端**命名
+    /// （导出目录 + 作品名 + 本地时间戳 + 真实扩展名）。前端不再自己拼——
+    /// 命名依赖后端的路径重定向与写入语义（只认 exports/ 前缀、无回执即直写覆盖），
+    /// 前端无从知晓，拼错的表现是文件静默落到 .runtime/artifacts 且互相覆盖。
+    /// </summary>
+    Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string? artifactId = null, string format = "markdown", CancellationToken cancellationToken = default);
 
     Task<DocumentWriteReport> SaveDocumentContentAsync(string documentId, string content, string? baseVersion = null, CancellationToken cancellationToken = default);
 

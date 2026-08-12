@@ -440,37 +440,13 @@ fn start_of_utc_day_ms(now_ms: u64) -> u64 {
 fn start_of_utc_month_ms(now_ms: u64) -> u64 {
     const MS_PER_DAY: i64 = 86_400_000;
     let days = (now_ms / MS_PER_DAY as u64) as i64;
-    let (year, month, _day) = civil_from_days(days);
-    let month_start_days = days_from_civil(year, month, 1);
+    let (year, month, _day) = crate::contracts::civil_from_days(days);
+    let month_start_days = crate::contracts::days_from_civil(year, month, 1);
     (month_start_days * MS_PER_DAY) as u64
 }
 
-/// days（自 1970-01-01 起的天数）转成 (year, month, day)（UTC）。
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    // 以 0000-03-01 为纪元的 Hinnant 算法。
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    (if month <= 2 { year + 1 } else { year }, month, day)
-}
-
-/// (year, month, day)（UTC）转成自 1970-01-01 起的天数。
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400; // [0, 399]
-    let m = month as i64;
-    let d = day as i64;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    era * 146_097 + doe - 719_468
-}
+// 民用历算法已上移到 `contracts::clock`（`civil_from_days` / `days_from_civil`），
+// 导出文件名的时间戳也要用它，重复两份必然漂移。
 
 /// 累加 token 用量。
 fn accumulate_usage(total: &mut TokenUsage, usage: Option<TokenUsage>) {

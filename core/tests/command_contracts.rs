@@ -4959,13 +4959,68 @@ fn configured_project_layout_drives_documents_workflows_exports_skills_and_git()
     let exported = export_chapters(
         &state,
         vec!["chapter-1".to_owned()],
-        "exports/book.md".to_owned(),
+        Some("exports/book.md".to_owned()),
         None,
     )
     .unwrap();
     assert!(project.path().join("output/exports/book.md").is_file());
     assert!(exported.storage_uri.contains("output/exports/book.md"));
     assert!(!project.path().join("exports/book.md").exists());
+
+    // U134：不传 artifact_id 时后端自己命名，必须仍落在配置的导出目录、
+    // 带真实扩展名、且两次导出不互相覆盖。
+    // 缺陷版本（前端传 "combined-md"）三条全违反：落 .runtime/artifacts、
+    // 无扩展名、固定 id 静默覆盖。
+    let auto_first = export_chapters(&state, vec!["chapter-1".to_owned()], None, None).unwrap();
+    assert!(
+        auto_first.artifact_id.starts_with("exports/"),
+        "缺 exports/ 前缀会让导出根重定向失效：{}",
+        auto_first.artifact_id
+    );
+    assert!(
+        auto_first.artifact_id.ends_with(".md"),
+        "无扩展名的导出物双击打不开：{}",
+        auto_first.artifact_id
+    );
+    assert!(
+        auto_first.storage_uri.contains("output/exports/"),
+        "自动命名必须落在用户配置的导出目录：{}",
+        auto_first.storage_uri
+    );
+    let auto_path = project
+        .path()
+        .join("output")
+        .join("exports")
+        .join(auto_first.artifact_id.trim_start_matches("exports/"));
+    assert!(auto_path.is_file(), "自动命名的导出文件未落盘：{auto_path:?}");
+
+    let auto_epub = export_chapters(
+        &state,
+        vec!["chapter-1".to_owned()],
+        None,
+        Some(ariadne::frontend::ChapterExportFormat::Epub),
+    )
+    .unwrap();
+    assert!(auto_epub.artifact_id.ends_with(".epub"));
+    assert_ne!(
+        auto_first.artifact_id, auto_epub.artifact_id,
+        "不同格式必须导出成不同文件，否则后一次覆盖前一次"
+    );
+
+    // 同格式连续导出也不能互相覆盖。这一条比「不同格式」严格得多：
+    // 扩展名不同本来就会产生不同文件名，只有同格式才真正考验唯一性。
+    // 秒级时间戳挡不住连点两次导出——所以实现里还叠了进程内自增序号。
+    let auto_second = export_chapters(&state, vec!["chapter-1".to_owned()], None, None).unwrap();
+    assert_ne!(
+        auto_first.artifact_id, auto_second.artifact_id,
+        "同格式连续导出产生了相同文件名，第二次会静默覆盖第一次"
+    );
+    let second_path = project
+        .path()
+        .join("output")
+        .join("exports")
+        .join(auto_second.artifact_id.trim_start_matches("exports/"));
+    assert!(auto_path.is_file() && second_path.is_file(), "两次导出应各自成文件");
 
     let skill_dir = project.path().join("extensions/skills/layout-skill");
     std::fs::create_dir_all(&skill_dir).unwrap();

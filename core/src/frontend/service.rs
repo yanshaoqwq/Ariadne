@@ -1484,6 +1484,70 @@ pub fn import_chapter_document(
 }
 
 /// 合并导出选中章节正文为指定格式 artifact。
+/// 生成导出物的 artifact id。
+///
+/// U134：修的是三重缺陷。前端原本传 `combined-{format}`，于是：
+/// 1. 不带 `exports/` 前缀 ⇒ `artifact_path` 不做导出根重定向，文件落进
+///    `.runtime/artifacts`，**用户在设置里配的导出目录完全不生效**（而成功弹窗
+///    还写着「导出目录可在设置 → 通用中修改」，属明确的错误引导）；
+/// 2. 没有扩展名 ⇒ `combined-epub` 双击打不开，`extension()` 只写进 metadata；
+/// 3. 是固定字符串 ⇒ **第二次导出静默覆盖第一次**（`operation_id: None` 走无回执
+///    分支，直接 `atomic_write`）。
+///
+/// 所以 id 必须同时满足：带 `exports/` 前缀、带真实扩展名、每次导出唯一。
+/// 时间戳用本地时区且不含 `:`（Windows 禁止）与空格（省得命令行处理要引号）。
+///
+/// **秒级时间戳不足以保证唯一**：用户连点两次导出、或脚本连续调用都会落在同一秒，
+/// 那就退回「静默覆盖」。因此追加一个进程内自增序号，同一秒内也各自成文件。
+///
+/// 文件名基底取项目名，空白或含路径分隔符时回落到 `export`——artifact id 会被
+/// `validate_artifact_id` 拒绝反斜杠与 `..`，但正斜杠会被当成子目录，
+/// 「作品名里有 `/`」不该变成在导出目录下建目录。
+pub fn combined_export_artifact_id(
+    project_name: &str,
+    format: ChapterExportFormat,
+    now_ms: u64,
+) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let stem = sanitize_export_file_stem(project_name);
+    let timestamp = crate::contracts::format_local_timestamp_for_filename(now_ms);
+    let sequence = EXPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "exports/{stem}-{timestamp}-{sequence:03}.{}",
+        format.extension()
+    )
+}
+
+/// 把作品名压成文件名安全的基底。
+///
+/// 只保留字母数字与 CJK，其余（空格、标点、路径分隔符、emoji、控制字符）一律折成
+/// 一个连字符：导出物要能在任意平台被双击、被脚本处理，而作品名是用户自由输入的。
+fn sanitize_export_file_stem(project_name: &str) -> String {
+    let mut stem = String::new();
+    let mut pending_separator = false;
+    for ch in project_name.trim().chars() {
+        if ch.is_alphanumeric() {
+            if pending_separator && !stem.is_empty() {
+                stem.push('-');
+            }
+            pending_separator = false;
+            stem.push(ch);
+        } else {
+            pending_separator = true;
+        }
+        // 上限 48 字符：足够辨识，又不至于让完整路径撞上文件系统长度限制。
+        if stem.chars().count() >= 48 {
+            break;
+        }
+    }
+    if stem.is_empty() {
+        return "export".to_owned();
+    }
+    stem
+}
+
 pub fn export_chapters_combined(
     documents: &FileDocumentService,
     index: &ChapterDocumentIndex,

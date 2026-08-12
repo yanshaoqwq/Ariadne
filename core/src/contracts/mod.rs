@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod cancellation;
+pub mod clock;
 pub mod content;
 pub mod errors;
 pub mod events;
@@ -11,6 +12,7 @@ pub mod workflow;
 
 pub use artifacts::*;
 pub use cancellation::*;
+pub use clock::*;
 pub use content::*;
 pub use errors::*;
 pub use events::*;

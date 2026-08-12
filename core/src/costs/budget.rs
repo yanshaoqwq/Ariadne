@@ -63,35 +63,16 @@ fn normalize_budget_limit(value: Option<f64>) -> Option<f64> {
 /// 宁可切日时刻不合预期，也不要因时区探测失败而让预算判定整体失效。
 pub fn start_of_local_day_ms(now_ms: u64) -> u64 {
     const MS_PER_DAY: i64 = 86_400_000;
-    let offset = local_utc_offset_ms();
+    let offset = crate::contracts::local_utc_offset_ms();
     // 先把时间轴平移到「本地墙钟」，切日，再平移回 UTC。
     let local = now_ms as i64 + offset;
     let local_day_start = local - local.rem_euclid(MS_PER_DAY);
     (local_day_start - offset).max(0) as u64
 }
 
-/// 本地时区相对 UTC 的偏移（毫秒），东为正。
-///
-/// 无第三方时间库时，唯一可靠的纯 std 途径是让系统把同一时刻分别格式化成
-/// 本地时间与 UTC 再求差——但 std 不提供格式化。因此读 `TZ` 风格的偏移由
-/// 平台层给出：这里通过 `date +%z` 之外的方式无法在纯 std 拿到，
-/// 故采用环境变量 `ARIADNE_UTC_OFFSET_MINUTES` 显式声明，缺省按 UTC。
-///
-/// 这样做的取舍：**可预测优先于自动**。自动探测在容器/CI 里经常给出与用户
-/// 预期不同的结果，而预算是会拦住运行的硬门禁，静默按错误时区切日比按 UTC
-/// 更难排查。桌面端在启动时把系统偏移写入该变量即可获得本地语义。
-fn local_utc_offset_ms() -> i64 {
-    const MS_PER_MINUTE: i64 = 60_000;
-    // 合法范围 UTC-12:00 ~ UTC+14:00，超出视为配置错误并退化为 UTC。
-    const MIN_OFFSET_MINUTES: i64 = -12 * 60;
-    const MAX_OFFSET_MINUTES: i64 = 14 * 60;
-    std::env::var("ARIADNE_UTC_OFFSET_MINUTES")
-        .ok()
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        .filter(|minutes| (MIN_OFFSET_MINUTES..=MAX_OFFSET_MINUTES).contains(minutes))
-        .map(|minutes| minutes * MS_PER_MINUTE)
-        .unwrap_or(0)
-}
+// 时区偏移已上移到 `contracts::clock::local_utc_offset_ms`——`llm/service.rs` 的月度
+// 用量切月也要用同一份偏移，两处各持一份会让「今天花了多少」与「这个月花了多少」
+// 按不同规则切分。
 
 /// 预算评估后的动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

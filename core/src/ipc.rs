@@ -1140,7 +1140,10 @@ struct UpdateParam<T> {
 struct ExportChaptersParams {
     #[serde(default)]
     selected_chapter_ids: Vec<String>,
-    artifact_id: String,
+    /// U134：缺省时由后端生成（导出目录 + 作品名 + 本地时间戳 + 扩展名）。
+    /// 前端不再拼这个 id——命名依赖后端的路径重定向与写入语义，前端无从知晓。
+    #[serde(default)]
+    artifact_id: Option<String>,
     #[serde(default)]
     format: Option<crate::frontend::ChapterExportFormat>,
 }

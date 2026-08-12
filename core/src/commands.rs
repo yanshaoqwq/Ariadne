@@ -2249,24 +2249,48 @@ pub fn import_chapter(
     Ok(index)
 }
 
+/// 合并导出选中章节。
+///
+/// U134：`artifact_id` 改为**可选**，缺省时由后端按「导出目录 + 作品名 + 本地时间戳
+/// + 真实扩展名」生成（`combined_export_artifact_id`）。
+///
+/// 为什么不让前端继续拼：前端原本传 `combined-{format}`，缺 `exports/` 前缀导致
+/// 导出根重定向失效、缺扩展名导致文件双击打不开、固定字符串导致第二次导出静默
+/// 覆盖第一次。这三件事全取决于后端的路径与写入语义（`artifact_path` 只认
+/// `exports/` 前缀、`operation_id: None` 走无回执直写分支），前端无从知晓，
+/// 命名权就该在后端。
+///
+/// 仍保留显式传入：工作流导出节点等调用方需要自己指定 artifact id。
 pub fn export_chapters(
     state: &AriadneAppState,
     selected_chapter_ids: Vec<String>,
-    artifact_id: String,
+    artifact_id: Option<String>,
     format: Option<ChapterExportFormat>,
 ) -> CommandResult<CombinedExportReport> {
     let project_root = project_root_from_state(state, None)?;
     let _project_mutation = acquire_project_mutation_guard(&project_root, "chapter_export")?;
     let documents = configured_document_service(&project_root)?;
     let index = load_chapter_index(&project_root)?;
-    export_chapters_combined(
-        &documents,
-        &index,
-        &selected_chapter_ids,
-        &artifact_id,
-        format.unwrap_or_default(),
-    )
-    .map_err(error_to_string)
+    let format = format.unwrap_or_default();
+    let artifact_id = match artifact_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        Some(explicit) => explicit,
+        None => {
+            let project_name = ConfigStore::new(&project_root)
+                .load_or_create()
+                .map(|config| config.app.project_name)
+                .unwrap_or_default();
+            crate::frontend::combined_export_artifact_id(
+                &project_name,
+                format,
+                crate::frontend::now_timestamp_ms(),
+            )
+        }
+    };
+    export_chapters_combined(&documents, &index, &selected_chapter_ids, &artifact_id, format)
+        .map_err(error_to_string)
 }
 
 pub fn load_workflow_graph(
