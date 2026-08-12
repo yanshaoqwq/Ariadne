@@ -63,6 +63,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private CancellationTokenSource? _quickEditGenerationCts;
     private long _quickEditGeneration;
     private bool _isQuickEditGenerating;
+    private bool _isQuickEditOpen;
     private CancellationTokenSource? _summaryLoadCts;
     private long _summaryLoadGeneration;
     private bool _isSummaryLoading;
@@ -134,9 +135,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         CopyCommand = new RelayCommand(() => RequestEditorCopy?.Invoke());
         SelectAllCommand = new RelayCommand(() => RequestEditorSelectAll?.Invoke());
         OpenQuickEditCommand = new RelayCommand(OpenQuickEdit, CanOpenQuickEdit);
+        CloseQuickEditCommand = new RelayCommand(CloseQuickEdit, () => !IsQuickEditGenerating);
         QuickAiCommand = new RelayCommand(() =>
         {
-            IsEditMode = true;
+            // U130：不再顺手把用户推进修改模式。改写结果落在 diff 预览里，
+            // 阅读态照样能看能应用；「应用建议」才需要编辑器承接，那一步再切。
+            IsQuickEditOpen = true;
             _ = QuickEditAsync();
         }, CanGenerateQuickEdit);
         ToggleOutlinePanelCommand = new RelayCommand(ToggleOutlinePanel, () => HasCurrentDocument);
@@ -347,6 +351,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public RelayCommand SelectAllCommand { get; }
 
     public RelayCommand OpenQuickEditCommand { get; }
+    public RelayCommand CloseQuickEditCommand { get; }
 
     public RelayCommand QuickAiCommand { get; }
 
@@ -717,12 +722,39 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             if (SetProperty(ref _isQuickEditGenerating, value))
             {
                 OnPropertyChanged(nameof(QuickEditGenerateText));
+                OnPropertyChanged(nameof(IsQuickEditCloseEnabled));
                 QuickAiCommand.NotifyCanExecuteChanged();
                 OpenQuickEditCommand.NotifyCanExecuteChanged();
                 ApplyQuickEditCommand.NotifyCanExecuteChanged();
+                CloseQuickEditCommand.NotifyCanExecuteChanged();
             }
         }
     }
+
+    /// <summary>
+    /// 快速编辑悬浮窗是否打开。
+    ///
+    /// U130：此前它只绑 <see cref="IsEditMode"/>，即「进修改模式」与「要 AI 改写」
+    /// 是同一个动作——面板占掉 289px、正文塌到 209px，而且**关不掉**。
+    /// 两件事本来无关：想手写一段不需要 AI 面板，想让 AI 改一段也不必先进编辑器。
+    /// 所以拆成独立开关；生成中不允许关闭窗口，否则用户看不到自己等的结果。
+    /// </summary>
+    public bool IsQuickEditOpen
+    {
+        get => _isQuickEditOpen;
+        set
+        {
+            if (SetProperty(ref _isQuickEditOpen, value))
+            {
+                OnPropertyChanged(nameof(IsQuickEditCloseEnabled));
+            }
+        }
+    }
+
+    /// <summary>生成中禁用关闭：请求已经发出去了（钱已经花了），关窗只会让结果无处落地。</summary>
+    public bool IsQuickEditCloseEnabled => !IsQuickEditGenerating;
+
+    public string QuickEditCloseText => _displayNames.Text("ui.common.close");
 
     public string ExportFormat
     {
@@ -1063,8 +1095,22 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     private void OpenQuickEdit()
     {
-        IsEditMode = true;
+        // U130：只开面板，不动阅读/修改模式。用户按 Ctrl+K 要的是「跟 AI 说一句」，
+        // 不是「把正文变成可编辑」——后者会让他在毫无准备时误碰键盘就改了小说。
+        IsQuickEditOpen = true;
         RequestFocusQuickEditInstruction?.Invoke();
+    }
+
+    private void CloseQuickEdit()
+    {
+        if (IsQuickEditGenerating)
+        {
+            return;
+        }
+        IsQuickEditOpen = false;
+        // 关窗即丢弃未应用的建议：留着它下次开窗会看到一条与当前正文早已不同步的
+        // 旧 diff，而 CanApplyQuickEdit 又会拒绝应用，等于摆一个死按钮。
+        ClearPendingQuickEdit();
     }
 
     private bool CanApplyQuickEdit()
@@ -2539,6 +2585,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
         DocumentContent = updatedContent;
         MarkDocumentDirty();
+        // U130：**应用**才切修改模式（生成不切）。改写落到内存正文后用户必然要
+        // 复核、微调、保存，此刻编辑器是他要的界面；而在此之前把他推进编辑器
+        // 只是让 289px 的面板挤掉正文。
+        IsEditMode = true;
         _quickEditUndo = new QuickEditUndoState(
             _currentDocumentId,
             updatedContent,

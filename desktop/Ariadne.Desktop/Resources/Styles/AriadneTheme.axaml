@@ -424,6 +424,10 @@
       <StreamGeometry x:Key="Ariadne.Icon.Pack">M12,3 L20,7.5 L20,16.5 L12,21 L4,16.5 L4,7.5 Z M4,7.5 L12,12 L20,7.5 M12,12 L12,21</StreamGeometry>
       <!-- 搜索（放大镜） -->
       <StreamGeometry x:Key="Ariadne.Icon.Search">M10.5,5 a5.5,5.5 0 1,0 0.01,0 M14.8,14.8 L19,19</StreamGeometry>
+      <!-- AI 改写（星芒）：一大一小两颗四角星。这是 AI 辅助在各家产品里的
+           通行手势，比「魔杖」「机器人」更少歧义，也不会被读成「收藏」。
+           大星在左上、小星在右下，避免两颗一样大而失去主次。 -->
+      <StreamGeometry x:Key="Ariadne.Icon.Sparkle">M10,3 L11.6,7.9 L16.5,9.5 L11.6,11.1 L10,16 L8.4,11.1 L3.5,9.5 L8.4,7.9 Z M17.5,14 L18.4,16.6 L21,17.5 L18.4,18.4 L17.5,21 L16.6,18.4 L14,17.5 L16.6,16.6 Z</StreamGeometry>
     </ResourceDictionary>
   </Styles.Resources>
 

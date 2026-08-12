@@ -59,6 +59,11 @@
               </ComboBox.ItemTemplate>
             </ComboBox>
             <Border Width="1" Margin="6,4" Background="{DynamicResource Ariadne.BorderMuted}" />
+            <!-- U130：快速 AI 改写有了自己的可见入口。此前只能靠 Ctrl+K 或右键菜单，
+                 而它又与「修改」按钮共用同一个 IsEditMode，用户无从知道这是两件事。 -->
+            <Button Classes="icon-btn" ToolTip.Tip="{Binding QuickEditTitle}" AutomationProperties.Name="{Binding QuickEditTitle}" Command="{Binding OpenQuickEditCommand}">
+              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Sparkle}" />
+            </Button>
             <!-- 图标按钮：导入稿件 / 导出合并 / 保存 -->
             <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" AutomationProperties.Name="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
@@ -146,8 +151,10 @@
                   Classes="document-surface"
                   Padding="72,56,72,52"
                   IsVisible="{Binding ShowDocumentChrome}">
-            <!-- U131：正文与「章节大纲对照」并列。对照栏关闭时列宽为 0，不占版面。 -->
-            <Grid RowDefinitions="Auto,*,Auto" RowSpacing="0" MinHeight="640"
+            <!-- U131：正文与「章节大纲对照」并列。对照栏关闭时列宽为 0，不占版面。
+                 U130：原先还有第三行给快速编辑面板，现已移出为悬浮小窗——
+                 纸上只剩刊头与正文两行，正文高度不再被面板挤压。 -->
+            <Grid RowDefinitions="Auto,*" RowSpacing="0" MinHeight="640"
                   ColumnDefinitions="*,Auto">
               <!-- 刊头：章节名 + 元信息，底部发丝线收口 -->
               <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Spacing="7" Margin="0,0,0,34">
@@ -262,78 +269,111 @@
                   </ScrollViewer>
                 </Grid>
               </Border>
-              <!-- 快速编辑：去掉纸上又贴一张卡（card-in-card），
-                   改为纸面下缘的一道工作区——顶部发丝线分隔即可。 -->
-              <Border Grid.Row="2"
-                      Grid.ColumnSpan="2"
-                      BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                      BorderThickness="0,1,0,0"
-                      Margin="0,28,0,0"
-                      Padding="0,20,0,0"
-                      IsVisible="{Binding IsEditMode}">
-                <StackPanel Spacing="12">
-                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                    <TextBlock Grid.Column="0" Text="{Binding QuickEditTitle}" Classes="subtitle" VerticalAlignment="Center" />
-                    <Button Grid.Column="1" Classes="secondary" Content="{Binding QuickEditGenerateText}" Command="{Binding QuickAiCommand}" />
-                  </Grid>
-                  <TextBox x:Name="QuickEditInstructionBox" AutomationProperties.Name="{Binding QuickEditTitle}"
-                           Text="{Binding QuickEditInstruction, Mode=TwoWay}"
-                           PlaceholderText="{Binding QuickEditPlaceholder}" />
-                  <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption"
-                             IsVisible="{Binding HasQuickEditDiff}" />
-                  <!-- 统一视图（inline）：删除行红、新增行绿，上下排列。
-                       不用左右两栏——快速编辑是「这段改成那段」的顺序阅读，
-                       并排对照反而要来回扫视。着色复用主题里早已定义、
-                       但此前全仓无人使用的 Ariadne.DiffAdd/RemoveBackground。
-                       用 ItemsControl + ScrollViewer 而非只读 TextBox：
-                       后者无法分行着色，且项目规范禁止用 IsReadOnly TextBox 承载内容。 -->
-                  <Border IsVisible="{Binding HasQuickEditDiff}"
-                          Background="{DynamicResource Ariadne.BackgroundCode}"
-                          CornerRadius="8"
-                          Padding="0,6">
-                    <ScrollViewer MaxHeight="280"
-                                  HorizontalScrollBarVisibility="Auto"
-                                  VerticalScrollBarVisibility="Auto"
-                                  AutomationProperties.Name="{Binding QuickEditDiffText}">
-                      <ItemsControl ItemsSource="{Binding QuickEditDiffLines}">
-                        <ItemsControl.ItemTemplate>
-                          <DataTemplate x:DataType="vm:QuickEditDiffLineViewModel">
-                            <!-- 整行铺底色（含左侧标记列），而不是只给文字加背景，
-                                 否则短行的色块参差不齐，读起来比不着色还乱。
-                                 用 Classes.xxx 绑定而非 Style Selector 走 DataContext，
-                                 Avalonia 里前者对 ItemTemplate 内的元素更直接。 -->
-                            <Grid ColumnDefinitions="16,*"
-                                  Classes.added="{Binding IsAdded}"
-                                  Classes.removed="{Binding IsRemoved}">
-                              <TextBlock Grid.Column="0" Text="{Binding Marker}"
-                                         FontFamily="{DynamicResource Ariadne.Font.Mono}"
-                                         Foreground="{DynamicResource Ariadne.TextSubtle}"
-                                         TextAlignment="Center" />
-                              <TextBlock Grid.Column="1" Text="{Binding Text}"
-                                         FontFamily="{DynamicResource Ariadne.Font.Mono}"
-                                         TextWrapping="Wrap" />
-                            </Grid>
-                          </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                        <ItemsControl.Styles>
-                          <Style Selector="Grid.added">
-                            <Setter Property="Background" Value="{DynamicResource Ariadne.DiffAddBackground}" />
-                          </Style>
-                          <Style Selector="Grid.removed">
-                            <Setter Property="Background" Value="{DynamicResource Ariadne.DiffRemoveBackground}" />
-                          </Style>
-                        </ItemsControl.Styles>
-                      </ItemsControl>
-                    </ScrollViewer>
-                  </Border>
-                  <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-                    <Button Classes="secondary" Content="{Binding QuickEditUndoText}" Command="{Binding UndoQuickEditCommand}" />
-                    <Button Classes="primary" Content="{Binding QuickEditApplyText}" Command="{Binding ApplyQuickEditCommand}" />
-                  </StackPanel>
-                </StackPanel>
-              </Border>
             </Grid>
           </Border>
+
+          <!-- ============ U130：快速 AI 改写 —— 悬浮毛玻璃小窗 ============
+               原实现是纸面下缘的一整道工作区，且只绑 IsEditMode：进修改模式它就
+               强制出现、且关不掉。1400×900 实测正文塌成 209px、面板占 289px——
+               **写作区比 AI 输入框还小**，这不是长篇写作工具该有的默认视图。
+               现在改为浮在稿纸右下角的独立小窗：
+               - 有自己的开关（IsQuickEditOpen），与阅读/修改模式解耦
+               - 浮层不参与稿纸布局，正文高度**不因它增减而变化**
+               - 毛玻璃 + Flyout 投影，与弹窗/菜单同一材料语汇（ConfirmDialogView）
+               挂在 document-surface 的兄弟层而非纸内 Grid.Row：长在纸上就又变成
+               U136 说的「输入框长在书页里」。 -->
+          <Panel Grid.Row="0" Grid.RowSpan="2"
+                 IsVisible="{Binding IsQuickEditOpen}"
+                 HorizontalAlignment="Right"
+                 VerticalAlignment="Bottom"
+                 Margin="0,0,26,26">
+            <ExperimentalAcrylicBorder CornerRadius="14" IsHitTestVisible="False">
+              <ExperimentalAcrylicBorder.Material>
+                <ExperimentalAcrylicMaterial
+                    BackgroundSource="Digger"
+                    TintColor="{DynamicResource Ariadne.Color.GlassTint}"
+                    TintOpacity="0.84"
+                    MaterialOpacity="0.9" />
+              </ExperimentalAcrylicBorder.Material>
+            </ExperimentalAcrylicBorder>
+            <Border Classes="glass-dialog" Width="392" Padding="18,16">
+              <StackPanel Spacing="11">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                  <TextBlock Grid.Column="0" Text="{Binding QuickEditTitle}" Classes="subtitle" VerticalAlignment="Center" />
+                  <!-- 关闭键：生成中禁用（请求已发出，关窗只会让结果无处落地） -->
+                  <Button Grid.Column="1"
+                          Classes="subtle"
+                          Padding="6,2"
+                          Command="{Binding CloseQuickEditCommand}"
+                          IsEnabled="{Binding IsQuickEditCloseEnabled}"
+                          ToolTip.Tip="{Binding QuickEditCloseText}"
+                          AutomationProperties.Name="{Binding QuickEditCloseText}">
+                    <PathIcon Width="12" Height="12"
+                              Data="{DynamicResource Ariadne.Icon.Close}"
+                              Foreground="{DynamicResource Ariadne.TextMuted}" />
+                  </Button>
+                </Grid>
+                <TextBox x:Name="QuickEditInstructionBox" AutomationProperties.Name="{Binding QuickEditTitle}"
+                         Text="{Binding QuickEditInstruction, Mode=TwoWay}"
+                         PlaceholderText="{Binding QuickEditPlaceholder}" />
+                <Button Classes="secondary" HorizontalAlignment="Stretch"
+                        Content="{Binding QuickEditGenerateText}" Command="{Binding QuickAiCommand}" />
+                <TextBlock Text="{Binding QuickEditDiffText}" Classes="caption"
+                           IsVisible="{Binding HasQuickEditDiff}" />
+                <!-- 统一视图（inline）：删除行红、新增行绿，上下排列。
+                     不用左右两栏——快速编辑是「这段改成那段」的顺序阅读，
+                     并排对照反而要来回扫视。着色复用主题里早已定义、
+                     但此前全仓无人使用的 Ariadne.DiffAdd/RemoveBackground。
+                     用 ItemsControl + ScrollViewer 而非只读 TextBox：
+                     后者无法分行着色，且项目规范禁止用 IsReadOnly TextBox 承载内容。
+                     整块随 HasQuickEditDiff 显隐：原实现给它留了 MinHeight="110"
+                     的常驻空位，没有 diff 时也照占（U130）。 -->
+                <Border IsVisible="{Binding HasQuickEditDiff}"
+                        Background="{DynamicResource Ariadne.BackgroundCode}"
+                        CornerRadius="8"
+                        Padding="0,6">
+                  <ScrollViewer MaxHeight="240"
+                                HorizontalScrollBarVisibility="Auto"
+                                VerticalScrollBarVisibility="Auto"
+                                AutomationProperties.Name="{Binding QuickEditDiffText}">
+                    <ItemsControl ItemsSource="{Binding QuickEditDiffLines}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:QuickEditDiffLineViewModel">
+                          <!-- 整行铺底色（含左侧标记列），而不是只给文字加背景，
+                               否则短行的色块参差不齐，读起来比不着色还乱。
+                               用 Classes.xxx 绑定而非 Style Selector 走 DataContext，
+                               Avalonia 里前者对 ItemTemplate 内的元素更直接。 -->
+                          <Grid ColumnDefinitions="16,*"
+                                Classes.added="{Binding IsAdded}"
+                                Classes.removed="{Binding IsRemoved}">
+                            <TextBlock Grid.Column="0" Text="{Binding Marker}"
+                                       FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                       Foreground="{DynamicResource Ariadne.TextSubtle}"
+                                       TextAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="{Binding Text}"
+                                       FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                       TextWrapping="Wrap" />
+                          </Grid>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                      <ItemsControl.Styles>
+                        <Style Selector="Grid.added">
+                          <Setter Property="Background" Value="{DynamicResource Ariadne.DiffAddBackground}" />
+                        </Style>
+                        <Style Selector="Grid.removed">
+                          <Setter Property="Background" Value="{DynamicResource Ariadne.DiffRemoveBackground}" />
+                        </Style>
+                      </ItemsControl.Styles>
+                    </ItemsControl>
+                  </ScrollViewer>
+                </Border>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                  <Button Classes="secondary" Content="{Binding QuickEditUndoText}" Command="{Binding UndoQuickEditCommand}" />
+                  <Button Classes="primary" Content="{Binding QuickEditApplyText}" Command="{Binding ApplyQuickEditCommand}" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+          </Panel>
         </Grid>
       </Grid>
       </DockPanel>
