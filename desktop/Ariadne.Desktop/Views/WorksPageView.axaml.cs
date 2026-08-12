@@ -21,11 +21,28 @@ public partial class WorksPageView : UserControl
     /// </summary>
     private EditorTextSelection? _stickySelection;
 
+    /// <summary>
+    /// U132：Ctrl+A 的「全选整章」是否仍然生效。
+    ///
+    /// 需要这个状态是因为虚拟化：Ctrl+A 当场只刷得到已实体化的块，
+    /// 被回收的块滚进视口时是**新的控件实例**、选区为空。
+    /// 没有它，「Ctrl+A 后往下滚，后半章是没选中的」——而用户看不出为什么。
+    /// 任何一次改动正文或换文档都要清掉它（旧的全选态不该套到新内容上）。
+    /// </summary>
+    private bool _readingSelectAllActive;
+
     public WorksPageView()
     {
         InitializeComponent();
         DocumentEditor.TextArea.SelectionChanged += OnDocumentEditorSelectionChanged;
         DocumentEditor.TextArea.Caret.PositionChanged += OnDocumentEditorCaretPositionChanged;
+        // U132：必须挂 Tunnel（预览）阶段。SelectableTextBlock 自己也处理
+        // PointerPressed 来起新选区，冒泡阶段事件可能已被它标记 Handled，
+        // XAML 里写 PointerPressed="..." 挂的是冒泡，会时灵时不灵。
+        DocumentReaderScroll.AddHandler(
+            PointerPressedEvent,
+            OnReadingSurfacePointerPressed,
+            RoutingStrategies.Tunnel);
         DataContextChanged += (_, _) => AttachEditorActions();
         AttachEditorActions();
     }
@@ -65,6 +82,30 @@ public partial class WorksPageView : UserControl
         if (e.Key == Key.S)
         {
             e.Handled = viewModel.SaveCommand.TryExecute();
+            return;
+        }
+
+        // U132：阅读态的 Ctrl+A / Ctrl+C 必须在**页面级**处理。
+        // SelectableTextBlock 自带这两个手势，但只在该块拿到键盘焦点时触发
+        // （Focusable 默认 False，点正文永远拿不到焦点），且 SelectAll()/Copy()
+        // 只操作自己那一个块——最多选中 4000–6000 字符，不是整章。
+        // 编辑态不拦：AvaloniaEdit 自己处理得更好（有撤销栈、有列选区）。
+        if (viewModel.IsEditMode)
+        {
+            return;
+        }
+
+        if (e.Key == Key.A)
+        {
+            SelectAllReadingBlocks();
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.C)
+        {
+            _ = CopySelectionAsync();
+            e.Handled = true;
         }
     }
 
@@ -128,7 +169,12 @@ public partial class WorksPageView : UserControl
                 DocumentEditor.SelectAll();
                 DocumentEditor.Focus();
                 CaptureStickySelection(clearWhenEmpty: false);
+                return;
             }
+
+            // U132：阅读态也要能全选。缺陷版本这里只有 IsEditMode 分支，
+            // 阅读态点「全选」毫无反应——一个存在但不工作的入口。
+            SelectAllReadingBlocks();
         };
         viewModel.RequestEditorSelection = CurrentEditorSelection;
         viewModel.RequestRevealEditorRange = RevealEditorRange;
@@ -414,6 +460,10 @@ public partial class WorksPageView : UserControl
     private void ClearStickySelectionState()
     {
         _stickySelection = null;
+        // U132：换文档时全选态必须一并作废——否则新章节刚渲染就整片刷黑，
+        // 用户从没按过 Ctrl+A。ClearStickyEditorSelection 已在三处换文档入口被调用，
+        // 挂在这里就不必再找一遍那三处（漏一处就是一个只在特定路径出现的怪现象）。
+        _readingSelectAllActive = false;
         if (DocumentEditor.Document is not null)
         {
             DocumentEditor.Select(0, 0);
@@ -470,24 +520,83 @@ public partial class WorksPageView : UserControl
             clearWhenEmpty);
     }
 
+    /// <summary>
+    /// U132：块被虚拟化重新实体化时补上全选态。
+    ///
+    /// Ctrl+A 当场只能刷到已实体化的块。没有这一步，用户 Ctrl+A 之后往下滚，
+    /// 后半章是没选中的——而屏幕上看不出为什么，Ctrl+C 拿到的也就只有前半段。
+    /// </summary>
+    private void OnReadingBlockPrepared(object? sender, ContainerPreparedEventArgs e)
+    {
+        if (!_readingSelectAllActive)
+        {
+            return;
+        }
+
+        var block = e.Container as SelectableTextBlock
+                    ?? e.Container.GetVisualDescendants().OfType<SelectableTextBlock>().FirstOrDefault();
+        if (block is null)
+        {
+            return;
+        }
+
+        // 容器刚准备好时 Text 可能尚未由绑定填入，等一轮再刷。
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_readingSelectAllActive)
+            {
+                return;
+            }
+            block.SelectionStart = 0;
+            block.SelectionEnd = block.Text?.Length ?? 0;
+        }, DispatcherPriority.Loaded);
+    }
+
+    /// <summary>
+    /// U132：在正文上按下指针即解除「全选整章」态。
+    ///
+    /// 用户点一下就是要重新开始选，此时若仍保留全选态，滚下去的新块会被
+    /// <see cref="OnReadingBlockPrepared"/> 继续刷黑——用户会看到自己刚取消的选中
+    /// 又冒出来。用 Tunnel（预览）阶段拿事件：SelectableTextBlock 自己也处理
+    /// PointerPressed 来起新选区，冒泡阶段可能已被它标记 Handled。
+    /// </summary>
+    private void OnReadingSurfacePointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        _readingSelectAllActive = false;
+    }
+
     private async Task CopySelectionAsync()
     {
         try
         {
-            if (DataContext is WorksPageViewModel { IsEditMode: true }
-                && DocumentEditor.SelectionLength > 0)
+            if (DataContext is not WorksPageViewModel viewModel)
             {
-                DocumentEditor.Copy();
                 return;
             }
 
-            var selectedText = DataContext is WorksPageViewModel viewModel
-                ? viewModel.DocumentContent
+            if (viewModel.IsEditMode)
+            {
+                if (DocumentEditor.SelectionLength > 0)
+                {
+                    DocumentEditor.Copy();
+                }
+                return;
+            }
+
+            // U132：阅读态复制**用户选中的那一段**。缺陷版本在非编辑态直接回退
+            // viewModel.DocumentContent——实测把整章 51088 字符塞进剪贴板、
+            // 无视用户选中的 10 个字。用户按 Ctrl+C 想要的是他刚刷黑的句子。
+            var selections = CollectReadingSelections();
+            var selectedText = ReadingSelectionAggregator.HasSelection(selections)
+                ? ReadingSelectionAggregator.Aggregate(viewModel.DocumentBlocks, selections)
                 : string.Empty;
             if (string.IsNullOrEmpty(selectedText))
             {
+                // 一字未选就什么也不复制。悄悄换成整章会让用户以为复制成功了，
+                // 直到粘贴出五万字才发现——比明确的「没反应」难排查得多。
                 return;
             }
+
             var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
             if (clipboard is not null)
             {
@@ -501,6 +610,68 @@ public partial class WorksPageView : UserControl
                 viewModel.StatusText = UserFacingError.Format(
                     ex,
                     Ariadne.Desktop.Localization.DisplayNameService.Current);
+            }
+        }
+    }
+
+    /// <summary>
+    /// U132：把阅读态每个可见块的选区采样出来，交给页面级归并。
+    ///
+    /// 只能拿到**已实体化**的块——虚拟化会回收远处的块，它们没有控件实例。
+    /// 这是 Ctrl+A 之外的场景（拖选）的固有限制：跨块拖选在当前结构下本就不可能
+    /// （正文是 9 个独立 SelectableTextBlock），所以实际采样到的永远是视口内那一两块。
+    /// </summary>
+    private List<ReadingSelectionAggregator.BlockSelection> CollectReadingSelections()
+    {
+        var result = new List<ReadingSelectionAggregator.BlockSelection>();
+        foreach (var (index, block) in EnumerateReadingBlocks())
+        {
+            var start = Math.Min(block.SelectionStart, block.SelectionEnd);
+            var end = Math.Max(block.SelectionStart, block.SelectionEnd);
+            if (end > start)
+            {
+                result.Add(new ReadingSelectionAggregator.BlockSelection(index, start, end));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// U132：Ctrl+A 选中**整章**，而不是当前这一块。
+    ///
+    /// 逐块 SelectAll 是这个结构下唯一可行的做法：正文被切成多个独立控件，
+    /// 没有一个跨块的选区模型。视觉上会看到已渲染的块整片刷黑；
+    /// 被虚拟化回收的块没有控件实例、当场刷不到，但它们滚进视口时会重新走
+    /// 容器准备逻辑——所以这里同时记住「全选态」，由 <see cref="OnReadingBlockAttached"/>
+    /// 补上。否则「Ctrl+A 后往下滚，后半章是没选中的」。
+    /// </summary>
+    private void SelectAllReadingBlocks()
+    {
+        _readingSelectAllActive = true;
+        foreach (var (_, block) in EnumerateReadingBlocks())
+        {
+            block.SelectionStart = 0;
+            block.SelectionEnd = block.Text?.Length ?? 0;
+        }
+    }
+
+    private IEnumerable<(int Index, SelectableTextBlock Block)> EnumerateReadingBlocks()
+    {
+        if (DocumentReaderScroll.Presenter?.Child is not ItemsPresenter itemsPresenter
+            || itemsPresenter.Panel is not { } panel)
+        {
+            yield break;
+        }
+
+        for (var index = 0; index < panel.Children.Count; index++)
+        {
+            // 模板根就是 SelectableTextBlock；若将来模板变了，用视觉树兜底而不是崩。
+            var child = panel.Children[index];
+            var block = child as SelectableTextBlock
+                        ?? child.GetVisualDescendants().OfType<SelectableTextBlock>().FirstOrDefault();
+            if (block is not null)
+            {
+                yield return (index, block);
             }
         }
     }

@@ -82,9 +82,15 @@
       <Grid Background="{DynamicResource Ariadne.EditorBackground}">
         <Grid.ContextMenu>
           <ContextMenu Classes="ariadne">
-            <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopyCommand}" />
-            <MenuItem Header="{Binding CtxSelectAllText}" Command="{Binding SelectAllCommand}" />
-            <Separator />
+            <!-- U132：「复制」「全选」只在修改态显示。阅读态它们既可见又是错的——
+                 复制无视选中的 10 个字、把整章 51088 字符塞进剪贴板；
+                 全选带 IsEditMode 前置判断，点了毫无反应。
+                 产品决策：阅读态只保留 Ctrl+A / Ctrl+C 快捷键，不摆按钮。 -->
+            <MenuItem Header="{Binding CtxCopyText}" Command="{Binding CopyCommand}"
+                      IsVisible="{Binding ShowSelectionContextItems}" />
+            <MenuItem Header="{Binding CtxSelectAllText}" Command="{Binding SelectAllCommand}"
+                      IsVisible="{Binding ShowSelectionContextItems}" />
+            <Separator IsVisible="{Binding ShowSelectionContextItems}" />
             <MenuItem Header="{Binding CtxQuickAiText}" Command="{Binding OpenQuickEditCommand}" />
             <MenuItem Header="{Binding CtxShowOutlineText}" Command="{Binding ToggleOutlinePanelCommand}" />
             <Separator />
@@ -197,7 +203,9 @@
                             IsVisible="{Binding !IsEditMode}"
                             HorizontalScrollBarVisibility="Disabled"
                             VerticalScrollBarVisibility="Auto">
-                <ItemsControl ItemsSource="{Binding DocumentBlocks}">
+                <ItemsControl x:Name="DocumentBlocksHost"
+                              ItemsSource="{Binding DocumentBlocks}"
+                              ContainerPrepared="OnReadingBlockPrepared">
                   <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                       <VirtualizingStackPanel />

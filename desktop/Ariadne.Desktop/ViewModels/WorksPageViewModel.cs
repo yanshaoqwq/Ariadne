@@ -609,6 +609,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 RebuildDocumentBlocks(_editorBuffer.Text);
             }
             OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
+            OnPropertyChanged(nameof(ShowSelectionContextItems));
 
             // 恢复交给 View：新视图此刻还没完成布局，必须等一轮 Dispatcher。
             if (_readingOffsetAnchor is { } anchor)
@@ -1039,6 +1040,17 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public string CtxQuickAiText => _displayNames.Text("ui.works.context.quick_ai");
     public string CtxShowOutlineText => _displayNames.Text("ui.works.context.insert_outline");
     public string CtxToggleEditText => _displayNames.Text("ui.works.context.toggle_edit");
+
+    /// <summary>
+    /// 右键菜单是否显示「复制」「全选」两项。
+    ///
+    /// U132 产品决策：**阅读态不显示这两项，只保留 Ctrl+A / Ctrl+C 快捷键**。
+    /// 此前它们在阅读态既可见又是错的——「复制」无视用户选中的 10 个字、
+    /// 把整章 51088 字符塞进剪贴板；「全选」带 IsEditMode 前置判断，
+    /// 点了毫无反应。两个都是**会误导的可见入口**：比没有更糟，
+    /// 因为用户会以为自己操作错了，而不是知道这里没这个功能。
+    /// </summary>
+    public bool ShowSelectionContextItems => IsEditMode;
 
     private bool CanImportChapter()
     {
