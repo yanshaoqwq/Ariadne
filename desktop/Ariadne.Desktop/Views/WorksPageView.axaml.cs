@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
@@ -106,6 +107,8 @@ public partial class WorksPageView : UserControl
             _attachedViewModel.RequestEditorSelection = null;
             _attachedViewModel.RequestRevealEditorRange = null;
             _attachedViewModel.ClearStickyEditorSelection = null;
+            _attachedViewModel.CaptureReadingOffset = null;
+            _attachedViewModel.RestoreReadingOffset = null;
             _attachedViewModel.RequestFocusQuickEditInstruction = null;
             _attachedViewModel.PickImportSourceFile = null;
             _attachedViewModel.OpenFolderInShell = null;
@@ -130,6 +133,8 @@ public partial class WorksPageView : UserControl
         viewModel.RequestEditorSelection = CurrentEditorSelection;
         viewModel.RequestRevealEditorRange = RevealEditorRange;
         viewModel.ClearStickyEditorSelection = ClearStickySelectionState;
+        viewModel.CaptureReadingOffset = CaptureReadingOffset;
+        viewModel.RestoreReadingOffset = RestoreReadingOffset;
         viewModel.RequestFocusQuickEditInstruction = FocusQuickEditInstruction;
         viewModel.PickImportSourceFile = PickImportSourceFileAsync;
         viewModel.OpenFolderInShell = OpenFolderInShellAsync;
@@ -192,6 +197,8 @@ public partial class WorksPageView : UserControl
             _attachedViewModel.RequestEditorSelection = null;
             _attachedViewModel.RequestRevealEditorRange = null;
             _attachedViewModel.ClearStickyEditorSelection = null;
+            _attachedViewModel.CaptureReadingOffset = null;
+            _attachedViewModel.RestoreReadingOffset = null;
             _attachedViewModel.RequestFocusQuickEditInstruction = null;
             _attachedViewModel.PickImportSourceFile = null;
             _attachedViewModel.OpenFolderInShell = null;
@@ -209,6 +216,177 @@ public partial class WorksPageView : UserControl
             QuickEditInstructionBox.SelectionStart = QuickEditInstructionBox.Text?.Length ?? 0;
             QuickEditInstructionBox.SelectionEnd = QuickEditInstructionBox.SelectionStart;
         }, DispatcherPriority.Input);
+    }
+
+    /// <summary>
+    /// U129：读出**当前可见视图**顶部对应的全篇字符偏移。
+    ///
+    /// 两条路径的坐标系完全不同，所以各自换算后统一成字符偏移：
+    /// - 编辑器：VerticalOffset → 视觉行 → DocumentLine.Offset（AvaloniaEdit 自带映射）
+    /// - 阅读器：ScrollViewer.Offset.Y → 落在哪个块 + 块内比例 → 字符偏移
+    ///
+    /// 返回 null 表示此刻问不出有效位置（正文空、控件未测量），
+    /// 调用方据此保留上一个锚点而不是覆盖成 0。
+    /// </summary>
+    private int? CaptureReadingOffset()
+    {
+        if (DataContext is not WorksPageViewModel viewModel)
+        {
+            return null;
+        }
+
+        return viewModel.IsEditMode
+            ? CaptureEditorOffset()
+            : CaptureReaderOffset(viewModel);
+    }
+
+    private int? CaptureEditorOffset()
+    {
+        var document = DocumentEditor.Document;
+        if (document is null || document.TextLength == 0)
+        {
+            return null;
+        }
+
+        var textView = DocumentEditor.TextArea.TextView;
+        // TextView 未完成测量时 VisualLines 为空，GetDocumentLineByVisualTop 会给出
+        // 无意义的结果——此时宁可返回 null 让调用方保留旧锚点。
+        if (textView.VisualLinesValid && textView.VisualLines.Count > 0)
+        {
+            var line = textView.GetDocumentLineByVisualTop(DocumentEditor.VerticalOffset);
+            if (line is not null)
+            {
+                return line.Offset;
+            }
+        }
+
+        // 回退：用光标所在偏移。它未必是屏幕顶部，但比「从头开始」接近得多。
+        return Math.Clamp(DocumentEditor.CaretOffset, 0, document.TextLength);
+    }
+
+    private int? CaptureReaderOffset(WorksPageViewModel viewModel)
+    {
+        var blocks = viewModel.DocumentBlocks;
+        if (blocks.Count == 0)
+        {
+            return null;
+        }
+
+        var presenter = DocumentReaderScroll.Presenter;
+        var scrollTop = DocumentReaderScroll.Offset.Y;
+        if (presenter is null)
+        {
+            return null;
+        }
+
+        // 逐块累加实际高度找出滚动线落在哪一块。不能用「块索引 ÷ 块数 × 总高」
+        // 之类的比例估算——末块常常只有几行，各块高度差好几倍。
+        var cumulative = 0d;
+        for (var index = 0; index < blocks.Count; index++)
+        {
+            var height = BlockVisualHeight(index);
+            if (height <= 0d)
+            {
+                // 虚拟化把远处的块回收了，没有实体可测。此时该块必然不在视口内，
+                // 而滚动线只会落在视口附近的块上，跳过是安全的。
+                continue;
+            }
+
+            if (scrollTop < cumulative + height)
+            {
+                var ratio = (scrollTop - cumulative) / height;
+                return ReadingPositionMapper.OffsetFromBlockProgress(blocks, index, ratio);
+            }
+            cumulative += height;
+        }
+
+        // 滚到底：锚在末块尾部。
+        return ReadingPositionMapper.OffsetFromBlockProgress(blocks, blocks.Count - 1, 1d);
+    }
+
+    /// <summary>取第 index 个阅读块的实际渲染高度；块被虚拟化回收时返回 0。</summary>
+    private double BlockVisualHeight(int index)
+    {
+        if (DocumentReaderScroll.Presenter?.Child is not ItemsPresenter itemsPresenter
+            || itemsPresenter.Panel is not { } panel
+            || index < 0
+            || index >= panel.Children.Count)
+        {
+            return 0d;
+        }
+
+        var child = panel.Children[index];
+        return child.Bounds.Height;
+    }
+
+    /// <summary>
+    /// U129：把字符偏移恢复到**切换后**的视图。
+    ///
+    /// 必须等一轮布局：切换瞬间新视图的 IsVisible 刚翻转，尚未测量，
+    /// 此刻设 Offset/ScrollTo 会被随后的布局重置回 0——那正是「位置丢失」
+    /// 最常见的成因，而且现象与「压根没实现」一模一样，极难分辨。
+    /// 用 Loaded 优先级（低于 Layout）确保测量已完成。
+    /// </summary>
+    private void RestoreReadingOffset(int offset)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (DataContext is not WorksPageViewModel viewModel)
+            {
+                return;
+            }
+
+            if (viewModel.IsEditMode)
+            {
+                RestoreEditorOffset(offset);
+            }
+            else
+            {
+                RestoreReaderOffset(viewModel, offset);
+            }
+        }, DispatcherPriority.Loaded);
+    }
+
+    private void RestoreEditorOffset(int offset)
+    {
+        var document = DocumentEditor.Document;
+        if (document is null || document.TextLength == 0)
+        {
+            return;
+        }
+
+        var clamped = Math.Clamp(offset, 0, document.TextLength);
+        var line = document.GetLineByOffset(clamped);
+        // ScrollToLine 把目标行**居中**，而我们要的是「原来在顶部的行仍在顶部」。
+        // 所以直接按视觉顶推算 VerticalOffset：先确保该行已构造出视觉行。
+        DocumentEditor.ScrollToLine(line.LineNumber);
+        var textView = DocumentEditor.TextArea.TextView;
+        textView.EnsureVisualLines();
+        var visualTop = textView.GetVisualTopByDocumentLine(line.LineNumber);
+        DocumentEditor.ScrollToVerticalOffset(visualTop);
+    }
+
+    private void RestoreReaderOffset(WorksPageViewModel viewModel, int offset)
+    {
+        var blocks = viewModel.DocumentBlocks;
+        if (!ReadingPositionMapper.TryLocateOffset(blocks, offset, out var blockIndex, out var ratio))
+        {
+            return;
+        }
+
+        // 先把目标块滚进视口，虚拟化才会把它实体化，之后才量得到高度。
+        DocumentReaderScroll.UpdateLayout();
+        var cumulative = 0d;
+        for (var index = 0; index < blockIndex; index++)
+        {
+            cumulative += BlockVisualHeight(index);
+        }
+        var targetHeight = BlockVisualHeight(blockIndex);
+        var top = cumulative + (targetHeight * ratio);
+        var maxOffset = Math.Max(0d, DocumentReaderScroll.Extent.Height - DocumentReaderScroll.Viewport.Height);
+        DocumentReaderScroll.Offset = new Vector(
+            DocumentReaderScroll.Offset.X,
+            Math.Clamp(top, 0d, maxOffset));
     }
 
     private void RevealEditorRange(int globalStart, int globalEnd)

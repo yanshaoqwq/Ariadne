@@ -64,6 +64,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private long _quickEditGeneration;
     private bool _isQuickEditGenerating;
     private bool _isQuickEditOpen;
+    /// <summary>
+    /// U129：跨视图切换保留的阅读位置（全篇字符偏移）。
+    ///
+    /// 阅读侧与编辑器侧的滚动坐标系不可直接互换，字符偏移是唯一的共同量。
+    /// 换文档时必须清空（<see cref="ReadingPositionMapper.ClearOnDocumentChange"/>）——
+    /// 旧偏移套到新正文上会滚到毫无关系的位置，比「从头开始」更难被理解成 bug。
+    /// </summary>
+    private int? _readingOffsetAnchor;
     private CancellationTokenSource? _summaryLoadCts;
     private long _summaryLoadGeneration;
     private bool _isSummaryLoading;
@@ -376,6 +384,25 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     /// <summary>View 注册：文档切换/打开时清空粘性选区，避免旧索引打到新正文。</summary>
     public Action? ClearStickyEditorSelection { get; set; }
 
+    /// <summary>
+    /// View 注入：读取**当前可见视图**的阅读位置，折算成全篇字符偏移。
+    ///
+    /// U129：由 View 提供而不在 ViewModel 里算，因为位置只有视觉层知道
+    /// （阅读侧要问 ScrollViewer 的 Offset 与块的实际高度，编辑器侧要问
+    /// VisualLine 的 VisualTop）。返回 null 表示「此刻没有可用位置」，
+    /// 例如正文为空或控件还没完成布局——这种情况下不该覆盖已有锚点。
+    /// </summary>
+    public Func<int?>? CaptureReadingOffset { get; set; }
+
+    /// <summary>
+    /// View 注入：把全篇字符偏移恢复到**切换后**的那个视图。
+    ///
+    /// 与 <see cref="CaptureReadingOffset"/> 成对。分开两个钩子而不是一个
+    /// 「SyncPosition」，是因为捕获必须在切换**前**（旧视图还可见时）执行，
+    /// 恢复必须在切换**后**（新视图完成布局时）执行，两个时机隔着一次布局。
+    /// </summary>
+    public Action<int>? RestoreReadingOffset { get; set; }
+
     /// <summary>后端作品树的单一层级身份源；显示筛选只复用这些节点实例。</summary>
     public ObservableCollection<WorksTreeItemViewModel> WorksTreeRoots { get; }
 
@@ -558,6 +585,20 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         get => _isEditMode;
         set
         {
+            if (_isEditMode == value)
+            {
+                return;
+            }
+
+            // U129：**切换前**先把旧视图的阅读位置折算成字符偏移存下来。
+            // 顺序不能反——一旦 IsVisible 翻转，旧视图的 ScrollViewer/VisualLine
+            // 就问不出有效位置了（未测量的控件返回 0，那等于静默丢失位置）。
+            var captured = CaptureReadingOffset?.Invoke();
+            if (captured is { } offset)
+            {
+                _readingOffsetAnchor = offset;
+            }
+
             if (!SetProperty(ref _isEditMode, value))
             {
                 return;
@@ -568,6 +609,12 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 RebuildDocumentBlocks(_editorBuffer.Text);
             }
             OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
+
+            // 恢复交给 View：新视图此刻还没完成布局，必须等一轮 Dispatcher。
+            if (_readingOffsetAnchor is { } anchor)
+            {
+                RestoreReadingOffset?.Invoke(anchor);
+            }
         }
     }
 
@@ -1833,6 +1880,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             InvalidateQuickEditGeneration();
             ClearQuickEditUndo();
             ClearStickyEditorSelection?.Invoke();
+            // U129：换文档即锚点作废。旧偏移套到新正文上会滚到毫无关系的位置。
+            _readingOffsetAnchor = ReadingPositionMapper.ClearOnDocumentChange();
 
             generation = Interlocked.Increment(ref _documentLoadGeneration);
             _documentLoadCts?.Cancel();
@@ -2275,6 +2324,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     internal void SeedOpenDocumentForTests(string documentId, string? version, string content)
     {
         ClearStickyEditorSelection?.Invoke();
+        _readingOffsetAnchor = ReadingPositionMapper.ClearOnDocumentChange();
         ClearSummaryState();
         _currentDocumentId = documentId;
         _currentDocumentPath = documentId;
@@ -2804,6 +2854,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             if (documentGeneration == _documentLoadGeneration)
             {
                 ClearStickyEditorSelection?.Invoke();
+                _readingOffsetAnchor = ReadingPositionMapper.ClearOnDocumentChange();
                 _currentDocumentId = string.Empty;
                 _currentDocumentPath = string.Empty;
                 _currentDocumentVersion = null;
