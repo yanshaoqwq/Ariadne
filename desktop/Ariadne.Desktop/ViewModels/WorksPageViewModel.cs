@@ -191,23 +191,36 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
     }
 
+    /// <summary>
+    /// 设置项「作品页右栏默认展开」的当前值。
+    ///
+    /// U133：它现在**只作默认值**用（<see cref="ApplyUiPreferences"/> 里在没有
+    /// 保存过的开合状态时取它），不再参与任何可见性判断。此前它同时决定
+    /// 「右栏是否可见」与「药丸是否可见」，后者让用户在页面内彻底失去恢复手段。
+    /// 保留为公开属性是为了设置页改动后能立即反映；私有 setter 保证只由偏好驱动。
+    /// </summary>
     public bool IsProjectPanelVisible
     {
         get => _isProjectPanelVisible;
-        private set
-        {
-            if (SetProperty(ref _isProjectPanelVisible, value))
-            {
-                OnPropertyChanged(nameof(IsRightPanelVisible));
-                OnPropertyChanged(nameof(IsRightPanelToggleVisible));
-                OnPropertyChanged(nameof(RightPanelSplitterWidth));
-                OnPropertyChanged(nameof(RightPanelColumnWidth));
-                ToggleRightPanelCommand.NotifyCanExecuteChanged();
-            }
-        }
+        private set => SetProperty(ref _isProjectPanelVisible, value);
     }
 
-    public bool IsRightPanelToggleVisible => IsProjectPanelVisible || IsImportPanelOpen;
+    /// <summary>
+    /// 收展药丸（页面内唯一的右栏开合入口）是否可见。
+    ///
+    /// U133：**恒为 true，刻意不再看 <see cref="IsProjectPanelVisible"/>**。
+    /// 此前它是 `IsProjectPanelVisible || IsImportPanelOpen`，于是设置里关掉那个
+    /// 开关后药丸一起消失、`ToggleRightPanelCommand.CanExecute()` 返回 false——
+    /// **在作品页内没有任何办法把导航树叫回来**，只能回设置页重新勾选。
+    /// 设置项该决定的是「进页面时默认收着还是展开」，不是「剥夺开合能力」：
+    /// 一个个性化偏好不该把功能锁死。
+    ///
+    /// 也不按「作品树是否为空」判断——右栏有两个标签，项目 AI 在没有任何章节时
+    /// 照样可用（正是从零开始那一刻最需要问 AI 的时候）。
+    /// 保留这个属性而不是删掉，是因为三页共用的 <c>RightPanelTogglePill</c>
+    /// 都绑它，各页的判据未必一致。
+    /// </summary>
+    public bool IsRightPanelToggleVisible => true;
 
     /// U131：章节大纲对照栏是否展开。与正文并列显示，只读。
     public bool IsOutlinePanelOpen
@@ -281,7 +294,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             return;
         }
         IsRightPanelOpen = !IsRightPanelOpen;
-        if (!IsProjectPanelVisible || _persistPanelState is null)
+        // U133：**去掉 `!IsProjectPanelVisible` 的早退**。此前设置项关着时页面内的
+        // 开合不落盘，于是「在页面里展开 → 切页回来又收起了」——用户会以为
+        // 展开失败。设置项是**默认值**，页面内的手动开合是更晚的、更明确的用户意图，
+        // 该覆盖它并记住。
+        if (_persistPanelState is null)
         {
             return;
         }
