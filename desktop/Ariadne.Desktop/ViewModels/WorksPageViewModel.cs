@@ -37,6 +37,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private string _currentDocumentId = string.Empty;
     private string _currentDocumentPath = string.Empty;
     private string? _currentDocumentVersion;
+    // U131：章节大纲对照栏。原实现把 "@planning/outline.md" 追加进正文，
+    // 用户按 Ctrl+S 就把这行垃圾持久化进小说；且那个路径全后端零存在
+    // （真实约定是 planning/chapters/{id}.md）。改为只读对照，绝不碰正文。
+    private bool _isOutlinePanelOpen;
+    private string _chapterOutlineText = string.Empty;
+    private bool _isOutlineLoading;
+    private CancellationTokenSource? _outlineLoadCts;
     private string _documentTitle;
     private string _importChapterId = string.Empty;
     private string _importChapterTitle = string.Empty;
@@ -132,7 +139,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             IsEditMode = true;
             _ = QuickEditAsync();
         }, CanGenerateQuickEdit);
-        InsertOutlineCommand = new RelayCommand(InsertOutlineReference, () => HasCurrentDocument);
+        ToggleOutlinePanelCommand = new RelayCommand(ToggleOutlinePanel, () => HasCurrentDocument);
         ToggleEditCommand = new RelayCommand(() => IsEditMode = !IsEditMode);
         SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync(), CanSendProjectAi);
         ApplyQuickEditCommand = new RelayCommand(ApplyQuickEdit, CanApplyQuickEdit);
@@ -189,6 +196,38 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     }
 
     public bool IsRightPanelToggleVisible => IsProjectPanelVisible || IsImportPanelOpen;
+
+    /// U131：章节大纲对照栏是否展开。与正文并列显示，只读。
+    public bool IsOutlinePanelOpen
+    {
+        get => _isOutlinePanelOpen;
+        set
+        {
+            if (SetProperty(ref _isOutlinePanelOpen, value))
+            {
+                OnPropertyChanged(nameof(OutlinePanelWidth));
+            }
+        }
+    }
+
+    /// 对照栏宽度；关闭时为 0，配合 IsVisible 彻底不占版面。
+    public double OutlinePanelWidth => IsOutlinePanelOpen ? 320d : 0d;
+
+    /// 当前章节的大纲正文；找不到时是可诊断文案而非空串。
+    public string ChapterOutlineText
+    {
+        get => _chapterOutlineText;
+        private set => SetProperty(ref _chapterOutlineText, value);
+    }
+
+    public bool IsOutlineLoading
+    {
+        get => _isOutlineLoading;
+        private set => SetProperty(ref _isOutlineLoading, value);
+    }
+
+    /// 对照栏标题。
+    public string OutlineCompareText => _displayNames.Text("ui.works.outline_compare");
 
     public bool IsRightPanelVisible => IsRightPanelToggleVisible && IsRightPanelOpen;
 
@@ -311,7 +350,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public RelayCommand QuickAiCommand { get; }
 
-    public RelayCommand InsertOutlineCommand { get; }
+    public RelayCommand ToggleOutlinePanelCommand { get; }
 
     public RelayCommand ToggleEditCommand { get; }
 
@@ -919,7 +958,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public string CtxCopyText => _displayNames.Text("ui.works.context.copy");
     public string CtxSelectAllText => _displayNames.Text("ui.works.context.select_all");
     public string CtxQuickAiText => _displayNames.Text("ui.works.context.quick_ai");
-    public string CtxInsertOutlineText => _displayNames.Text("ui.works.context.insert_outline");
+    public string CtxShowOutlineText => _displayNames.Text("ui.works.context.insert_outline");
     public string CtxToggleEditText => _displayNames.Text("ui.works.context.toggle_edit");
 
     private bool CanImportChapter()
@@ -1062,7 +1101,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         OnPropertyChanged(nameof(DocumentSaveStateText));
         SaveCommand.NotifyCanExecuteChanged();
         OpenQuickEditCommand.NotifyCanExecuteChanged();
-        InsertOutlineCommand.NotifyCanExecuteChanged();
+        ToggleOutlinePanelCommand.NotifyCanExecuteChanged();
         QuickAiCommand.NotifyCanExecuteChanged();
     }
 
@@ -2212,26 +2251,118 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         OnPropertyChanged(nameof(DocumentSaveStateText));
         SaveCommand.NotifyCanExecuteChanged();
         OpenQuickEditCommand.NotifyCanExecuteChanged();
-        InsertOutlineCommand.NotifyCanExecuteChanged();
+        ToggleOutlinePanelCommand.NotifyCanExecuteChanged();
         QuickAiCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>测试用：直接读取指定章节的正式总结投影。</summary>
     internal Task LoadChapterSummaryForTests(string chapterId) => LoadChapterSummaryAsync(chapterId);
 
+    /// <summary>
+    /// 测试用：只设置当前章节归属，不触发总结加载。
+    ///
+    /// 与 <see cref="LoadChapterSummaryForTests"/> 的区别是不打后端——
+    /// U131 的大纲对照只需要「当前是哪一章」这个事实。
+    /// </summary>
+    internal void SeedSummaryChapterForTests(string chapterId)
+    {
+        _currentSummaryChapterId = chapterId;
+        OnPropertyChanged(nameof(CurrentSummaryChapterId));
+    }
+
     /// <summary>测试与调试：当前会话历史条数（用户+助手成对累积）。</summary>
     internal int ProjectAiHistoryCount => _projectAiHistory.Count;
 
-    private void InsertOutlineReference()
+    /// <summary>
+    /// U131：打开/关闭章节大纲对照栏。
+    ///
+    /// 原实现（<c>InsertOutlineReference</c>）干三件事：强行进入修改模式、把
+    /// <c>"@planning/outline.md"</c> 追加进正文末尾、改状态栏。后果是**用户按 Ctrl+S
+    /// 就把这行垃圾持久化进小说**，而那个路径全后端零存在——真实约定是
+    /// <c>planning/chapters/{id}.md</c>（见 core/src/rag/tools.rs）。
+    ///
+    /// 现在改为只读对照：读该章大纲文件显示在侧栏，**绝不修改正文**，
+    /// 也不切换编辑模式（设计要求见 ui设计方案.md §2.2/2.3「左正文、右该章大纲」）。
+    /// </summary>
+    private void ToggleOutlinePanel()
     {
+        if (IsOutlinePanelOpen)
+        {
+            IsOutlinePanelOpen = false;
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(_currentDocumentId))
         {
             StatusText = NoDocumentText;
             return;
         }
-        IsEditMode = true;
-        DocumentContent = AssembleDocumentContent() + Environment.NewLine + "@planning/outline.md";
-        StatusText = OutlineText;
+
+        IsOutlinePanelOpen = true;
+        _ = LoadChapterOutlineAsync();
+    }
+
+    /// <summary>
+    /// 读当前章节的大纲文件。找不到时显示可诊断文案而非静默留空——
+    /// 「打开了对照栏但一片空白」分不清是没大纲还是加载失败。
+    /// </summary>
+    private async Task LoadChapterOutlineAsync()
+    {
+        var chapterId = _currentSummaryChapterId;
+        if (string.IsNullOrWhiteSpace(chapterId))
+        {
+            // 没有章节归属（例如打开的是全局总纲本身），此时没有「该章大纲」可言。
+            ChapterOutlineText = _displayNames.Format(
+                "ui.works.outline_missing",
+                new Dictionary<string, string> { ["chapter"] = "-" });
+            return;
+        }
+
+        _outlineLoadCts?.Cancel();
+        _outlineLoadCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _outlineLoadCts = cts;
+
+        IsOutlineLoading = true;
+        ChapterOutlineText = string.Empty;
+        try
+        {
+            var path = $"planning/chapters/{chapterId}.md";
+            var content = await _backend
+                .GetDocumentContentByPathAsync(path, cts.Token)
+                .ConfigureAwait(true);
+            if (cts.IsCancellationRequested)
+            {
+                return;
+            }
+            ChapterOutlineText = string.IsNullOrWhiteSpace(content)
+                ? _displayNames.Format(
+                    "ui.works.outline_missing",
+                    new Dictionary<string, string> { ["chapter"] = chapterId })
+                : content;
+        }
+        catch (OperationCanceledException)
+        {
+            // 切章导致的取消不是错误，也不该覆盖新一轮的加载结果。
+        }
+        catch (Exception)
+        {
+            if (!cts.IsCancellationRequested)
+            {
+                // 后端对不存在的路径返回错误。这里不透传原始错误文本：
+                // 用户要的答案是「这章还没写大纲」，不是 IPC 错误码。
+                ChapterOutlineText = _displayNames.Format(
+                    "ui.works.outline_missing",
+                    new Dictionary<string, string> { ["chapter"] = chapterId });
+            }
+        }
+        finally
+        {
+            if (!cts.IsCancellationRequested)
+            {
+                IsOutlineLoading = false;
+            }
+        }
     }
 
     private void OpenImportPanel()

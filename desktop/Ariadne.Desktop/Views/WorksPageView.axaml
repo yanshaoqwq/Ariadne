@@ -81,7 +81,7 @@
             <MenuItem Header="{Binding CtxSelectAllText}" Command="{Binding SelectAllCommand}" />
             <Separator />
             <MenuItem Header="{Binding CtxQuickAiText}" Command="{Binding OpenQuickEditCommand}" />
-            <MenuItem Header="{Binding CtxInsertOutlineText}" Command="{Binding InsertOutlineCommand}" />
+            <MenuItem Header="{Binding CtxShowOutlineText}" Command="{Binding ToggleOutlinePanelCommand}" />
             <Separator />
             <MenuItem Header="{Binding CtxToggleEditText}" Command="{Binding ToggleEditCommand}" />
           </ContextMenu>
@@ -146,9 +146,11 @@
                   Classes="document-surface"
                   Padding="72,56,72,52"
                   IsVisible="{Binding ShowDocumentChrome}">
-            <Grid RowDefinitions="Auto,*,Auto" RowSpacing="0" MinHeight="640">
+            <!-- U131：正文与「章节大纲对照」并列。对照栏关闭时列宽为 0，不占版面。 -->
+            <Grid RowDefinitions="Auto,*,Auto" RowSpacing="0" MinHeight="640"
+                  ColumnDefinitions="*,Auto">
               <!-- 刊头：章节名 + 元信息，底部发丝线收口 -->
-              <StackPanel Grid.Row="0" Spacing="7" Margin="0,0,0,34">
+              <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Spacing="7" Margin="0,0,0,34">
                 <TextBlock Text="{Binding DocumentTitle}"
                            Classes="reading"
                            FontSize="27"
@@ -222,9 +224,48 @@
                              Foreground="{DynamicResource Ariadne.TextPrimary}"
                              FontFamily="{DynamicResource Ariadne.Font.Reading}"
                              FontSize="16" />
+              <!-- U131：章节大纲对照栏。只读——原实现把 "@planning/outline.md"
+                   追加进正文，用户 Ctrl+S 就把垃圾持久化进小说了。
+                   这里读 planning/chapters/{id}.md 并列显示，绝不碰正文。 -->
+              <Border Grid.Row="1"
+                      Grid.Column="1"
+                      Width="{Binding OutlinePanelWidth}"
+                      IsVisible="{Binding IsOutlinePanelOpen}"
+                      Margin="28,0,0,0"
+                      Padding="20,0,0,0"
+                      BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                      BorderThickness="1,0,0,0">
+                <Grid RowDefinitions="Auto,*" RowSpacing="12">
+                  <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                    <TextBlock Grid.Column="0"
+                               Text="{Binding OutlineCompareText}"
+                               Classes="subtitle"
+                               VerticalAlignment="Center" />
+                    <Button Grid.Column="1"
+                            Classes="subtle"
+                            Padding="6,2"
+                            Command="{Binding ToggleOutlinePanelCommand}"
+                            ToolTip.Tip="{Binding OutlineCompareText}"
+                            AutomationProperties.Name="{Binding OutlineCompareText}">
+                      <PathIcon Width="12" Height="12"
+                                Data="{DynamicResource Ariadne.Icon.Close}"
+                                Foreground="{DynamicResource Ariadne.TextMuted}" />
+                    </Button>
+                  </Grid>
+                  <ScrollViewer Grid.Row="1"
+                                HorizontalScrollBarVisibility="Disabled"
+                                VerticalScrollBarVisibility="Auto">
+                    <SelectableTextBlock Text="{Binding ChapterOutlineText}"
+                                         Classes="reading"
+                                         FontSize="14"
+                                         TextWrapping="Wrap" />
+                  </ScrollViewer>
+                </Grid>
+              </Border>
               <!-- 快速编辑：去掉纸上又贴一张卡（card-in-card），
                    改为纸面下缘的一道工作区——顶部发丝线分隔即可。 -->
               <Border Grid.Row="2"
+                      Grid.ColumnSpan="2"
                       BorderBrush="{DynamicResource Ariadne.BorderMuted}"
                       BorderThickness="0,1,0,0"
                       Margin="0,28,0,0"
@@ -337,7 +378,7 @@
             <!-- 原为无任何视觉属性的空 Border（纯 padding 壳），改回 StackPanel + Margin -->
             <StackPanel DockPanel.Dock="Top" Margin="10,10,10,4" Spacing="8">
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                  <Button Classes="subtle" Padding="10,6" ToolTip.Tip="{Binding OutlineText}" AutomationProperties.Name="{Binding OutlineText}" Command="{Binding InsertOutlineCommand}">
+                  <Button Classes="subtle" Padding="10,6" ToolTip.Tip="{Binding OutlineText}" AutomationProperties.Name="{Binding OutlineText}" Command="{Binding ToggleOutlinePanelCommand}">
                     <StackPanel Orientation="Horizontal" Spacing="7">
                       <Path Classes="icon" Width="15" Height="15"
                             Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
