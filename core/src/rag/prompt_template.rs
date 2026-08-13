@@ -158,7 +158,17 @@ fn resolve_variable(
     context: &PromptTemplateContext,
     depth: usize,
 ) -> CoreResult<String> {
-    if variable == "节点提示词" || variable == "prompt.节点提示词" {
+    // U149：`角色设定` 是新名，`节点提示词` 是**必须保留的兼容别名**。
+    // 「节点」是画布上的方块、是我们的实现概念——模型读到「你是一个节点」
+    // 既得不到水准锚点也得不到身份代入，所以模板里改叫「角色设定」。
+    // 但存量工作流的节点 config 里存的是**渲染前的模板字符串**：
+    // 只认新名会让所有已保存的工作流在下一次运行时 fail-loud
+    // （`unknown_prompt_placeholder_fails_loudly` 那条保护正是为此存在的）。
+    // 两个名字指向同一份正文，直到确认线上再无旧模板为止。
+    if matches!(
+        variable,
+        "角色设定" | "prompt.角色设定" | "节点提示词" | "prompt.节点提示词"
+    ) {
         return Ok(context.prompt_text.clone());
     }
     if let Some(name) = variable.strip_prefix("input.") {
