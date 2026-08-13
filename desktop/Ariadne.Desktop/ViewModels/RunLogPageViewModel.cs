@@ -23,7 +23,6 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
     private string _searchQuery = string.Empty;
     private string _selectedLevel = string.Empty;
     private string _selectedKind = string.Empty;
-    private string _workflowIdFilter = string.Empty;
     private string _runIdFilter = string.Empty;
     private string _nodeIdFilter = string.Empty;
     private string _statusText = string.Empty;
@@ -82,9 +81,8 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         : "ui.run_log.mark_read.all");
 
     public string KindFilterText => _displayNames.Text("ui.run_log.filter.kind");
-    public string WorkflowFilterText => _displayNames.Text("ui.run_log.filter.workflow");
-    public string RunFilterText => _displayNames.Text("ui.run_log.filter.run");
-    public string NodeFilterText => _displayNames.Text("ui.run_log.filter.node");
+    // U137：WorkflowFilterText / RunFilterText / NodeFilterText 已删——
+    // 它们是三个手打 ID 输入框的 placeholder，输入框删了它们就零引用。
     public string LoadMoreText => _displayNames.Text("ui.run_log.load_more");
     public string LoadingMoreText => _displayNames.Text("ui.run_log.loading_more");
     public string ClearFiltersText => _displayNames.Text("ui.run_log.clear_filters");
@@ -111,11 +109,22 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
     public bool HasActiveFilter => !string.IsNullOrWhiteSpace(SearchQuery)
         || !string.IsNullOrWhiteSpace(SelectedLevel)
         || !string.IsNullOrWhiteSpace(SelectedKind)
-        || !string.IsNullOrWhiteSpace(WorkflowIdFilter)
         || !string.IsNullOrWhiteSpace(RunIdFilter)
         || !string.IsNullOrWhiteSpace(NodeIdFilter);
 
     public ObservableCollection<RunLogItemViewModel> Logs { get; }
+
+    /// <summary>
+    /// 当前生效的 ID 筛选，以可移除 chip 呈现。
+    ///
+    /// U137：取代原来三个手打输入框。后端对 run_id / node_id 是**精确等值**匹配
+    /// （同一条 SQL 里 message 用的是 LIKE），手敲差一个字符就是空结果、
+    /// 且除了"没有结果"以外不给任何提示。取值只能来自用户点过的那条日志，
+    /// 就不存在"敲错"这件事。
+    /// </summary>
+    public ObservableCollection<RunLogContextChipViewModel> ActiveIdFilters { get; } = new();
+
+    public bool HasActiveIdFilters => ActiveIdFilters.Count > 0;
 
     public ObservableCollection<RunLogLevelOption> LevelOptions { get; }
 
@@ -187,18 +196,6 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
                 {
                     _ = RefreshAsync();
                 }
-            }
-        }
-    }
-
-    public string WorkflowIdFilter
-    {
-        get => _workflowIdFilter;
-        set
-        {
-            if (SetProperty(ref _workflowIdFilter, value))
-            {
-                NotifyFilterChanged();
             }
         }
     }
@@ -328,7 +325,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
             SelectedLog = null;
             foreach (var log in page)
             {
-                Logs.Add(new RunLogItemViewModel(log, _displayNames));
+                Logs.Add(CreateLogItem(log));
             }
             HasMore = logs.Count > PageSize;
             MarkReadCommand.NotifyCanExecuteChanged();
@@ -388,7 +385,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
             {
                 if (Logs.All(existing => !string.Equals(existing.LogId, log.LogId, StringComparison.Ordinal)))
                 {
-                    Logs.Add(new RunLogItemViewModel(log, _displayNames));
+                    Logs.Add(CreateLogItem(log));
                 }
             }
             HasMore = logs.Count > PageSize;
@@ -456,7 +453,10 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         return new RunLogQuery(
             NullIfWhiteSpace(SelectedKind),
             NullIfWhiteSpace(SelectedLevel),
-            NullIfWhiteSpace(WorkflowIdFilter),
+            // U137：workflow_id 恒传 null。桌面端 2026-07-20 起固定单画布约束
+            // （DefaultWorkflowId = "default"），按它筛选没有任何区分度；
+            // 原来那个输入框永远只有一个可能值，已删。
+            null,
             NullIfWhiteSpace(RunIdFilter),
             NullIfWhiteSpace(NodeIdFilter),
             NullIfWhiteSpace(SearchQuery),
@@ -466,6 +466,20 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
             Descending: true);
     }
 
+    /// <summary>
+    /// 构造日志条目并接上 ID 回填。
+    ///
+    /// U137：**收口成工厂方法**，因为条目在两处被创建（首屏加载 + 加载更多）。
+    /// 各自 new 的话漏接一处，就会出现「前 100 条的 ID 能点、往下翻的点不动」——
+    /// 这种只在特定路径失效的缺陷最难被发现。
+    /// </summary>
+    private RunLogItemViewModel CreateLogItem(UiRunLogEntry entry)
+    {
+        var item = new RunLogItemViewModel(entry, _displayNames);
+        item.ApplyFilterRequest = ApplyIdFilter;
+        return item;
+    }
+
     private void NotifyFilterChanged()
     {
         OnPropertyChanged(nameof(HasActiveFilter));
@@ -473,6 +487,95 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         OnPropertyChanged(nameof(EmptyTitle));
         OnPropertyChanged(nameof(EmptyHint));
         ClearFiltersCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>
+    /// U137：点明细里的 ID chip 即回填筛选并立刻重查。
+    ///
+    /// 同一字段再点一次就换成新值（而不是叠加）——后端是等值匹配，
+    /// 两个 run_id 同时生效的语义不存在。
+    /// </summary>
+    public void ApplyIdFilter(RunLogFilterField field, string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        _isClearingFilters = true;
+        try
+        {
+            switch (field)
+            {
+                case RunLogFilterField.RunId:
+                    RunIdFilter = value;
+                    break;
+                case RunLogFilterField.NodeId:
+                    NodeIdFilter = value;
+                    break;
+            }
+        }
+        finally
+        {
+            _isClearingFilters = false;
+        }
+        RebuildActiveIdFilters();
+        _ = RefreshAsync();
+    }
+
+    /// <summary>U137：移除某个生效的 ID 筛选并重查。</summary>
+    public void RemoveIdFilter(RunLogFilterField field)
+    {
+        _isClearingFilters = true;
+        try
+        {
+            switch (field)
+            {
+                case RunLogFilterField.RunId:
+                    RunIdFilter = string.Empty;
+                    break;
+                case RunLogFilterField.NodeId:
+                    NodeIdFilter = string.Empty;
+                    break;
+            }
+        }
+        finally
+        {
+            _isClearingFilters = false;
+        }
+        RebuildActiveIdFilters();
+        _ = RefreshAsync();
+    }
+
+    /// <summary>
+    /// 重建筛选区的 chip 列表。
+    ///
+    /// 每次全量重建而不是增删单项：这个列表最多两条，重建的代价可以忽略，
+    /// 而增量维护要处理「同字段换值」「清空全部」等分支，
+    /// 漏一条就会出现「筛选还在生效但 chip 已经不见了」——用户无从知道
+    /// 为什么列表是空的。
+    /// </summary>
+    private void RebuildActiveIdFilters()
+    {
+        ActiveIdFilters.Clear();
+        AddActiveIdFilter(RunLogFilterField.RunId, "ui.run_log.context.run", RunIdFilter);
+        AddActiveIdFilter(RunLogFilterField.NodeId, "ui.run_log.context.node", NodeIdFilter);
+        OnPropertyChanged(nameof(HasActiveIdFilters));
+    }
+
+    private void AddActiveIdFilter(RunLogFilterField field, string key, string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        var label = _displayNames.Format(key, new Dictionary<string, string> { ["id"] = value });
+        ActiveIdFilters.Add(new RunLogContextChipViewModel(
+            label,
+            field,
+            value,
+            () => RemoveIdFilter(field)));
     }
 
     private void ClearFilters()
@@ -488,7 +591,6 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
             SearchQuery = string.Empty;
             SelectedLevel = string.Empty;
             SelectedKind = string.Empty;
-            WorkflowIdFilter = string.Empty;
             RunIdFilter = string.Empty;
             NodeIdFilter = string.Empty;
         }
@@ -496,6 +598,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         {
             _isClearingFilters = false;
         }
+        RebuildActiveIdFilters();
         _ = RefreshAsync();
     }
 
@@ -569,7 +672,6 @@ public sealed class RunLogItemViewModel : ViewModelBase
         Kind = entry.Kind;
         Level = entry.Level;
         Message = entry.Message;
-        WorkflowId = entry.WorkflowId;
         RunId = entry.RunId;
         NodeId = entry.NodeId;
         IsUnread = entry.Unread;
@@ -592,7 +694,9 @@ public sealed class RunLogItemViewModel : ViewModelBase
     public string Kind { get; }
     public string Level { get; }
     public string Message { get; }
-    public string? WorkflowId { get; }
+    // U137：WorkflowId 已删。它恒为 "default"（桌面端固定单画布约束），
+    // 既不显示也不筛选也不复制——零读者。要诊断具体工作流身份，
+    // 后端日志里那一列一直都在，不需要 UI 层再存一份。
     public string? RunId { get; }
     public string? NodeId { get; }
     public string TimestampText { get; }
@@ -613,25 +717,50 @@ public sealed class RunLogItemViewModel : ViewModelBase
         var level = Level.ToLowerInvariant() == "warn" ? "warning" : Level.ToLowerInvariant();
         LevelText = names.Text($"ui.level.{level}");
         UnreadText = names.Text("ui.run_log.unread");
-        var context = new List<string>();
-        AddContext(context, names, "ui.run_log.context.workflow", WorkflowId);
-        AddContext(context, names, "ui.run_log.context.run", RunId);
-        AddContext(context, names, "ui.run_log.context.node", NodeId);
-        ContextText = string.Join(" · ", context);
-        HasContext = context.Count > 0;
+        // U137：ID 由「拼进一个字符串」改为**结构化的可点击项**。
+        // 此前 ContextText 是纯 TextBlock，用户唯一的筛选路径是：
+        // 看到明细里的 a3f9c2e1-… → 肉眼记住 → 手敲进上面的输入框，
+        // 而后端是精确等值匹配，差一个字符就是空结果、且不给任何提示。
+        // 只保留 run/node 两类：工作流 ID 恒为 "default"（桌面端 2026-07-20 起
+        // 固定单画布约束），拿它筛选没有任何区分度。
+        ContextChips.Clear();
+        AddContextChip(names, "ui.run_log.context.run", RunLogFilterField.RunId, RunId);
+        AddContextChip(names, "ui.run_log.context.node", RunLogFilterField.NodeId, NodeId);
+        HasContext = ContextChips.Count > 0;
+        // 「复制这条日志」要的是纯文本，从 chip 派生而不是另拼一遍——
+        // 两份拼装逻辑迟早漂移，届时复制出来的内容与屏幕上看到的不一致。
+        ContextText = string.Join(" · ", ContextChips.Select(chip => chip.Label));
         OnPropertyChanged(string.Empty);
     }
 
-    private static void AddContext(
-        ICollection<string> target,
+    /// <summary>
+    /// 明细里可点击回填的 ID 项。
+    ///
+    /// 每条日志各自持有，因为 chip 的文案（「运行 a3f9c2e1」）与它承载的
+    /// 字段+取值绑在一起——共享一份列表会让点击时分不清是哪条日志的 ID。
+    /// </summary>
+    public ObservableCollection<RunLogContextChipViewModel> ContextChips { get; } = new();
+
+    /// <summary>View 注入：点击 chip 时把 (字段, 取值) 交给页面去筛选。</summary>
+    public Action<RunLogFilterField, string>? ApplyFilterRequest { get; set; }
+
+    private void AddContextChip(
         DisplayNameService names,
         string key,
+        RunLogFilterField field,
         string? value)
     {
-        if (!string.IsNullOrWhiteSpace(value))
+        if (string.IsNullOrWhiteSpace(value))
         {
-            target.Add(names.Format(key, new Dictionary<string, string> { ["id"] = value }));
+            return;
         }
+
+        var label = names.Format(key, new Dictionary<string, string> { ["id"] = value });
+        ContextChips.Add(new RunLogContextChipViewModel(
+            label,
+            field,
+            value,
+            () => ApplyFilterRequest?.Invoke(field, value)));
     }
 
     private static string FormatTimestamp(long ms)
@@ -645,4 +774,43 @@ public sealed class RunLogItemViewModel : ViewModelBase
             return ms.ToString();
         }
     }
+}
+
+/// <summary>
+/// 可点击的 ID 字段。
+///
+/// U137：用枚举而不是字符串 key，因为回填的目标是三个语义不同的筛选槽，
+/// 拼错字符串只会静默不生效——正是这条缺陷「手敲即错、错了只是空结果」的翻版。
+/// </summary>
+public enum RunLogFilterField
+{
+    RunId,
+    NodeId,
+}
+
+/// <summary>
+/// 日志明细里可点击回填的 ID chip，以及筛选区里可移除的生效项。
+///
+/// 同一个类兼两用：明细里点它=加筛选，筛选区里点它=去筛选。
+/// 差别只在 <see cref="Invoke"/> 绑的是哪个动作，
+/// 因此外观与文案能天然保持一致——用户看到的是「同一个 chip 被搬上去了」。
+/// </summary>
+public sealed class RunLogContextChipViewModel
+{
+    public RunLogContextChipViewModel(
+        string label,
+        RunLogFilterField field,
+        string value,
+        Action action)
+    {
+        Label = label;
+        Field = field;
+        Value = value;
+        Command = new RelayCommand(action);
+    }
+
+    public string Label { get; }
+    public RunLogFilterField Field { get; }
+    public string Value { get; }
+    public RelayCommand Command { get; }
 }

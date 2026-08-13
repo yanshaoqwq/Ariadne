@@ -26,7 +26,8 @@ public sealed class RunLogStateTests
 
         Assert.True(item.IsUnread);
         Assert.True(item.HasContext);
-        Assert.Contains("workflow-a", item.ContextText, StringComparison.Ordinal);
+        // U137：不再显示 workflow_id——它恒为 "default"，拿它筛选没有区分度。
+        Assert.DoesNotContain("workflow-a", item.ContextText, StringComparison.Ordinal);
         Assert.Contains("run-a", item.ContextText, StringComparison.Ordinal);
         Assert.Contains("writer", item.ContextText, StringComparison.Ordinal);
         Assert.DoesNotContain("[ui.run_log.kind", item.KindText, StringComparison.Ordinal);
@@ -40,7 +41,6 @@ public sealed class RunLogStateTests
         var viewModel = new RunLogPageViewModel(DisplayNameService.LoadDefault(), backend.Client)
         {
             SearchQuery = "failure",
-            WorkflowIdFilter = "wf",
             RunIdFilter = "run",
             NodeIdFilter = "node",
         };
@@ -50,6 +50,7 @@ public sealed class RunLogStateTests
 
         var query = Assert.Single(backend.Queries);
         Assert.Null(query.Query);
+        // U137：workflow_id 恒传 null——桌面端固定单画布，按它筛选没有区分度。
         Assert.Null(query.WorkflowId);
         Assert.Null(query.RunId);
         Assert.Null(query.NodeId);
@@ -151,7 +152,6 @@ public sealed class RunLogStateTests
         var viewModel = new RunLogPageViewModel(DisplayNameService.LoadDefault(), backend.Client)
         {
             SearchQuery = "failed",
-            WorkflowIdFilter = "workflow-a",
             RunIdFilter = "run-a",
             NodeIdFilter = "writer",
         };
@@ -162,7 +162,8 @@ public sealed class RunLogStateTests
 
         var filter = backend.MarkReadFilters[0];
         Assert.Equal("failed", filter.Query);
-        Assert.Equal("workflow-a", filter.WorkflowId);
+        // U137：标记已读与查询共用 BuildQuery，workflow_id 一并恒为 null。
+        Assert.Null(filter.WorkflowId);
         Assert.Equal("run-a", filter.RunId);
         Assert.Equal("writer", filter.NodeId);
         Assert.Null(filter.Limit);

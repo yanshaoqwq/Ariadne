@@ -92,28 +92,44 @@
           </ComboBox>
         </Grid>
 
-        <Grid ColumnDefinitions="*,*,*,Auto,Auto" ColumnSpacing="8">
-          <TextBox Grid.Column="0"
-                   Text="{Binding WorkflowIdFilter, Mode=TwoWay}"
-                   PlaceholderText="{Binding WorkflowFilterText}"
-                   AutomationProperties.Name="{Binding WorkflowFilterText}"
-                   KeyDown="OnSearchKeyDown" />
-          <TextBox Grid.Column="1"
-                   Text="{Binding RunIdFilter, Mode=TwoWay}"
-                   PlaceholderText="{Binding RunFilterText}"
-                   AutomationProperties.Name="{Binding RunFilterText}"
-                   KeyDown="OnSearchKeyDown" />
-          <TextBox Grid.Column="2"
-                   Text="{Binding NodeIdFilter, Mode=TwoWay}"
-                   PlaceholderText="{Binding NodeFilterText}"
-                   AutomationProperties.Name="{Binding NodeFilterText}"
-                   KeyDown="OnSearchKeyDown" />
-          <Button Grid.Column="3"
+        <!-- U137：原来这里是三个自由文本框（工作流 ID / 运行 ID / 节点 ID），
+             后端对它们是**精确等值**匹配，用户只能肉眼抄 UUID 再手敲，
+             差一个字符就是空结果、且不给任何提示。现在改为：
+             筛选来源只有"点明细里的 ID"，生效项以可移除 chip 呈现。
+             工作流 ID 框一并删掉——桌面端 2026-07-20 起固定单画布约束，
+             它恒为 "default"，永远只有一个可能值。 -->
+        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+          <ItemsControl Grid.Column="0"
+                        ItemsSource="{Binding ActiveIdFilters}"
+                        IsVisible="{Binding HasActiveIdFilters}"
+                        VerticalAlignment="Center">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <WrapPanel Orientation="Horizontal" />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="{x:Type vm:RunLogContextChipViewModel}">
+                <!-- 生效的筛选 chip：点它=移除。带一个 × 让"可移除"这件事不用猜。 -->
+                <Button Classes="chip-filter"
+                        Margin="0,0,6,0"
+                        Command="{Binding Command}"
+                        AutomationProperties.Name="{Binding Label}">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Text="{Binding Label}" Classes="caption" VerticalAlignment="Center" />
+                    <Path Classes="icon" Width="9" Height="9"
+                          Data="{StaticResource Ariadne.Icon.Close}" />
+                  </StackPanel>
+                </Button>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <Button Grid.Column="1"
                   Classes="subtle"
                   Content="{Binding ClearFiltersText}"
                   Command="{Binding ClearFiltersCommand}"
                   IsVisible="{Binding HasActiveFilter}" />
-          <Button Grid.Column="4"
+          <Button Grid.Column="2"
                   Classes="secondary"
                   Content="{Binding MarkReadText}"
                   Command="{Binding MarkReadCommand}" />
@@ -226,11 +242,34 @@
                              Classes="secondary"
                              TextWrapping="Wrap"
                              LineHeight="20" />
-                  <TextBlock Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="4"
-                             Text="{Binding ContextText}"
-                             Classes="caption mono"
-                             TextWrapping="Wrap"
-                             IsVisible="{Binding HasContext}" />
+                  <!-- U137：ID 从纯 TextBlock 改为可点击 chip。此前用户唯一的
+                       筛选路径是「肉眼记住 a3f9c2e1-… → 手敲进上面的框」，
+                       而后端是精确等值匹配，差一个字符就是空结果。
+                       点它即回填并重查——取值来自这条日志本身，敲错不可能发生。 -->
+                  <ItemsControl Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="4"
+                                ItemsSource="{Binding ContextChips}"
+                                IsVisible="{Binding HasContext}">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal" />
+                      </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate DataType="{x:Type vm:RunLogContextChipViewModel}">
+                        <!-- 行内 ID chip 比筛选区的紧一档：它是明细的一部分，
+                             不该抢走消息正文的视觉权重。 -->
+                        <Button Classes="chip-filter"
+                                MinHeight="22"
+                                Padding="8,2"
+                                Margin="0,2,6,0"
+                                Command="{Binding Command}"
+                                ToolTip.Tip="{Binding Value}"
+                                AutomationProperties.Name="{Binding Label}">
+                          <TextBlock Text="{Binding Label}" Classes="caption mono" />
+                        </Button>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
                 </Grid>
               </Border>
             </DataTemplate>
