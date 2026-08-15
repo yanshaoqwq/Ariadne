@@ -61,6 +61,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(ProjectMemoryPlaceholder),
         nameof(SaveGeneralText),
         nameof(ProviderIdLabel),
+        nameof(CopyProviderIdText),
         nameof(ProviderTypeLabel),
         nameof(ProviderDisplayNameLabel),
         nameof(BaseUrlLabel),
@@ -469,6 +470,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         ProviderOptions = new ObservableCollection<ProviderOptionViewModel>();
         AvailableModels = new ObservableCollection<ModelOptionViewModel>();
         ProviderModels = new ObservableCollection<ProviderModelEditorRow>();
+        // U145：模型 ID 候选。来源是「测试连接 / 刷新模型」从服务商真实拉回的模型目录——
+        // 产品已经知道这批 id，此前却让用户对着文档手抄（抄错只会在真正调用时才报错）。
+        FetchedModelIdCandidates = new ObservableCollection<string>();
         ProviderCapabilityOptions = new ObservableCollection<SettingsValueOption>
         {
             new("llm", displayNames.Text("ui.settings.models.capability.llm")),
@@ -598,7 +602,47 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         SelectThemeEditDayCommand = new RelayCommand(() => SetEditingNightThemeColors(false));
         SelectThemeEditNightCommand = new RelayCommand(() => SetEditingNightThemeColors(true));
 
+        // U146：三处路径列表的 chip 投影。必须建在构造器末尾——
+        // PathChipListViewModel 的构造会立刻 Sync 一次（读宿主字符串），
+        // 建得太早读到的是尚未初始化的字段。
+        ReadableRootChips = new PathChipListViewModel(
+            _displayNames,
+            () => ReadableRootsText,
+            value => ReadableRootsText = value,
+            requireAbsolute: true,
+            probeExistence: true,
+            assign => BrowseIntoAsync(assign));
+        WritableRootChips = new PathChipListViewModel(
+            _displayNames,
+            () => WritableRootsText,
+            value => WritableRootsText = value,
+            requireAbsolute: true,
+            probeExistence: true,
+            assign => BrowseIntoAsync(assign));
+        // 忽略路径是**项目内相对路径**（Git 忽略项），所以 requireAbsolute=false；
+        // 体检要先拼上项目根才知道存不存在，故给 resolveForProbe。
+        // 注意这里的选择器走 BrowseProjectDirectoryAsync——它会把绝对路径折回
+        // 项目内相对路径，并在选到项目外时给出提示，与该字段的取值域一致。
+        IgnoredPathChips = new PathChipListViewModel(
+            _displayNames,
+            () => IgnoredPathsText,
+            value => IgnoredPathsText = value,
+            requireAbsolute: false,
+            probeExistence: true,
+            assign => BrowseProjectDirectoryAsync(assign),
+            relative => string.IsNullOrWhiteSpace(ProjectRoot)
+                ? string.Empty
+                : Path.Combine(ProjectRoot, relative));
     }
+
+    /// <summary>U146：全局可读根的 chip 投影。</summary>
+    public PathChipListViewModel ReadableRootChips { get; }
+
+    /// <summary>U146：全局可写根的 chip 投影。</summary>
+    public PathChipListViewModel WritableRootChips { get; }
+
+    /// <summary>U146：Git 忽略路径的 chip 投影（相对路径）。</summary>
+    public PathChipListViewModel IgnoredPathChips { get; }
 
     private void AppendReadableRoot(string path) =>
         ReadableRootsText = AppendPathLine(ReadableRootsText, path);
@@ -964,6 +1008,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public ObservableCollection<ProviderOptionViewModel> ProviderOptions { get; }
     public ObservableCollection<ModelOptionViewModel> AvailableModels { get; }
     public ObservableCollection<ProviderModelEditorRow> ProviderModels { get; }
+    /// <summary>
+    /// U145：模型 ID 候选，来自「刷新模型 / 测试连接」向服务商真实拉回的目录。
+    ///
+    /// 仍允许手打列表外的值：新发布的模型常常还没进 /models 接口，
+    /// 而用户往往正是为了用它才来改这一行。
+    /// </summary>
+    public ObservableCollection<string> FetchedModelIdCandidates { get; }
     public ObservableCollection<SettingsValueOption> ProviderCapabilityOptions { get; }
     public ObservableCollection<ProviderModelRouteOption> DefaultLlmRouteOptions { get; }
     public ObservableCollection<ProviderModelRouteOption> DefaultEmbeddingRouteOptions { get; }
@@ -1068,6 +1119,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public RelayCommand BrowseWorkflowsDirCommand { get; }
     public RelayCommand BrowseSkillsDirCommand { get; }
     public RelayCommand BrowseExportsDirCommand { get; }
+
+    // U146：chip 化后 XAML 不再绑这两个命令（浏览按钮收进了 chip 列表模板，
+    // 走 PathChipListViewModel.BrowseCommand，那条路径会对选到的目录做逐条校验）。
+    // 保留是因为它们仍是「往路径列表追加一条」的编程入口，且现有用例在用；
+    // 两者最终都落到同一个 AppendPathLine + 字符串 setter，不会与 chip 投影分叉。
     public RelayCommand BrowseReadableRootsCommand { get; }
     public RelayCommand BrowseWritableRootsCommand { get; }
     public RelayCommand BrowseQdrantBinaryCommand { get; }
@@ -1100,6 +1156,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string SaveGeneralText => _displayNames.Text("ui.settings.general.save");
 
     public string ProviderIdLabel => _displayNames.Text("ui.settings.models.provider_id");
+    /// <summary>U135：服务 ID 改为只读展示后，「取值」由显式复制动作承接。</summary>
+    public string CopyProviderIdText => _displayNames.Text("ui.settings.models.provider_id.copy");
     public string ProviderTypeLabel => _displayNames.Text("ui.settings.models.provider_type");
     public string ProviderDisplayNameLabel => _displayNames.Text("ui.settings.models.display_name");
     public string BaseUrlLabel => _displayNames.Text("ui.settings.models.base_url");
@@ -1525,8 +1583,32 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         get => _areAdvancedAppRuntimeSettingsExpanded;
         set => SetProperty(ref _areAdvancedAppRuntimeSettingsExpanded, value);
     }
-    public string ReadableRootsText { get => _readableRootsText; set => SetProperty(ref _readableRootsText, value); }
-    public string WritableRootsText { get => _writableRootsText; set => SetProperty(ref _writableRootsText, value); }
+    // U146：全局可读/可写根同样 chip 化。字符串仍是真源（脏状态、快照、
+    // MatchesPermissionProfile、ApplyRecommendedDefaults 全部依赖它），
+    // chip 增删经由 setter 落地，故 OnPropertyChanged → UpdateDirtyState 链路不变。
+    public string ReadableRootsText
+    {
+        get => _readableRootsText;
+        set
+        {
+            if (SetProperty(ref _readableRootsText, value))
+            {
+                ReadableRootChips.Sync();
+            }
+        }
+    }
+
+    public string WritableRootsText
+    {
+        get => _writableRootsText;
+        set
+        {
+            if (SetProperty(ref _writableRootsText, value))
+            {
+                WritableRootChips.Sync();
+            }
+        }
+    }
 
     public string Theme
     {
@@ -2118,7 +2200,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public bool TrackWorkflows { get => _trackWorkflows; set => SetProperty(ref _trackWorkflows, value); }
     public bool TrackSkills { get => _trackSkills; set => SetProperty(ref _trackSkills, value); }
     public bool TrackNonSensitiveConfig { get => _trackNonSensitiveConfig; set => SetProperty(ref _trackNonSensitiveConfig, value); }
-    public string IgnoredPathsText { get => _ignoredPathsText; set => SetProperty(ref _ignoredPathsText, value); }
+    public string IgnoredPathsText
+    {
+        get => _ignoredPathsText;
+        set
+        {
+            if (SetProperty(ref _ignoredPathsText, value))
+            {
+                IgnoredPathChips.Sync();
+            }
+        }
+    }
     public string DiagnosticsStatus { get => _diagnosticsStatus; set { if (SetProperty(ref _diagnosticsStatus, value)) OnPropertyChanged(nameof(DiagnosticsStatusText)); } }
 
     public string SelectedLanguage
@@ -4134,6 +4226,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 RemoveProviderModelRow));
             AvailableModels.Add(CreateModelOption(model));
         }
+        // U145：候选取自这批「后端交给我们的」模型（已落库配置 + 刷新/测试连接拉回的目录）。
+        // 刻意**不**把用户正在手打的行回收进候选：那等于把打错的 id 洗成「看起来是官方的选项」，
+        // 下一次就再也分不清哪个才是真的。
+        IdentifierCandidates.Sync(
+            FetchedModelIdCandidates,
+            IdentifierCandidates.Compose(ProviderModels.Select(row => row.ModelId)));
         ValidateProviderModelRows();
         ModelsText = ProviderModelsText();
         RebuildProviderDefaultModelRoutes();
@@ -5424,7 +5522,8 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 policy,
                 settings.Policy,
                 () => OnScopedPermissionProfileChanged(scope),
-                assign => BrowseIntoAsync(assign)));
+                assign => BrowseIntoAsync(assign),
+                _displayNames));
         }
         OnPropertyChanged(nameof(HasCompatibilityPermissionScopes));
         OnPropertyChanged(nameof(CompatibilityPermissionScopesText));
@@ -6472,6 +6571,22 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             OnPropertyChanged(propertyName);
         }
 
+        // U146：chip 的失效说明、占位符、按钮文案都走 display_name，切语言要跟着刷。
+        // 漏掉这一处的表现是「切成英文后只有 chip 区还是中文」。
+        ReadableRootChips.RefreshLocalizedText();
+        WritableRootChips.RefreshLocalizedText();
+        IgnoredPathChips.RefreshLocalizedText();
+        foreach (var profile in ScopedPermissionProfiles)
+        {
+            profile.ReadableRootChips.RefreshLocalizedText();
+            profile.WritableRootChips.RefreshLocalizedText();
+        }
+        foreach (var preset in NodePresets)
+        {
+            preset.Permissions.ReadableRootChips.RefreshLocalizedText();
+            preset.Permissions.WritableRootChips.RefreshLocalizedText();
+        }
+
         foreach (var option in LanguageOptions)
         {
             option.Label = _displayNames.LanguageLabel(option.Code);
@@ -7326,7 +7441,8 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
         PermissionPolicy? policy,
         PermissionPolicy fallback,
         Action markDirty,
-        Func<Action<string>, Task>? browse = null)
+        Func<Action<string>, Task>? browse = null,
+        DisplayNameService? displayNames = null)
     {
         Scope = scope;
         _displayName = displayName;
@@ -7348,12 +7464,38 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
         BrowseWritableRootsCommand = new RelayCommand(
             () => _ = BrowseRootAsync(writable: true),
             () => _browse is not null);
+        // U146：chip 列表是**投影**，读写都经由上面那两个字符串属性，
+        // 所以 SetAndMark 的脏标记、Snapshot、ToPolicy 全部照旧生效——
+        // 这是选投影而非换数据结构的核心收益。
+        // displayNames 为 null 时退回全局实例：这个 VM 有多个既有构造点
+        // （NodeTypePresetViewModel 里也建），不该为了 chip 化去改它们的签名。
+        var names = displayNames ?? DisplayNameService.Current;
+        ReadableRootChips = new PathChipListViewModel(
+            names,
+            () => ReadableRootsText,
+            value => ReadableRootsText = value,
+            requireAbsolute: true,
+            probeExistence: true,
+            browse);
+        WritableRootChips = new PathChipListViewModel(
+            names,
+            () => WritableRootsText,
+            value => WritableRootsText = value,
+            requireAbsolute: true,
+            probeExistence: true,
+            browse);
     }
 
     public string Scope { get; }
     public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
     public RelayCommand BrowseReadableRootsCommand { get; }
     public RelayCommand BrowseWritableRootsCommand { get; }
+
+    /// <summary>U146：可读根的 chip 投影。</summary>
+    public PathChipListViewModel ReadableRootChips { get; }
+
+    /// <summary>U146：可写根的 chip 投影。</summary>
+    public PathChipListViewModel WritableRootChips { get; }
     public bool IsOverrideEnabled => !InheritGlobal;
     public bool InheritGlobal
     {
@@ -7395,8 +7537,34 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
     public bool AllowHttpSkill { get => _allowHttpSkill; set => SetAndMark(ref _allowHttpSkill, value); }
     public bool AllowWasmNetwork { get => _allowWasmNetwork; set => SetAndMark(ref _allowWasmNetwork, value); }
     public bool AllowSecretRead { get => _allowSecretRead; set => SetAndMark(ref _allowSecretRead, value); }
-    public string ReadableRootsText { get => _readableRootsText; set => SetAndMark(ref _readableRootsText, value); }
-    public string WritableRootsText { get => _writableRootsText; set => SetAndMark(ref _writableRootsText, value); }
+
+    // U146：字符串仍是唯一真源，chip 只是投影。任何写入这两个属性的旧路径
+    // （继承投影、推荐默认值、目录选择器、测试直接赋值）都会把 chip 拉回一致；
+    // 反过来 chip 增删也是经由这里落地，故脏标记只需在这一处维持。
+    // Sync 内部做「投影结果相同就早退」，所以 chip 触发的回写不会递归重建集合。
+    public string ReadableRootsText
+    {
+        get => _readableRootsText;
+        set
+        {
+            if (SetAndMark(ref _readableRootsText, value))
+            {
+                ReadableRootChips.Sync();
+            }
+        }
+    }
+
+    public string WritableRootsText
+    {
+        get => _writableRootsText;
+        set
+        {
+            if (SetAndMark(ref _writableRootsText, value))
+            {
+                WritableRootChips.Sync();
+            }
+        }
+    }
 
     public PermissionPolicy ToPolicy() => new(
         AllowNetwork,
@@ -7452,6 +7620,11 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
             ref _writableRootsText,
             string.Join(Environment.NewLine, policy.WritableFileRoots),
             nameof(WritableRootsText));
+        // U146：这里刻意走 backing field（避免与 InheritGlobal setter 抢），
+        // 于是绕过了属性 setter 里的 Sync——必须在此手工补一次，
+        // 否则「继承父级」改了字符串而 chip 还显示旧路径，界面与将要保存的值不一致。
+        ReadableRootChips.Sync();
+        WritableRootChips.Sync();
     }
 
     private bool SetAndMark<T>(ref T field, T value)
@@ -7710,4 +7883,447 @@ public sealed class ConfirmationPolicyGroupViewModel : ViewModelBase
     public string GroupId { get; }
     public string Title { get; }
     public ObservableCollection<ConfirmationPolicyViewModel> Items { get; }
+}
+
+/// <summary>路径存在性体检结论。与 U143 的 <c>RecentProjectHealth</c> 同族语义。</summary>
+public enum PathChipHealth
+{
+    /// <summary>尚未体检。体检是磁盘 IO，不能在 UI 线程同步跑，所以必然有这个中间态。</summary>
+    Unknown,
+
+    /// <summary>目录存在。</summary>
+    Healthy,
+
+    /// <summary>目录不存在（被删或被移走）。</summary>
+    Missing,
+
+    /// <summary>路径存在但是文件而非目录——「可读根」必须是目录，指到文件上等于配错。</summary>
+    NotADirectory,
+}
+
+/// <summary>
+/// U146：路径列表里的单条 chip。
+///
+/// 原先整个列表塞在一个 <c>AcceptsReturn</c> 的 <c>TextBox</c> 里，三条后果：
+/// 单条无法校验（只能整体接受或拒绝，用户不知道哪行错）、看不出哪条已失效、
+/// 首尾空格静默出错（<c>" /home/x"</c> 与 <c>"/home/x"</c> 在文本里长得一样，
+/// 作为路径却是两个值）。这些是**权限边界配置**，静默出错等于权限判定与用户意图不符。
+///
+/// 每条独立成 chip 后，失效状态才有地方显示——与 U143「路径类数据必须能显示自身健康度」同源。
+/// </summary>
+public sealed class PathChipViewModel : ViewModelBase
+{
+    private readonly DisplayNameService _displayNames;
+    private PathChipHealth _health = PathChipHealth.Unknown;
+
+    public PathChipViewModel(
+        string path,
+        DisplayNameService displayNames,
+        Action<PathChipViewModel> remove)
+    {
+        // Path 一律是已规范化的值：调用方在加入前必须过 TryNormalizePath，
+        // 所以这里不再 Trim——若还需要 Trim，说明有旁路绕过了规范化收口。
+        PathText = path;
+        _displayNames = displayNames;
+        RemoveCommand = new RelayCommand(() => remove(this));
+    }
+
+    /// <summary>
+    /// 规范化后的路径值。这就是序列化出去的内容，chip 上显示的也是它。
+    /// 叫 PathText 而不是 Path：<c>{Binding Path}</c> 在 XAML 里与
+    /// <c>Binding.Path</c> 以及 <c>&lt;Path&gt;</c> 图形元素同名，是编译绑定的歧义源。
+    /// </summary>
+    public string PathText { get; }
+
+    /// <summary>移除本条。chip 自己持有删除命令，列表模板里不必再靠索引回查。</summary>
+    public RelayCommand RemoveCommand { get; }
+
+    /// <summary>
+    /// 体检结论。<see cref="PathChipHealth.Unknown"/> 期间**不显示失效标记**——
+    /// 体检未完成就先标红会让每次打开设置页都闪一片告警色，用户会学会忽略它。
+    /// </summary>
+    public PathChipHealth Health
+    {
+        get => _health;
+        private set
+        {
+            if (SetProperty(ref _health, value))
+            {
+                OnPropertyChanged(nameof(IsUnavailable));
+                OnPropertyChanged(nameof(UnavailableText));
+                OnPropertyChanged(nameof(HasUnavailableText));
+            }
+        }
+    }
+
+    /// <summary>是否该置灰/标告警色。</summary>
+    public bool IsUnavailable =>
+        Health is PathChipHealth.Missing or PathChipHealth.NotADirectory;
+
+    /// <summary>
+    /// 失效说明文字。**只灰掉不给字是不够的**——用户看到一条灰 chip 无从知道
+    /// 是「目录被删了」还是「我指到文件上了」，两者的出路完全不同。
+    /// </summary>
+    public string UnavailableText => Health switch
+    {
+        PathChipHealth.Missing => _displayNames.Text("ui.settings.permissions.path_chip.missing"),
+        PathChipHealth.NotADirectory => _displayNames.Text("ui.settings.permissions.path_chip.not_a_directory"),
+        _ => string.Empty,
+    };
+
+    public bool HasUnavailableText => !string.IsNullOrEmpty(UnavailableText);
+
+    /// <summary>无障碍名：路径 + 失效说明，读屏用户不靠颜色也能知道这条坏了。</summary>
+    public string AccessibleName => HasUnavailableText
+        ? $"{PathText}（{UnavailableText}）"
+        : PathText;
+
+    /// <summary>切语言后刷新失效说明。</summary>
+    internal void RefreshLocalizedText()
+    {
+        OnPropertyChanged(nameof(UnavailableText));
+        OnPropertyChanged(nameof(HasUnavailableText));
+        OnPropertyChanged(nameof(AccessibleName));
+    }
+
+    internal void ApplyHealth(PathChipHealth health)
+    {
+        Health = health;
+        OnPropertyChanged(nameof(AccessibleName));
+    }
+}
+
+/// <summary>
+/// U146：路径列表的 chip 投影层。
+///
+/// **为什么是投影而不是彻底换掉数据结构**：底层仍以「换行分隔的字符串」作为序列化形态，
+/// 原因是这个字符串同时被 7 类逻辑消费——保存序列化（<c>AbsolutePaths</c>/<c>RelativePaths</c>）、
+/// 脏状态快照（<c>CurrentValues</c> 的字典值）、快照对比（<c>IsTrackedDirtyProperty</c>）、
+/// 预设匹配（<c>PathLinesEqual</c>）、继承投影（<c>ApplyPolicy</c>）、
+/// 推荐默认值（<c>ApplyRecommendedDefaults</c>）、权限档位判定（<c>MatchesPermissionProfile</c>）。
+/// 换成集合要同时改这 7 处，且脏状态快照必须自己实现一套稳定序列化——
+/// 漏一处就是「改了不算脏」或「保存丢内容」。
+///
+/// 投影方案把风险收在一处：chip 的任何改动都**经由宿主原有的字符串 setter** 落地，
+/// 于是脏状态、快照、保存链路一行都不用动；宿主字符串被任何旧路径改写后，
+/// <see cref="Sync"/> 把 chip 拉回一致。双向同步的唯一真源始终是那个字符串。
+/// </summary>
+public sealed class PathChipListViewModel : ViewModelBase
+{
+    private readonly DisplayNameService _displayNames;
+    private readonly Func<string> _read;
+    private readonly Action<string> _write;
+    private readonly Func<Action<string>, Task>? _browse;
+    private readonly bool _requireAbsolute;
+    private readonly bool _probeExistence;
+    private readonly Func<string, string>? _resolveForProbe;
+    private readonly RequestGenerationSession _probeSession = new();
+    private string _draftPath = string.Empty;
+    private string _draftError = string.Empty;
+
+    public PathChipListViewModel(
+        DisplayNameService displayNames,
+        Func<string> read,
+        Action<string> write,
+        bool requireAbsolute,
+        bool probeExistence,
+        Func<Action<string>, Task>? browse = null,
+        Func<string, string>? resolveForProbe = null)
+    {
+        _displayNames = displayNames;
+        _read = read;
+        _write = write;
+        _requireAbsolute = requireAbsolute;
+        _probeExistence = probeExistence;
+        _browse = browse;
+        _resolveForProbe = resolveForProbe;
+        Chips = new ObservableCollection<PathChipViewModel>();
+        AddCommand = new RelayCommand(() => TryCommitDraft(), () => !string.IsNullOrWhiteSpace(DraftPath));
+        BrowseCommand = new RelayCommand(() => _ = BrowseAsync(), () => _browse is not null);
+        Sync();
+    }
+
+    public ObservableCollection<PathChipViewModel> Chips { get; }
+    public RelayCommand AddCommand { get; }
+    public RelayCommand BrowseCommand { get; }
+
+    public bool HasChips => Chips.Count > 0;
+
+    /// <summary>空列表要给字而不是留白：留白让人以为界面没加载完。</summary>
+    public string EmptyText => _displayNames.Text("ui.settings.permissions.path_chip.empty");
+
+    public string AddText => _displayNames.Text("ui.settings.permissions.path_chip.add");
+    public string RemoveHintText => _displayNames.Text("ui.settings.permissions.path_chip.remove");
+
+    /// <summary>目录选择器按钮文案。复用既有的「浏览…」，不新造一个同义词。</summary>
+    public string BrowseText => _displayNames.Text("ui.settings.browse_folder");
+
+    public string DraftPlaceholder => _requireAbsolute
+        ? _displayNames.Text("ui.settings.permissions.path_chip.draft_placeholder_absolute")
+        : _displayNames.Text("ui.settings.permissions.path_chip.draft_placeholder_relative");
+
+    /// <summary>待添加的输入。留一个单行输入框，键盘用户不必依赖目录选择器。</summary>
+    public string DraftPath
+    {
+        get => _draftPath;
+        set
+        {
+            if (SetProperty(ref _draftPath, value))
+            {
+                // 用户开始重新输入就清掉上一条错误：错误常驻会盖住当前这次输入的真实状态。
+                DraftError = string.Empty;
+                AddCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 逐条校验的错误文字。**这就是 U146 第一条后果的正解**——
+    /// 原先整个文本框只能整体接受或拒绝，用户不知道是哪一行错；
+    /// 现在错的那一条根本进不了列表，且当场说明原因。
+    /// </summary>
+    public string DraftError
+    {
+        get => _draftError;
+        private set
+        {
+            if (SetProperty(ref _draftError, value))
+            {
+                OnPropertyChanged(nameof(HasDraftError));
+            }
+        }
+    }
+
+    public bool HasDraftError => !string.IsNullOrEmpty(DraftError);
+
+    /// <summary>
+    /// 把宿主字符串拉进 chip 集合。
+    ///
+    /// 只在**投影结果真的不同**时重建：宿主 setter 会因为无关改动反复触发 PropertyChanged，
+    /// 每次都重建集合会让正在体检的结论全部作废、并让 UI 无谓地重排一遍 chip。
+    /// </summary>
+    public void Sync()
+    {
+        var desired = SplitStoredLines(_read());
+        if (desired.Count == Chips.Count
+            && desired.SequenceEqual(Chips.Select(chip => chip.PathText), StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        Chips.Clear();
+        foreach (var path in desired)
+        {
+            Chips.Add(new PathChipViewModel(path, _displayNames, Remove));
+        }
+        OnPropertyChanged(nameof(HasChips));
+        _ = ProbeHealthAsync();
+    }
+
+    /// <summary>切语言后刷新自身与全部 chip 的文案。</summary>
+    public void RefreshLocalizedText()
+    {
+        OnPropertyChanged(nameof(EmptyText));
+        OnPropertyChanged(nameof(AddText));
+        OnPropertyChanged(nameof(RemoveHintText));
+        OnPropertyChanged(nameof(BrowseText));
+        OnPropertyChanged(nameof(DraftPlaceholder));
+        foreach (var chip in Chips)
+        {
+            chip.RefreshLocalizedText();
+        }
+    }
+
+    /// <summary>提交输入框里那条。成功则清空输入框，失败则留着原文并给出原因。</summary>
+    internal bool TryCommitDraft()
+    {
+        if (!TryAdd(DraftPath, out var failure))
+        {
+            DraftError = failure;
+            return false;
+        }
+
+        DraftPath = string.Empty;
+        DraftError = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// 加入一条路径。首尾空格在 <see cref="SettingsInputValidation.TryNormalizePath"/> 里就被吃掉——
+    /// U146 的第三条后果（<c>" /home/x"</c> 与 <c>"/home/x"</c> 肉眼不可辨却是两个值）由此消除。
+    /// </summary>
+    internal bool TryAdd(string? raw, out string failure)
+    {
+        failure = string.Empty;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            // 空行不入列表：原先文本框里的空行会在保存时被静默丢掉，
+            // 用户看到「我输的东西不见了」却查不出原因。
+            failure = _displayNames.Text("ui.settings.permissions.path_chip.error_empty");
+            return false;
+        }
+
+        if (!SettingsInputValidation.TryNormalizePath(raw, _requireAbsolute, out var normalized))
+        {
+            failure = _requireAbsolute
+                ? _displayNames.Text("ui.settings.permissions.path_chip.error_absolute")
+                : _displayNames.Text("ui.settings.permissions.path_chip.error_relative");
+            return false;
+        }
+
+        // 重复项当场拒绝并说明。若放进去，保存时 Paths() 会因重复抛 PathLine 异常，
+        // 那时错误信息只有行号——而 chip 列表里根本没有「行号」这个概念可指。
+        if (Chips.Any(chip => SettingsInputValidation.PathComparer.Equals(chip.PathText, normalized)))
+        {
+            failure = _displayNames.Text("ui.settings.permissions.path_chip.error_duplicate");
+            return false;
+        }
+
+        Chips.Add(new PathChipViewModel(normalized, _displayNames, Remove));
+        Commit();
+        return true;
+    }
+
+    internal void Remove(PathChipViewModel chip)
+    {
+        if (Chips.Remove(chip))
+        {
+            Commit();
+        }
+    }
+
+    /// <summary>chip 集合 → 宿主字符串。经由宿主原有 setter，脏状态与快照链路照旧生效。</summary>
+    private void Commit()
+    {
+        _write(string.Join(Environment.NewLine, Chips.Select(chip => chip.PathText)));
+        OnPropertyChanged(nameof(HasChips));
+        _ = ProbeHealthAsync();
+    }
+
+    private async Task BrowseAsync()
+    {
+        if (_browse is null)
+        {
+            return;
+        }
+
+        await _browse(path =>
+        {
+            if (!TryAdd(path, out var failure))
+            {
+                // 选择器给回的路径也可能不合法（例如相对根要求的字段选到了项目外），
+                // 同样要给字——只把它悄悄丢掉会让用户以为选择器坏了。
+                DraftError = failure;
+            }
+        }).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 逐条体检存在性。
+    ///
+    /// **不在 UI 线程同步跑**：失效条目往往落在已卸载的外部盘或网络路径上，
+    /// 那里的 <c>Directory.Exists</c> 可能阻塞到超时，一列路径顺序探完足以卡住设置页。
+    /// 整批丢进 <c>Task.Run</c>，只把结论切回 UI 线程回填（<c>ConfigureAwait(true)</c>——
+    /// <c>Health</c> 会触发 PropertyChanged，绑定必须在 UI 线程收到）。
+    ///
+    /// 代次守卫：体检期间用户可能已经增删过 chip，过期结论不能盖到新集合上。
+    /// </summary>
+    private async Task ProbeHealthAsync()
+    {
+        if (!_probeExistence)
+        {
+            return;
+        }
+
+        var request = _probeSession.Begin();
+        var targets = Chips.ToArray();
+        if (targets.Length == 0)
+        {
+            return;
+        }
+
+        var probePaths = targets
+            .Select(chip => _resolveForProbe is null ? chip.PathText : _resolveForProbe(chip.PathText))
+            .ToArray();
+        PathChipHealth[] results;
+        try
+        {
+            results = await Task.Run(
+                () => probePaths.Select(Inspect).ToArray(),
+                request.CancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (!_probeSession.IsCurrent(request))
+        {
+            return;
+        }
+
+        for (var i = 0; i < targets.Length && i < results.Length; i++)
+        {
+            // 集合可能已被替换（Sync 重建过）；只回填仍在列表里的那些实例。
+            if (Chips.Contains(targets[i]))
+            {
+                targets[i].ApplyHealth(results[i]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 单条体检。区分「不存在」与「存在但是文件」——两者出路不同：
+    /// 前者要重新指路，后者是配错了层级。
+    /// </summary>
+    private static PathChipHealth Inspect(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return PathChipHealth.Missing;
+        }
+
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                return PathChipHealth.Healthy;
+            }
+
+            return File.Exists(path) ? PathChipHealth.NotADirectory : PathChipHealth.Missing;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // 权限不足、路径非法一律按不可用：让用户看到失效标记，
+            // 好过给一个看着正常、实际权限判定用不上的条目。
+            return PathChipHealth.Missing;
+        }
+    }
+
+    /// <summary>
+    /// 宿主字符串 → 去空行、去首尾空格、去重的有序列表。
+    ///
+    /// 刻意**不做合法性过滤**：历史配置里可能存着非法值（旧版本写进去的相对路径等），
+    /// 过滤掉会让它在界面上消失、却仍在保存时报错，用户永远找不到那条。
+    /// 让它作为 chip 显示出来、体检标失效，才有机会被删掉。
+    /// </summary>
+    private static List<string> SplitStoredLines(string? text)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return result;
+        }
+
+        var seen = new HashSet<string>(SettingsInputValidation.PathComparer);
+        foreach (var line in text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (!string.IsNullOrWhiteSpace(trimmed) && seen.Add(trimmed))
+            {
+                result.Add(trimmed);
+            }
+        }
+        return result;
+    }
 }

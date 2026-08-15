@@ -203,7 +203,35 @@ public partial class SettingsPageView : UserControl
             }
             catch (Exception)
             {
-                // async void 处理器的异常无人可捕，剪贴板不可用时只能就地吞掉。
+                // async void 的异常无人可捕，剪贴板不可用只能就地吞掉。
+            }
+        }
+    }
+
+    /// <summary>
+    /// U135：服务 ID 去输入框化后，「把它拿出去用」这条诉求由显式复制承接。
+    ///
+    /// 原来它是 `TextBox IsReadOnly="True"`，用户能选中就能 Ctrl+C——但代价是
+    /// 那个框长得、也表现得完全像可编辑输入框。现在展示控件退出焦点序列，
+    /// 复制改为一个明确的动作，两件事各归各位。
+    /// </summary>
+    private async void OnCopyProviderId(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not SettingsPageViewModel vm || string.IsNullOrWhiteSpace(vm.ProviderId))
+        {
+            return;
+        }
+
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard is not null)
+        {
+            try
+            {
+                await clipboard.SetTextAsync(vm.ProviderId);
+            }
+            catch (Exception)
+            {
+                // 同 OnCopyDiagnostics：async void 的异常无人可捕，剪贴板不可用只能就地吞掉。
             }
         }
     }

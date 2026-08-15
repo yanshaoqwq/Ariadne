@@ -6,6 +6,14 @@
     xmlns:vm="clr-namespace:Ariadne.Desktop.ViewModels"
     x:DataType="vm:SettingsPageViewModel">
   <UserControl.Styles>
+    <!-- U145：标识/别名选择器。AutoCompleteBox 内层就是 TextBox，槽色与焦点描边
+         全部沿用主题基础样式；这里只补等宽字体（标识符要看清 l/1/I 的差别）
+         与候选面板限高。选择器必须带类型前缀，裸 .identifier-picker 会 AVLN2200。
+         与 WorkspacePageView 各留一份：两个页面都要用，而主题文件此轮不动。 -->
+    <Style Selector="AutoCompleteBox.identifier-picker">
+      <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Mono}" />
+      <Setter Property="MaxDropDownHeight" Value="240" />
+    </Style>
     <Style Selector="ListBox.settings-section-index">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
@@ -81,7 +89,99 @@
     <Style Selector="CheckBox.policy-blocked">
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusWarning}" />
     </Style>
+    <!-- U146：失效路径 chip。选择器必须带元素类型前缀（裸 .path-chip-dead 会报 AVLN2200），
+         且这两条要声明在通用 chip-filter 之后才压得住——Avalonia 同优先级按文档顺序后者胜，
+         没有 CSS 那种特异性权重。这里靠 Classes.path-chip-dead 绑定 IsUnavailable 触发。 -->
+    <Style Selector="Button.chip-filter.path-chip-dead">
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusWarning}" />
+      <Setter Property="Background" Value="{DynamicResource Ariadne.LogWarningBg}" />
+    </Style>
+    <Style Selector="Button.chip-filter.path-chip-dead TextBlock.path-chip-label">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusWarning}" />
+      <Setter Property="TextDecorations" Value="Strikethrough" />
+    </Style>
   </UserControl.Styles>
+  <UserControl.Resources>
+    <!-- U146：路径 chip 列表的统一模板，7 个站点共用一份。
+         原先每处是一个 AcceptsReturn 的 TextBox 装换行分隔列表，导致单条无法校验、
+         看不出哪条已失效、首尾空格静默出错。改成 chip 后每条独立、带存在性标注。
+         复用主题已有的 Button.chip-filter，不新造视觉语汇。 -->
+    <DataTemplate x:Key="PathChipListTemplate" DataType="{x:Type vm:PathChipListViewModel}">
+      <StackPanel Spacing="6">
+        <!-- 空列表给字而不是留白：留白让人以为界面没加载完 -->
+        <TextBlock Text="{Binding EmptyText}"
+                   Classes="caption"
+                   IsVisible="{Binding !HasChips}" />
+        <ItemsControl ItemsSource="{Binding Chips}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <WrapPanel />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="{x:Type vm:PathChipViewModel}">
+              <!-- 点 chip = 移除这一条，与运行记录页的筛选 chip 同一手势。
+                   × 图标用矢量 Path（禁用图标字体：Segoe Fluent Icons 在 Linux 缺失会成豆腐块）。 -->
+              <Button Classes="chip-filter"
+                      Classes.path-chip-dead="{Binding IsUnavailable}"
+                      Margin="0,0,6,6"
+                      Command="{Binding RemoveCommand}"
+                      ToolTip.Tip="{Binding AccessibleName}"
+                      AutomationProperties.Name="{Binding AccessibleName}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Text="{Binding PathText}"
+                             Classes="caption path-chip-label"
+                             VerticalAlignment="Center" />
+                  <Path Classes="icon" Width="9" Height="9"
+                        Data="{StaticResource Ariadne.Icon.Close}" />
+                </StackPanel>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <!-- 失效条目的说明文字：只置灰不给字，用户无从知道是「目录被删」还是「指到文件上」。 -->
+        <ItemsControl ItemsSource="{Binding Chips}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="{x:Type vm:PathChipViewModel}">
+              <TextBlock IsVisible="{Binding HasUnavailableText}"
+                         Classes="caption"
+                         TextWrapping="Wrap"
+                         Foreground="{DynamicResource Ariadne.StatusWarning}"
+                         Text="{Binding AccessibleName}" />
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <!-- 手输入口 + 目录选择器。留单行输入框是为了键盘用户不必依赖选择器；
+             AcceptsReturn 保持默认 false——这里一次只加一条，回车即提交。 -->
+        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+          <TextBox Grid.Column="0"
+                   Text="{Binding DraftPath, Mode=TwoWay}"
+                   PlaceholderText="{Binding DraftPlaceholder}"
+                   AutomationProperties.Name="{Binding DraftPlaceholder}">
+            <TextBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding AddCommand}" />
+            </TextBox.KeyBindings>
+          </TextBox>
+          <Button Grid.Column="1"
+                  Classes="secondary"
+                  Content="{Binding AddText}"
+                  Command="{Binding AddCommand}" />
+          <Button Grid.Column="2"
+                  Classes="secondary"
+                  Content="{Binding BrowseText}"
+                  Command="{Binding BrowseCommand}" />
+        </Grid>
+        <!-- 逐条校验的错误：这就是「单条无法校验」那条后果的正解。
+             错的那条进不了列表，且当场说明原因（不是只灰掉按钮）。 -->
+        <TextBlock Text="{Binding DraftError}"
+                   IsVisible="{Binding HasDraftError}"
+                   Classes="caption"
+                   TextWrapping="Wrap"
+                   Foreground="{DynamicResource Ariadne.StatusError}"
+                   AutomationProperties.LiveSetting="Assertive" />
+      </StackPanel>
+    </DataTemplate>
+  </UserControl.Resources>
   <!-- 根容器透明：让 MainWindow 底层的径向光晕透上来 -->
   <Grid RowDefinitions="Auto,*" Background="Transparent">
 
@@ -344,9 +444,34 @@
                     <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding ProviderStatus}" Classes="caption" TextWrapping="Wrap" />
                   </Grid>
                   <Expander Header="{Binding AdvancedSettingsText}">
-                    <Grid Margin="0,10,0,0" ColumnDefinitions="140,*" ColumnSpacing="14">
+                    <!-- U135：服务 ID 是后端分配的标识，用户永远改不了它。
+                         原来用 `TextBox IsReadOnly="True"` 承载，而主题没有任何
+                         `:readonly` 伪类样式，于是它与可编辑输入框像素级同款：
+                         点一下同样亮 2px 强调色描边、同样抢走焦点、还照样占 Tab 停靠位，
+                         但一个字也打不进去——最坏的一类假控件。
+                         改为 SelectableTextBlock：无槽无边框（可编辑→有槽，只读→无槽），
+                         仍可框选复制；Focusable=False 让它彻底退出焦点与 Tab 序列。 -->
+                    <Grid Margin="0,10,0,0" ColumnDefinitions="140,*,Auto" ColumnSpacing="14">
                       <TextBlock Grid.Column="0" Text="{Binding ProviderIdLabel}" Classes="secondary" VerticalAlignment="Center" />
-                      <TextBox Grid.Column="1" Text="{Binding ProviderId}" Classes="mono" IsReadOnly="True" AutomationProperties.Name="{Binding ProviderIdLabel}" />
+                      <SelectableTextBlock x:Name="ProviderIdDisplay"
+                                           Grid.Column="1"
+                                           Text="{Binding ProviderId}"
+                                           Classes="mono"
+                                           Focusable="False"
+                                           IsTabStop="False"
+                                           TextWrapping="Wrap"
+                                           VerticalAlignment="Center"
+                                           AutomationProperties.Name="{Binding ProviderIdLabel}" />
+                      <!-- 只读值唯一的正当诉求是「拿出去用」，所以给一个显式复制动作，
+                           而不是让用户去戳一个假输入框。文字按钮而非图标：
+                           仓库没有 Copy 矢量 geometry，而图标字体在 Linux 上会渲染成豆腐块。 -->
+                      <Button Grid.Column="2"
+                              Classes="subtle"
+                              Padding="8,3"
+                              Content="{Binding CopyProviderIdText}"
+                              Click="OnCopyProviderId"
+                              ToolTip.Tip="{Binding CopyProviderIdText}"
+                              AutomationProperties.Name="{Binding CopyProviderIdText}" />
                     </Grid>
                   </Expander>
                 </StackPanel>
@@ -369,7 +494,17 @@
                     <DataTemplate DataType="{x:Type vm:ProviderModelEditorRow}">
                       <Grid ColumnDefinitions="2*,150,105,105,105,Auto" ColumnSpacing="8" Margin="0,3">
                         <StackPanel Grid.Column="0" Spacing="3">
-                          <TextBox Text="{Binding ModelId, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelIdColumnLabel}" AutomationProperties.HelpText="{Binding ModelIdError}" />
+                          <!-- U145：模型 ID 的候选就是刷新/测试连接从服务商拉回的目录，
+                               产品已经知道这批 id，此前却让用户对着文档手抄。
+                               仍可手打列表外的值——新模型常常还没进 /models 接口。 -->
+                          <AutoCompleteBox Classes="identifier-picker"
+                                           Text="{Binding ModelId, Mode=TwoWay}"
+                                           ItemsSource="{Binding $parent[UserControl].DataContext.FetchedModelIdCandidates}"
+                                           FilterMode="ContainsOrdinal"
+                                           MinimumPrefixLength="0"
+                                           IsTextCompletionEnabled="False"
+                                           AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelIdColumnLabel}"
+                                           AutomationProperties.HelpText="{Binding ModelIdError}" />
                           <TextBlock Text="{Binding ModelIdError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasModelIdError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="3">
@@ -494,14 +629,17 @@
                                   <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWasmNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWasmNetworkText}" />
                                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowSecretRead, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowSecretReadText}" />
                                 </WrapPanel>
-                                <TextBox Text="{Binding Permissions.ReadableRootsText, Mode=TwoWay}"
-                                         PlaceholderText="{Binding $parent[UserControl].DataContext.PathPlaceholder}"
-                                         AcceptsReturn="True" MinHeight="64"
-                                         AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}" />
-                                <TextBox Text="{Binding Permissions.WritableRootsText, Mode=TwoWay}"
-                                         PlaceholderText="{Binding $parent[UserControl].DataContext.PathPlaceholder}"
-                                         AcceptsReturn="True" MinHeight="64"
-                                         AutomationProperties.Name="{Binding $parent[UserControl].DataContext.WritableRootsLabel}" />
+                                <!-- U146 站点 1/2（节点预设的权限覆盖）：换行分隔文本框 → chip 列表。
+                                     标签是必须的：原先只有 AutomationProperties.Name，
+                                     视力正常的用户靠 PlaceholderText 猜这框是「可读」还是「可写」。 -->
+                                <TextBlock Text="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}"
+                                           Classes="caption" />
+                                <ContentControl Content="{Binding Permissions.ReadableRootChips}"
+                                                ContentTemplate="{StaticResource PathChipListTemplate}" />
+                                <TextBlock Text="{Binding $parent[UserControl].DataContext.WritableRootsLabel}"
+                                           Classes="caption" />
+                                <ContentControl Content="{Binding Permissions.WritableRootChips}"
+                                                ContentTemplate="{StaticResource PathChipListTemplate}" />
                               </StackPanel>
                               <TextBlock Text="{Binding $parent[UserControl].DataContext.PresetToolsTitle}" Classes="caption" FontWeight="SemiBold" />
                               <ItemsControl ItemsSource="{Binding ToolControls}">
@@ -790,32 +928,17 @@
                           <CheckBox Margin="0,0,18,8" IsEnabled="{Binding AllowNetwork}" IsChecked="{Binding AllowWasmNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWasmNetworkText}" />
                           <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowSecretRead, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowSecretReadText}" />
                         </WrapPanel>
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                          <TextBox Grid.Column="0"
-                                   Text="{Binding ReadableRootsText, Mode=TwoWay}"
-                                   PlaceholderText="{Binding $parent[UserControl].DataContext.PathPlaceholder}"
-                                   AcceptsReturn="True"
-                                   MinHeight="76"
-                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}" />
-                          <Button Grid.Column="1"
-                                  Classes="secondary"
-                                  VerticalAlignment="Top"
-                                  Content="{Binding $parent[UserControl].DataContext.BrowseFolderText}"
-                                  Command="{Binding BrowseReadableRootsCommand}" />
-                        </Grid>
-                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                          <TextBox Grid.Column="0"
-                                   Text="{Binding WritableRootsText, Mode=TwoWay}"
-                                   PlaceholderText="{Binding $parent[UserControl].DataContext.PathPlaceholder}"
-                                   AcceptsReturn="True"
-                                   MinHeight="76"
-                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.WritableRootsLabel}" />
-                          <Button Grid.Column="1"
-                                  Classes="secondary"
-                                  VerticalAlignment="Top"
-                                  Content="{Binding $parent[UserControl].DataContext.BrowseFolderText}"
-                                  Command="{Binding BrowseWritableRootsCommand}" />
-                        </Grid>
+                        <!-- U146 站点 3/4（作用域权限覆盖）：文本框 + 外挂「浏览」按钮 → chip 列表。
+                             「浏览」按钮收进模板内部了（chip 列表自带 BrowseCommand），
+                             所以这里不再需要外层那个 Grid 分两列。 -->
+                        <TextBlock Text="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}"
+                                   Classes="caption" />
+                        <ContentControl Content="{Binding ReadableRootChips}"
+                                        ContentTemplate="{StaticResource PathChipListTemplate}" />
+                        <TextBlock Text="{Binding $parent[UserControl].DataContext.WritableRootsLabel}"
+                                   Classes="caption" />
+                        <ContentControl Content="{Binding WritableRootChips}"
+                                        ContentTemplate="{StaticResource PathChipListTemplate}" />
                       </StackPanel>
                     </StackPanel>
                   </Border>
@@ -889,23 +1012,15 @@
                 <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
                 <StackPanel Grid.Column="0" Spacing="8">
                   <TextBlock Text="{Binding ReadableRootsLabel}" Classes="secondary" />
-                  <TextBox Text="{Binding ReadableRootsText, Mode=TwoWay}"
-                           PlaceholderText="{Binding PathPlaceholder}"
-                           AcceptsReturn="True"
-                           MinHeight="130"
-                           AutomationProperties.Name="{Binding ReadableRootsLabel}"
-                           AutomationProperties.HelpText="{Binding PathPlaceholder}" />
-                  <Button Classes="secondary" HorizontalAlignment="Left" Content="{Binding BrowseFolderText}" Command="{Binding BrowseReadableRootsCommand}" />
+                  <!-- U146 站点 5（全局可读根）：chip 列表自带添加 / 浏览，原「浏览」按钮并入模板。 -->
+                  <ContentControl Content="{Binding ReadableRootChips}"
+                                  ContentTemplate="{StaticResource PathChipListTemplate}" />
                 </StackPanel>
                 <StackPanel Grid.Column="1" Spacing="8">
                   <TextBlock Text="{Binding WritableRootsLabel}" Classes="secondary" />
-                  <TextBox Text="{Binding WritableRootsText, Mode=TwoWay}"
-                           PlaceholderText="{Binding PathPlaceholder}"
-                           AcceptsReturn="True"
-                           MinHeight="130"
-                           AutomationProperties.Name="{Binding WritableRootsLabel}"
-                           AutomationProperties.HelpText="{Binding PathPlaceholder}" />
-                  <Button Classes="secondary" HorizontalAlignment="Left" Content="{Binding BrowseFolderText}" Command="{Binding BrowseWritableRootsCommand}" />
+                  <!-- U146 站点 6（全局可写根） -->
+                  <ContentControl Content="{Binding WritableRootChips}"
+                                  ContentTemplate="{StaticResource PathChipListTemplate}" />
                 </StackPanel>
                 </Grid>
               </StackPanel>
@@ -1217,7 +1332,10 @@
                   <CheckBox Margin="0,0,18,8" IsChecked="{Binding TrackNonSensitiveConfig, Mode=TwoWay}" Content="{Binding TrackConfigText}" />
                 </WrapPanel>
                 <TextBlock Text="{Binding IgnoredPathsLabel}" Classes="secondary" />
-                <TextBox Text="{Binding IgnoredPathsText, Mode=TwoWay}" PlaceholderText="{Binding IgnoredPathsPlaceholder}" AcceptsReturn="True" MinHeight="120" AutomationProperties.Name="{Binding IgnoredPathsLabel}" AutomationProperties.HelpText="{Binding IgnoredPathsPlaceholder}" />
+                <!-- U146 站点 7（Git 忽略路径）：这些是项目内相对路径，
+                     所以 chip 列表建在 requireAbsolute=false 上；体检时会拼上项目根再看存在性。 -->
+                <ContentControl Content="{Binding IgnoredPathChips}"
+                                ContentTemplate="{StaticResource PathChipListTemplate}" />
               </StackPanel>
             </Border>
           </StackPanel>

@@ -156,6 +156,61 @@ internal static class SettingsInputValidation
         return Paths(text, fieldKey, requireAbsolute: false);
     }
 
+    /// <summary>
+    /// U146：单条路径的规范化判定，不抛异常。
+    ///
+    /// chip 列表要在「加入时」就告诉用户这一条行不行，而整段 <see cref="Paths"/> 只能
+    /// 整体成功或整体抛错。两者若各写一套规则必然漂移——那会出现「chip 显示正常、
+    /// 保存却被拒」这种最难查的分裂，所以 <see cref="Paths"/> 也改成逐条调用本方法，
+    /// 规则只有这一份。
+    ///
+    /// 首尾空白在这里就吃掉：<c>" /home/x"</c> 与 <c>"/home/x"</c> 在文本框里长得一样，
+    /// 但作为路径是两个值，靠肉眼永远看不出来（U146 的三条后果之一）。
+    /// </summary>
+    public static bool TryNormalizePath(string? raw, bool requireAbsolute, out string normalized)
+    {
+        normalized = string.Empty;
+        var trimmed = (raw ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (requireAbsolute)
+            {
+                if (!Path.IsPathFullyQualified(trimmed)
+                    || trimmed.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                        .Any(component => component == ".."))
+                {
+                    return false;
+                }
+                normalized = Path.GetFullPath(trimmed);
+                return true;
+            }
+
+            var relative = trimmed.Replace('\\', '/').TrimEnd('/');
+            if (Path.IsPathFullyQualified(relative)
+                || relative.StartsWith("/", StringComparison.Ordinal)
+                || relative.Length == 0
+                || relative.Contains(':')
+                || relative.Split('/').Any(component =>
+                    string.IsNullOrEmpty(component) || component is "." or ".."))
+            {
+                return false;
+            }
+            normalized = relative;
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or PathTooLongException or NotSupportedException)
+        {
+            // Path.GetFullPath 对含非法字符/超长的输入会抛；这类输入就是「这条不合法」，
+            // 不该让整个设置页崩在校验上。
+            return false;
+        }
+    }
+
     private static IReadOnlyList<string> Paths(string? text, string fieldKey, bool requireAbsolute)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -168,35 +223,17 @@ internal static class SettingsInputValidation
         var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
         for (var index = 0; index < lines.Length; index++)
         {
-            var raw = lines[index].Trim();
+            var raw = lines[index];
             if (string.IsNullOrWhiteSpace(raw))
             {
                 continue;
             }
 
-            string normalized;
-            if (requireAbsolute)
+            // 规则收口到 TryNormalizePath：chip 的逐条判定与这里的保存前校验共用同一份，
+            // 否则「加得进去、存不下去」。
+            if (!TryNormalizePath(raw, requireAbsolute, out var normalized))
             {
-                if (!Path.IsPathFullyQualified(raw)
-                    || raw.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                        .Any(component => component == ".."))
-                {
-                    throw new SettingsInputException(SettingsInputFailure.PathLine, fieldKey, index + 1);
-                }
-                normalized = Path.GetFullPath(raw);
-            }
-            else
-            {
-                normalized = raw.Replace('\\', '/').TrimEnd('/');
-                if (Path.IsPathFullyQualified(normalized)
-                    || normalized.StartsWith("/", StringComparison.Ordinal)
-                    || normalized.Length == 0
-                    || normalized.Contains(':')
-                    || normalized.Split('/').Any(component =>
-                        string.IsNullOrEmpty(component) || component is "." or ".."))
-                {
-                    throw new SettingsInputException(SettingsInputFailure.PathLine, fieldKey, index + 1);
-                }
+                throw new SettingsInputException(SettingsInputFailure.PathLine, fieldKey, index + 1);
             }
 
             if (!unique.Add(normalized))
