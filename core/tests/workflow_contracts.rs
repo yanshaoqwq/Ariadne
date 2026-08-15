@@ -2169,19 +2169,17 @@ fn completed_operation_response_is_reused_without_second_provider_call() {
     let operation_id = ariadne::skills::stable_text_hash(
         "workflow-operation-v1\0journal-replay\0run-1\0writer\x001",
     );
-    let request_hash = ariadne::skills::stable_text_hash(
-        &serde_json::to_string(&json!({
-            "type_name": "llm",
-            "config": Value::Null,
-            "inputs": PortMap::new(),
-            "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
-            "metadata": Value::Null,
-            // 变量参与 request_hash：循环每轮变量不同，若不计入，第二轮请求会与
-            // 第一轮完全一致而被 operation journal 误判成重放。
-            "variables": BTreeMap::<String, Value>::new(),
-        }))
-        .unwrap(),
-    );
+    // 调生产的 compute_workflow_request_hash 而不再手抄字段列表：公式此前在测试里
+    // 被镜像三份，加字段漏同步就表现为 workflow operation identity mismatch。
+    let request_hash = ariadne::workflow::compute_workflow_request_hash(
+        "llm",
+        &Value::Null,
+        &PortMap::new(),
+        &[],
+        &Value::Null,
+        &BTreeMap::new(),
+    )
+    .unwrap();
     store
         .create_operation(
             &NewWorkflowOperation {
@@ -2260,19 +2258,16 @@ fn persisted_operation_rejects_recovery_policy_drift_for_the_same_identity() {
     let operation_id = ariadne::skills::stable_text_hash(
         "workflow-operation-v1\0journal-policy-drift\0run-1\0writer\x001",
     );
-    let request_hash = ariadne::skills::stable_text_hash(
-        &serde_json::to_string(&json!({
-            "type_name": "llm",
-            "config": Value::Null,
-            "inputs": PortMap::new(),
-            "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
-            "metadata": Value::Null,
-            // 变量参与 request_hash：循环每轮变量不同，若不计入，第二轮请求会与
-            // 第一轮完全一致而被 operation journal 误判成重放。
-            "variables": BTreeMap::<String, Value>::new(),
-        }))
-        .unwrap(),
-    );
+    // 同上：公式的单一来源在生产侧，测试不再手抄。
+    let request_hash = ariadne::workflow::compute_workflow_request_hash(
+        "llm",
+        &Value::Null,
+        &PortMap::new(),
+        &[],
+        &Value::Null,
+        &BTreeMap::new(),
+    )
+    .unwrap();
     store
         .create_operation(
             &NewWorkflowOperation {

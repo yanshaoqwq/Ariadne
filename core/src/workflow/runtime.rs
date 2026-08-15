@@ -653,6 +653,40 @@ fn variable_value_type_name(value: &Value) -> &'static str {
     }
 }
 
+/// 计算节点执行请求的 `request_hash` —— **这个公式的单一来源**。
+///
+/// 抽成公开函数而不是内联在 `run_inner` 里：operation journal 按这个哈希判定
+/// 重放，测试要种一条 journal 记录就得先构造出**与生产逐字节一致**的哈希。
+/// 此前公式在测试里被手工镜像三份（`command_contracts.rs` 一处、
+/// `workflow_contracts.rs` 两处），给公式增删字段必须同步全部镜像，漏一处就
+/// 表现为 `workflow operation identity mismatch` —— 本次加 `variables` 时
+/// 已经踩过这个坑。现在生产与测试都调这一个函数，字段列表只存在一处。
+///
+/// 字段顺序也是公式的一部分：`serde_json` 默认不启用 `preserve_order`，
+/// `json!` 宏构造的 Map 会按键名排序输出，所以这里的书写顺序不影响结果 ——
+/// 但仍不要随意改动，逐字节稳定性是这个哈希唯一的价值。
+///
+/// `variables` 必须计入：循环第 N+1 轮除变量外与第 N 轮完全一致，不计入会让
+/// journal 把新一轮判成同一请求的重放而复用上一轮结果 —— 表现就是循环反复
+/// 重写第一章且**不报错**，正是变量能力要消除的那个静默故障。
+pub fn compute_workflow_request_hash(
+    type_name: &str,
+    config: &Value,
+    inputs: &PortMap,
+    communication_messages: &[CommunicationMessage],
+    metadata: &Value,
+    variables: &BTreeMap<String, Value>,
+) -> CoreResult<String> {
+    Ok(stable_text_hash(&serde_json::to_string(&json!({
+        "type_name": type_name,
+        "config": config,
+        "inputs": inputs,
+        "communication_messages": communication_messages,
+        "metadata": metadata,
+        "variables": variables,
+    }))?))
+}
+
 /// 单条 communication 边的运行状态。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommunicationRuntimeState {
@@ -1396,15 +1430,16 @@ impl WorkflowRuntime {
             // 变量当前值必须进 request_hash：循环每轮读到的变量不同（第一章 →
             // 第二章），若不计入，第二轮的 request 会与第一轮完全一致，operation
             // journal 会把它判成同一次请求的重放而复用上一轮结果。
+            // 公式收敛在 compute_workflow_request_hash，测试镜像同一个函数。
             let variables = self.state.variables.flatten();
-            let request_hash = stable_text_hash(&serde_json::to_string(&json!({
-                "type_name": node_instance.type_name,
-                "config": node_instance.config,
-                "inputs": inputs,
-                "communication_messages": communication_messages,
-                "metadata": metadata,
-                "variables": variables,
-            }))?);
+            let request_hash = compute_workflow_request_hash(
+                &node_instance.type_name,
+                &node_instance.config,
+                &inputs,
+                &communication_messages,
+                &metadata,
+                &variables,
+            )?;
             let mut request = WorkflowNodeExecutionRequest {
                 workflow_id: workflow.id.clone(),
                 run_id: self.state.run_id.clone(),
@@ -3106,6 +3141,17 @@ fn rebase_worker_state_after_conflict(
             .or_insert_with(|| confirmation.clone());
     }
     latest.retry_policy = worker_state.retry_policy;
+    // 变量整簇取 worker 的值：worker 手上是刚跑完那一轮的最新取值（比如
+    // chapter 刚从 2 递增到 3），而 latest 是落库那一刻的旧快照。这里若不覆盖，
+    // 末尾 `*worker_state = latest` 会把本轮递增**回退掉** —— 循环表现为
+    // 反复重写同一章且不报错，正是变量能力要消除的那个静默故障。
+    // 声明与句式是启动时冻结的，两边本应一致；一并取 worker 的以免旧快照
+    // （例如刚迁移上来、字段还是空的）把它们清掉。
+    latest.variables = worker_state.variables.clone();
+    latest.variable_decls = worker_state.variable_decls.clone();
+    latest.summary_template = worker_state.summary_template.clone();
+    // 发起对话 id 同理：丢了终态回报就没有投递目标。
+    latest.origin_conversation_id = worker_state.origin_conversation_id.clone();
     if latest.control == RunControl::Continue {
         latest.status = worker_state.status;
         latest.next_retry_at_ms = worker_state.next_retry_at_ms;

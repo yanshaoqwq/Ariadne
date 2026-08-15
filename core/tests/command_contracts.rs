@@ -9525,19 +9525,17 @@ fn seed_command_in_doubt_search_run(
         run_id.as_str(),
         node_id.as_str()
     ));
-    let request_hash = ariadne::skills::stable_text_hash(
-        &serde_json::to_string(&json!({
-            "type_name": "search",
-            "config": Value::Null,
-            "inputs": ariadne::contracts::PortMap::new(),
-            "communication_messages": Vec::<ariadne::workflow::CommunicationMessage>::new(),
-            // 变量参与 request_hash（循环每轮取值不同，不计入会被判成重放）。
-            // 本 fixture 的 workflow 没有变量声明，展平后为空表。
-            "variables": BTreeMap::<String, Value>::new(),
-            "metadata": Value::Null,
-        }))
-        .unwrap(),
-    );
+    // 公式的单一来源是生产的 compute_workflow_request_hash；测试不再手抄字段列表。
+    // 本 fixture 的 workflow 没有变量声明，展平后为空表。
+    let request_hash = ariadne::workflow::compute_workflow_request_hash(
+        "search",
+        &Value::Null,
+        &ariadne::contracts::PortMap::new(),
+        &[],
+        &Value::Null,
+        &BTreeMap::new(),
+    )
+    .unwrap();
     let store = SqliteWorkflowRuntimeStore::open(project_root).unwrap();
     store.create_state(&state).unwrap();
     store

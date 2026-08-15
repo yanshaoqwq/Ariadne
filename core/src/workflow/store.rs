@@ -307,6 +307,21 @@ pub enum InDoubtResolutionResult {
     },
 }
 
+/// state_json 的持久化投影。
+///
+/// **这是一份手抄的字段镜像，加字段必须同步这里** —— `WorkflowRunState` 上新增
+/// 的字段若不在本结构里出现，序列化时会被**静默丢掉**：读回时
+/// `WorkflowRunState` 那些字段都带 `#[serde(default)]`，缺键不报错而是变成
+/// 空默认值。表现就是「写进去了、读出来没了」，且全程无错误可查。
+/// 工作流变量整簇（`variables` / `variable_decls` / `summary_template`）与
+/// `origin_conversation_id` 曾因此漏了一整轮：注入的取值进不了 runtime.db，
+/// 项目 AI 启动的运行也丢掉发起对话 id，终态回报无从投递。
+///
+/// 刻意不持久化的只有三个，各有独立机制：
+/// - `state_revision` —— 由 SQLite 独立列维护，load 时回填（乐观并发版本）；
+/// - `events` / `structured_events` —— 落 `workflow_run_events` 表，
+///   load 时由 `load_structured_events` / `load_legacy_events` 补回，
+///   放进 state_json 会让每次保存重复写一遍整条事件流。
 #[derive(Serialize)]
 struct PersistedWorkflowRunState<'a> {
     workflow_id: &'a WorkflowId,
@@ -331,6 +346,20 @@ struct PersistedWorkflowRunState<'a> {
         crate::workflow::CommunicationRuntimeState,
     >,
     loop_iterations: &'a std::collections::BTreeMap<crate::contracts::NodeId, u32>,
+    /// 变量作用域链：循环跨轮累积的取值靠它落库，Resume 后才能接着写下一章。
+    variables: &'a crate::workflow::WorkflowVariableScopes,
+    /// 启动时冻结的变量声明：写回的类型校验依赖它，丢了会让 Resume 后
+    /// 所有写回都被判成「未声明变量」而被拒。
+    variable_decls: &'a Vec<crate::contracts::WorkflowVariableDecl>,
+    /// 摘要句式：丢了会让 Resume 后执行页折叠行退回按声明顺序拼接。
+    ///
+    /// 不加 `skip_serializing_if`：本字段是 `&'a Option<String>`，
+    /// `Option::is_none` 收 `&Option<T>`，serde 传进来的却是 `&&Option<T>`，
+    /// 会类型不匹配。`None` 直接序列化成 `null`，读回时仍是 `None`，语义不变。
+    summary_template: &'a Option<String>,
+    /// 发起本次运行的项目空间 AI 对话 id：丢了终态回报就没有投递目标，
+    /// AI 启动完工作流即断线。同上，不加 `skip_serializing_if`。
+    origin_conversation_id: &'a Option<String>,
     rerun_queue: &'a Vec<crate::contracts::NodeId>,
     confirmations: &'a std::collections::BTreeMap<String, crate::workflow::RuntimeConfirmation>,
     next_event_sequence: u64,
@@ -355,6 +384,10 @@ impl<'a> From<&'a WorkflowRunState> for PersistedWorkflowRunState<'a> {
             node_operation_sequences: &state.node_operation_sequences,
             communication_edges: &state.communication_edges,
             loop_iterations: &state.loop_iterations,
+            variables: &state.variables,
+            variable_decls: &state.variable_decls,
+            summary_template: &state.summary_template,
+            origin_conversation_id: &state.origin_conversation_id,
             rerun_queue: &state.rerun_queue,
             confirmations: &state.confirmations,
             next_event_sequence: state.next_event_sequence,
