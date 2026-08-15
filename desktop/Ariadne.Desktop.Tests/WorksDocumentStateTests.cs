@@ -93,7 +93,9 @@ public sealed class WorksDocumentStateTests
         Assert.Equal("A*", savedContent);
         Assert.Equal("A*+", vm.DocumentContent);
         Assert.True(vm.HasUnsavedChanges);
-        Assert.Contains("未保存", vm.DocumentInfoText, StringComparison.Ordinal);
+        // U136：保存状态从稿纸刊头（DocumentInfoText，已删）挪到顶栏状态区。
+        // 断言的意图没变——「未保存」这件事必须对用户可见；只是承载它的属性变了。
+        Assert.Contains("未保存", vm.DocumentSaveStateText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -164,7 +166,10 @@ public sealed class WorksDocumentStateTests
         aRelease.TrySetResult(true);
 
         Assert.Equal("B", vm.DocumentContent);
-        Assert.Contains("documents/b.md", vm.DocumentInfoText, StringComparison.Ordinal);
+        // U136：刊头不再印文件路径（那是文件系统元数据，不属于书页）。
+        // 「后到的响应不能覆盖当前文档」这条性质改由文档标题体现——
+        // 标题同样是每篇唯一的身份，且它本来就该出现在页上。
+        Assert.Contains("b", vm.DocumentTitle, StringComparison.OrdinalIgnoreCase);
     }
 
     private static WorksPageViewModel NewViewModel(WorksBackend backend) =>

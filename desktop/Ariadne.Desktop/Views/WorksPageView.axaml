@@ -39,7 +39,14 @@
           <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
             <TextBlock Text="{Binding CurrentDocumentText}" Classes="secondary"
                        FontSize="13" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-            <TextBlock Text="{Binding DocumentSaveStateText}" Classes="subtle" IsVisible="{Binding HasCurrentDocument}" VerticalAlignment="Center" />
+            <!-- U136：保存状态与字符数从稿纸刊头挪到这里。
+                 它们是**文档状态**不是书页内容，属于状态栏；印在纸上会让
+                 「页」变成属性面板。同排显示也顺带消掉了原先「状态在顶栏印一遍、
+                 又在刊头 DocumentInfoText 里印一遍」的重复。 -->
+            <StackPanel Orientation="Horizontal" Spacing="12" IsVisible="{Binding HasCurrentDocument}">
+              <TextBlock Text="{Binding DocumentSaveStateText}" Classes="subtle" VerticalAlignment="Center" />
+              <TextBlock Text="{Binding CharacterCountText}" Classes="subtle" VerticalAlignment="Center" />
+            </StackPanel>
           </StackPanel>
           <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
             <Border Classes="segmented-control">
@@ -97,7 +104,10 @@
             <MenuItem Header="{Binding CtxToggleEditText}" Command="{Binding ToggleEditCommand}" />
           </ContextMenu>
         </Grid.ContextMenu>
-        <Grid MaxWidth="1180" Margin="40,30,40,44" HorizontalAlignment="Stretch" RowDefinitions="Auto,*" RowSpacing="18">
+        <!-- U140：页面边距改走共享 token，让各页切换时版心不跳。
+             外层不再设 MaxWidth——版心由稿纸自己的 SurfaceMaxWidth 决定并居中，
+             宽屏下纸面保持书页宽度而不是被拉成一整条。 -->
+        <Grid Margin="{DynamicResource Ariadne.Page.Margin}" HorizontalAlignment="Stretch" RowDefinitions="Auto,*" RowSpacing="18">
           <!-- 作品树空：二次元打响指全幅空态，不露出编辑器壳 -->
           <Border Grid.Row="0" Grid.RowSpan="2" Classes="empty-state"
                   IsVisible="{Binding IsWorksTreeEmpty}"
@@ -152,17 +162,28 @@
 
           <!-- 一张稿纸：原先「标题卡 + 正文卡」是两张分离的圆角卡（且标题与顶栏
                CurrentDocumentText 重复渲染）。现在合成单张纸——刊头在纸上方，
-               一道发丝横线分隔，正文衬线排版，纸缘一层柔投影。像真正的书页。 -->
+               一道发丝横线分隔，正文衬线排版，纸缘一层柔投影。像真正的书页。
+               U136/U140：宽度与内边距改走排版 token。原先 Grid MaxWidth=1180
+               减去左右各 72 得 1036px 测量宽 ⇒ 每行约 65 个汉字，
+               回行时眼睛要横扫近一米、极易串行——那是网页正文容器的宽度，
+               不是书页的宽度。现在版心由「字号 × 36 字」推导，改字号会跟着走。 -->
           <Border Grid.Row="0" Grid.RowSpan="2"
                   Classes="document-surface"
-                  Padding="72,56,72,52"
+                  MaxWidth="{Binding DocumentSurfaceMaxWidth}"
+                  Padding="{DynamicResource Ariadne.Reading.SurfacePadding}"
                   IsVisible="{Binding ShowDocumentChrome}">
             <!-- U131：正文与「章节大纲对照」并列。对照栏关闭时列宽为 0，不占版面。
                  U130：原先还有第三行给快速编辑面板，现已移出为悬浮小窗——
                  纸上只剩刊头与正文两行，正文高度不再被面板挤压。 -->
             <Grid RowDefinitions="Auto,*" RowSpacing="0" MinHeight="640"
                   ColumnDefinitions="*,Auto">
-              <!-- 刊头：章节名 + 元信息，底部发丝线收口 -->
+              <!-- 刊头：只有章节名。
+                   U136：原先这里还印着「路径：{path} 版本：{version} {state}」
+                   + 字符数 + StatusText——即在书名下方打印**文件路径、内容哈希、
+                   保存状态、字符数、操作流水**五类文件系统元数据。
+                   真正的「页」上只该有章节名；那些属于状态栏/属性面板，
+                   顶栏的 CurrentDocumentText / DocumentSaveStateText 已经承担了
+                   （此前同一份信息在一屏内印两遍）。 -->
               <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Spacing="7" Margin="0,0,0,34">
                 <TextBlock Text="{Binding DocumentTitle}"
                            Classes="reading"
@@ -170,11 +191,6 @@
                            LineHeight="38"
                            FontWeight="SemiBold"
                            Foreground="{DynamicResource Ariadne.TextHeading}" />
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
-                  <TextBlock Grid.Column="0" Text="{Binding DocumentInfoText}" Classes="caption" TextWrapping="Wrap" />
-                  <TextBlock Grid.Column="1" Text="{Binding CharacterCountText}" Classes="caption" VerticalAlignment="Center" />
-                </Grid>
-                <TextBlock Text="{Binding StatusText}" Classes="subtle" TextWrapping="Wrap" />
                 <!-- 刊头分隔：中间实、两端淡出的渐变细线，比一条硬直线雅致 -->
                 <Border Height="1" Margin="0,9,0,0">
                   <Border.Background>

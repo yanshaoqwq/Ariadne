@@ -341,6 +341,34 @@
       <x:Double x:Key="Ariadne.Size.Caption">12</x:Double>
       <x:Double x:Key="Ariadne.Size.Badge">10.5</x:Double>
 
+      <!-- ===== 排版尺度（U140）=====
+           此前全仓没有「版心宽度」「页面边距」这类 token，尺度类只到圆角，
+           于是每页各写死自己那套魔数：作品页 MaxWidth=1180/Margin=40,30,40,44、
+           工作区 Margin=34,28 与 14,10,14,14、Git/设置/运行记录各一套。
+           后果一是切页时内容左右跳动，二是**调正文字号时版心不会跟随**——
+           U136 那个「每行 65 个汉字」的问题会以另一种形式回来。
+
+           版心按「字号 × 目标字数」推导，不是拍脑袋的整数：
+           正文 16px（`*.reading` 样式），CJK 全角字宽 ≈ 字号，
+           排版学对 CJK 单栏建议 25–45 字/行，Word A4 小四约 37.6 字/行。
+           取 36 字 ⇒ 16 × 36 = 576px 测量宽。改字号时把这里一起改，
+           两个数字的关系就写在这段注释里，不会再分头漂移。 -->
+      <x:Double x:Key="Ariadne.Reading.MeasureCharsPerLine">36</x:Double>
+      <!-- 正文测量宽 = Size.Reading(16) × MeasureCharsPerLine(36) -->
+      <x:Double x:Key="Ariadne.Reading.MeasureMaxWidth">576</x:Double>
+      <!-- 稿纸内边距：左右 72 是版心两侧的「书页留白」，
+           上下不对称（56 / 52）是因为刊头本身带下沿留白，视觉上要压掉一点。 -->
+      <Thickness x:Key="Ariadne.Reading.SurfacePadding">72,56,72,52</Thickness>
+      <!-- 稿纸外框宽 = 测量宽 + 左右内边距 = 576 + 144 -->
+      <x:Double x:Key="Ariadne.Reading.SurfaceMaxWidth">720</x:Double>
+
+      <!-- 页面级边距：所有主功能页共用，让切页时版心不跳。
+           底部比顶部厚，是给滚动到底的内容留呼吸，不是笔误。 -->
+      <Thickness x:Key="Ariadne.Page.Margin">40,30,40,44</Thickness>
+      <!-- 面板/工作区内边距：比页面级紧一档，用于画布、检查器这类密集区域。 -->
+      <Thickness x:Key="Ariadne.Page.PanelPadding">14,10,14,14</Thickness>
+      <Thickness x:Key="Ariadne.Page.SectionMargin">34,28</Thickness>
+
       <!-- 字体：Inter 不含中文，必须挂中文黑体 fallback（系统实测可用：WenQuanYi Zen Hei / AR PL UMing CN / DejaVu）。
            Windows 上前面的 Segoe UI / Microsoft YaHei 会优先命中，Linux 上回退到文泉驿正黑。 -->
       <FontFamily x:Key="Ariadne.Font.Ui">Inter, Segoe UI, Microsoft YaHei UI, PingFang SC, Noto Sans CJK SC, WenQuanYi Zen Hei, DejaVu Sans, sans-serif</FontFamily>

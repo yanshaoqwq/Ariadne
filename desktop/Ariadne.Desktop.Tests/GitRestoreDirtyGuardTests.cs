@@ -147,6 +147,12 @@ public sealed class GitRestoreDirtyGuardTests
             {
                 return true;
             }
+            // 徽章契约不允许 null——生产代码直接读字段，返回 null 就是 NRE。
+            // 替身也要守这个约定，否则测的是替身的 bug 而不是被测代码。
+            if (targetMethod?.Name == nameof(IAriadneBackendClient.GetSidebarBadgesAsync))
+            {
+                return Task.FromResult(new SidebarBadgeCounts(0, 0, 0));
+            }
             if (targetMethod?.ReturnType == typeof(Task))
             {
                 return Task.CompletedTask;

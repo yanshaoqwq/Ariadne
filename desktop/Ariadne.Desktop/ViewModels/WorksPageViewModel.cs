@@ -231,12 +231,25 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             if (SetProperty(ref _isOutlinePanelOpen, value))
             {
                 OnPropertyChanged(nameof(OutlinePanelWidth));
+                OnPropertyChanged(nameof(DocumentSurfaceMaxWidth));
             }
         }
     }
 
     /// 对照栏宽度；关闭时为 0，配合 IsVisible 彻底不占版面。
     public double OutlinePanelWidth => IsOutlinePanelOpen ? 320d : 0d;
+
+    /// <summary>
+    /// 稿纸外框宽度上限。
+    ///
+    /// U136/U140：基准 720 = 正文测量宽 576（16px × 36 字）+ 左右内边距 144。
+    /// 对照栏展开时**必须把纸加宽**而不是让正文让位——否则版心被压到 372px、
+    /// 每行只剩 23 个字，读起来比 65 字/行还难受（那正是这次要修的方向的反面）。
+    /// 加的量 = 对照栏宽 320 + 它与正文之间的 28 间距 + 20 内缩，与 XAML 里
+    /// 那个 Border 的 Margin/Padding 对齐；两处改动必须同步，否则纸宽与实际
+    /// 占位对不上，正文会被悄悄挤窄。
+    /// </summary>
+    public double DocumentSurfaceMaxWidth => IsOutlinePanelOpen ? 720d + 368d : 720d;
 
     /// 当前章节的大纲正文；找不到时是可诊断文案而非空串。
     public string ChapterOutlineText
@@ -651,7 +664,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         {
             if (SetProperty(ref _hasUnsavedChanges, value))
             {
-                OnPropertyChanged(nameof(DocumentInfoText));
                 OnPropertyChanged(nameof(DocumentSaveStateText));
             }
         }
@@ -667,7 +679,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             if (SetProperty(ref _isDocumentSaving, value))
             {
                 SaveCommand.NotifyCanExecuteChanged();
-                OnPropertyChanged(nameof(DocumentInfoText));
                 OnPropertyChanged(nameof(DocumentSaveStateText));
             }
         }
@@ -957,16 +968,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public string CurrentDocumentText => DocumentTitle;
 
-    public string DocumentInfoText => string.IsNullOrWhiteSpace(_currentDocumentId)
-        ? NoDocumentText
-        : _displayNames.Format("ui.works.document_info", new Dictionary<string, string>
-        {
-            ["path"] = string.IsNullOrWhiteSpace(_currentDocumentPath) ? _currentDocumentId : _currentDocumentPath,
-            ["version"] = ShortValue(_currentDocumentVersion),
-            ["state"] = HasUnsavedChanges
-                ? _displayNames.Text("ui.works.save_state.unsaved")
-                : _displayNames.Text("ui.works.save_state.saved"),
-        });
+    // U136：DocumentInfoText 已删。它把「路径 + 版本哈希 + 保存状态」印在稿纸刊头上，
+    // 即在书名下方打印文件系统元数据——真正的「页」上只该有章节名。
+    // 保存状态由顶栏 DocumentSaveStateText 承担（此前两处各印一遍），
+    // 路径与版本属于属性面板，不属于阅读界面。
 
     public string DocumentBodyText => string.IsNullOrWhiteSpace(_currentDocumentId)
         ? NoDocumentText
@@ -1219,7 +1224,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         OnPropertyChanged(nameof(HasCurrentDocument));
         OnPropertyChanged(nameof(ShowNoDocumentEmpty));
         OnPropertyChanged(nameof(ShowDocumentChrome));
-        OnPropertyChanged(nameof(DocumentInfoText));
         OnPropertyChanged(nameof(DocumentSaveStateText));
         SaveCommand.NotifyCanExecuteChanged();
         OpenQuickEditCommand.NotifyCanExecuteChanged();
@@ -1725,7 +1729,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         OnPropertyChanged(nameof(DocumentBodyText));
         OnPropertyChanged(nameof(CharacterCountText));
         OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
-        OnPropertyChanged(nameof(DocumentInfoText));
         QuickAiCommand.NotifyCanExecuteChanged();
 
         if (_suppressDirtyTracking || !IsEditMode)
@@ -1770,7 +1773,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
         OnPropertyChanged(nameof(HasDocumentBlocks));
         OnPropertyChanged(nameof(ShowReadModeEmptyDocument));
-        OnPropertyChanged(nameof(DocumentInfoText));
     }
 
     private static IEnumerable<string> SplitDocumentBlocks(string content)
@@ -2090,8 +2092,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
             _currentDocumentPath = report.Metadata.Path;
             _currentDocumentVersion = report.Metadata.Version;
-            OnPropertyChanged(nameof(DocumentInfoText));
-            var unchangedSinceSave = saveRevision == _documentEditRevision
+                var unchangedSinceSave = saveRevision == _documentEditRevision
                                      && string.Equals(AssembleDocumentContent(), saveContent, StringComparison.Ordinal);
             if (unchangedSinceSave)
             {
@@ -2796,8 +2797,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             }
             _currentDocumentPath = report.Metadata.Path;
             _currentDocumentVersion = report.Metadata.Version;
-            OnPropertyChanged(nameof(DocumentInfoText));
-            AcceptSavedDocumentSnapshot(preparedContent);
+                AcceptSavedDocumentSnapshot(preparedContent);
             ClearPreparedLeave();
             return !HasUnsavedChanges;
         }

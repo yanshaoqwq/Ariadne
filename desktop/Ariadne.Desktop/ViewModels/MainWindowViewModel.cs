@@ -1182,6 +1182,17 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     internal Task PreloadProjectPagesForTestsAsync() => LoadProjectDataPagesAsync();
 
+    /// <summary>
+    /// 测试用：暴露预载清单本身。
+    ///
+    /// U138：这份清单承担着一条**没写在任何地方的安全约定**——
+    /// 每个能持有未保存内容的页（`IUnsavedChangesGuard`）都必须在打开项目时被实例化，
+    /// 否则 `ConfirmCachedProjectPagesLeaveAsync` 遍历 `_pageCache` 时就看不见它，
+    /// Git 回档会静默放行、丢掉内存里未保存的正文。
+    /// 把清单本身暴露出来，让那条约定能被断言钉住，而不是靠人记得。
+    /// </summary>
+    internal static IReadOnlyList<string> PreloadedProjectPageIdsForTests => PreloadedProjectPageIds;
+
     internal void ResetProjectPageSessionForTests() => ResetProjectPageSession();
 
     internal string? LastNavigationIdForTests => _lastNavId;
