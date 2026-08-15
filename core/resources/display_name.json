@@ -1333,5 +1333,17 @@
   "diagnostics.secrets.locked": "凭据存储已锁定，保存密钥会失败。请设置本地主密码，或显式接受明文保存。",
   "ui.i18n.release_scope": "首发仅提供中文界面；英文/日文资源为占位，不作为已完成语言交付。",
   "ui.maintenance.banner_active": "项目维护进行中（{kind} · {phase}）。完成前无法保存或运行工作流。",
-  "ui.maintenance.banner_failed": "项目维护失败（{kind} · {phase}）：{error}。请先处理后再保存或运行。"
+  "ui.maintenance.banner_failed": "项目维护失败（{kind} · {phase}）：{error}。请先处理后再保存或运行。",
+  "ui.welcome.recent.unavailable_missing": "目录不存在",
+  "ui.welcome.recent.unavailable_not_project": "目录存在但不是 Ariadne 项目",
+  "ui.welcome.recent.unavailable_hint": "目录已移动或删除",
+  "ui.welcome.recent.checking": "正在检查项目位置…",
+  "ui.dialog.open_project.missing_title": "目录不存在",
+  "ui.dialog.open_project.missing_message": "这个位置已经找不到了，可能是目录被移动、重命名或删除：\n{path}\n\n可以重新定位到它的新位置，或把它从最近项目中移除。",
+  "ui.dialog.open_project.missing_status": "项目目录不存在",
+  "ui.dialog.open_project.not_project_hint": "目录还在，但里面没有 .config/app.yaml——它还不是一个 Ariadne 项目。",
+  "ui.dialog.open_project.initialize_here": "在此目录初始化",
+  "ui.dialog.open_project.relocate": "重新定位…",
+  "ui.dialog.open_project.forget": "从列表移除",
+  "ui.welcome.recent.initialized_here": "已在 {path} 初始化项目。"
 }

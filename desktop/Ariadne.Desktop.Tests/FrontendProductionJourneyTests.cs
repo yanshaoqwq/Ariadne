@@ -37,6 +37,11 @@ public sealed class FrontendProductionJourneyTests : IDisposable
 
     private static string? ResolveSidecar()
     {
+        // U142：起真实 sidecar 前先确认 app-state 已隔离。此前本文件建的
+        // 「我的小说 / 迭代项目 / 断网项目」全部写进了用户真实的
+        // recent_projects.json，20 条上限把用户自己的项目挤没了。
+        SidecarAppStateIsolation.RequireIsolatedAppState();
+
         // 无 keychain 的开发构建里，LocalFileSecretStore 只认这个环境变量
         // （core/src/config/secrets.rs:315）。真实产品在 Linux 上同样会踩到
         // 「保存密钥必报错且无主密码 UI」——已立 U118 跟踪；测试先注入

@@ -9,16 +9,57 @@ use crate::contracts::{CoreError, CoreResult};
 
 pub const APP_STATE_ENV: &str = "ARIADNE_APP_STATE_ROOT";
 
+/// 测试进程用它声明「我的 app-state 必须落在这个根之下」。
+///
+/// 存在的理由是 U142：桌面契约测试起真实 sidecar 时没有隔离 app-state，
+/// 于是 `recent_projects.json` 写进了用户真实目录，20 条上限
+/// （`frontend/project.rs` 的 `entries.truncate(20)`）把用户自己建过的项目
+/// 全部挤了出去，用户侧表现为「最近项目全部打不开」。
+///
+/// 取值是**隔离根的绝对路径**而不是 `1`：只有拿到期望前缀，才能判定
+/// 「解析出来的根是不是真的在隔离区里」。用布尔量做不到——真实目录可能经由
+/// 符号链接（本机 `~/.config` → `/custdata/.config`）出现，按 HOME 前缀猜会漏。
+pub const APP_STATE_REQUIRE_ISOLATION_ENV: &str = "ARIADNE_APP_STATE_REQUIRE_ISOLATION";
+
 static FALLBACK_APP_STATE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static PROJECT_APP_STATE_ROOTS: OnceLock<RwLock<BTreeMap<PathBuf, PathBuf>>> = OnceLock::new();
 
 /// 返回项目树之外的默认应用状态目录。
 pub fn default_app_state_root() -> PathBuf {
-    if let Some(path) = std::env::var_os(APP_STATE_ENV) {
-        return PathBuf::from(path);
+    let resolved = match std::env::var_os(APP_STATE_ENV) {
+        Some(path) => PathBuf::from(path),
+        None => platform_app_state_root(),
+    };
+
+    // 隔离哨兵只在测试进程置位；生产进程没有这个变量，行为与之前完全一致。
+    enforce_app_state_isolation(&resolved);
+    resolved
+}
+
+/// 置位隔离哨兵后，app-state 根必须落在声明的隔离区内，否则**直接 panic**。
+///
+/// 这里刻意选 panic 而不是静默改道：静默改道会让「测试污染用户目录」这类缺陷
+/// 继续以另一种形式存在（测试通过、用户目录仍可能被别的路径写到），
+/// 而 panic 让配置错误在第一次落盘前就炸出来、且带得走排查信息。
+/// 签名是 `-> PathBuf` 无法回传错误，调用点遍布 commands/cli/ipc，
+/// 改成 `CoreResult` 会波及契约层，不是这条缺陷该付的代价。
+fn enforce_app_state_isolation(resolved: &Path) {
+    let Some(required) = std::env::var_os(APP_STATE_REQUIRE_ISOLATION_ENV) else {
+        return;
+    };
+    let required = PathBuf::from(required);
+    if required.as_os_str().is_empty() || resolved.starts_with(&required) {
+        return;
     }
 
-    platform_app_state_root()
+    panic!(
+        "{APP_STATE_REQUIRE_ISOLATION_ENV} 要求 app-state 根落在 {} 之下，\
+         实际解析到 {}。测试进程绝不能写用户真实应用状态目录：\
+         那里的 recent_projects.json 只保留 20 条，测试残留会把用户自己的项目挤掉（U142）。\
+         请给起 sidecar 的测试注入独立的 {APP_STATE_ENV}。",
+        required.display(),
+        resolved.display()
+    );
 }
 
 fn platform_app_state_root() -> PathBuf {

@@ -4,6 +4,28 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
+/// <summary>
+/// 最近项目条目的健康度。
+///
+/// 两种失效原因分开表达，而不是一个 bool：它们的**出路不同**——
+/// 目录不存在只能重新定位或移除；目录还在、只缺 .config/app.yaml 时
+/// 「在此目录初始化」是可行的。合并成一个状态就没法给对出路（U143）。
+/// </summary>
+public enum RecentProjectHealth
+{
+    /// <summary>体检未完成。渲染上等同「正常」，避免进页面时整列先闪灰。</summary>
+    Unknown,
+
+    /// <summary>目录存在且含 .config/app.yaml。</summary>
+    Healthy,
+
+    /// <summary>目录不存在（被移动、重命名或删除）。</summary>
+    Missing,
+
+    /// <summary>目录存在但缺 .config/app.yaml，不是 Ariadne 项目。</summary>
+    NotAProject,
+}
+
 public sealed class WelcomeViewModel : ViewModelBase
 {
     private enum RecentProjectsState
@@ -246,6 +268,11 @@ public sealed class WelcomeViewModel : ViewModelBase
             SetRecentState(RecentProjects.Count == 0
                 ? RecentProjectsState.Empty
                 : RecentProjectsState.Content);
+
+            // 列表先渲染、体检随后回填：体检要读磁盘，等它完成再显示会让
+            // 欢迎页在慢盘/失效网络路径上白屏。条目默认 Unknown（视觉同正常），
+            // 结论到了才置灰，不会先闪一下。
+            await ProbeRecentProjectHealthAsync(RecentProjects, request).ConfigureAwait(true);
         }
         catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
         {
@@ -440,6 +467,75 @@ public sealed class WelcomeViewModel : ViewModelBase
             () => CanStartProjectAction)).ToArray();
     }
 
+    /// <summary>
+    /// 给列表逐条做存在性体检，并把结论回填到条目上。
+    ///
+    /// 体检是**磁盘 IO**，列表最多 20 条，且失效条目往往落在已卸载的外部盘或
+    /// 网络路径上——那里的 <c>Directory.Exists</c> 可能阻塞到超时。在 UI 线程
+    /// 同步跑一遍会让欢迎页直接卡住，所以整批丢进 <c>Task.Run</c>，
+    /// 只把结论切回 UI 线程回填。
+    ///
+    /// 结论回填用 <c>ConfigureAwait(true)</c> 回到原上下文：<c>Health</c> 会触发
+    /// <c>PropertyChanged</c>，绑定必须在 UI 线程上收到。
+    /// </summary>
+    private async Task ProbeRecentProjectHealthAsync(
+        IReadOnlyList<RecentProjectItemViewModel> items,
+        RequestGeneration request)
+    {
+        if (items.Count == 0)
+        {
+            return;
+        }
+
+        var roots = items.Select(item => item.ProjectRoot).ToArray();
+        var results = await Task.Run(
+            () => roots.Select(InspectRecentProject).ToArray(),
+            request.CancellationToken).ConfigureAwait(true);
+
+        // 体检期间用户可能已经刷新过列表；过期结论不能覆盖新列表的状态。
+        if (!_recentProjectsSession.IsCurrent(request))
+        {
+            return;
+        }
+
+        for (var i = 0; i < items.Count && i < results.Length; i++)
+        {
+            items[i].ApplyHealth(results[i]);
+        }
+    }
+
+    /// <summary>
+    /// 单条体检。区分「目录不存在」与「目录在但不是项目」——两者出路不同。
+    /// </summary>
+    private static RecentProjectHealth InspectRecentProject(string projectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(projectRoot))
+        {
+            return RecentProjectHealth.Missing;
+        }
+
+        try
+        {
+            var root = Path.GetFullPath(projectRoot.Trim());
+            if (!Directory.Exists(root))
+            {
+                return RecentProjectHealth.Missing;
+            }
+
+            // 与 ProjectPathHelper.LooksLikeInitializedProject 同一判据，
+            // 保证「列表显示可用」与「点开真的能开」不会给出相反结论。
+            return File.Exists(Path.Combine(root, ".config", "app.yaml"))
+                ? RecentProjectHealth.Healthy
+                : RecentProjectHealth.NotAProject;
+        }
+        catch
+        {
+            // 权限不足、路径非法等一律按不可用处理：让用户看到失效标记，
+            // 好过给一个点下去才报错的「正常」条目。
+            return RecentProjectHealth.Missing;
+        }
+    }
+
     private async Task RelocateRecentProjectAsync(RecentProjectEntry entry)
     {
         if (_isProjectActionRunning)
@@ -520,7 +616,8 @@ public sealed class WelcomeViewModel : ViewModelBase
             var entries = await _backend
                 .ForgetRecentProjectAsync(entry.ProjectRoot)
                 .ConfigureAwait(true);
-            RecentProjects = WrapRecentProjects(entries);
+            var items = WrapRecentProjects(entries);
+            RecentProjects = items;
             NotifyRecentProjectsChanged();
             SetRecentState(RecentProjects.Count == 0
                 ? RecentProjectsState.Empty
@@ -528,6 +625,9 @@ public sealed class WelcomeViewModel : ViewModelBase
             StatusText = _displayNames.Format(
                 "ui.welcome.recent.forgotten",
                 new Dictionary<string, string> { ["name"] = entry.Name });
+            // 重建后的条目健康度是 Unknown，不体检的话剩余失效项会变回「看着正常」。
+            await ProbeRecentProjectHealthAsync(items, _recentProjectsSession.Begin())
+                .ConfigureAwait(true);
         }
         catch (Exception ex)
         {
@@ -620,21 +720,184 @@ public sealed class WelcomeViewModel : ViewModelBase
         }
     }
 
+    /// <summary>
+    /// 打不开时的出路对话框。
+    ///
+    /// 原版只有一个「关闭」按钮：用户撞上死路后没有任何可做的事，
+    /// 得自己猜到去菜单里找「重新定位」。现在按失效原因给不同出路——
+    /// 目录还在（只是缺 app.yaml）时「在此目录初始化」是最省事的一条，
+    /// 目录已不存在时给它反而是误导，所以只在前者出现。
+    /// </summary>
     private async Task ShowNotProjectDialogAsync(string root)
     {
-        await DialogService.Current.ConfirmAsync(new ConfirmDialogViewModel(
-            _displayNames.Text("ui.dialog.open_project.not_project_title"),
-            _displayNames.Format(
-                "ui.dialog.open_project.not_project_message",
-                new Dictionary<string, string> { ["path"] = root }),
-            new[]
-            {
-                new DialogButton(_displayNames.Text("ui.common.close"), DialogButtonVariant.Primary, 0),
-            })
+        var health = InspectRecentProject(root);
+        var missing = health == RecentProjectHealth.Missing;
+
+        var title = _displayNames.Text(missing
+            ? "ui.dialog.open_project.missing_title"
+            : "ui.dialog.open_project.not_project_title");
+        var message = _displayNames.Format(
+            missing
+                ? "ui.dialog.open_project.missing_message"
+                : "ui.dialog.open_project.not_project_message",
+            new Dictionary<string, string> { ["path"] = root });
+        if (!missing)
         {
-            CancelResultIndex = 0,
-        }).ConfigureAwait(true);
-        StatusText = _displayNames.Text("ui.dialog.open_project.not_project_status");
+            // 目录存在这件事本身是关键信息：用户据此才知道「不是没了，是没初始化」。
+            message += "\n\n" + _displayNames.Text("ui.dialog.open_project.not_project_hint");
+        }
+
+        var buttons = new List<DialogButton>();
+        if (!missing)
+        {
+            buttons.Add(new DialogButton(
+                _displayNames.Text("ui.dialog.open_project.initialize_here"),
+                DialogButtonVariant.Primary,
+                buttons.Count));
+        }
+
+        var relocateIndex = buttons.Count;
+        buttons.Add(new DialogButton(
+            _displayNames.Text("ui.dialog.open_project.relocate"),
+            missing ? DialogButtonVariant.Primary : DialogButtonVariant.Subtle,
+            relocateIndex));
+
+        var forgetIndex = buttons.Count;
+        buttons.Add(new DialogButton(
+            _displayNames.Text("ui.dialog.open_project.forget"),
+            DialogButtonVariant.Danger,
+            forgetIndex));
+
+        var closeIndex = buttons.Count;
+        buttons.Add(new DialogButton(
+            _displayNames.Text("ui.common.close"),
+            DialogButtonVariant.Subtle,
+            closeIndex));
+
+        var choice = await DialogService.Current.ConfirmAsync(
+            new ConfirmDialogViewModel(title, message, buttons)
+            {
+                CancelResultIndex = closeIndex,
+            }).ConfigureAwait(true);
+
+        StatusText = _displayNames.Text(missing
+            ? "ui.dialog.open_project.missing_status"
+            : "ui.dialog.open_project.not_project_status");
+
+        if (choice == closeIndex || choice < 0)
+        {
+            // choice < 0 是「已有弹窗占着，本次请求被直接拒了」（ConfirmAsync 返回 -1）。
+            // 必须当成「什么都不做」——落到下面任何一条出路都等于用户没点却被执行了。
+            return;
+        }
+        if (choice == forgetIndex)
+        {
+            await ForgetProjectRootAsync(root).ConfigureAwait(true);
+            return;
+        }
+        if (choice == relocateIndex)
+        {
+            await RelocateProjectRootAsync(root).ConfigureAwait(true);
+            return;
+        }
+
+        // 只剩「在此目录初始化」：目录存在时才会有这个按钮。
+        await InitializeProjectAtAsync(root).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 在已存在但未初始化的目录上就地建项目。
+    ///
+    /// 走 <c>CreateProjectAsync</c> 传目录本身（而不是
+    /// <c>BuildUniqueProjectRoot</c> 再造一层子目录）——用户指的就是这个目录，
+    /// 给它建个 xxx_2 兄弟目录只会让人更糊涂。
+    /// </summary>
+    private async Task InitializeProjectAtAsync(string root)
+    {
+        try
+        {
+            var name = new DirectoryInfo(root.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar)).Name;
+            var report = await _backend.CreateProjectAsync(root, name).ConfigureAwait(true);
+            var status = new CurrentProjectStatus(report.ProjectRoot, report.ProjectName);
+            await RefreshRecentProjectsAsync().ConfigureAwait(true);
+            StatusText = _displayNames.Format(
+                "ui.welcome.recent.initialized_here",
+                new Dictionary<string, string> { ["path"] = report.ProjectRoot });
+            if (_projectOpened is not null)
+            {
+                await _projectOpened(status).ConfigureAwait(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+    }
+
+    /// <summary>
+    /// 从对话框直接重新定位。与菜单里的 <c>RelocateCommand</c> 走同一后端命令，
+    /// 差别只是入口——用户撞上死路的当下就能改，不用再去翻菜单。
+    /// </summary>
+    private async Task RelocateProjectRootAsync(string previousRoot)
+    {
+        try
+        {
+            var picked = await _pickProjectFolder(
+                _displayNames.Text("ui.welcome.recent.relocate_picker_title")).ConfigureAwait(true);
+            if (string.IsNullOrWhiteSpace(picked))
+            {
+                StatusText = _displayNames.Text("ui.common.cancel");
+                return;
+            }
+            if (!ProjectPathHelper.LooksLikeInitializedProject(picked))
+            {
+                // 新选的位置同样可能不是项目：直接复用本对话框，避免死路套死路。
+                await ShowNotProjectDialogAsync(picked).ConfigureAwait(true);
+                return;
+            }
+
+            var status = await _backend
+                .RelocateRecentProjectAsync(previousRoot, picked)
+                .ConfigureAwait(true);
+            await RefreshRecentProjectsAsync().ConfigureAwait(true);
+            StatusText = _displayNames.Format(
+                "ui.welcome.recent.relocated",
+                new Dictionary<string, string> { ["path"] = status.ProjectRoot });
+            if (_projectOpened is not null)
+            {
+                await _projectOpened(status).ConfigureAwait(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+    }
+
+    /// <summary>从对话框直接移除失效条目（不再二次确认：用户刚看过路径与原因）。</summary>
+    private async Task ForgetProjectRootAsync(string root)
+    {
+        try
+        {
+            var entries = await _backend.ForgetRecentProjectAsync(root).ConfigureAwait(true);
+            var items = WrapRecentProjects(entries);
+            RecentProjects = items;
+            NotifyRecentProjectsChanged();
+            SetRecentState(items.Count == 0
+                ? RecentProjectsState.Empty
+                : RecentProjectsState.Content);
+            StatusText = _displayNames.Format(
+                "ui.welcome.recent.forgotten",
+                new Dictionary<string, string> { ["name"] = root });
+            await ProbeRecentProjectHealthAsync(items, _recentProjectsSession.Begin())
+                .ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
     }
 
     internal Task RefreshRecentProjectsForTestsAsync() => RefreshRecentProjectsAsync();
@@ -644,6 +907,7 @@ public sealed class RecentProjectItemViewModel : ViewModelBase
 {
     private readonly DisplayNameService _displayNames;
     private readonly ulong _lastOpenedMs;
+    private RecentProjectHealth _health = RecentProjectHealth.Unknown;
 
     public RecentProjectItemViewModel(
         RecentProjectEntry entry,
@@ -671,6 +935,51 @@ public sealed class RecentProjectItemViewModel : ViewModelBase
     public RelayCommand RelocateCommand { get; }
     public RelayCommand ForgetCommand { get; }
 
+    /// <summary>
+    /// 条目健康度。<see cref="RecentProjectHealth.Unknown"/> 表示体检尚未完成——
+    /// 此时**不得**渲染成失效，否则每次进欢迎页所有条目都会先闪一下灰。
+    /// </summary>
+    public RecentProjectHealth Health
+    {
+        get => _health;
+        private set
+        {
+            if (SetProperty(ref _health, value))
+            {
+                OnPropertyChanged(nameof(IsUnavailable));
+                OnPropertyChanged(nameof(UnavailableText));
+                OnPropertyChanged(nameof(HasUnavailableText));
+                OnPropertyChanged(nameof(UnavailableHint));
+            }
+        }
+    }
+
+    /// <summary>列表项是否应置灰。</summary>
+    public bool IsUnavailable =>
+        Health is RecentProjectHealth.Missing or RecentProjectHealth.NotAProject;
+
+    /// <summary>
+    /// 失效原因文案。两种原因**刻意分开**：目录不存在只能重新定位或移除，
+    /// 而目录还在、只是缺 .config/app.yaml，则「在此目录初始化」是可行出路——
+    /// 混成一句话会让用户对后者也以为无药可救。
+    /// </summary>
+    public string? UnavailableText => Health switch
+    {
+        RecentProjectHealth.Missing => _displayNames.Text("ui.welcome.recent.unavailable_missing"),
+        RecentProjectHealth.NotAProject => _displayNames.Text("ui.welcome.recent.unavailable_not_project"),
+        _ => null,
+    };
+
+    public bool HasUnavailableText => !string.IsNullOrWhiteSpace(UnavailableText);
+
+    /// <summary>失效条目的补充提示（「目录已移动或删除」）。</summary>
+    public string? UnavailableHint => IsUnavailable
+        ? _displayNames.Text("ui.welcome.recent.unavailable_hint")
+        : null;
+
+    /// <summary>体检结论回填（由 <see cref="WelcomeViewModel"/> 在后台线程算完后调用）。</summary>
+    internal void ApplyHealth(RecentProjectHealth health) => Health = health;
+
     internal void NotifyCanExecuteChanged()
     {
         OpenCommand.NotifyCanExecuteChanged();
@@ -688,6 +997,10 @@ public sealed class RecentProjectItemViewModel : ViewModelBase
                 new Dictionary<string, string> { ["time"] = time });
         OnPropertyChanged(nameof(LastOpenedText));
         OnPropertyChanged(nameof(HasLastOpened));
+        // 失效文案同样是本地化文本，切语言时必须一起刷新。
+        OnPropertyChanged(nameof(UnavailableText));
+        OnPropertyChanged(nameof(HasUnavailableText));
+        OnPropertyChanged(nameof(UnavailableHint));
     }
 
     private static string? FormatLastOpened(ulong lastOpenedMs, string language)

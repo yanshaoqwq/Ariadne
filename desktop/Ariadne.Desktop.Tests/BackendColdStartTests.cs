@@ -16,6 +16,11 @@ public sealed class BackendColdStartTests
 {
     private static string? ResolveSidecar()
     {
+        // U142：起真实 sidecar 前先确认 app-state 已隔离。缺了它，
+        // 本文件建的 "Cold Start" 项目会写进用户真实的 recent_projects.json，
+        // 而该列表只留 20 条，测试残留会把用户自己的项目挤出去。
+        SidecarAppStateIsolation.RequireIsolatedAppState();
+
         var fromEnv = Environment.GetEnvironmentVariable("ARIADNE_BACKEND_IPC");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))
         {

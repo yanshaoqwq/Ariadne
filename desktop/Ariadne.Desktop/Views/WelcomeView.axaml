@@ -7,6 +7,26 @@
     x:Name="Root"
     x:DataType="vm:WelcomeViewModel">
 
+  <UserControl.Styles>
+    <!-- 失效条目置灰（U143）。样式留在本页而不是进主题文件：
+         这是欢迎页最近项目独有的状态，抬到全局 token 只会给主题增负担。
+         选择器**必须带元素类型前缀**：Avalonia 的 Setter 要能确定目标类型，
+         裸 `.recent-identity` 会在编译期报 AVLN2200。两处宿主分别是
+         图标 Border 与文本 StackPanel，二者没有共同基类可归并，故分开写。 -->
+    <Style Selector="Border.recent-identity">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="Border.recent-identity.unavailable">
+      <Setter Property="Opacity" Value="0.45" />
+    </Style>
+    <Style Selector="StackPanel.recent-identity">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="StackPanel.recent-identity.unavailable">
+      <Setter Property="Opacity" Value="0.45" />
+    </Style>
+  </UserControl.Styles>
+
   <!-- 创作首页：编辑排版式骨架 + 生成式叙事轨迹，操作与最近项目仍保持高密度可扫描。 -->
   <Panel>
     <Border Background="{DynamicResource Ariadne.BackgroundMain}" />
@@ -213,6 +233,8 @@
                                 HorizontalContentAlignment="Stretch">
                           <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
                             <Border Grid.Column="0" Width="36" Height="36" CornerRadius="8"
+                                    Classes="recent-identity"
+                                    Classes.unavailable="{Binding IsUnavailable}"
                                     Background="{DynamicResource Ariadne.AccentLight}"
                                     VerticalAlignment="Center">
                               <Path Classes="icon" Width="16" Height="16"
@@ -220,14 +242,37 @@
                                     Data="M5,4 L14,4 L19,9 L19,20 L5,20 Z M14,4 L14,9 L19,9 M8,13 L16,13 M8,16 L14,16" />
                             </Border>
                             <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                              <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14"
-                                         TextTrimming="CharacterEllipsis" />
-                              <TextBlock Text="{Binding ProjectRoot}" Classes="mono" FontSize="11"
-                                         Opacity="0.8" TextTrimming="CharacterEllipsis" />
-                              <TextBlock Text="{Binding LastOpenedText}"
-                                         Classes="caption"
-                                         FontSize="11"
-                                         IsVisible="{Binding HasLastOpened}" />
+                              <!-- 置灰只作用在「标题+路径+时间」上，失效原因那行保持满不透明——
+                                   把解释文字一起调淡，等于把唯一的补救线索也藏起来。 -->
+                              <StackPanel Classes="recent-identity" Spacing="3"
+                                          Classes.unavailable="{Binding IsUnavailable}">
+                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding ProjectRoot}" Classes="mono" FontSize="11"
+                                           Opacity="0.8" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding LastOpenedText}"
+                                           Classes="caption"
+                                           FontSize="11"
+                                           IsVisible="{Binding HasLastOpened}" />
+                              </StackPanel>
+                              <!-- 失效原因：目录不存在 / 目录在但不是项目。
+                                   用警示色而非仅置灰——置灰只说明「不可用」，
+                                   说不出为什么，也就指不出该走哪条出路。 -->
+                              <StackPanel Orientation="Horizontal" Spacing="5"
+                                          IsVisible="{Binding HasUnavailableText}">
+                                <Path Classes="icon" Width="12" Height="12"
+                                      VerticalAlignment="Center"
+                                      Stroke="{DynamicResource Ariadne.StatusWarning}"
+                                      Data="M12,3 L22,20 L2,20 Z M12,9 L12,14 M12,17 L12,17.5" />
+                                <TextBlock Text="{Binding UnavailableText}"
+                                           FontSize="11" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource Ariadne.StatusWarning}"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding UnavailableHint}"
+                                           Classes="caption" FontSize="11" Opacity="0.75"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" />
+                              </StackPanel>
                             </StackPanel>
                             <Path Grid.Column="2" Classes="icon" Width="14" Height="14"
                                   Opacity="0.45" VerticalAlignment="Center"
