@@ -160,6 +160,14 @@ public partial class WorkspacePageView : UserControl
         ResizeNodeLayers(e.NewSize.Width, e.NewSize.Height);
     }
 
+    /// <summary>
+    /// U141：内容层尺寸按「图包围盒 ∪ 可见区 + 余量」取，**不再等于视口尺寸**。
+    ///
+    /// 旧版把两层的 Width/Height 直接设成 CanvasOverlay 的视口尺寸，于是内容层
+    /// 只有一屏大——这是「一屏画布」的第三道闸：坐标即使放开，层外的节点也不
+    /// 参与测量/命中。层比内容大一圈后，节点拖到视口外仍在层内。
+    /// 视口边界的裁剪交给外层 CanvasHost（ClipToBounds=True），内容层本身不裁。
+    /// </summary>
     private void ResizeNodeLayers(double width, double height)
     {
         if (width <= 0 || height <= 0)
@@ -167,18 +175,76 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        // ItemsControl 作为 Canvas 子项时默认 DesiredSize 可能为 0，必须铺满宿主
+        var (layerWidth, layerHeight) = ComputeNodeLayerSize(width, height);
+        // ItemsControl 作为 Canvas 子项时默认 DesiredSize 可能为 0，必须显式给尺寸
         if (NodesItemsControl is not null)
         {
-            NodesItemsControl.Width = width;
-            NodesItemsControl.Height = height;
+            NodesItemsControl.Width = layerWidth;
+            NodesItemsControl.Height = layerHeight;
         }
         if (EdgesItemsControl is not null)
         {
-            EdgesItemsControl.Width = width;
-            EdgesItemsControl.Height = height;
+            EdgesItemsControl.Width = layerWidth;
+            EdgesItemsControl.Height = layerHeight;
         }
         ScheduleFullCanvasSync();
+    }
+
+    /// <summary>
+    /// U141：内容层当前该有多大。图为空时退化为「可见区 + 余量」，
+    /// 保证空画布也能往右下拖出屏幕。
+    /// </summary>
+    private (double Width, double Height) ComputeNodeLayerSize(
+        double viewportWidth,
+        double viewportHeight)
+    {
+        var maxX = double.NegativeInfinity;
+        var maxY = double.NegativeInfinity;
+        if (DataContext is WorkspacePageViewModel { Nodes.Count: > 0 } viewModel)
+        {
+            maxX = viewModel.Nodes.Max(node => node.X + NodePortSpec.NodeWidth);
+            maxY = viewModel.Nodes.Max(node => node.Y + node.CanvasHeight);
+        }
+
+        var offset = CurrentCanvasOffset();
+        return CanvasViewportHelpers.ComputeContentLayerSize(
+            maxX,
+            maxY,
+            viewportWidth,
+            viewportHeight,
+            CurrentCanvasZoom(),
+            offset.X,
+            offset.Y);
+    }
+
+    /// <summary>
+    /// U141：图或视口变化后重算内容层尺寸。拖动到层边缘、平移、缩放都要跟着长，
+    /// 否则「刚好够用」的层在下一次拖动时又变成新的边界。
+    /// </summary>
+    private void RefreshNodeLayerSize()
+    {
+        if (CanvasOverlay is null)
+        {
+            return;
+        }
+
+        var (layerWidth, layerHeight) = ComputeNodeLayerSize(
+            CanvasOverlay.Bounds.Width,
+            CanvasOverlay.Bounds.Height);
+        if (NodesItemsControl is not null
+            && (Math.Abs(NodesItemsControl.Width - layerWidth) > 0.5
+                || Math.Abs(NodesItemsControl.Height - layerHeight) > 0.5))
+        {
+            NodesItemsControl.Width = layerWidth;
+            NodesItemsControl.Height = layerHeight;
+        }
+        if (EdgesItemsControl is not null
+            && (Math.Abs(EdgesItemsControl.Width - layerWidth) > 0.5
+                || Math.Abs(EdgesItemsControl.Height - layerHeight) > 0.5))
+        {
+            EdgesItemsControl.Width = layerWidth;
+            EdgesItemsControl.Height = layerHeight;
+        }
     }
 
     private void OnFirstLayout(object? sender, EventArgs e)
@@ -1631,6 +1697,10 @@ public partial class WorkspacePageView : UserControl
         // 点阵背景与节点层同帧联动：同一缩放/平移状态，避免两坐标系错位。
         CanvasGridBg?.SetViewport(state.Zoom, state.OffsetX, state.OffsetY);
 
+        // U141：平移/缩放会改变「可见逻辑区域」，内容层要随之长大，
+        // 否则往右下平移后新露出的区域落在层外，节点拖进去就看不见。
+        RefreshNodeLayerSize();
+
         SyncMiniMapViewportFrame();
     }
 
@@ -1681,22 +1751,16 @@ public partial class WorkspacePageView : UserControl
         var position = ToLogicalCanvasPoint(e.GetPosition(CanvasOverlay));
         var newX = _nodeDragOriginX + position.X - _nodeDragStart.X;
         var newY = _nodeDragOriginY + position.Y - _nodeDragStart.Y;
-        var zoom = CurrentCanvasZoom();
-        var offset = CurrentCanvasOffset();
-        var (safeX, safeY) = CanvasViewportHelpers.KeepNodeReachable(
-            newX,
-            newY,
-            NodePortSpec.NodeWidth,
-            node.CanvasHeight,
-            zoom,
-            offset.X,
-            offset.Y,
-            CanvasOverlay.Bounds.Width,
-            CanvasOverlay.Bounds.Height,
-            CanvasOcclusionRects());
+        // U141：逻辑坐标按指针位移原样写入，不做任何视口钳位。
+        // 旧版在这里调 KeepNodeReachable 把坐标钳回视口边缘再反算，
+        // 结果是「节点从未被允许拖出去」，且被改写的值随工作流存盘——
+        // 那改的是用户数据。可达性由视口负责（见 EnsureNodeInSafeViewport）。
+        //
+        // 拖动过程中刻意不追随视口：_nodeDragStart 是按press 时的 offset 换算出的
+        // 逻辑点，中途改 offset 会让同一屏幕位置映射到不同逻辑点，节点会跳。
         // C5-a：只写逻辑坐标；主节点布局与相邻边 Geometry 在 Render 帧回调中合并执行。
-        node.X = safeX;
-        node.Y = safeY;
+        node.X = newX;
+        node.Y = newY;
         if (!CanvasDragFrameHelpers.ShouldApplyMainVisualsOnPointerMoved)
         {
             ScheduleDragFrameSync();
@@ -2081,7 +2145,12 @@ public partial class WorkspacePageView : UserControl
         geometry.Figures ??= new PathFigures();
         geometry.Figures.Add(figure);
         RubberBandPath.Data = geometry;
-        RubberBandPath.Stroke = BrushForPortKind(_edgeSourceKind);
+        // 每次更新橡皮筋都重查主题令牌（不缓存），这样换主题后新拖的线立刻跟随。
+        // 查不到就保留 XAML 里绑的 DynamicResource，不覆盖成任何字面量色。
+        if (TryBrushForPortKind(_edgeSourceKind, out var strokeBrush))
+        {
+            RubberBandPath.Stroke = strokeBrush;
+        }
         RubberBandPath.StrokeThickness = isComm ? 2.2 : 1.8;
         RubberBandPath.IsVisible = true;
     }
@@ -2097,12 +2166,53 @@ public partial class WorkspacePageView : UserControl
         RubberBandPath.Data = null;
     }
 
-    private static IBrush BrushForPortKind(NodePortKind kind) => kind switch
+    /// <summary>
+    /// 引脚种类 → 主题令牌名。三种引脚色在主题里**亮暗各有一套值**
+    /// （`Ariadne.Color.EdgeControl` / `EdgeCommunication` / `EdgeData`，
+    /// 见 AriadneTheme.axaml 的 Light / Dark ThemeDictionaries），
+    /// 所以任何写死的十六进制值都只可能在一套主题下对——U155 原代码抄的正是
+    /// 「亮色 2 个 + 暗色 1 个」的混合，12 套主题下没有一套完全正确。
+    /// 这里只保留 key，色值一律由主题解析，源码里不再出现颜色字面量。
+    /// </summary>
+    private static string PortKindBrushKey(NodePortKind kind) => kind switch
     {
-        NodePortKind.Control => new SolidColorBrush(Color.Parse("#8B939D")),
-        NodePortKind.Communication => new SolidColorBrush(Color.Parse("#7C3AED")),
-        _ => new SolidColorBrush(Color.Parse("#2E726B")),
+        NodePortKind.Control => "Ariadne.EdgeControl",
+        NodePortKind.Communication => "Ariadne.EdgeCommunication",
+        _ => "Ariadne.EdgeData",
     };
+
+    /// <summary>
+    /// 取橡皮筋线的笔刷：**每次调用都重新查主题**，不缓存。
+    ///
+    /// 不能缓存成 `static readonly` 字段：那样进程内只算一次，用户换主题
+    /// （12 套预设 + 个性化强调色）后拖出的线仍是旧色——这正是 `ChatBubbleViewModel`
+    /// 现在踩的坑，别把它复制过来。橡皮筋只在拖拽期间可见、拖拽期间无法切主题，
+    /// 因此「每次 UpdateRubberBand 重查」就足以让新画的线跟随主题，不需要订阅变更事件。
+    ///
+    /// 走 `TryFindResource` 而不是直接读 `Application.Current.Resources`：
+    /// 它沿逻辑树上溯到应用级样式，与 XAML 里
+    /// `Stroke="{DynamicResource Ariadne.EdgeData}"` 的取值口径一致，
+    /// 也能取到 `ThemeApplication` 写进应用级资源的个性化覆盖层。
+    /// **变体显式传 `ActualThemeVariant`**（而不是用省略变体的重载）：
+    /// 三枚引脚令牌住在 `ThemeDictionaries` 的 Light/Dark 两本字典里，
+    /// 变体选错就会在亮色主题下取到暗色值——那正是本条缺陷的形态。
+    ///
+    /// 查不到时**返回 false 让调用方不要动 Stroke**，而不是兜一个硬编码色：
+    /// Path 在 XAML 里已经绑了 `Ariadne.EdgeData` 的 DynamicResource，保留它
+    /// 比写死一个「兜底设计值」更接近正确，也让这条路径上零颜色字面量。
+    /// </summary>
+    private bool TryBrushForPortKind(NodePortKind kind, out IBrush brush)
+    {
+        if (this.TryFindResource(PortKindBrushKey(kind), ActualThemeVariant, out var resource)
+            && resource is IBrush found)
+        {
+            brush = found;
+            return true;
+        }
+
+        brush = Brushes.Transparent;
+        return false;
+    }
 
     private void ResetEdgeDrag()
     {
@@ -2486,6 +2596,9 @@ public partial class WorkspacePageView : UserControl
 
     private void CommitDraggedNodeLayout(WorkflowNodeViewModel node)
     {
+        // U141：松手时节点可能已经落在原内容层之外，先把层长到够大再提交布局位，
+        // 否则新位置这一帧不参与测量（拖动帧只同步被拖的那一个容器）。
+        RefreshNodeLayerSize();
         if (FindNodeContainer(node, NodesItemsControl, _nodeContainersById) is { } nodeContainer)
         {
             CommitCanvasPosition(nodeContainer, node.X, node.Y);
@@ -2521,6 +2634,10 @@ public partial class WorkspacePageView : UserControl
         {
             return;
         }
+
+        // U141：位置刷新与层尺寸同一时机——节点刚移到层外时若不长层，
+        // 它这一帧就不参与测量，会出现「拖出去了但空一格」。
+        RefreshNodeLayerSize();
 
         // 优先对 ItemsControl 容器设 Canvas 附加属性（DataTemplate 根上的 Canvas.Left 常不生效）
         foreach (var node in viewModel.Nodes)
@@ -2561,16 +2678,23 @@ public partial class WorkspacePageView : UserControl
         SyncMiniMapViewportFrame();
     }
 
+    /// <summary>
+    /// U141：把视口移到能看见该节点的位置——**不动节点坐标**。
+    ///
+    /// 旧版在这里把节点 X/Y 钳成视口边缘值（新建、粘贴、导航都经此路径），
+    /// 于是「保证可见」实际是「悄悄搬动用户的节点」。现在只改 offset：
+    /// 节点在哪就是在哪，是视口去找它。
+    /// </summary>
     private void EnsureNodeInSafeViewport(WorkflowNodeViewModel node)
     {
-        if (CanvasOverlay is null)
+        if (CanvasOverlay is null || DataContext is not WorkspacePageViewModel viewModel)
         {
             return;
         }
 
         var zoom = CurrentCanvasZoom();
         var offset = CurrentCanvasOffset();
-        var (safeX, safeY) = CanvasViewportHelpers.KeepNodeReachable(
+        var (offsetX, offsetY) = CanvasViewportHelpers.EnsureNodeVisibleOffset(
             node.X,
             node.Y,
             NodePortSpec.NodeWidth,
@@ -2578,11 +2702,14 @@ public partial class WorkspacePageView : UserControl
             zoom,
             offset.X,
             offset.Y,
-            CanvasOverlay.Bounds.Width,
-            CanvasOverlay.Bounds.Height,
-            CanvasOcclusionRects());
-        node.X = safeX;
-        node.Y = safeY;
+            SafeFitViewport());
+        if (Math.Abs(offsetX - offset.X) < 1e-6 && Math.Abs(offsetY - offset.Y) < 1e-6)
+        {
+            return;
+        }
+
+        ApplyCanvasViewportState(viewModel.CanvasViewport.SetOffset(offsetX, offsetY));
+        ScheduleFullCanvasSync();
     }
 
     private IReadOnlyList<CanvasViewportRect> CanvasOcclusionRects()
@@ -2621,6 +2748,13 @@ public partial class WorkspacePageView : UserControl
             control.Bounds.Height));
     }
 
+    /// <summary>
+    /// U141：防遮挡的唯一落点——把浮层从**视口**里挖掉，得到「点得到」的安全矩形。
+    ///
+    /// Fit 与「保证节点可见」都用它。以前这里手写一遍避让、拖动那边又用
+    /// KeepNodeReachable 改写坐标避让一遍，两套逻辑里只有改坐标那套会污染用户数据。
+    /// 现在避让只表达为视口约束，节点坐标一律不动。
+    /// </summary>
     private CanvasViewportRect SafeFitViewport()
     {
         if (CanvasOverlay is null)
@@ -2628,49 +2762,10 @@ public partial class WorkspacePageView : UserControl
             return new CanvasViewportRect(0, 0, 1, 1);
         }
 
-        const double inset = 12;
-        var left = inset;
-        var top = inset;
-        var right = Math.Max(left + 1, CanvasOverlay.Bounds.Width - inset);
-        var bottom = Math.Max(top + 1, CanvasOverlay.Bounds.Height - inset);
-        foreach (var control in new Control?[] { CanvasToolbarActions })
-        {
-            var rects = new List<CanvasViewportRect>();
-            AddControlRect(control, rects);
-            if (rects.Count > 0)
-            {
-                top = Math.Max(top, rects[0].Bottom + inset);
-            }
-        }
-
-        var miniMapRects = new List<CanvasViewportRect>();
-        AddControlRect(MiniMapHost, miniMapRects);
-        if (miniMapRects.Count > 0)
-        {
-            right = Math.Min(right, miniMapRects[0].X - inset);
-            bottom = Math.Min(bottom, miniMapRects[0].Y - inset);
-        }
-
-        if (DataContext is WorkspacePageViewModel { UseOverlayRightPanel: true, IsRightPanelOpen: true })
-        {
-            var rightPanelRects = new List<CanvasViewportRect>();
-            AddControlRect(RightPanelHost, rightPanelRects);
-            if (rightPanelRects.Count > 0)
-            {
-                right = Math.Min(right, rightPanelRects[0].X - inset);
-            }
-        }
-
-        if (right - left < 160 || bottom - top < 120)
-        {
-            return new CanvasViewportRect(
-                inset,
-                inset,
-                Math.Max(1, CanvasOverlay.Bounds.Width - (inset * 2)),
-                Math.Max(1, CanvasOverlay.Bounds.Height - (inset * 2)));
-        }
-
-        return new CanvasViewportRect(left, top, right - left, bottom - top);
+        return CanvasViewportHelpers.ComputeSafeViewport(
+            CanvasOverlay.Bounds.Width,
+            CanvasOverlay.Bounds.Height,
+            CanvasOcclusionRects());
     }
 
     private void SyncEdgePositions()

@@ -460,31 +460,64 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Equal(state.OffsetY, session.OffsetY);
     }
 
+    /// <summary>
+    /// U141：可达性靠**移视口**实现，不靠改节点坐标。
+    ///
+    /// 这条原先测的是 `KeepNodeReachable`——它把逻辑坐标钳到视口边缘再反算回去，
+    /// 于是「防遮挡」的代价是**改写用户数据**（节点 X/Y 随工作流存盘一起变），
+    /// 画布也因此退化成「一屏 + 缩放」。那个方法已删。
+    ///
+    /// 现在的判据是：节点逻辑坐标**一个都不许动**，只有 offset 变——
+    /// 逻辑坐标是内容，offset 是显示，两者不能互相污染。
+    /// </summary>
     [Fact]
-    public void W6_NodePlacementAvoidsToolbarAndMiniMapOcclusions()
+    public void W6_RevealingAnOccludedNodeMovesTheViewportNotTheNode()
     {
-        var blockers = new[]
-        {
-            new CanvasViewportRect(0, 0, 800, 80),
-            new CanvasViewportRect(640, 450, 160, 150),
-        };
+        // 安全视口 = 总视口扣掉顶部工具条(80) 与右下小地图(160×150)。
+        var safeViewport = new CanvasViewportRect(0, 80, 640, 370);
+        const double logicalX = 680;
+        const double logicalY = 490;
 
-        var (x, y) = CanvasViewportHelpers.KeepNodeReachable(
-            logicalX: 680,
-            logicalY: 490,
+        var (offsetX, offsetY) = CanvasViewportHelpers.EnsureNodeVisibleOffset(
+            logicalX: logicalX,
+            logicalY: logicalY,
             nodeWidth: 120,
             nodeHeight: 80,
             zoom: 1,
             offsetX: 0,
             offsetY: 0,
-            viewportWidth: 800,
-            viewportHeight: 600,
-            blockers);
-        var placed = new CanvasViewportRect(x, y, 120, 80);
+            safeViewport);
 
-        Assert.InRange(placed.X, 8, 672);
-        Assert.InRange(placed.Y, 8, 512);
-        Assert.DoesNotContain(blockers.Select(blocker => blocker.Inflate(8)), placed.Intersects);
+        // 节点原本落在小地图底下（680+120=800 > 640，490+80=570 > 450），
+        // 所以两轴都必须补位移才能露出来。
+        Assert.True(offsetX < 0, "水平方向未补位移，节点仍被右侧遮挡");
+        Assert.True(offsetY < 0, "垂直方向未补位移，节点仍被底部遮挡");
+
+        // 关键断言：补完位移后节点整块落进安全视口，而**逻辑坐标一字未动**。
+        var screenX = logicalX + offsetX;
+        var screenY = logicalY + offsetY;
+        Assert.InRange(screenX, safeViewport.X, safeViewport.X + safeViewport.Width - 120);
+        Assert.InRange(screenY, safeViewport.Y, safeViewport.Y + safeViewport.Height - 80);
+    }
+
+    /// <summary>已可见的节点不该产生位移——否则每帧都在抖。</summary>
+    [Fact]
+    public void W6_AlreadyVisibleNodeKeepsTheCurrentOffset()
+    {
+        var safeViewport = new CanvasViewportRect(0, 80, 640, 370);
+
+        var (offsetX, offsetY) = CanvasViewportHelpers.EnsureNodeVisibleOffset(
+            logicalX: 200,
+            logicalY: 200,
+            nodeWidth: 120,
+            nodeHeight: 80,
+            zoom: 1,
+            offsetX: 0,
+            offsetY: 0,
+            safeViewport);
+
+        Assert.Equal(0, offsetX);
+        Assert.Equal(0, offsetY);
     }
 
     [Fact]
@@ -516,7 +549,11 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("x:Name=\"CanvasToolbarActions\"", axaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"CanvasStatusHost\"", axaml, StringComparison.Ordinal);
         Assert.Contains("TextTrimming=\"CharacterEllipsis\"", axaml, StringComparison.Ordinal);
-        Assert.Contains("CanvasViewportHelpers.KeepNodeReachable", view, StringComparison.Ordinal);
+        // U141：`KeepNodeReachable` 已删——它靠改写节点逻辑坐标来「防遮挡」，
+        // 改的是随工作流存盘的用户数据。替代品 `EnsureNodeVisibleOffset` 只动 offset。
+        // 只查**调用**，不查字符串出现——注释里提到旧名是合理的历史记录。
+        Assert.DoesNotContain("CanvasViewportHelpers.KeepNodeReachable", view, StringComparison.Ordinal);
+        Assert.Contains("CanvasViewportHelpers.EnsureNodeVisibleOffset", view, StringComparison.Ordinal);
         Assert.Contains("CanvasOcclusionRects()", view, StringComparison.Ordinal);
         Assert.Contains("SafeFitViewport()", view, StringComparison.Ordinal);
         Assert.Contains("RequestEnsureNodeVisible = EnsureNodeInSafeViewport", view, StringComparison.Ordinal);

@@ -10,6 +10,12 @@ public static class CanvasViewportHelpers
     public const double DefaultFitPadding = 48;
 
     /// <summary>
+    /// 安全可视区在任一方向上不得被浮层裁到比这更窄，否则「避让」会把画布削成一条缝。
+    /// 宁可保留一点重叠：重叠还能靠平移绕开，可视区没了就无路可走。
+    /// </summary>
+    public const double MinimumSafeSpan = 120;
+
+    /// <summary>
     /// W2：按节点包围盒与真实视口计算 zoom + 平移，使图落入可见区（非仅非负左上角微调）。
     /// </summary>
     public static (double Zoom, double OffsetX, double OffsetY) ComputeFitTransform(
@@ -90,10 +96,17 @@ public static class CanvasViewportHelpers
         (offsetX + deltaX, offsetY + deltaY);
 
     /// <summary>
-    /// W6：把节点完整屏幕矩形保持在视口内，并避开真实浮层矩形。
-    /// 返回逻辑坐标，供拖动、新建和粘贴共用。
+    /// U141：让**视口**追上节点，而不是把节点拽回视口。
+    ///
+    /// 旧版 <c>KeepNodeReachable</c> 把「可达性」实现成对逻辑坐标的钳位再反算，
+    /// 于是节点的 X/Y 会被改写成视口边缘值并随工作流存盘——改的是用户数据，
+    /// 画布也因此退化成「一屏 + 缩放」。这里改为只动 offset：
+    /// 逻辑坐标是内容，offset 是显示，两者不能互相污染。
+    ///
+    /// 返回让节点整块落进 <paramref name="safeViewport"/> 所需的新 offset。
+    /// 节点已经可见时原样返回，避免每帧抖动。
     /// </summary>
-    public static (double X, double Y) KeepNodeReachable(
+    public static (double OffsetX, double OffsetY) EnsureNodeVisibleOffset(
         double logicalX,
         double logicalY,
         double nodeWidth,
@@ -101,60 +114,164 @@ public static class CanvasViewportHelpers
         double zoom,
         double offsetX,
         double offsetY,
+        CanvasViewportRect safeViewport)
+    {
+        var safeZoom = Math.Max(MinZoom, zoom);
+        var safe = safeViewport.Normalize();
+        if (safe.Width <= 0 || safe.Height <= 0)
+        {
+            return (offsetX, offsetY);
+        }
+
+        var screenWidth = Math.Max(1, nodeWidth * safeZoom);
+        var screenHeight = Math.Max(1, nodeHeight * safeZoom);
+        return (
+            AxisOffsetToReveal(logicalX, screenWidth, safeZoom, offsetX, safe.X, safe.Width),
+            AxisOffsetToReveal(logicalY, screenHeight, safeZoom, offsetY, safe.Y, safe.Height));
+    }
+
+    /// <summary>
+    /// 单轴求解：只在节点越界的那一侧补足位移，且节点比可视区还长时对齐前缘
+    /// （否则「两端都要进来」这个约束无解，会来回抖）。
+    /// </summary>
+    private static double AxisOffsetToReveal(
+        double logical,
+        double screenLength,
+        double zoom,
+        double offset,
+        double safeStart,
+        double safeLength)
+    {
+        var start = (logical * zoom) + offset;
+        var end = start + screenLength;
+        if (screenLength >= safeLength)
+        {
+            return safeStart - (logical * zoom);
+        }
+
+        if (start < safeStart)
+        {
+            return offset + (safeStart - start);
+        }
+
+        if (end > safeStart + safeLength)
+        {
+            return offset - (end - (safeStart + safeLength));
+        }
+
+        return offset;
+    }
+
+    /// <summary>
+    /// U141：把浮层（工具条、小地图、右栏…）从视口里挖掉，得到「点得到」的安全矩形。
+    ///
+    /// 这是防遮挡的**正确落点**：只影响 Fit / 追随视口这类显示决策，
+    /// 一个字节的用户数据都不会被改。挖到过窄就整块放弃避让，只留边距内缩
+    /// （见 <see cref="MinimumSafeSpan"/>）。
+    /// </summary>
+    public static CanvasViewportRect ComputeSafeViewport(
         double viewportWidth,
         double viewportHeight,
         IReadOnlyList<CanvasViewportRect> occlusions,
-        double gap = 8)
+        double inset = 12)
     {
-        var safeZoom = Math.Max(MinZoom, zoom);
-        var screenWidth = Math.Max(1, nodeWidth * safeZoom);
-        var screenHeight = Math.Max(1, nodeHeight * safeZoom);
-        var minX = Math.Min(gap, Math.Max(0, viewportWidth - screenWidth));
-        var minY = Math.Min(gap, Math.Max(0, viewportHeight - screenHeight));
-        var maxX = Math.Max(minX, viewportWidth - gap - screenWidth);
-        var maxY = Math.Max(minY, viewportHeight - gap - screenHeight);
-        var originX = Math.Clamp((logicalX * safeZoom) + offsetX, minX, maxX);
-        var originY = Math.Clamp((logicalY * safeZoom) + offsetY, minY, maxY);
-        var x = originX;
-        var y = originY;
-        var blockers = occlusions
-            .Select(rect => rect.Normalize().Inflate(gap))
-            .Where(rect => rect.Width > 0 && rect.Height > 0)
-            .ToArray();
+        var width = Math.Max(1, viewportWidth);
+        var height = Math.Max(1, viewportHeight);
+        var left = Math.Min(inset, width * 0.25);
+        var top = Math.Min(inset, height * 0.25);
+        var right = Math.Max(left + 1, width - inset);
+        var bottom = Math.Max(top + 1, height - inset);
 
-        for (var pass = 0; pass < Math.Max(1, blockers.Length * 2); pass++)
+        foreach (var raw in occlusions)
         {
-            var current = new CanvasViewportRect(x, y, screenWidth, screenHeight);
-            var blocker = blockers.FirstOrDefault(current.Intersects);
+            var blocker = raw.Normalize();
             if (blocker.Width <= 0 || blocker.Height <= 0)
             {
-                break;
+                continue;
             }
 
-            var candidates = new[]
+            // 只从最近的一侧切：浮层贴着哪条边，就把那条边推进来。
+            // 四个 cut 里有非正数说明浮层已经在矩形之外（含右栏停靠在画布右侧
+            // 之外的情形），直接跳过——否则会白挖掉一块可视区。
+            var cutLeft = blocker.Right - left;
+            var cutRight = right - blocker.X;
+            var cutTop = blocker.Bottom - top;
+            var cutBottom = bottom - blocker.Y;
+            if (cutLeft <= 0 || cutRight <= 0 || cutTop <= 0 || cutBottom <= 0)
             {
-                (X: blocker.X - screenWidth, Y: y),
-                (X: blocker.Right, Y: y),
-                (X: x, Y: blocker.Y - screenHeight),
-                (X: x, Y: blocker.Bottom),
-            };
-            var best = candidates
-                .Select(candidate =>
-                {
-                    var cx = Math.Clamp(candidate.X, minX, maxX);
-                    var cy = Math.Clamp(candidate.Y, minY, maxY);
-                    var rect = new CanvasViewportRect(cx, cy, screenWidth, screenHeight);
-                    var intersections = blockers.Count(rect.Intersects);
-                    var distance = Math.Pow(cx - originX, 2) + Math.Pow(cy - originY, 2);
-                    return (X: cx, Y: cy, Score: (intersections * 1_000_000_000d) + distance);
-                })
-                .OrderBy(candidate => candidate.Score)
-                .First();
-            x = best.X;
-            y = best.Y;
+                continue;
+            }
+
+            // 取代价最小的一侧。每侧都以 MinimumSafeSpan 兜底：宁可与浮层留一点重叠，
+            // 也不把可视区削成一条缝——重叠还能靠平移绕开，可视区没了就无路可走。
+            var minimumCut = Math.Min(Math.Min(cutLeft, cutRight), Math.Min(cutTop, cutBottom));
+            if (Math.Abs(minimumCut - cutLeft) < 1e-9)
+            {
+                left = Math.Min(left + cutLeft + inset, right - MinimumSafeSpan);
+            }
+            else if (Math.Abs(minimumCut - cutRight) < 1e-9)
+            {
+                right = Math.Max(right - cutRight - inset, left + MinimumSafeSpan);
+            }
+            else if (Math.Abs(minimumCut - cutTop) < 1e-9)
+            {
+                top = Math.Min(top + cutTop + inset, bottom - MinimumSafeSpan);
+            }
+            else
+            {
+                bottom = Math.Max(bottom - cutBottom - inset, top + MinimumSafeSpan);
+            }
         }
 
-        return ((x - offsetX) / safeZoom, (y - offsetY) / safeZoom);
+        if (right - left < MinimumSafeSpan || bottom - top < MinimumSafeSpan)
+        {
+            return new CanvasViewportRect(
+                Math.Min(inset, width * 0.25),
+                Math.Min(inset, height * 0.25),
+                Math.Max(1, width - (inset * 2)),
+                Math.Max(1, height - (inset * 2)));
+        }
+
+        return new CanvasViewportRect(left, top, right - left, bottom - top);
+    }
+
+    /// <summary>
+    /// U141：内容层尺寸不能等于视口尺寸——那是「一屏画布」的根源：层只有一屏大，
+    /// 层外的节点既不参与测量，也可能因宿主/主题的裁剪而消失。
+    ///
+    /// 这里按「图包围盒 ∪ 当前可见逻辑区域」再留一屏余量取尺寸，于是层始终比
+    /// 内容大一圈，节点拖到视口外仍在层内。
+    ///
+    /// **负半轴不靠尺寸覆盖**：层的局部原点就是逻辑 0，负坐标节点落在层矩形之外，
+    /// 靠内容层 <c>ClipToBounds=False</c> 正常渲染与命中（真正该裁的是外层视口
+    /// CanvasHost，那才是「屏幕边界」）。想用尺寸覆盖负半轴就得平移层原点，
+    /// 那会连带改写所有边 Geometry 的坐标基准，代价远大于收益。
+    /// </summary>
+    public static (double Width, double Height) ComputeContentLayerSize(
+        double maxX,
+        double maxY,
+        double viewportWidth,
+        double viewportHeight,
+        double zoom,
+        double offsetX,
+        double offsetY,
+        double margin = 1200)
+    {
+        var safeZoom = Math.Max(MinZoom, zoom);
+        var viewW = Math.Max(1, viewportWidth) / safeZoom;
+        var viewH = Math.Max(1, viewportHeight) / safeZoom;
+        // 可见逻辑区域的右/下边界：screen = logical * zoom + offset 的反解。
+        var visibleRight = (-offsetX / safeZoom) + viewW;
+        var visibleBottom = (-offsetY / safeZoom) + viewH;
+        var right = Math.Max(
+            double.IsFinite(maxX) ? maxX : visibleRight,
+            visibleRight);
+        var bottom = Math.Max(
+            double.IsFinite(maxY) ? maxY : visibleBottom,
+            visibleBottom);
+        return (
+            Math.Max(1, right + margin),
+            Math.Max(1, bottom + margin));
     }
 }
 

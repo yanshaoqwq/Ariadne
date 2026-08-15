@@ -209,8 +209,22 @@
                   Background="{DynamicResource Ariadne.BackgroundSubtle}"
                   BorderBrush="{DynamicResource Ariadne.BorderMuted}"
                   BorderThickness="1" CornerRadius="4" Padding="8">
-            <TextBlock Text="{Binding DiagnosticDetailText}" Classes="caption"
-                       TextWrapping="Wrap" MaxHeight="96" />
+            <!-- U153：MaxHeight 必须挂 ScrollViewer 而不是 TextBlock。
+                 同样的写法在两类控件上语义相反：ScrollViewer 上是「限高可滚」，
+                 TextBlock 上是「裁掉多余」——且裁切发生在测量阶段，
+                 TextBlock 向父级上报的 DesiredSize 已被钉死，外层再包滚动也救不回来。
+                 原先 MaxHeight="96" 让 40 行调用栈只剩 17.6% 可见，
+                 而按钮文案是「展开详情」，功能与文案直接矛盾。
+                 限高从 96 放宽到 320（与 ConfirmDialogView 的弹窗限高同值）：
+                 「展开详情」承接的是排障最需要看全的脱敏诊断，
+                 96px 只有 7 行，连一屏调用栈都装不下；320 约 24 行，
+                 既让常见诊断一眼看完，又不至于让顶栏吃掉半屏。 -->
+            <ScrollViewer MaxHeight="320"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+              <TextBlock Text="{Binding DiagnosticDetailText}" Classes="caption"
+                         TextWrapping="Wrap" />
+            </ScrollViewer>
           </Border>
         </StackPanel>
       </Border>

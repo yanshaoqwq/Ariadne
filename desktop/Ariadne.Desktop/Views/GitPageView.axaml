@@ -286,10 +286,22 @@
                   <TextBlock Text="{Binding DiffPreviewLabel}" Classes="subtle" />
                   <!-- 去盒中盒：diff 预览已在 Expander + 检查器分区内，
                        第三层描边纯属噪音；等宽字体本身已足够区分。 -->
-                  <TextBlock Text="{Binding DiffPreviewText}"
-                             Classes="mono"
-                             TextWrapping="Wrap"
-                             MaxHeight="220" />
+                  <!-- U153：MaxHeight 原先挂在 TextBlock 上，那是「裁掉多余」而非
+                       「限高可滚」——后端专门截到 4000 字符送来，前端只显示 7.4%，
+                       那道截断基本白做。挂到 ScrollViewer 上才是限高。
+                       高度保持 220：右栏净宽只有 255px，diff 在这里是「扫一眼」用途，
+                       再高会把回档表单挤出视野；要读全文该走 Git 主视图。
+                       嵌套滚动的取舍：外层右栏本身可滚（见上方 ScrollViewer），
+                       Avalonia 无 scroll chaining，鼠标悬在 diff 上时滚的是 diff，
+                       这符合直觉；Auto 保证内容不超高时不出现滚动条、
+                       滚轮直接归外层，因此不会凭空多出一个卡住滚动的死区。 -->
+                  <ScrollViewer MaxHeight="220"
+                                VerticalScrollBarVisibility="Auto"
+                                HorizontalScrollBarVisibility="Disabled">
+                    <TextBlock Text="{Binding DiffPreviewText}"
+                               Classes="mono"
+                               TextWrapping="Wrap" />
+                  </ScrollViewer>
                 </StackPanel>
               </StackPanel>
             </Expander>
