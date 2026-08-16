@@ -4676,6 +4676,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             ["roles"] = roles,
             ["key"] = keyImpact,
         });
+        // U157：产品决策是「从应用级彻底删除」，那就必须把跨项目影响说出来。
+        // 应用级目录是共享的，用户在项目 A 点删除，项目 B 也不再看到这家服务商——
+        // 不告知就等于让他在不知情的前提下改动别的项目的可用配置。
+        if (preview.AffectsOtherProjects)
+        {
+            message += Environment.NewLine
+                + Environment.NewLine
+                + _displayNames.Text("ui.dialog.settings.remove_provider.cross_project");
+        }
         return new ConfirmDialogViewModel(
             _displayNames.Text("ui.dialog.settings.remove_provider.title"),
             message,

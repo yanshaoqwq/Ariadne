@@ -160,7 +160,11 @@ public sealed record ProviderRemovalPreview(
     [property: JsonPropertyName("revision")] string Revision,
     [property: JsonPropertyName("has_key")] bool HasKey,
     [property: JsonPropertyName("default_roles")] IReadOnlyList<string> DefaultRoles,
-    [property: JsonPropertyName("blocking_references")] IReadOnlyList<ProviderRemovalReference> BlockingReferences);
+    [property: JsonPropertyName("blocking_references")] IReadOnlyList<ProviderRemovalReference> BlockingReferences,
+    // U157：该 Provider 是否在应用级目录（跨项目共享）里。为 true 时删除会让
+    // 其它项目也看不到这家服务商——超出「本项目」的影响必须在确认框里告知。
+    // 有默认值：旧后端不返回该字段时按「不影响别处」处理，不阻断功能。
+    [property: JsonPropertyName("affects_other_projects")] bool AffectsOtherProjects = false);
 
 public sealed record ModelConfig(
     [property: JsonPropertyName("model_id")] string ModelId,

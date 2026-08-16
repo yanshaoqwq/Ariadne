@@ -65,6 +65,26 @@ impl ProviderCatalog {
         self.validate()
     }
 
+    /// 从目录里移除一个条目；返回是否真的移除了。
+    ///
+    /// U157：这条能力**原先根本不存在**（`upsert`/`merge_authorized`/`project_projection`
+    /// 都有，`remove` 没有）——写侧建了、删侧没建。后果是 `remove_provider` 只清项目
+    /// 配置那一份，而 `provider_config_status_from_app_state` 又把目录条目合并回列表，
+    /// 于是**「删除报成功但列表里还在」**，且磁盘上 base_url 与模型清单原样留着：
+    /// 用户删的是「不用这家服务商了」，留下的却是这家的完整接入配置。
+    ///
+    /// **返回 `Ok(false)` 而非 `Err(not_found)`**：删除要幂等。
+    /// 调用方（`remove_provider`）的场景是「用户点了删除」，此时目录里没有该条目
+    /// 是**完全正常**的——例如该 Provider 只在项目里配过、从未进过应用级目录。
+    /// 报错会把这种正常情况变成一个用户无法处理的失败，而他要的结果（它不在了）已经达成。
+    /// 真正的错误（IO、锁、校验）由 store 层的 `Err` 表达，与「本来就没有」区分开。
+    pub fn remove(&mut self, provider_id: &str) -> bool {
+        let before = self.providers.len();
+        self.providers
+            .retain(|provider| provider.provider_id != provider_id);
+        self.providers.len() != before
+    }
+
     /// 将项目明确授权的全局条目覆盖到有效配置；未授权条目不可进入运行时。
     pub fn merge_authorized(&self, project: &mut ProvidersConfig) -> CoreResult<()> {
         self.validate()?;

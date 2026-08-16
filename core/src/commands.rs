@@ -1391,6 +1391,15 @@ pub struct ProviderRemovalPreview {
     pub default_roles: Vec<String>,
     #[serde(default)]
     pub blocking_references: Vec<ProviderRemovalReference>,
+    /// U157：该 Provider 是否存在于**应用级目录**（跨项目共享）。
+    ///
+    /// 为 `true` 时删除会把它从目录里移除，**其它项目也不再看到这家服务商**——
+    /// 那是超出「本项目」范围的影响，必须在确认对话框里明确告知，
+    /// 否则用户以为自己只是在清理当前项目。
+    ///
+    /// 为 `false` 表示它只在本项目配过、从未进过应用级目录，删除不影响别处。
+    #[serde(default)]
+    pub affects_other_projects: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4383,6 +4392,7 @@ pub fn preview_provider_removal(
         state.secret_store.as_ref(),
         &config,
         &provider,
+        state.app_state_root(),
     )
 }
 
@@ -4395,6 +4405,14 @@ pub fn remove_provider(
     let _project_mutation = acquire_project_mutation_guard(&project_root, "provider_removal")?;
     let _provider_references = acquire_provider_reference_graph_guard(&project_root)?;
     let provider = normalize_provider(&provider)?;
+    // U157：应用级目录的锁在**整个删除事务期间**持有。
+    //
+    // 与保存侧（`save_global_provider_settings_under_guards`）同一把跨进程锁，
+    // 否则「另一个实例正在保存同一个 Provider」与本次删除会互相丢更新。
+    // 在这里就取，而不是等到真要写目录时才取：取锁点必须在读 expected **之前**，
+    // 否则会出现「读到的项目配置是旧的、目录已被别人改过」的错配。
+    let catalog_store = ProviderCatalogStore::default_for_app(state.app_state_root());
+    let _catalog_lock = catalog_store.lock_exclusive().map_err(error_to_string)?;
     let expected = ConfigStore::new(&project_root)
         .load()
         .map_err(error_to_string)?;
@@ -4403,6 +4421,7 @@ pub fn remove_provider(
         state.secret_store.as_ref(),
         &expected,
         &provider,
+        state.app_state_root(),
     )?;
     if preview.revision != expected_revision {
         return Err(CommandError::conflict(
@@ -4454,9 +4473,49 @@ pub fn remove_provider(
         });
     }
 
+    // U157：**主删除事务全部成功之后**才从应用级目录里移除条目。
+    //
+    // 位置是本条修复的关键。放在前面（与项目配置一起改）会造出
+    // 「配置回滚了但目录已删」的**静默**不一致——比原缺陷更难查：
+    // 原缺陷至少是「列表里多一条」，用户看得见；那种不一致是
+    // 「别的项目的可用服务商凭空消失」，用户在另一个项目里才发现。
+    //
+    // **两种失败模式不对称，所以偏保守那侧**：
+    // - 目录残留（此处失败）= 列表多一条，可以再点一次删除清掉
+    // - 目录错删 = 别的项目的接入配置没了，用户得重新填 base_url 与模型清单
+    //
+    // 因此这里的失败**不回滚已完成的删除、也不把整个命令判为失败**：
+    // 用户要的「本项目不再用它 + 密钥已删」都已达成，把成功的删除报成失败
+    // 会让他重试，而重试会撞上「项目里已经没有它了」的 NotFound。
+    //
+    // ⚠️ 必须排在下面那个后台索引 worker **之前**：`spawn_registered_indexing_worker_with_runtime`
+    // 会把 `project_root` move 走。顺序上也更对——目录清理属于删除事务，
+    // 索引重建是异步副作用。
+    let mut next_catalog = catalog_store.read_unlocked().map_err(error_to_string)?;
+    if next_catalog.remove(&provider) {
+        if let Err(error) = catalog_store.write_unlocked(&next_catalog) {
+            eprintln!(
+                "[ariadne] provider '{provider}' removed from project but still present in the \
+                 app-level catalog: {error}"
+            );
+        } else {
+            // 目录变了，状态要重算：否则返回给前端的列表里还带着刚删掉的那条
+            // （`provider_config_status_from_config_with_app_state` 会把目录条目合并进来，
+            // 那正是「删除按钮没用」的直接成因）。
+            status = provider_config_status_from_config_with_app_state(
+                &project_root,
+                candidate,
+                state.secret_store.as_ref(),
+                state.app_state_root(),
+            )?;
+            clear_removed_provider_key_status(&mut status, &provider);
+        }
+    }
+
     if let Some(worker_key) = register_indexing_worker(&project_root) {
         spawn_registered_indexing_worker_with_runtime(project_root, worker_key, runtime);
     }
+
     Ok(status)
 }
 
@@ -9017,6 +9076,7 @@ fn provider_removal_preview_from_config(
     secrets: &dyn SecretStore,
     config: &ProjectConfig,
     provider_id: &str,
+    app_state_root: &Path,
 ) -> CommandResult<ProviderRemovalPreview> {
     let provider = config
         .providers
@@ -9061,6 +9121,25 @@ fn provider_removal_preview_from_config(
         "blocking_references": &blocking_references,
     }))
     .map_err(error_to_string)?;
+    // U157：该 Provider 在应用级目录里吗？在的话删除会影响其它项目。
+    //
+    // ⚠️ 这个字段**刻意不进 revision 哈希**：revision 是「删除影响是否变化」的
+    // CAS 令牌，preview 与 remove 之间必须一致。把一个只用于展示的布尔量塞进去，
+    // 会让「另一个项目恰好在这中间保存了同一个 Provider」变成 revision 冲突，
+    // 逼用户重新确认一次——而删除的实际影响面并没有改变。
+    //
+    // 读目录失败时保守取 `true`：宁可多告知一次跨项目影响，
+    // 也不要因为读不到目录就让用户以为「只影响本项目」而误删。
+    let affects_other_projects = ProviderCatalogStore::default_for_app(app_state_root)
+        .read()
+        .map(|catalog| {
+            catalog
+                .providers
+                .iter()
+                .any(|entry| entry.provider_id == provider_id)
+        })
+        .unwrap_or(true);
+
     Ok(ProviderRemovalPreview {
         provider_id: provider_id.to_owned(),
         display_name: provider.display_name.clone(),
@@ -9068,6 +9147,7 @@ fn provider_removal_preview_from_config(
         has_key,
         default_roles,
         blocking_references,
+        affects_other_projects,
     })
 }
 

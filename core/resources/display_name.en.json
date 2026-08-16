@@ -1297,5 +1297,6 @@
   "diagnostics.secrets.locked": "Credential storage is locked, so saving keys will fail. Set a local master password, or explicitly accept plain-text storage.",
   "ui.run_log.message.workflow.run.succeeded": "Run succeeded",
   "ui.run_log.message.workflow.run.stopped": "Run stopped",
-  "ui.run_log.message.workflow.run.paused": "Run paused, awaiting confirmation"
+  "ui.run_log.message.workflow.run.paused": "Run paused, awaiting confirmation",
+  "ui.dialog.settings.remove_provider.cross_project": "⚠ This removes it from the app-level provider catalog; other projects will no longer see this provider."
 }

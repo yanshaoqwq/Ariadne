@@ -1368,5 +1368,6 @@
   "ui.settings.permissions.path_chip.error_duplicate": "这条路径已经在列表里了。",
   "ui.run_log.message.workflow.run.succeeded": "运行成功",
   "ui.run_log.message.workflow.run.stopped": "运行已停止",
-  "ui.run_log.message.workflow.run.paused": "运行已暂停，等待确认"
+  "ui.run_log.message.workflow.run.paused": "运行已暂停，等待确认",
+  "ui.dialog.settings.remove_provider.cross_project": "⚠ 这会从「应用级服务商目录」中移除它，其它项目将不再看到这家服务商。"
 }
