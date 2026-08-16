@@ -231,6 +231,28 @@ C# 测试在 `desktop/Ariadne.Desktop.Tests/`，用 `DispatchProxy` mock `IAriad
 **mock 也要守生产契约**：让本该非 null 的后端方法返回 `null` 会导致 NRE。
 生产代码假设 IPC 要么给值要么抛是合理的，是 mock 违约了。
 
+### 「跳过」会被记成「通过」
+
+**xUnit 把 `return` 记成绿。** 所以下面这个写法等于把覆盖偷偷删掉：
+
+```csharp
+var sidecar = ResolveSidecar();
+if (sidecar is null) { return; }   // 理由对，手段错
+```
+
+U156（点运行什么都不会发生，产品主功能全废）本来有 12 条跨进程测试能拦住它。
+CI 里不编 Rust 后端时那些测试**全部静默跳过、全部记成绿**，
+于是「测试全绿」与「主功能全废」同时成立了一整周。
+
+⇒ **前提不满足时要显式失败**，并把「我接受没有这层覆盖」做成一个
+要有人主动写下来的决定（环境变量 opt-out），而不是一个谁都不会注意到的默认值。
+现成的守卫：`SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(nameof(TestName))`
++ `ARIADNE_TESTS_ALLOW_MISSING_SIDECAR=1`。
+
+同理，**验证手段退化时要显式想清它放过了什么**：本机 Avalonia headless 卡死后，
+把验证退到「读 `.axaml` 文本」的源码断言——那层**完全不过 XAML 编译**，
+于是提交过一个编译不通过的主题文件而测试全绿。改 `.axaml` 后必须 `dotnet build`。
+
 ### 测试隔离
 
 起真实后端 sidecar 的桌面测试**必须注入独立的 `ARIADNE_APP_STATE_ROOT`**。
