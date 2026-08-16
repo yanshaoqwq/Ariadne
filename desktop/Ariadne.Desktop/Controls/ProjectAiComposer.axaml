@@ -9,18 +9,38 @@
     作品页 / 工作区共用的项目 AI 输入区。
     边框焦点走主题 Border.ai-composer:focus-within（唯一允许主题色描边的输入面）。
     内层 TextBox 无边框，靠外层一体 chrome + 光标反馈。
+
+    ⚠️ U148：内层压平**不能只靠内联属性**。下面 TextBox 上的
+    `BorderThickness="0"` / `Background="Transparent"` 语义正确（内层确实不该有边框），
+    但它们设在 TextBox **自身**，而主题的焦点样式设在**模板内的
+    `Border#PART_BorderElement`**——两者作用对象不同、压根不冲突，
+    所以谁也没盖掉谁，于是一次聚焦画出两条主题色线（外框一条 + 内层一条）。
+    真正生效的压平在主题里：`Border.ai-composer TextBox /template/ Border#PART_BorderElement`
+    （声明位置必须在通用 TextBox 样式之后，否则会被盖掉，见 U154）。
+    **别把内联属性当成压平手段**——它治不了模板层，只会让人以为治了。
   -->
+  <!-- MinHeight 按内容实算（U148）：
+       Row0 自动化按钮 27（Padding 上下 5×2 + caption 行高≈17）
+       + RowSpacing 8 + Row1 输入 72 + RowSpacing 8 + Row2 发送键 36
+       = 内容 151；+ 外框 Padding 上下 10×2 = 20；+ Border 1px×2 = 2 ⇒ 173。
+       原值 128 比实需小 45px，**从来没生效过**——外框高度不是设计出来的、
+       是被内容顶出来的，这正是用户说「外框比例巨差」的来源。
+       改这个数就要同步改上面那笔加法，否则又会漂成一个装饰性数字。 -->
   <Border Classes="ai-composer"
           HorizontalAlignment="Stretch"
-          MinHeight="128"
+          MinHeight="173"
           Padding="12,10">
     <Grid RowDefinitions="Auto,*,Auto" RowSpacing="8" HorizontalAlignment="Stretch">
+      <!-- Padding 左右取 0（U148 第二步）：原先按钮是 8,5，文字左缘落在 12+8=20，
+           而 Row1 输入文字左缘是 12，**差 8px 不成一条线**。
+           既然要「一体」，共同左基线只能由外框 Padding 单独决定，
+           内部元素一律不再自行左内缩；上下仍留 5px 撑出按钮高度。 -->
       <Button Grid.Row="0"
               Classes="subtle"
               ctl:SelectedClass.IsSelected="{Binding ProjectAutomation.IsEnabled}"
               HorizontalAlignment="Stretch"
               HorizontalContentAlignment="Stretch"
-              Padding="8,5"
+              Padding="0,5"
               Command="{Binding ProjectAutomation.ToggleCommand}"
               AutomationProperties.Name="{Binding ProjectAutomation.Label}">
         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
@@ -30,7 +50,12 @@
       </Button>
       <!-- 输入框占满整框宽度，发送键落到它下方右侧。
            原本发送键与输入框分列同一行，输入框因此只剩局部宽度——
-           写长段时可写区域比看到的框窄一截，是这个面最别扭的地方。 -->
+           写长段时可写区域比看到的框窄一截，是这个面最别扭的地方。
+           ⚠️ 原先这里有 `MaxHeight="140"`，在正常尺寸下**不可达**：
+           Row1 是 `*`，要触到 140 得先把外框拉到 241px 以上。
+           限高的真正需求是「输入面不要无限长高」，那属于外框（`MaxHeight` 该挂在
+           `Border.ai-composer` 或宿主行上），挂在 `*` 行的子控件上永远不生效。
+           已删除，不用一个不起作用的数字冒充有限高。 -->
       <TextBox Grid.Row="1"
                Text="{Binding ProjectAiMessage, Mode=TwoWay}"
                AcceptsReturn="True"
@@ -39,7 +64,6 @@
                Background="Transparent"
                FontSize="13"
                MinHeight="72"
-               MaxHeight="140"
                MinWidth="0"
                HorizontalAlignment="Stretch"
                HorizontalContentAlignment="Stretch"

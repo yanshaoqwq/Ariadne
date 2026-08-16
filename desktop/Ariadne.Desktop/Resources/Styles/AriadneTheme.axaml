@@ -1089,14 +1089,10 @@
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
   </Style>
-  <!-- 输入框禁用同理：保留纸面，只降透明度 -->
-  <Style Selector="TextBox:disabled">
-    <Setter Property="Opacity" Value="0.5" />
-  </Style>
-  <Style Selector="TextBox:disabled /template/ Border#PART_BorderElement">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSurface}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
-  </Style>
+  <!-- ⚠️ TextBox 的禁用态**不在这里**（U144 挪走）：它要压模板层 `PART_BorderElement`，
+       而通用 `TextBox /template/ …` 那几条声明在文件后段（约 :1950 起的输入控件节）。
+       Avalonia 同优先级按文档顺序、后者胜，写在这里会被后面的通用样式盖掉——
+       U154 就是这么失效的。禁用/只读/错误四态现集中在输入控件节，勿再往前搬。 -->
 
   <!-- 预算条：细胶囊轨 + 强调色填充，替掉 Fluent 默认那根突兀的灰线 -->
   <Style Selector="ProgressBar">
@@ -1499,6 +1495,12 @@
   <Style Selector="Border.search-shell:pointerover">
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderStrong}" />
   </Style>
+  <!-- U154：整框响应焦点。原先只有 `:pointerover`，聚焦时外壳灰边**纹丝不动**，
+       而同一产品的 ai-composer 复合输入面是会整框变强调色的——
+       两种复合输入面一种响应焦点、一种不响应，是不该存在的分裂。 -->
+  <Style Selector="Border.search-shell:focus-within">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+  </Style>
   <Style Selector="TextBox.search-input">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
@@ -1507,10 +1509,11 @@
     <Setter Property="FontSize" Value="14" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
-  <Style Selector="TextBox.search-input:focus /template/ Border#PART_BorderElement">
-    <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="Background" Value="Transparent" />
-  </Style>
+  <!-- ⚠️ `TextBox.search-input` 的**模板层**压平样式不在这里，在输入控件节末尾（约 :2085）。
+       原先它就写在这个位置，结果被约 300 行后的通用 `TextBox:focus /template/ …` 整个盖掉：
+       Avalonia 同优先级按**文档顺序**、后者胜，**没有 CSS 那种选择器特异性权重**——
+       `.search-input` 比 `TextBox` 具体得多，但那不给它任何优先权（U154）。
+       别把它搬回来「就近管理」，一搬就复发。 -->
   <Style Selector="Button.search-submit">
     <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="BorderThickness" Value="0" />
@@ -1948,23 +1951,56 @@
   </Style>
 
   <!-- ============================ 输入控件 ============================ -->
-  <!-- 输入控件：无边框·柔性填充槽（去盒子）。
-       旧法每个输入是一圈灰边的盒子，一列输入 = 一堆叠框。
-       改为半透明墨色填充 + 零描边：压在任何面板底上都自然凹陷成一处槽，
-       靠明暗而非边框区分，一整列输入读起来是安静的填充带，不再是叠框。
-       聚焦时才浮现青绿描边作为可编辑信号。单行/多行/代码框统一生效。 -->
+  <!-- U144：输入面从「品牌色凹槽 + 四边框 + 圆角」改为**一条输入线**。
+
+       为什么换掉槽：槽 + 四边框 + 圆角是「表单格子」的语汇，97 个 TextBox 一律如此，
+       整个界面就读成一堆待填的格子——而这是个写小说的工具，不是报税软件。
+       换成输入线后，文字坐在线上、与上方标签齐左，一列字段读起来是一叠稿纸行，
+       不再是一叠盒子。手势取自作品页刊头那条渐变细线（强调色→边框色→透明），
+       即**稿纸基线**语言，与 U136「作品页是 Word 的页」同源。
+
+       ⚠️ 这条线**不是**「点击才出现边框」（那个做法已否决）：静息就有线，
+       因为线本身承载语义——**可编辑→有线，只读→无线**（见下方 IsReadOnly 一节）。
+       让「能不能改」看一眼即知，比省掉一条线重要。
+
+       ⚠️ 四个视觉属性（线宽/圆角/底/线色）在模板层 `PART_BorderElement` 上**全部显式设定**，
+       不依赖 Fluent 的 `TemplateBinding`：`:pointerover` / `:focus` 那两条本来就直接改模板层，
+       静息态若靠 TemplateBinding 传递，就会出现「静息走一条路、悬停走另一条路」的分叉——
+       U148/U154 两个缺陷都是这种分叉的产物。
+       ⚠️ `Padding` 左右取 0：输入线的产品含义是「文字与上方标签齐左」，
+       任何左内缩都会让文字比标签往右挪一截，线就不成基线了。 -->
   <Style Selector="TextBox">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
-    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
-    <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="BorderThickness" Value="1" />
+    <!-- 圆角必须归零：底线两端一旦带圆角会向上翘成一对小括号，不再是一条基线 -->
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <!-- Thickness 是 left,top,right,bottom：底线是 0,0,0,1。
+         写成 0,0,1,0 会得到一条**右侧竖线**——一个字符之差，视觉上完全是另一回事。 -->
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
     <Setter Property="CaretBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
     <Setter Property="MinHeight" Value="32" />
-    <Setter Property="Padding" Value="10,6" />
+    <Setter Property="Padding" Value="0,5,0,6" />
   </Style>
+  <!-- 静息线：实色主体 + 右端 12% 收笔淡出。
+       为什么不整条走渐变淡出：短字段（200px 宽）无所谓，长字段右半截会直接消失，
+       看着像线没画完；只在末尾收笔淡出，才是刊头那条线的「起笔重、收笔轻」手势。
+       ⚠️ 过渡只给两支画刷，**刻意不给 BorderThickness 加 ThicknessTransition**：
+       线宽是本方案的主要焦点判据，一旦有补间，任何读取都可能落在中间值上，
+       测试会变成「等多久算够」的猜谜。线宽瞬时切换，反馈由颜色过渡承担。 -->
   <Style Selector="TextBox /template/ Border#PART_BorderElement">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.BorderDefault}" />
+          <GradientStop Offset="0.88" Color="{DynamicResource Ariadne.Color.BorderDefault}" />
+          <GradientStop Offset="1" Color="Transparent" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
@@ -1972,14 +2008,75 @@
       </Transitions>
     </Setter>
   </Style>
+  <!-- 悬停：只把线加深一档，**不铺底**。铺底等于把刚拆掉的槽又装回来；
+       「这里可点」由指针形状与线变深表达就够了。 -->
   <Style Selector="TextBox:pointerover /template/ Border#PART_BorderElement">
-    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFillHover}" />
-    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.BorderStrong}" />
+          <GradientStop Offset="0.88" Color="{DynamicResource Ariadne.Color.BorderStrong}" />
+          <GradientStop Offset="1" Color="Transparent" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
   </Style>
-  <!-- 聚焦：青绿描边（现代输入的可编辑信号），填充回落到静态槽色 -->
+  <!-- 聚焦：线点亮成强调色渐变并加粗到 2px。
+       亮点从左缘起、向右淡出，与光标起点同侧——正是刊头那条线的走势。
+       仍然只有一条线（底边），**不回到四边框**：加粗 + 变色已是足够清晰的反馈。 -->
   <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
+    <Setter Property="BorderThickness" Value="0,0,0,2" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="0.55" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="0.88" Color="{DynamicResource Ariadne.Color.BorderDefault}" />
+          <GradientStop Offset="1" Color="Transparent" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <!-- 错误：线转错误色 + 2px。
+       挂在 Avalonia 自带的 `:error` 伪类上（`DataValidationErrors` 在绑定校验失败时置位），
+       因此**对所有已绑定的输入立即生效、无需逐站点加 class**，也不会变成没人挂的死样式。
+       现状错误信息只由输入框下方一行红字承担；线跟着变色是把同一语义补到第二通道
+       （色 + 位置），不是只靠颜色。 -->
+  <Style Selector="TextBox:error /template/ Border#PART_BorderElement">
+    <Setter Property="BorderThickness" Value="0,0,0,2" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusError}" />
+  </Style>
+  <!-- 只读 → **无线**：U144 那条衍生语法规则的另一半。
+       有线=可编辑、无线=只读，于是「能不能改」看一眼即知。
+
+       ⚠️ **Avalonia 12 没有 `:readonly` 伪类**（已在 Avalonia.Controls/Base 全量核对过伪类字符串表：
+       有 `:focus` / `:pointerover` / `:error` / `:empty` 等，没有 `:readonly`），
+       所以这里用**属性选择器** `[IsReadOnly=True]`。照抄 CSS/WPF 的 `:readonly` 写法
+       会静默匹配不上——样式加了却毫无效果，正是 U148/U154 那一类「写了等于没写」。 -->
+  <Style Selector="TextBox[IsReadOnly=True] /template/ Border#PART_BorderElement">
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <!-- 只读且聚焦仍然无线：只读框可被 Tab 选中以复制文本，但它不可编辑，
+       一旦给焦点线就等于谎报「这里能改」。声明在 `:focus` 之后才压得住（U154）。 -->
+  <Style Selector="TextBox[IsReadOnly=True]:focus /template/ Border#PART_BorderElement">
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <!-- 禁用：线保留但退到最淡的 BorderMuted + 整体降透明。
+       为什么禁用**留线**而只读**去线**——两者语义不同：
+       禁用是「此处本可编辑，当前不可用」（线还在，只是灰了），
+       只读是「此处从来只是展示」（根本不该有输入位的痕迹）。
+       这两条样式原先在按钮禁用态那一段（约 :1093），声明位置早于本节的通用模板层样式，
+       是 U154 同一个顺序陷阱的下一个受害者——一并挪到这里，四态集中且顺序正确。 -->
+  <Style Selector="TextBox:disabled">
+    <Setter Property="Opacity" Value="0.5" />
+  </Style>
+  <Style Selector="TextBox:disabled /template/ Border#PART_BorderElement">
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="Background" Value="Transparent" />
   </Style>
   <!-- U151/U152：这里曾有一条 `TextBox.document-editor`（衬线 + 16px + LineHeight 30）。
        正文编辑早就换成 ae:TextEditor 了，该类全仓零挂载——留着的唯一作用是
@@ -1993,14 +2090,34 @@
     <Setter Property="LineHeight" Value="18" />
   </Style>
 
+  <!-- ComboBox：与 TextBox **同一套输入线**。
+       它的槽视觉是独立定义的（模板层是 `Border#Background`，不是 `PART_BorderElement`），
+       所以 U144 改 TextBox 那一处**不会**带上它——若只改 TextBox，
+       设置页里一列「输入线 + 品牌色槽 + 输入线」会交替出现，比原来全是槽更难看。
+       一并改，是为了让「可编辑控件长什么样」在产品里只有一个答案。
+
+       ⚠️ 下拉箭头是选择器唯一的可供性提示，所以 ComboBox 不参与「只读→无线」规则
+       （它没有只读态，禁用即不可选）。 -->
   <Style Selector="ComboBox">
-    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFill}" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
     <Setter Property="MinHeight" Value="32" />
   </Style>
   <Style Selector="ComboBox /template/ Border#Background">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.BorderDefault}" />
+          <GradientStop Offset="0.88" Color="{DynamicResource Ariadne.Color.BorderDefault}" />
+          <GradientStop Offset="1" Color="Transparent" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
@@ -2009,11 +2126,108 @@
     </Setter>
   </Style>
   <Style Selector="ComboBox:pointerover /template/ Border#Background">
-    <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="Background" Value="{DynamicResource Ariadne.InputFillHover}" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.BorderStrong}" />
+          <GradientStop Offset="0.88" Color="{DynamicResource Ariadne.Color.BorderStrong}" />
+          <GradientStop Offset="1" Color="Transparent" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style Selector="ComboBox:focus /template/ Border#Background">
-    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Setter Property="BorderThickness" Value="0,0,0,2" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="0.55" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="0.88" Color="{DynamicResource Ariadne.Color.BorderDefault}" />
+          <GradientStop Offset="1" Color="Transparent" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <!-- 下拉展开时保持焦点线（`:dropdownopen` 与 `:focus` 不一定同时置位，
+       缺了它会出现「点开下拉、线却灭了」的闪断）。 -->
+  <Style Selector="ComboBox:dropdownopen /template/ Border#Background">
+    <Setter Property="BorderThickness" Value="0,0,0,2" />
+    <Setter Property="BorderBrush">
+      <Setter.Value>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+          <GradientStop Offset="0" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="0.55" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
+          <GradientStop Offset="0.88" Color="{DynamicResource Ariadne.Color.BorderDefault}" />
+          <GradientStop Offset="1" Color="Transparent" />
+        </LinearGradientBrush>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <!-- NumericUpDown（作品页导入序号一处）内层就是 TextBox + ButtonSpinner：
+       它的文字区自动继承上面的 TextBox 输入线，但**外层 ButtonSpinner 另有一圈盒子**，
+       于是会出现「盒子里套一条线」。把外层压平，只留内层那条线。 -->
+  <Style Selector="NumericUpDown">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="NumericUpDown ButtonSpinner">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="NumericUpDown ButtonSpinner /template/ Border#PART_BorderElement">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+
+  <!-- ================== 复合输入面的模板层压平（位置敏感，勿上移） ==================
+       下面两条是**专用覆盖**，必须声明在上面所有通用 `TextBox … /template/ …` 之后。
+
+       ⚠️ Avalonia 与 CSS **不同**：它没有「选择器特异性」权重。同一 `Styles` 集合里
+       两条样式都命中同一元素的同一属性时，**后声明的无条件胜出**，与选择器多具体无关。
+       `TextBox.search-input` 比 `TextBox` 具体得多，那不给它任何优先权。
+
+       U154 就是这么失效的：`search-input:focus` 的压平原本写在文件约 :1510
+       （search-shell 那一节），而通用 `TextBox:focus` 在约 :2026——后者胜，
+       于是搜索框聚焦时照样长出 2px 主题色内边框 + 品牌色填充，「覆盖等于没写」。
+       U148 的 composer 则是另一种失效：内联 `BorderThickness="0"` 设在 **TextBox 自身**，
+       而主题样式设在 **模板内的 Border#PART_BorderElement**，两者作用对象不同、
+       压根不冲突，所以谁也没盖掉谁。
+
+       两个陷阱合起来给出压平的两个必要条件：**打到 /template/ 那一层** +
+       **声明在通用样式之后**。少一个都是「写了等于没写」。
+       ============================================================================ -->
+
+  <!-- 搜索框：chrome 由外层 `Border.search-shell` 一体承担，内层必须**全态无痕**。
+       四个状态各列一遍而不是只写 `:focus`：静息由基础样式给了底线（U144），
+       悬停/焦点/只读各有独立覆盖，漏任一态就会在那一态下重新长出线。 -->
+  <Style Selector="TextBox.search-input /template/ Border#PART_BorderElement,
+                   TextBox.search-input:pointerover /template/ Border#PART_BorderElement,
+                   TextBox.search-input:focus /template/ Border#PART_BorderElement,
+                   TextBox.search-input:error /template/ Border#PART_BorderElement">
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+
+  <!-- 项目 AI 输入区（U148）：焦点反馈由外层 `Border.ai-composer:focus-within` 整框承担，
+       内层 TextBox 必须无描边无底。`ProjectAiComposer.axaml` 的注释一直写着这个意图，
+       但那里用的是内联属性——设在 TextBox 自身，压不掉模板层，于是一次聚焦画出**两条**
+       主题色线（外框一条 + 内层一条），中间隔着 Padding 的空隙，文本区还多一块品牌色底。
+
+       ⚠️ **必须带 `Border.ai-composer` 前缀限定**：全局压平会把设置页 40 多个正常输入框的
+       焦点反馈一起干掉——那是比双层边框严重得多的倒退（用户会不知道焦点在哪）。 -->
+  <Style Selector="Border.ai-composer TextBox /template/ Border#PART_BorderElement,
+                   Border.ai-composer TextBox:pointerover /template/ Border#PART_BorderElement,
+                   Border.ai-composer TextBox:focus /template/ Border#PART_BorderElement">
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Background" Value="Transparent" />
   </Style>
 
   <!-- 分隔线 -->
