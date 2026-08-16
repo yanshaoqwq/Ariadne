@@ -16,6 +16,12 @@
     <Style Selector="Border.works-tree-node.current">
       <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
     </Style>
+    <!-- U145：标识选择器。内层是 TextBox，槽色/焦点描边沿用主题基础样式；
+         这里只补等宽字体与候选面板限高。选择器必须带类型前缀（否则 AVLN2200）。 -->
+    <Style Selector="AutoCompleteBox.identifier-picker">
+      <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Mono}" />
+      <Setter Property="MaxDropDownHeight" Value="240" />
+    </Style>
   </UserControl.Styles>
   <!-- 作品页：中阅读/修改器 + 右栏（顶部标签切换 导航树/项目 AI，可收起）。无左栏。 -->
   <Grid Background="Transparent">
@@ -236,6 +242,11 @@
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
               </ScrollViewer>
+              <!-- U151：**这里不要写 LineHeight**。AvaloniaEdit 自己排版，不读
+                   TextBlock.LineHeight，内联写了是静默无效——上一版就是因此以为
+                   行高已统一。行高由 code-behind 的 SyncEditorLineHeightToReadingMode
+                   读 Ariadne.Reading.LineHeight 后反解 Options.LineHeightFactor 落实，
+                   与阅读态 `*.reading` 样式同源。 -->
               <ae:TextEditor x:Name="DocumentEditor"
                              Grid.Row="1"
                              Document="{Binding EditorDocument}"
@@ -459,8 +470,16 @@
                     <TextBlock Text="{Binding ImportTitle}" Classes="subtitle" />
                     <StackPanel Spacing="4">
                       <TextBlock Text="{Binding ImportChapterIdText}" Classes="caption" />
-                      <TextBox Text="{Binding ImportChapterId, Mode=TwoWay}"
-                               AutomationProperties.Name="{Binding ImportChapterIdText}" />
+                      <!-- U145：候选是作品树里已有的章节 id（后端 ChapterDocumentIndex）。
+                           仍可手打列表外的值——导入一个**新**章节本来就要给还不存在的 id，
+                           这个字段不能收成纯下拉；候选服务的是「覆盖既有章节」那条路径。 -->
+                      <AutoCompleteBox Classes="identifier-picker"
+                                       Text="{Binding ImportChapterId, Mode=TwoWay}"
+                                       ItemsSource="{Binding ImportChapterIdCandidates}"
+                                       FilterMode="ContainsOrdinal"
+                                       MinimumPrefixLength="0"
+                                       IsTextCompletionEnabled="False"
+                                       AutomationProperties.Name="{Binding ImportChapterIdText}" />
                       <TextBlock Text="{Binding ImportChapterIdErrorText}"
                                  Classes="caption"
                                  Foreground="{DynamicResource Ariadne.StatusError}"

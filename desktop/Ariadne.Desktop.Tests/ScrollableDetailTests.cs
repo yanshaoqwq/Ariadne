@@ -178,15 +178,17 @@ public sealed class ScrollableDetailTests
         foreach (var file in Directory.EnumerateFiles(viewsDir, "*.axaml", SearchOption.AllDirectories))
         {
             var markup = File.ReadAllText(file);
-            foreach (var match in System.Text.RegularExpressions.Regex.Matches(
+            // 显式声明 Match 而不是 var：MatchCollection 的枚举项被推断为 object?，
+            // 会让下面的 ToString() 触发 CS8602（解引用可能为空）。
+            foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
                          markup,
                          @"<TextBlock\s[\s\S]*?/?>",
                          System.Text.RegularExpressions.RegexOptions.CultureInvariant))
             {
-                var tag = match.ToString();
+                var tag = match.Value;
                 if (tag.Contains("MaxHeight", StringComparison.Ordinal))
                 {
-                    offenders.Add($"{Path.GetFileName(file)}: {tag.ReplaceLineEndings(" ")}");
+                    offenders.Add($"{Path.GetFileName(file) ?? file}: {tag.ReplaceLineEndings(" ")}");
                 }
             }
         }

@@ -36,6 +36,15 @@ public partial class WorksPageView : UserControl
         InitializeComponent();
         DocumentEditor.TextArea.SelectionChanged += OnDocumentEditorSelectionChanged;
         DocumentEditor.TextArea.Caret.PositionChanged += OnDocumentEditorCaretPositionChanged;
+        // U151：换文档时 AvaloniaEdit 会重建 TextFormatter 并重算字体度量
+        // （TextView 只在 Document 被赋值时才拿到 formatter），所以行高系数
+        // 必须在那之后重新反解一次，不能只在构造时算。
+        DocumentEditor.DocumentChanged += (_, _) => SyncEditorLineHeightToReadingMode();
+        // 还要挂布局完成：修改态首次可见（IsVisible 翻转）之前编辑器根本没测量过，
+        // 没有 formatter 时 AvaloniaEdit 用 `FontSize + 3` 估算度量，
+        // 此刻反解出的系数是错的。反解是不动点 + 有 1e-6 死区，
+        // 所以这里重复调用会收敛到真实度量后停下，不会自激。
+        DocumentEditor.LayoutUpdated += (_, _) => SyncEditorLineHeightToReadingMode();
         // U132：必须挂 Tunnel（预览）阶段。SelectableTextBlock 自己也处理
         // PointerPressed 来起新选区，冒泡阶段事件可能已被它标记 Handled，
         // XAML 里写 PointerPressed="..." 挂的是冒泡，会时灵时不灵。
@@ -51,6 +60,67 @@ public partial class WorksPageView : UserControl
     {
         base.OnAttachedToVisualTree(e);
         AttachEditorActions();
+        // 进可视树后主题资源才查得到（TryFindResource 沿逻辑树上溯），
+        // 字体也才真正解析到 fallback 链里那一款，此时反解的度量才是最终的。
+        SyncEditorLineHeightToReadingMode();
+    }
+
+    /// <summary>
+    /// U151：把修改态编辑器的行高对齐到阅读态。
+    ///
+    /// **同一份正文有两套排版实现**：阅读态是 `SelectableTextBlock.reading`（吃
+    /// `LineHeight`），修改态是 `ae:TextEditor`（**不吃** `TextBlock.LineHeight`，
+    /// 内联写了静默无效）。AvaloniaEdit 自己排版，行高 = 字体度量高 ×
+    /// `TextEditorOptions.LineHeightFactor`（默认 1.16），所以唯一的旋钮是这个系数。
+    /// 缺陷版本只给阅读态设了 30，修改态停在默认 1.16 ⇒ 约 20.2px，
+    /// 点一下「修改」整篇行距收紧约三分之一、一屏累计位移近 200px。
+    ///
+    /// **系数必须按当前字体反解，不能写死**：`Ariadne.Font.Reading` 是一条 CJK 衬线
+    /// fallback 链（Source Han Serif SC → Noto Serif CJK SC → … → serif），
+    /// 换机器落到不同字体时度量高不同，写死的系数会在别的机器上重新跑偏。
+    /// 目标行高也从 `Ariadne.Reading.LineHeight` 取，与阅读态样式同源——
+    /// 两边各写一个 30 正是本条缺陷的成因。
+    ///
+    /// 反复调用是安全且必要的：本算式是**不动点**——一旦系数已经使行高等于目标，
+    /// 再算一次会解出同一个系数，而 `LineHeightFactor` 的 setter 在值相等时不触发重排，
+    /// 所以不会形成「设值 → 重排 → 再设值」的布局循环。反过来，字体或度量在首次
+    /// 计算之后才落定时（formatter 尚未建立时 AvaloniaEdit 用 `FontSize + 3` 估算），
+    /// 下一次调用会自动纠正到真实度量上。
+    /// </summary>
+    private void SyncEditorLineHeightToReadingMode()
+    {
+        if (!this.TryFindResource("Ariadne.Reading.LineHeight", ActualThemeVariant, out var resource)
+            || resource is not double targetLineHeight
+            || targetLineHeight <= 0)
+        {
+            return;
+        }
+
+        var textView = DocumentEditor.TextArea.TextView;
+        var currentFactor = DocumentEditor.Options.LineHeightFactor;
+        // DefaultLineHeight 已经含当前系数（= 度量高 × factor），先除回去拿到字体自身度量高。
+        var metricHeight = textView.DefaultLineHeight / currentFactor;
+        if (!double.IsFinite(metricHeight) || metricHeight <= 0)
+        {
+            return;
+        }
+
+        var factor = targetLineHeight / metricHeight;
+        // LineHeightFactor 的 setter 拒绝 <=0 / NaN / 无穷。
+        if (!double.IsFinite(factor) || factor <= 0)
+        {
+            return;
+        }
+
+        // 只在系数**实质变化**时赋值。setter 自身也会跳过完全相等的值，但浮点反解
+        // 可能在末位比特上抖动，逐次赋值会带来一次 Redraw（内含 ClearVisualLines），
+        // 而本方法挂在 LayoutUpdated 上 —— 那就成了「重排触发重排」的自激循环。
+        if (Math.Abs(factor - currentFactor) < 1e-6)
+        {
+            return;
+        }
+
+        DocumentEditor.Options.LineHeightFactor = factor;
     }
 
     private void OnDocumentEditorKeyDown(object? sender, KeyEventArgs e)
