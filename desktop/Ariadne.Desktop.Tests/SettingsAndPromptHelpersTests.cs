@@ -327,7 +327,16 @@ public sealed class SettingsAndPromptHelpersTests
         PromptCatalog.ResetCacheForTests();
         var prompt = PromptCatalog.ResolveNodePrompt("writer");
         Assert.False(string.IsNullOrWhiteSpace(prompt));
-        Assert.Contains("Writer", prompt, StringComparison.OrdinalIgnoreCase);
+
+        // 原断言是 `Contains("Writer")`，随 U149 中文化必然失效——而它**本该失效**：
+        // 那条断言钉的正是产品要拿掉的东西（英文类型名 / 实现概念不该出现在给 LLM 的提示词里，
+        // 「你是 Writer 节点」既不给水准也不给身份）。
+        // 改为钉真正重要的两条性质：
+        //   (1) 解析到的是**正文写作**那一条，不是别的角色（否则 key 映射改错了也不会红）
+        //   (2) 提示词里**不含**实现概念——这是 U149 的产品判据本身
+        Assert.Contains("本章正文", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Writer", prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("节点", prompt, StringComparison.Ordinal);
     }
 
     [Fact]
