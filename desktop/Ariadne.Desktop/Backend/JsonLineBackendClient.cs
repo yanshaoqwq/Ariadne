@@ -319,14 +319,41 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
 
     public Task<WorkflowRunStarted> RunWorkflowAsync(string workflowId, string? startNodeId = null, IReadOnlyDictionary<string, object?>? variables = null, CancellationToken cancellationToken = default)
     {
-        // variables 为空时不发该键：让后端按 #[serde(default)] 取空表，
-        // 避免把 null 当成「显式清空」传下去。
-        return InvokeRequiredAsync<WorkflowRunStarted>("start_workflow", new
+        // U156（P0 回归）：**匿名对象压根做不到「按需加键」**。
+        //
+        // 原写法是 `variables = variables is { Count: > 0 } ? variables : null`，
+        // 上面还配着「variables 为空时不发该键」的注释——**注释的意图对，代码做的正好相反**：
+        // 匿名对象的属性集是**编译期固定**的，三元表达式只能改值、改不了「这个键在不在」，
+        // 而 `System.Text.Json` 默认会序列化 null 属性，于是 `"variables":null` 如实发出。
+        // 后端 `RunWorkflowParams.variables`（`core/src/ipc.rs`）是**非 `Option`** 的
+        // `BTreeMap` + `#[serde(default)]`，而 **`default` 只对「键缺失」生效、不接受显式 null**
+        // ⇒ 整条请求被拒：`invalid ipc params: invalid type: null, expected a map`。
+        // 后果是产品主功能全废——**点运行什么都不会发生**。
+        //
+        // ⚠️ 旁边的 `start_node_id` 同样可能传 null 却没事，因为它是 `Option<String>`。
+        // **两个字段并排、写法看着一样、一个能吃 null 一个不能**，这是本条最容易看漏的地方。
+        //
+        // ⚠️ **不要**改用 `_jsonOptions` 全局加 `DefaultIgnoreCondition = WhenWritingNull` 来「一劳永逸」：
+        // 全仓有大量参数**依赖显式 null 表达「清空」**（`expected_revision`、
+        // U112 的 `preauthorized_budget_usd` 那个 `Some(0.0)` vs `None` 双重语义），
+        // 全局忽略会静默改变这些命令的语义，换来一批更难查的缺陷。
+        // 所以只在这一处用字典**真正做到按需加键**。
+        var payload = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            workflow_id = workflowId,
-            start_node_id = startNodeId,
-            variables = variables is { Count: > 0 } ? variables : null,
-        }, cancellationToken);
+            ["workflow_id"] = workflowId,
+        };
+        if (startNodeId is not null)
+        {
+            payload["start_node_id"] = startNodeId;
+        }
+        // 空字典也不发键：`BuildStartVariables()` 在「无变量组」时返回**空字典**而非 null，
+        // 发个空 map 虽然后端能吃，但与「没有变量」语义相同，少一个键更省。
+        if (variables is { Count: > 0 })
+        {
+            payload["variables"] = variables;
+        }
+
+        return InvokeRequiredAsync<WorkflowRunStarted>("start_workflow", payload, cancellationToken);
     }
 
     public Task<WorkflowActionResult> PauseWorkflowAsync(string workflowId, string runId, string? reason = null, CancellationToken cancellationToken = default)

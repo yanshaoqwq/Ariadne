@@ -1138,7 +1138,10 @@ struct UpdateParam<T> {
 
 #[derive(Debug, Deserialize)]
 struct ExportChaptersParams {
-    #[serde(default)]
+    /// U156 同族：与 `variables` 同形态的「空即默认」集合，一并吃下 null。
+    /// 前端当前不传 null，但差别只在客户端怎么序列化空列表——
+    /// 修一个字段是修 bug，修完这一族才是修那类缺陷。
+    #[serde(default, deserialize_with = "null_tolerant_string_vec")]
     selected_chapter_ids: Vec<String>,
     /// U134：缺省时由后端生成（导出目录 + 作品名 + 本地时间戳 + 扩展名）。
     /// 前端不再拼这个 id——命名依赖后端的路径重定向与写入语义，前端无从知晓。
@@ -1203,7 +1206,8 @@ struct SetNodeBreakpointParams {
 #[derive(Debug, Deserialize)]
 struct WorkflowSelectionParams {
     workflow_id: String,
-    #[serde(default)]
+    /// U156 同族，见 `null_tolerant_string_vec`。
+    #[serde(default, deserialize_with = "null_tolerant_string_vec")]
     selected_node_ids: Vec<String>,
 }
 
@@ -1233,8 +1237,50 @@ struct RunWorkflowParams {
     #[serde(default)]
     start_node_id: Option<String>,
     /// 工作流变量初值（执行页表单填的值）。与起始节点端口输入不同层。
-    #[serde(default)]
+    ///
+    /// U156（P0）：`#[serde(default)]` **只对「键缺失」生效、不接受显式 `null`**。
+    /// 桌面端曾发出 `"variables": null`（匿名对象做不到按需加键），整条请求被拒
+    /// `invalid type: null, expected a map` ⇒ **产品主功能全废，点运行什么都不会发生**。
+    ///
+    /// 前端已改成按需加键，但这里**也要**吃下 null——这是收口层，
+    /// 它挡的是「将来任何客户端把空值序列化成 null」这一整类，
+    /// 而不是只挡当时那一个 bug。null 与「键缺失」在语义上都是「没有变量」，
+    /// 两者行为不同才是意外。
+    ///
+    /// ⚠️ 只对**这类「空即默认」的集合字段**这么做。表达「显式清空」语义的字段
+    /// （如 `expected_revision`、U112 的 `preauthorized_budget_usd`）**必须**
+    /// 保持 `Option` 并区分 null 与缺失——把它们也一并宽容化是安全性倒退。
+    #[serde(default, deserialize_with = "null_tolerant_map")]
     variables: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// 把 JSON `null` 当作空表反序列化。
+///
+/// 存在理由见 `RunWorkflowParams::variables`（U156）：`#[serde(default)]` 覆盖不到
+/// 显式 null，而客户端把空集合序列化成 null 是极常见的写法。
+fn null_tolerant_map<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// 把 JSON `null` 当作空列表反序列化。
+///
+/// 与 `null_tolerant_map` 同一理由（U156）。这一族共 3 个字段
+/// （`selected_chapter_ids` / `selected_node_ids` / `tags`）：前端当前都不传 null，
+/// 但差别只在客户端怎么序列化空列表，属**同一类缺陷的其余入口**——
+/// 修一个字段是修 bug，修完这一族才是修那类缺陷。
+///
+/// ⚠️ 判据是「空集合与缺席同义」。表达「显式清空」的字段不适用，
+/// 把它们一并宽容化会静默改变语义（U112 的 `preauthorized_budget_usd` 是反例）。
+fn null_tolerant_string_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1358,7 +1404,8 @@ struct PreferencesParams {
 struct SearchTemplatesParams {
     request: commands::TemplateRepositoryRequest,
     query: String,
-    #[serde(default)]
+    /// U156 同族，见 `null_tolerant_string_vec`。
+    #[serde(default, deserialize_with = "null_tolerant_string_vec")]
     tags: Vec<String>,
     #[serde(default)]
     page: u32,

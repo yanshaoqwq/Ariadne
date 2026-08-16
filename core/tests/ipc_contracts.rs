@@ -1053,6 +1053,57 @@ fn ipc_start_workflow_preflight_failure_does_not_return_queued() {
         .contains("workflow not found: missing-workflow"));
 }
 
+/// U156（P0）：显式 `"variables": null` 必须被当作空表，不能拒收整条请求。
+///
+/// 缺陷形态：`RunWorkflowParams.variables` 是**非 `Option`** 的 `BTreeMap`
+/// + `#[serde(default)]`，而 **`default` 只对「键缺失」生效、不接受显式 null**。
+/// 桌面端曾发出 `"variables": null`（匿名对象做不到按需加键），于是
+/// **参数解析就失败**、报 `invalid type: null, expected a map`——
+/// 产品主功能全废，点运行什么都不会发生。
+///
+/// **判据取「错误信息是 workflow not found 而不是 invalid ipc params」**：
+/// 前者证明参数**已成功解析、命令已执行**（只是探针没建那个 workflow），
+/// 后者是解析层就被挡住。两者的区别正好是这个缺陷的全部——
+/// 而「响应 ok 为 false」在两种情况下都成立，**拿它当判据就是空测**。
+#[test]
+fn ipc_run_workflow_accepts_explicit_null_variables() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    for method in ["run_workflow", "start_workflow"] {
+        let response = handle_request(
+            &state,
+            IpcRequest {
+                method: method.to_owned(),
+                params: json!({
+                    "workflow_id": "missing-workflow",
+                    "start_node_id": null,
+                    "variables": null,
+                }),
+            },
+        );
+
+        let error = response
+            .error
+            .unwrap_or_else(|| panic!("{method} 应当带回一条错误信息"));
+        assert!(
+            !error.contains("invalid ipc params"),
+            "{method} 不得因显式 null 而在参数解析层被拒（U156）：{error}"
+        );
+        assert!(
+            error.contains("workflow not found"),
+            "{method} 的错误必须来自命令执行而非参数解析——\
+             那才证明 null 已被当作空表吃下：{error}"
+        );
+    }
+}
+
 #[test]
 fn ipc_lists_workflow_tools_for_external_agents() {
     let temp = tempfile::tempdir().unwrap();
