@@ -387,6 +387,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         string? referenceRunId = null,
         string? conversationId = null,
         long? conversationRevision = null,
+        IReadOnlyList<string>? references = null,
         CancellationToken cancellationToken = default)
     {
         return ProjectAiChatAsync(
@@ -397,6 +398,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             referenceRunId,
             conversationId,
             conversationRevision,
+            references,
             cancellationToken);
     }
 
@@ -408,6 +410,7 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         string? referenceRunId = null,
         string? conversationId = null,
         long? conversationRevision = null,
+        IReadOnlyList<string>? references = null,
         CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<ProjectAiResponse>("project_ai_chat", new
@@ -416,7 +419,11 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
             {
                 message,
                 chat_history = chatHistory,
-                references = Array.Empty<string>(),
+                // 原先写死 Array.Empty<string>()：后端 references 链路（`@确认项:<id>` 展开）
+                // 从头到尾是通的，唯独前端永远只发空数组，等于把入口焊死（U139）。
+                // 传 null 时仍发空数组——后端字段是 Vec<String> 而非 Option，缺字段虽有
+                // serde default 兜底，但显式空数组语义更清楚。
+                references = references ?? (IReadOnlyList<string>)Array.Empty<string>(),
                 workflow_id_to_run = workflowIdToRun,
                 reference_workflow_id = referenceWorkflowId,
                 reference_run_id = referenceRunId,

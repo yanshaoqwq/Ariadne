@@ -307,6 +307,15 @@
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusError}" />
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
     </Style>
+    <!-- U145：标识/别名选择器。AutoCompleteBox 内层就是一个 TextBox，
+         所以字体/槽色/焦点描边全部沿用主题的 TextBox 基础样式，这里只补两件事：
+         (1) 等宽字体——这些值是标识符，等宽下更容易看出 data-in-1 与 data-in-l 的差别；
+         (2) 候选面板限高——引脚候选只有 3-5 项，章节可能上百项，不限高会拉满整屏。
+         注意选择器要带类型前缀（裸 .identifier-picker 会编译期 AVLN2200）。 -->
+    <Style Selector="AutoCompleteBox.identifier-picker">
+      <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Mono}" />
+      <Setter Property="MaxDropDownHeight" Value="240" />
+    </Style>
     <!-- 无障碍降级：偏好开启后保留状态变化，去掉位移/缩放插值。 -->
     <Style Selector="UserControl.reduce-motion Border.reject-reason-rail">
       <Setter Property="Transitions"><Transitions /></Setter>
@@ -377,17 +386,22 @@
         <!-- 低对比点阵背景：随缩放/平移联动（CanvasGrid token），在节点层之下提供空间参照 -->
         <ctl:CanvasGridBackground x:Name="CanvasGridBg" />
 
-        <!-- 节点/边坐标系：铺满宿主（修复嵌套 Canvas 时 ItemsControl 尺寸为 0） -->
+        <!-- 节点/边坐标系：无限画布的内容层。
+             U141：这一层**不裁剪**（ClipToBounds=False），节点坐标可以是负数、
+             也可以远超一屏；真正代表「屏幕边界」的裁剪在外层 CanvasHost。
+             层的 Width/Height 由 ResizeNodeLayers 按「图包围盒 ∪ 可见区 + 余量」
+             算出（不再等于视口尺寸），否则层外的节点不参与测量。 -->
         <Canvas x:Name="CanvasOverlay"
                 HorizontalAlignment="Stretch"
                 VerticalAlignment="Stretch"
                 Background="Transparent"
+                ClipToBounds="False"
                 PointerPressed="OnCanvasBackgroundPointerPressed"
                 PointerMoved="OnCanvasBackgroundPointerMoved"
                 PointerReleased="OnCanvasBackgroundPointerReleased"
                 PointerCaptureLost="OnCanvasBackgroundCaptureLost"
                 PointerWheelChanged="OnCanvasPointerWheel">
-        <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}">
+        <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}" ClipToBounds="False">
           <ItemsControl.RenderTransform>
             <TransformGroup>
               <ScaleTransform ScaleX="{Binding CanvasZoom}" ScaleY="{Binding CanvasZoom}" />
@@ -464,7 +478,9 @@
                 CornerRadius="2"
                 ZIndex="50" />
 
-        <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}">
+        <!-- U141：内容层不裁剪，负坐标与超屏坐标都要能渲染/命中；
+             屏幕边界的裁剪只在外层 CanvasHost 上做一次。 -->
+        <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}" ClipToBounds="False">
           <ItemsControl.RenderTransform>
             <TransformGroup>
               <ScaleTransform ScaleX="{Binding CanvasZoom}" ScaleY="{Binding CanvasZoom}" />
@@ -1372,11 +1388,16 @@
         </Grid>
       </Border>
 
+      <!-- 审阅态**替换整个画布位置**（U139①）：原先它是 ZIndex=15 的浮层，
+           右侧留着 BorderThickness="0,0,1,0" 那道边线——那条边正说明它只盖住画布的
+           一部分，画布从缝里露出来。审阅是要专注的判断，不该与画布争视线；
+           因此改为占满 WorkspaceGrid 全部三行（含下栏位置）、并去掉那道右边线。
+           右栏**不覆盖**：它在外层 Grid 的第 2 列，本 Border 只在第 0 列，
+           所以「问 AI」的对话面始终在旁边可见（U139⑤）。 -->
       <Border Grid.Row="0"
               Grid.RowSpan="3"
               Background="{DynamicResource Ariadne.BackgroundMain}"
-              BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-              BorderThickness="0,0,1,0"
+              BorderThickness="0"
               IsVisible="{Binding ShowConfirmationFullPanel}"
               ZIndex="15">
         <Grid Margin="34,28" RowDefinitions="Auto,*" RowSpacing="22">
@@ -1402,6 +1423,7 @@
               <Border DockPanel.Dock="Right" Width="1" Background="{DynamicResource Ariadne.BorderMuted}" Margin="18,0,0,0" />
               <ScrollViewer Margin="0,0,18,0">
                 <StackPanel Spacing="8">
+                  <TextBlock Text="{Binding ConfirmationListTitleText}" Classes="caption" />
                   <ItemsControl ItemsSource="{Binding Confirmations}">
                     <ItemsControl.ItemTemplate>
                       <DataTemplate DataType="{x:Type vm:ConfirmationItemViewModel}">
@@ -1444,54 +1466,100 @@
                              Classes="mono"
                              HorizontalAlignment="Right"
                              TextWrapping="Wrap" />
+                  <!-- 引用当前确认项问项目 AI（U139④）：后端 `@确认项:<id>` 链路本来就通，
+                       缺的只是这个入口。点它会切到右栏项目 AI 页并带上引用发问。 -->
+                  <Button Classes="secondary"
+                          HorizontalAlignment="Right"
+                          Content="{Binding AskAiAboutConfirmationText}"
+                          AutomationProperties.Name="{Binding AskAiAboutConfirmationText}"
+                          ToolTip.Tip="{Binding AskAiAboutConfirmationHintText}"
+                          Command="{Binding AskAiAboutConfirmationCommand}" />
                 </StackPanel>
               </Grid>
 
-              <TextBox Grid.Row="1" AutomationProperties.Name="{Binding SelectedConfirmation.ConfirmationId}"
-                       Text="{Binding SelectedConfirmation.Diff}"
-                       AcceptsReturn="True"
-                       TextWrapping="Wrap"
-                       IsReadOnly="True"
-                       Classes="detail-editor"
-                       MinHeight="360"
-                       Padding="18" />
+              <!-- diff 去输入框化（U139②）：原先是 `TextBox IsReadOnly` + MinHeight=360,
+                   一个字也打不进去却会亮边、抢焦点、占 Tab 停靠位（AGENTS §6）。
+                   改用 ItemsControl 分行着色，与作品页快速编辑同一套读法。
+                   ScrollViewer 是必需的：裸 ItemsControl 不自带滚动（U128），
+                   且 MaxHeight 只有挂在 ScrollViewer 上才是「限高可滚」，
+                   挂在 TextBlock 上会变成「裁掉多余」（U153）。 -->
+              <Border Grid.Row="1"
+                      Background="{DynamicResource Ariadne.BackgroundCode}"
+                      CornerRadius="8"
+                      Padding="0,8"
+                      IsVisible="{Binding HasConfirmationDiff}">
+                <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Auto"
+                              AutomationProperties.Name="{Binding ConfirmationDiffText}">
+                  <ItemsControl ItemsSource="{Binding ConfirmationDiffLines}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:QuickEditDiffLineViewModel">
+                        <!-- 整行铺底色（含标记列）：只给文字上色会让短行的色块参差不齐 -->
+                        <Grid ColumnDefinitions="22,*"
+                              Classes.added="{Binding IsAdded}"
+                              Classes.removed="{Binding IsRemoved}">
+                          <TextBlock Grid.Column="0" Text="{Binding Marker}"
+                                     FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                     Foreground="{DynamicResource Ariadne.TextSubtle}"
+                                     TextAlignment="Center" />
+                          <TextBlock Grid.Column="1" Text="{Binding Text}"
+                                     FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                     TextWrapping="Wrap" />
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                    <ItemsControl.Styles>
+                      <Style Selector="Grid.added">
+                        <Setter Property="Background" Value="{DynamicResource Ariadne.DiffAddBackground}" />
+                      </Style>
+                      <Style Selector="Grid.removed">
+                        <Setter Property="Background" Value="{DynamicResource Ariadne.DiffRemoveBackground}" />
+                      </Style>
+                    </ItemsControl.Styles>
+                  </ItemsControl>
+                </ScrollViewer>
+              </Border>
 
-              <Grid Grid.Row="2" RowDefinitions="Auto,Auto" RowSpacing="8">
-                <TextBlock Grid.Row="0" Text="{Binding ConfirmationReasonText}" Classes="caption" />
-                <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                  <TextBox Grid.Column="0" AutomationProperties.Name="{Binding ConfirmationReasonText}"
-                           Text="{Binding ConfirmationReason, Mode=TwoWay}"
-                           PlaceholderText="{Binding ConfirmationReasonPlaceholder}"
-                           VerticalAlignment="Center" />
-                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <!-- 拒绝是两步：第一次点击就地向左展开一条可写的线并把自己变成
-                         「确认拒绝」，同时「通过」让位为「取消」；第二次才真正提交。
-                         因此不再叠加危险对话框——两道确认会让人闭眼连点。 -->
-                    <Border Classes="reject-reason-rail"
-                            Classes.armed="{Binding IsRejectArmed}"
-                            VerticalAlignment="Center">
-                      <!-- 只见一条线：TextBox 去掉盒子，仅留底部一道发丝线。
-                           提示语直接做 placeholder，不另占一行标签。 -->
-                      <TextBox x:Name="RejectReasonBox"
-                               Classes="reason-rail-input"
-                               VerticalAlignment="Center"
-                               AutomationProperties.Name="{Binding RejectReasonPromptText}"
-                               Text="{Binding ConfirmationReason, Mode=TwoWay}"
-                               PlaceholderText="{Binding RejectReasonPromptText}" />
-                    </Border>
-                    <Button Classes="secondary"
-                            Classes.armed="{Binding IsRejectArmed}"
-                            Content="{Binding RejectButtonText}"
-                            AutomationProperties.Name="{Binding RejectButtonText}"
-                            Command="{Binding RejectConfirmationCommand}" />
-                    <!-- 武装态下「通过」让位为「取消」：同一位置、同一按钮，
-                         避免多长出一个键；点取消后变回「通过」。 -->
-                    <Button Classes="primary"
-                            Content="{Binding ApproveButtonText}"
-                            AutomationProperties.Name="{Binding ApproveButtonText}"
-                            Command="{Binding ApproveOrCancelCommand}" />
-                  </StackPanel>
-                </Grid>
+              <!-- 无 diff 的确认项（只问「要不要放行」）：明说，而不是留一片空白面 -->
+              <Border Grid.Row="1"
+                      Classes="empty-state"
+                      Padding="18,22"
+                      VerticalAlignment="Top"
+                      IsVisible="{Binding !HasConfirmationDiff}">
+                <TextBlock Text="{Binding ConfirmationDiffEmptyText}"
+                           Classes="caption"
+                           TextWrapping="Wrap" />
+              </Border>
+
+              <!-- 「驳回理由」平时不显示（U139③）：审阅态默认只有两个按钮，
+                   点「驳回」才向左展开理由线、按钮同时变成「确认拒绝」，
+                   第二次点击才真的提交。因此也不再叠危险对话框（U139④）。 -->
+              <Grid Grid.Row="2" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                  <Border Classes="reject-reason-rail"
+                          Classes.armed="{Binding IsRejectArmed}"
+                          VerticalAlignment="Center">
+                    <!-- 只见一条线：TextBox 去掉盒子，仅留底部一道发丝线。
+                         提示语直接做 placeholder，不另占一行标签。 -->
+                    <TextBox x:Name="RejectReasonBox"
+                             Classes="reason-rail-input"
+                             VerticalAlignment="Center"
+                             AutomationProperties.Name="{Binding RejectReasonPromptText}"
+                             Text="{Binding ConfirmationReason, Mode=TwoWay}"
+                             PlaceholderText="{Binding RejectReasonPromptText}" />
+                  </Border>
+                  <Button Classes="secondary"
+                          Classes.armed="{Binding IsRejectArmed}"
+                          Content="{Binding RejectButtonText}"
+                          AutomationProperties.Name="{Binding RejectButtonText}"
+                          Command="{Binding RejectConfirmationCommand}" />
+                  <!-- 武装态下「通过」让位为「取消」：同一位置、同一按钮，
+                       避免多长出一个键；点取消后变回「通过」。 -->
+                  <Button Classes="primary"
+                          Content="{Binding ApproveButtonText}"
+                          AutomationProperties.Name="{Binding ApproveButtonText}"
+                          Command="{Binding ApproveOrCancelCommand}" />
+                </StackPanel>
               </Grid>
             </Grid>
           </Grid>
@@ -1671,8 +1739,17 @@
                       <TextBlock Text="{Binding SearchNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding QueryAliasLabel}" />
-                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.QueryAlias, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding QueryAliasLabel}"
-                                 PlaceholderText="{Binding SearchQueryPlaceholder}" />
+                        <!-- U145：别名候选来自本节点的入边（连边时已定义过一次）+ 节点类型约定默认值。
+                             仍允许手打列表外的值——「引用尚未创建的节点」这类场景必须留活口。 -->
+                        <AutoCompleteBox Grid.Column="1"
+                                         Classes="identifier-picker"
+                                         Text="{Binding SelectedNode.QueryAlias, Mode=TwoWay}"
+                                         ItemsSource="{Binding NodeAliasCandidates}"
+                                         FilterMode="ContainsOrdinal"
+                                         MinimumPrefixLength="0"
+                                         IsTextCompletionEnabled="False"
+                                         PlaceholderText="{Binding SearchQueryPlaceholder}"
+                                         AutomationProperties.Name="{Binding QueryAliasLabel}" />
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding SearchLimitLabel}" />
@@ -1688,7 +1765,15 @@
                       <TextBlock Text="{Binding ConditionNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding ConditionInputAliasLabel}" />
-                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.ConditionInputAlias, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding ConditionInputAliasLabel}" />
+                        <!-- U145：同 query_alias，候选取本节点入边上的别名。 -->
+                        <AutoCompleteBox Grid.Column="1"
+                                         Classes="identifier-picker"
+                                         Text="{Binding SelectedNode.ConditionInputAlias, Mode=TwoWay}"
+                                         ItemsSource="{Binding NodeAliasCandidates}"
+                                         FilterMode="ContainsOrdinal"
+                                         MinimumPrefixLength="0"
+                                         IsTextCompletionEnabled="False"
+                                         AutomationProperties.Name="{Binding ConditionInputAliasLabel}" />
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding ConditionOperatorLabel}" />
@@ -1722,7 +1807,15 @@
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding StopInputAliasLabel}" />
-                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.StopInputAlias, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding StopInputAliasLabel}" />
+                        <!-- U145：循环停止条件读的也是入边别名，候选同源。 -->
+                        <AutoCompleteBox Grid.Column="1"
+                                         Classes="identifier-picker"
+                                         Text="{Binding SelectedNode.StopInputAlias, Mode=TwoWay}"
+                                         ItemsSource="{Binding NodeAliasCandidates}"
+                                         FilterMode="ContainsOrdinal"
+                                         MinimumPrefixLength="0"
+                                         IsTextCompletionEnabled="False"
+                                         AutomationProperties.Name="{Binding StopInputAliasLabel}" />
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding StopExpectedLabel}" />
@@ -1738,7 +1831,17 @@
                       <TextBlock Text="{Binding ApprovalNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding ApprovalIdLabel}" />
-                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.ApprovalId, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding ApprovalIdLabel}" />
+                        <!-- U145：候选为画布上各审批节点已用的 id。后端对 approval_id 查重
+                             （integration.rs 拒绝重复），所以看见别人用了什么本身就是有用信息。
+                             新建节点时 SeedUtilityDefaults 已填 approval-{nodeId}，此处主要用于对齐既有值。 -->
+                        <AutoCompleteBox Grid.Column="1"
+                                         Classes="identifier-picker"
+                                         Text="{Binding SelectedNode.ApprovalId, Mode=TwoWay}"
+                                         ItemsSource="{Binding ApprovalIdCandidates}"
+                                         FilterMode="ContainsOrdinal"
+                                         MinimumPrefixLength="0"
+                                         IsTextCompletionEnabled="False"
+                                         AutomationProperties.Name="{Binding ApprovalIdLabel}" />
                       </Grid>
                       <CheckBox IsChecked="{Binding SelectedNode.AutoApprove, Mode=TwoWay}"
                                 Content="{Binding AutoApproveText}" />
@@ -1752,8 +1855,21 @@
                       <TextBlock Text="{Binding ExportNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding ExportArtifactIdLabel}" />
-                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.ExportArtifactId, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding ExportArtifactIdLabel}" />
+                        <!-- U145：候选首项是带 exports/ 前缀的建议值——不带前缀的产物会落进
+                             .runtime/artifacts 而非用户配置的导出目录（U134 的病灶）。
+                             U134 只让作品页合并导出改由后端生成 id，工作流导出节点仍要求
+                             前端给出 artifact_id，所以这个字段删不掉，只能把正确形态摆出来。 -->
+                        <AutoCompleteBox Grid.Column="1"
+                                         Classes="identifier-picker"
+                                         Text="{Binding SelectedNode.ExportArtifactId, Mode=TwoWay}"
+                                         ItemsSource="{Binding ExportArtifactIdCandidates}"
+                                         FilterMode="ContainsOrdinal"
+                                         MinimumPrefixLength="0"
+                                         IsTextCompletionEnabled="False"
+                                         AutomationProperties.Name="{Binding ExportArtifactIdLabel}" />
                       </Grid>
+                      <TextBlock Text="{Binding ExportArtifactIdHint}"
+                                 Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding ExportFormatLabel}" />
                         <ComboBox Grid.Column="1" ItemsSource="{x:Static vm:WorkflowNodeViewModel.ExportFormats}"
@@ -1788,20 +1904,41 @@
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding SummarizerChapterIdLabel}" />
-                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.SummarizerChapterId, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterIdLabel}"
-                                 Classes="mono"
-                                 PlaceholderText="{Binding SummarizerChapterIdPlaceholder}" />
+                        <!-- U145：章节 id 的取值集合就是作品树（后端 ChapterDocumentIndex）。
+                             上面的章节下拉一次填两个字段，这两行留作单独校正/引用尚未建索引的章节。 -->
+                        <AutoCompleteBox Grid.Column="1"
+                                         Classes="identifier-picker"
+                                         Text="{Binding SelectedNode.SummarizerChapterId, Mode=TwoWay}"
+                                         ItemsSource="{Binding ChapterIdCandidates}"
+                                         FilterMode="ContainsOrdinal"
+                                         MinimumPrefixLength="0"
+                                         IsTextCompletionEnabled="False"
+                                         PlaceholderText="{Binding SummarizerChapterIdPlaceholder}"
+                                         AutomationProperties.Name="{Binding SummarizerChapterIdLabel}" />
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding SummarizerChapterDocumentIdLabel}" />
-                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.SummarizerChapterDocumentId, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterDocumentIdLabel}"
-                                 Classes="mono"
-                                 PlaceholderText="{Binding SummarizerChapterDocumentIdPlaceholder}" />
+                        <AutoCompleteBox Grid.Column="1"
+                                         Classes="identifier-picker"
+                                         Text="{Binding SelectedNode.SummarizerChapterDocumentId, Mode=TwoWay}"
+                                         ItemsSource="{Binding ChapterDocumentIdCandidates}"
+                                         FilterMode="ContainsOrdinal"
+                                         MinimumPrefixLength="0"
+                                         IsTextCompletionEnabled="False"
+                                         PlaceholderText="{Binding SummarizerChapterDocumentIdPlaceholder}"
+                                         AutomationProperties.Name="{Binding SummarizerChapterDocumentIdLabel}" />
                       </Grid>
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding SummarizerChapterTextAliasLabel}" />
-                        <TextBox Grid.Column="1" Text="{Binding SelectedNode.SummarizerChapterTextAlias, Mode=TwoWay}" AutomationProperties.Name="{Binding SummarizerChapterTextAliasLabel}"
-                                 Classes="mono" />
+                        <!-- U145：这个别名必须与入边上的别名一致才取到正文，候选因此取入边别名。 -->
+                        <AutoCompleteBox Grid.Column="1"
+                                         Classes="identifier-picker"
+                                         Text="{Binding SelectedNode.SummarizerChapterTextAlias, Mode=TwoWay}"
+                                         ItemsSource="{Binding NodeAliasCandidates}"
+                                         FilterMode="ContainsOrdinal"
+                                         MinimumPrefixLength="0"
+                                         IsTextCompletionEnabled="False"
+                                         AutomationProperties.Name="{Binding SummarizerChapterTextAliasLabel}" />
                       </Grid>
                       <TextBlock Text="{Binding SummarizerChapterTextAliasHint}"
                                  Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
@@ -2014,15 +2151,30 @@
 
                         <Grid ColumnDefinitions="*,*" ColumnSpacing="8"
                               IsVisible="{Binding SelectedEdge.ShowHandleFields}">
+                          <!-- U145：引脚名**写死在节点类型定义里**（后端 contracts/workflow.rs 的
+                               EXECUTION_INPUT_PORT / _OUTPUT_PORT / _TRUE / _FALSE / COMMUNICATION_PORT），
+                               用户无从凭记忆写对，此前却是自由文本框。
+                               目标侧候选按目标节点**实际存在的**数据入引脚算——
+                               列一个它没有的 data-in-3 等于教用户填错。 -->
                           <StackPanel Grid.Column="0" Spacing="4">
                             <TextBlock Text="{Binding SourceAliasText}" Classes="caption" />
-                            <TextBox Text="{Binding SelectedEdge.SourceHandle, Mode=TwoWay}"
-                                     AutomationProperties.Name="{Binding SourceAliasText}" />
+                            <AutoCompleteBox Classes="identifier-picker"
+                                             Text="{Binding SelectedEdge.SourceHandle, Mode=TwoWay}"
+                                             ItemsSource="{Binding SourceHandleCandidates}"
+                                             FilterMode="ContainsOrdinal"
+                                             MinimumPrefixLength="0"
+                                             IsTextCompletionEnabled="False"
+                                             AutomationProperties.Name="{Binding SourceAliasText}" />
                           </StackPanel>
                           <StackPanel Grid.Column="1" Spacing="4">
                             <TextBlock Text="{Binding TargetAliasText}" Classes="caption" />
-                            <TextBox Text="{Binding SelectedEdge.TargetHandle, Mode=TwoWay}"
-                                     AutomationProperties.Name="{Binding TargetAliasText}" />
+                            <AutoCompleteBox Classes="identifier-picker"
+                                             Text="{Binding SelectedEdge.TargetHandle, Mode=TwoWay}"
+                                             ItemsSource="{Binding TargetHandleCandidates}"
+                                             FilterMode="ContainsOrdinal"
+                                             MinimumPrefixLength="0"
+                                             IsTextCompletionEnabled="False"
+                                             AutomationProperties.Name="{Binding TargetAliasText}" />
                           </StackPanel>
                         </Grid>
 
@@ -2034,15 +2186,27 @@
 
                         <StackPanel IsVisible="{Binding SelectedEdge.ShowCommunicationFields}" Spacing="10">
                           <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                            <!-- U145：通信别名是「模板里 {{}} 引用的那个名字」，
+                                 候选取约定默认值 + 画布上其它通信边已用过的别名。 -->
                             <StackPanel Grid.Column="0" Spacing="4">
                               <TextBlock Text="{Binding ForwardAliasText}" Classes="caption" />
-                              <TextBox Text="{Binding SelectedEdge.ForwardAlias, Mode=TwoWay}"
-                                       AutomationProperties.Name="{Binding ForwardAliasText}" />
+                              <AutoCompleteBox Classes="identifier-picker"
+                                               Text="{Binding SelectedEdge.ForwardAlias, Mode=TwoWay}"
+                                               ItemsSource="{Binding CommunicationAliasCandidates}"
+                                               FilterMode="ContainsOrdinal"
+                                               MinimumPrefixLength="0"
+                                               IsTextCompletionEnabled="False"
+                                               AutomationProperties.Name="{Binding ForwardAliasText}" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Spacing="4">
                               <TextBlock Text="{Binding ReverseAliasText}" Classes="caption" />
-                              <TextBox Text="{Binding SelectedEdge.ReverseAlias, Mode=TwoWay}"
-                                       AutomationProperties.Name="{Binding ReverseAliasText}" />
+                              <AutoCompleteBox Classes="identifier-picker"
+                                               Text="{Binding SelectedEdge.ReverseAlias, Mode=TwoWay}"
+                                               ItemsSource="{Binding CommunicationAliasCandidates}"
+                                               FilterMode="ContainsOrdinal"
+                                               MinimumPrefixLength="0"
+                                               IsTextCompletionEnabled="False"
+                                               AutomationProperties.Name="{Binding ReverseAliasText}" />
                             </StackPanel>
                           </Grid>
 

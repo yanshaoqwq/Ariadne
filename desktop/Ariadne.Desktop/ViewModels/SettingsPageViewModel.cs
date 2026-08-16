@@ -3389,7 +3389,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             new Dictionary<string, string> { ["section"] = sectionTitle });
     }
 
-    private void SelectTabForTests(string tabId)
+    /// <summary>
+    /// 测试用：切到指定分页。
+    ///
+    /// 设置页是**分页的**（`IsGeneralSelected` / `IsModelsSelected` 驱动 `IsVisible`），
+    /// 未选中的分页内容在视觉树里压根不实例化。要断言某个分页里的控件，
+    /// 必须先切过去——否则 `GetVisualDescendants` 一个也找不到，
+    /// 看起来像「控件不存在」而其实是「分页没打开」。
+    /// </summary>
+    internal void SelectTabForTests(string tabId)
     {
         var tab = Tabs.First(item => string.Equals(item.Id, tabId, StringComparison.Ordinal));
         foreach (var item in Tabs)

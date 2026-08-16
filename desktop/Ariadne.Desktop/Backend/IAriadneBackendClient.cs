@@ -131,6 +131,12 @@ public interface IAriadneBackendClient
 
     Task<ResolveInDoubtOperationResult> ResolveInDoubtOperationAsync(string operationId, string decision, object? response = null, string? reason = null, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 项目 AI 问答。<paramref name="references"/> 走后端 `ProjectAiRequest.references`，
+    /// 支持 `@确认项:&lt;id&gt;` / `@文档:…` 等前缀形态——后端会把它们展开成真实内容
+    /// 再送进 LLM（`resolve_project_references_with_context`），所以引用必须带前缀，
+    /// 裸 id 在顶层解析器那里会因缺少 `:`/`/` 被拒。
+    /// </summary>
     Task<ProjectAiResponse> ProjectAiChatAsync(
         string message,
         string? workflowIdToRun = null,
@@ -138,6 +144,7 @@ public interface IAriadneBackendClient
         string? referenceRunId = null,
         string? conversationId = null,
         long? conversationRevision = null,
+        IReadOnlyList<string>? references = null,
         CancellationToken cancellationToken = default);
 
     Task<ProjectAiResponse> ProjectAiChatAsync(
@@ -148,6 +155,7 @@ public interface IAriadneBackendClient
         string? referenceRunId = null,
         string? conversationId = null,
         long? conversationRevision = null,
+        IReadOnlyList<string>? references = null,
         CancellationToken cancellationToken = default);
 
     Task<string> ReadProjectMemoryAsync(CancellationToken cancellationToken = default);

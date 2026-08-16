@@ -50,6 +50,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private Dictionary<string, object?> _canvasMetadata = new(StringComparer.Ordinal);
     private string _confirmationReason = string.Empty;
     private bool _isRejectArmed;
+    // 进入审阅态时「已自动切过右栏」的哨兵：只切一次，之后尊重用户的手动切换。
+    private bool _confirmationReviewSwitchedRightPanel;
     private WorkflowOperation? _selectedInDoubtOperation;
     private string _inDoubtResponseJson = string.Empty;
     private string _inDoubtStopReason = string.Empty;
@@ -158,6 +160,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             },
             CanResolveConfirmation);
         CancelRejectConfirmationCommand = new RelayCommand(DisarmReject);
+        // 引用当前确认项问项目 AI（U139④）：能力齐备、入口原本不存在。
+        AskAiAboutConfirmationCommand = new RelayCommand(
+            () => _ = AskAiAboutConfirmationAsync(),
+            () => SelectedConfirmation is not null);
         // 主按钮：武装态下是退出口（取消拒绝），常态才是确认通过。
         ApproveOrCancelCommand = new RelayCommand(
             () =>
@@ -199,6 +205,16 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             WorkflowModelOption.Inherited(displayNames.Text("ui.workspace.model_inherit_global")),
         };
         SummarizerChapterOptions = new ObservableCollection<SummarizerChapterOption>();
+        // U145：标识/别名候选。空集合也要建好——XAML 的 AutoCompleteBox 绑定它，
+        // 延迟到「选中节点时才 new」会让首次绑定拿到 null 而永久不再刷新。
+        NodeAliasCandidates = new ObservableCollection<string>();
+        ChapterIdCandidates = new ObservableCollection<string>();
+        ChapterDocumentIdCandidates = new ObservableCollection<string>();
+        ApprovalIdCandidates = new ObservableCollection<string>();
+        ExportArtifactIdCandidates = new ObservableCollection<string>();
+        SourceHandleCandidates = new ObservableCollection<string>();
+        TargetHandleCandidates = new ObservableCollection<string>();
+        CommunicationAliasCandidates = new ObservableCollection<string>();
         CaptureSnapshot();
     }
 
@@ -207,6 +223,124 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool HasAvailableModelChoices => AvailableModelOptions.Any(option => !option.IsInherited);
     public ObservableCollection<SummarizerChapterOption> SummarizerChapterOptions { get; }
     public bool HasSummarizerChapterChoices => SummarizerChapterOptions.Count > 0;
+
+    // ==================================================================
+    // U145：标识 / 别名候选源。
+    //
+    // 这几组值此前全靠用户手打，而后端对它们是精确等值匹配——手打即错，
+    // 且错了只是静默无结果。候选**产品全都持有**，来源逐条列在下面。
+    // 控件用 AutoCompleteBox（可搜索 + 列表外的值仍可提交），
+    // 因为「引用尚未创建的节点」这类高级场景必须留活口。
+    // ==================================================================
+
+    /// <summary>数据别名候选：来自当前节点已连上的数据边（别名在连边时就已定义过一次）。</summary>
+    public ObservableCollection<string> NodeAliasCandidates { get; }
+    /// <summary>章节 id 候选：来自作品树（后端 ChapterDocumentIndex）。</summary>
+    public ObservableCollection<string> ChapterIdCandidates { get; }
+    /// <summary>章节文档 id 候选：同上，与章节 id 一一对应。</summary>
+    public ObservableCollection<string> ChapterDocumentIdCandidates { get; }
+    /// <summary>审批 id 候选：画布上所有审批节点已用的 id（含本节点的默认值）。</summary>
+    public ObservableCollection<string> ApprovalIdCandidates { get; }
+    /// <summary>
+    /// 导出产物 id 候选：画布上各导出节点已用的 id + 一个带 `exports/` 前缀的建议值。
+    ///
+    /// ⚠️ **前缀不是装饰**：`documents/service.rs` 的 `artifact_path` 只对
+    /// `exports/` 前缀做导出根重定向，否则一律落 `.runtime/artifacts`——
+    /// 这正是 U134 那条「用户在设置里配的导出目录完全不生效」。U134 只修了作品页
+    /// 合并导出（后端自己生成 id），**工作流导出节点这条仍要求前端给出 artifact_id**
+    /// （`workflow/integration.rs` 的 `require_non_empty_node_field`），
+    /// 所以这里必须把带前缀的正确形态摆进候选，否则用户照旧只能手打出一个落错目录的值。
+    /// </summary>
+    public ObservableCollection<string> ExportArtifactIdCandidates { get; }
+    /// <summary>源引脚名候选：来自节点类型定义（NodePortSpec），用户无从凭记忆写对。</summary>
+    public ObservableCollection<string> SourceHandleCandidates { get; }
+    /// <summary>目标引脚名候选：目标节点**实际存在**的数据入引脚 + 执行入。</summary>
+    public ObservableCollection<string> TargetHandleCandidates { get; }
+    /// <summary>通信边正/反向别名候选：通信边的约定别名 + 画布上其它通信边已用过的。</summary>
+    public ObservableCollection<string> CommunicationAliasCandidates { get; }
+
+    /// <summary>
+    /// 重算全部标识候选。**必须在选中节点/边变化后调用**——候选依赖「当前选中的是谁」
+    /// （目标引脚要看目标节点有几个数据入），选中不变而候选不变时 Sync 不会动集合。
+    /// </summary>
+    private void RefreshIdentifierCandidates()
+    {
+        IdentifierCandidates.Sync(NodeAliasCandidates, ComposeNodeAliasCandidates());
+        IdentifierCandidates.Sync(
+            ChapterIdCandidates,
+            IdentifierCandidates.Compose(SummarizerChapterOptions.Select(option => option.ChapterId)));
+        IdentifierCandidates.Sync(
+            ChapterDocumentIdCandidates,
+            IdentifierCandidates.Compose(SummarizerChapterOptions.Select(option => option.DocumentId)));
+        IdentifierCandidates.Sync(
+            ApprovalIdCandidates,
+            IdentifierCandidates.Compose(
+                Nodes.Where(node => node.IsApprovalNode).Select(node => node.ApprovalId)));
+        IdentifierCandidates.Sync(ExportArtifactIdCandidates, ComposeExportArtifactIdCandidates());
+        IdentifierCandidates.Sync(
+            SourceHandleCandidates,
+            IdentifierCandidates.Compose(NodePortSpec.SourceHandleNames()));
+        IdentifierCandidates.Sync(TargetHandleCandidates, ComposeTargetHandleCandidates());
+        IdentifierCandidates.Sync(
+            CommunicationAliasCandidates,
+            IdentifierCandidates.Compose(
+                NodePortSpec.CommunicationAliasNames(),
+                Edges.Where(edge => edge.IsCommunication)
+                    .SelectMany(edge => new[] { edge.ForwardAlias, edge.ReverseAlias })));
+    }
+
+    /// <summary>
+    /// 数据别名候选：当前节点入边上已定义的别名优先，其后是节点类型的约定默认值。
+    ///
+    /// 入边别名排在最前是因为它才是**这个字段真正要对上的东西**：
+    /// 节点读取输入用的就是边上那个别名，两边不一致就取不到值。
+    /// </summary>
+    private List<string> ComposeNodeAliasCandidates()
+    {
+        var nodeId = SelectedNode?.Id;
+        var incoming = string.IsNullOrEmpty(nodeId)
+            ? Enumerable.Empty<string>()
+            : Edges
+                .Where(edge => edge.IsData && string.Equals(edge.Target, nodeId, StringComparison.Ordinal))
+                .Select(edge => string.IsNullOrWhiteSpace(edge.Label) ? edge.TargetHandle : edge.Label);
+        return IdentifierCandidates.Compose(incoming, NodePortSpec.ConventionalAliasNames());
+    }
+
+    /// <summary>
+    /// 导出产物 id 候选：先给当前节点一个**带 `exports/` 前缀**的建议值，
+    /// 再列出画布上其它导出节点已用的 id。
+    ///
+    /// 建议值排第一是刻意的：不带前缀的产物会落进 `.runtime/artifacts`
+    /// 而不是用户配置的导出目录（U134 的病灶）。把正确形态放在第一位，
+    /// 用户点一下就对，而不用先知道这条前缀规则的存在。
+    /// </summary>
+    private List<string> ComposeExportArtifactIdCandidates()
+    {
+        var suggested = SelectedNode is { IsExportNode: true } node
+            ? new[] { $"exports/{node.Id}" }
+            : Array.Empty<string>();
+        return IdentifierCandidates.Compose(
+            suggested,
+            Nodes.Where(item => item.IsExportNode).Select(item => item.ExportArtifactId));
+    }
+
+    /// <summary>
+    /// 目标引脚候选：取**目标节点实际存在的**数据入引脚，而不是笼统列一堆名字。
+    ///
+    /// 「data-in-3」在只有一个数据入的节点上是错的（连线落不到任何引脚），
+    /// 所以候选必须按目标节点的引脚列表算——否则下拉本身就在教用户填错。
+    /// </summary>
+    private List<string> ComposeTargetHandleCandidates()
+    {
+        var targetId = SelectedEdge?.Target;
+        var target = string.IsNullOrEmpty(targetId)
+            ? null
+            : Nodes.FirstOrDefault(node => string.Equals(node.Id, targetId, StringComparison.Ordinal));
+        var pins = target is null
+            ? Enumerable.Empty<string>()
+            : target.DataInPins.Select(pin => pin.Handle);
+        return IdentifierCandidates.Compose(pins, NodePortSpec.TargetHandleNames());
+    }
 
     private ObservableCollection<NodeLibraryItemViewModel> CreateNodeLibraryGroup(string group)
     {
@@ -319,10 +453,18 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ["count"] = Confirmations.Count.ToString(),
     });
     public string ConfirmationDiffText => _displayNames.Text("ui.workspace.confirmation.diff");
-    public string ConfirmationReasonText => _displayNames.Text("ui.workspace.confirmation.reason");
-    public string ConfirmationReasonPlaceholder => _displayNames.Text("ui.workspace.confirmation.reason.placeholder");
+    // ConfirmationReasonText / ConfirmationReasonPlaceholder 随常驻「审阅理由」输入框一起删除（U139③）：
+    // 理由现在只在点「驳回」后展开的那条线上出现，提示语由 RejectReasonPromptText 承担。
+    // 留着两个零消费者的文案属性会让人以为那个框还在（AGENTS §4「死代码会冒充已完成的工作」）。
     public string ApproveConfirmationText => _displayNames.Text("ui.workspace.confirmation.approve");
     public string RejectConfirmationText => _displayNames.Text("ui.workspace.confirmation.reject");
+    /// <summary>审阅面板左栏小标题：说明这一列是「等你拍板的条目」。</summary>
+    public string ConfirmationListTitleText => _displayNames.Text("ui.workspace.confirmation.list_title");
+    /// <summary>「问问 AI」按钮文案：把当前确认项交给项目 AI 评估。</summary>
+    public string AskAiAboutConfirmationText => _displayNames.Text("ui.workspace.confirmation.ask_ai");
+    public string AskAiAboutConfirmationHintText => _displayNames.Text("ui.workspace.confirmation.ask_ai.hint");
+    /// <summary>确认项不带正文改动时的说明；空白面会让人以为加载失败。</summary>
+    public string ConfirmationDiffEmptyText => _displayNames.Text("ui.workspace.confirmation.diff_empty");
     public string PromptTemplateText => _displayNames.Text("ui.workspace.prompt_template");
     public string ModelIdText => _displayNames.Text("ui.workspace.model_id");
     public string ModelSelectorPlaceholder => _displayNames.Text("ui.workspace.model_selector_placeholder");
@@ -396,6 +538,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ExportNodeTitle => _displayNames.Text("ui.workspace.export_node.title");
     public string ExportNodeHint => _displayNames.Text("ui.workspace.export_node.hint");
     public string ExportArtifactIdLabel => _displayNames.Text("ui.workspace.export_node.artifact_id");
+    /// <summary>U145：把「exports/ 前缀决定落哪个目录」这条隐规则说出来（U134 的病灶）。</summary>
+    public string ExportArtifactIdHint => _displayNames.Text("ui.workspace.export_node.artifact_id_hint");
     public string ExportFormatLabel => _displayNames.Text("ui.workspace.export_node.format");
     public string ExportTitleLabel => _displayNames.Text("ui.workspace.export_node.title_field");
     public string SummarizerNodeTitle => _displayNames.Text("ui.workspace.summarizer.title");
@@ -695,6 +839,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand CancelRejectConfirmationCommand { get; }
     public RelayCommand ApproveOrCancelCommand { get; }
 
+    /// <summary>把当前确认项作为 `@确认项:<id>` 引用发给项目 AI（U139④）。</summary>
+    public RelayCommand AskAiAboutConfirmationCommand { get; }
+
     /// <summary>View 注入：理由输入线展开后把焦点交给它（沿用作品页快捷改写的做法）。</summary>
     public Action? RequestFocusRejectReason { get; set; }
 
@@ -811,6 +958,18 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<NodeLibraryItemViewModel> WritingAgents { get; }
     public ObservableCollection<NodeLibraryItemViewModel> UtilityNodes { get; }
     public ObservableCollection<ConfirmationItemViewModel> Confirmations { get; }
+
+    /// <summary>
+    /// 当前确认项 diff 的分行投影（U139②）。
+    ///
+    /// 复用作品页快速编辑的 <see cref="QuickEditDiffLineViewModel"/>：两处消费的是**同一份**
+    /// 后端 diff 产出（`- ` / `+ ` / 两空格上下文前缀），各写一个解析器迟早会漂移。
+    /// 承载控件是 ItemsControl 而非只读 TextBox——后者无法分行着色，且会抢焦点占 Tab 位。
+    /// </summary>
+    public ObservableCollection<QuickEditDiffLineViewModel> ConfirmationDiffLines { get; } = new();
+
+    /// <summary>有无可渲染的 diff 行；无 diff 的确认项改显一句说明，不留空白面。</summary>
+    public bool HasConfirmationDiff => ConfirmationDiffLines.Count > 0;
     public ObservableCollection<WorkflowOperation> InDoubtOperations { get; }
     public ObservableCollection<WorkflowEdgeViewModel> Edges { get; }
     /// <summary>仅当前选中节点相关的边（右栏列表）。</summary>
@@ -909,11 +1068,41 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
                 // 换审阅对象必须解除武装：否则上一项留下的「确认拒绝」态会让
                 // 下一项的第一次点击直接拒绝——那是这个两步设计要防的事。
                 DisarmReject();
+                RebuildConfirmationDiffLines();
                 OnPropertyChanged(nameof(HasSelectedConfirmation));
                 OnPropertyChanged(nameof(HasPendingConfirmations));
                 NotifyConfirmationCommandStates();
             }
         }
+    }
+
+    /// <summary>
+    /// 把当前确认项的 diff 文本翻成分行视图（U139②）。
+    ///
+    /// 只做「前缀 → 类别」的翻译，不重新实现 diff 算法：算法在后端一处，
+    /// 前端两个消费点（作品页快速编辑、这里）共用同一份产出。
+    /// </summary>
+    private void RebuildConfirmationDiffLines()
+    {
+        ConfirmationDiffLines.Clear();
+        var diff = SelectedConfirmation?.Diff;
+        if (!string.IsNullOrEmpty(diff))
+        {
+            // 按字符感知的行切分：正文是中文，按字节找 '\n' 会切在多字节字符中间。
+            // 末尾空行不渲染（diff 常以换行结尾），否则底部凭空多出一条空色带。
+            foreach (var line in diff.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+            {
+                ConfirmationDiffLines.Add(new QuickEditDiffLineViewModel(line));
+            }
+            while (ConfirmationDiffLines.Count > 0
+                && ConfirmationDiffLines[^1].Text.Length == 0
+                && ConfirmationDiffLines[^1].Kind == QuickEditDiffLineKind.Context)
+            {
+                ConfirmationDiffLines.RemoveAt(ConfirmationDiffLines.Count - 1);
+            }
+        }
+        OnPropertyChanged(nameof(HasConfirmationDiff));
+        AskAiAboutConfirmationCommand.NotifyCanExecuteChanged();
     }
 
     public bool HasSelectedConfirmation => SelectedConfirmation is not null;
@@ -947,13 +1136,42 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             if (SetProperty(ref _isConfirmationPanelExpanded, value))
             {
-                OnPropertyChanged(nameof(ShowConfirmationFullPanel));
-                OnPropertyChanged(nameof(ShowConfirmationBanner));
+                NotifyConfirmationPanelVisibility();
             }
         }
     }
     public bool ShowConfirmationFullPanel => HasPendingConfirmations && IsConfirmationPanelExpanded;
     public bool ShowConfirmationBanner => HasPendingConfirmations && !IsConfirmationPanelExpanded;
+
+    /// <summary>
+    /// 审阅面板显隐的统一出口：通知两个可见性属性，并在**进入**审阅态时把右栏切到项目 AI（U139⑤）。
+    ///
+    /// 为什么自动切：审阅面板此刻替换了整个画布，节点检查器（它讲的是画布上选中的节点）
+    /// 在这一刻无事可讲；用户真正需要的是问 AI「这段改得对不对」。
+    /// 右栏**不隐藏**——它与面板分列外层 Grid 的两列，正好放对话。
+    ///
+    /// 只在「进入」时切、且只切一次（`_confirmationReviewSwitchedRightPanel` 作哨兵）：
+    /// 否则用户在审阅中手动切回节点检查器会被下一次刷新反复拽回来，等于剥夺了切换能力（U133 的教训）。
+    /// </summary>
+    private void NotifyConfirmationPanelVisibility()
+    {
+        OnPropertyChanged(nameof(ShowConfirmationFullPanel));
+        OnPropertyChanged(nameof(ShowConfirmationBanner));
+        if (ShowConfirmationFullPanel)
+        {
+            if (!_confirmationReviewSwitchedRightPanel)
+            {
+                _confirmationReviewSwitchedRightPanel = true;
+                SetRightPanelTab(WorkspaceRightPanelTab.ProjectAi);
+                IsRightPanelOpen = true;
+            }
+        }
+        else
+        {
+            // 离开审阅态后哨兵复位，下次再进来仍会自动切一次。
+            _confirmationReviewSwitchedRightPanel = false;
+        }
+    }
 
     public WorkflowEdgeViewModel? SelectedEdge
     {
@@ -1452,6 +1670,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ApproveConfirmationCommand.NotifyCanExecuteChanged();
         RejectConfirmationCommand.NotifyCanExecuteChanged();
         ApproveOrCancelCommand.NotifyCanExecuteChanged();
+        AskAiAboutConfirmationCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>
@@ -1561,8 +1780,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             defaultWorkDir: WorkflowNodeCatalog.Resolve(nodeType).ConfigKind == "start"
                 ? _displayNames.Text("ui.workspace.start_node.default_work_dir")
                 : string.Empty,
-            x: Math.Max(0, x),
-            y: Math.Max(0, y),
+            // U141：画布是无限的，坐标系有负半轴。原先这里是 Math.Max(0, x/y)，
+            // 把新节点钉在第一象限——用户往左上方平移后落点会被悄悄挪回原点侧，
+            // 且这个改写会随工作流存盘。落点合法性属于内容，不由视口或象限裁定。
+            x: x,
+            y: y,
             runRequested: runNode => _ = RunNodeAsync(runNode),
             () => SelectNode(node: null),
             RefreshDirtyState,
@@ -1970,6 +2192,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     /// <summary>刷新「与选中节点相关」的边列表。</summary>
     public void RefreshRelatedEdges()
     {
+        // U145：标识候选依赖「当前选中的是谁」+「画布上有哪些边/节点」，
+        // 而这个方法是所有选中变化与增删边的共同收口——挂在这里才不会漏路径。
+        // （各调用点各写一遍必然漏，那会表现为「换了个节点但下拉还是上一个节点的别名」。）
+        RefreshIdentifierCandidates();
+
         var selectedIds = GetSelectedNodes().Select(n => n.Id).ToArray();
         if (selectedIds.Length == 0 && SelectedNode is not null)
         {
@@ -2373,6 +2600,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             OnPropertyChanged(nameof(HasSummarizerChapterChoices));
             OnPropertyChanged(nameof(SelectedSummarizerChapterOption));
+            // U145：章节 id / 文档 id 候选就来自这份列表，装载完必须同步一次；
+            // 否则「先选中 summarizer 节点、再等作品树到货」这条顺序下候选恒为空。
+            RefreshIdentifierCandidates();
         }
     }
 
@@ -2940,6 +3170,77 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
+    /// <summary>
+    /// 带着当前确认项去问项目 AI「这段改得对不对」（U139④）。
+    ///
+    /// 后端 `@确认项:<id>` 引用链路一直是通的（`resolve_reference` → `resolve_confirmation`
+    /// 返回 summary + state + diff），断的只是前端：`references` 被写死成空数组、
+    /// 审阅面板也没有任何入口。这里两头都接上。
+    ///
+    /// **引用必须带 `@确认项:` 前缀**：顶层 `parse_project_reference` 要求含 `:` 或 `/`，
+    /// 裸 id 只有内层 store 容忍，走项目 AI 这条路会被判非法引用。
+    ///
+    /// 走 references 而不是把 diff 拼进 message：diff 可能是整段章节正文，
+    /// 内联传大段文本违反引用式数据流；而且后端展开引用时会自己做截断与预算记账。
+    /// </summary>
+    private async Task AskAiAboutConfirmationAsync()
+    {
+        var confirmation = SelectedConfirmation;
+        if (confirmation is null)
+        {
+            StatusText = ConfirmationsEmptyText;
+            return;
+        }
+        // 审阅态下右栏应当已经是项目 AI 页；用户手动切走后再点「问 AI」，
+        // 把它切回来——否则回答落在一个看不见的页面上。
+        SetRightPanelTab(WorkspaceRightPanelTab.ProjectAi);
+        IsRightPanelOpen = true;
+        var question = _displayNames.Text("ui.workspace.confirmation.ask_ai.question");
+        var reference = $"@确认项:{confirmation.ConfirmationId}";
+        var workflowId = string.IsNullOrWhiteSpace(confirmation.WorkflowId)
+            ? CurrentWorkflowId
+            : confirmation.WorkflowId;
+        var referenceRunId = !string.IsNullOrWhiteSpace(confirmation.RunId)
+            ? confirmation.RunId
+            : string.IsNullOrWhiteSpace(CurrentRunId) ? null : CurrentRunId;
+        var sessionFence = _runSession.CaptureFence();
+        try
+        {
+            // 提问先进气泡：审阅期间等回答可能要几秒，不回显的话点了像没反应。
+            ProjectAiBubbles.Add(new ChatBubbleViewModel("user", question));
+            OnPropertyChanged(nameof(HasProjectAiBubbles));
+            StatusText = _displayNames.Text("ui.workspace.confirmation.ask_ai.sent");
+            var result = await _backend.ProjectAiChatAsync(
+                question,
+                workflowIdToRun: null,
+                referenceWorkflowId: string.IsNullOrWhiteSpace(workflowId) ? null : workflowId,
+                referenceRunId: referenceRunId,
+                conversationId: ProjectAiConversationId,
+                conversationRevision: _projectAiConversationRevision,
+                references: new[] { reference })
+                .ConfigureAwait(true);
+            _runSession.ThrowIfStale(sessionFence);
+            ProjectAiAnswer = result.Answer;
+            _projectAiConversationRevision = ProjectAiConversationUi.Apply(
+                result,
+                _projectAiHistory,
+                ProjectAiBubbles,
+                _projectAiConversationRevision);
+            OnPropertyChanged(nameof(HasProjectAiBubbles));
+            StatusText = ProjectAiConversationUi.ContextWasCompacted(result)
+                ? _displayNames.Text("ui.project_ai.context_compacted")
+                : _displayNames.Text("ui.common.configured");
+        }
+        catch (OperationCanceledException)
+        {
+            // 回答属于已切走的运行会话；丢弃其页面投影。
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+    }
+
     private async Task ApplyNodeConfigAsync()
     {
         if (SelectedNode is null)
@@ -3129,8 +3430,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             OnPropertyChanged(nameof(HasPendingConfirmations));
             OnPropertyChanged(nameof(ConfirmationCountText));
             OnPropertyChanged(nameof(ConfirmationsBannerText));
-            OnPropertyChanged(nameof(ShowConfirmationFullPanel));
-            OnPropertyChanged(nameof(ShowConfirmationBanner));
+            NotifyConfirmationPanelVisibility();
             OnPropertyChanged(nameof(EmptyStartTitle));
             OnPropertyChanged(nameof(EmptyStartHint));
             NotifyConfirmationCommandStates();
@@ -3155,12 +3455,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             OnPropertyChanged(nameof(HasPendingConfirmations));
             OnPropertyChanged(nameof(ConfirmationCountText));
             OnPropertyChanged(nameof(ConfirmationsBannerText));
-            OnPropertyChanged(nameof(ShowConfirmationFullPanel));
-            OnPropertyChanged(nameof(ShowConfirmationBanner));
             if (Confirmations.Count > 0)
             {
                 IsConfirmationPanelExpanded = true;
             }
+            // 必须在 IsConfirmationPanelExpanded 之后再通知一次：该属性**已是 true 时不会触发**
+            // setter 里的通知（SetProperty 同值短路），而「有待审项」这件事本身刚刚才变真——
+            // 少了这一次，首屏进入审阅态就不会自动切右栏（U139⑤）。
+            NotifyConfirmationPanelVisibility();
             if (Confirmations.Count == 0)
             {
                 StatusText = ConfirmationsEmptyText;
@@ -4155,6 +4457,59 @@ public static class NodePortSpec
     public const string ExecOutTrueHandle = "exec_out_true";
     /// <summary>U125：condition 的「条件不成立」执行出引脚。</summary>
     public const string ExecOutFalseHandle = "exec_out_false";
+
+    /// <summary>
+    /// U145：源引脚名的完整取值集合。
+    ///
+    /// 这些名字**写死在节点类型定义里**（后端 `contracts/workflow.rs` 的
+    /// `EXECUTION_OUTPUT_PORT` / `_TRUE` / `_FALSE` / `COMMUNICATION_PORT`），
+    /// 用户无从知道该填什么；此前边检查器却给了个自由文本框。
+    /// 顺序按「最常用在前」：普通数据出 → 执行出 → 分支出 → 通信。
+    /// </summary>
+    public static IReadOnlyList<string> SourceHandleNames() => new[]
+    {
+        HandleName(NodePortKind.Data, NodePortDirection.Out),
+        HandleName(NodePortKind.Control, NodePortDirection.Out),
+        ExecOutTrueHandle,
+        ExecOutFalseHandle,
+        HandleName(NodePortKind.Communication, NodePortDirection.Out),
+    };
+
+    /// <summary>
+    /// U145：目标引脚名的类型级取值集合（首个数据入 + 执行入 + 通信）。
+    ///
+    /// 多数据入的 `data-in-N` **不在这里**：它取决于目标节点当前有几个引脚，
+    /// 由调用方按目标节点的 `DataInPins` 补进候选前段。
+    /// </summary>
+    public static IReadOnlyList<string> TargetHandleNames() => new[]
+    {
+        HandleName(NodePortKind.Data, NodePortDirection.In),
+        HandleName(NodePortKind.Control, NodePortDirection.In),
+        HandleName(NodePortKind.Communication, NodePortDirection.In),
+    };
+
+    /// <summary>U145：通信边的约定别名（与 DefaultCommunicationData 同源）。</summary>
+    public static IReadOnlyList<string> CommunicationAliasNames() => new[]
+    {
+        "forward_output",
+        "reverse_output",
+    };
+
+    /// <summary>
+    /// U145：各类节点对数据别名的约定默认值。
+    ///
+    /// 与 `SeedUtilityDefaults` 是同一组字面量：search 用 `query`、condition 用
+    /// `input`、loop 用 `done`、summarizer 用 `chapter_text`。它们是「留空时后端会
+    /// 采用的值」，因此也正是用户最可能想填的值。
+    /// </summary>
+    public static IReadOnlyList<string> ConventionalAliasNames() => new[]
+    {
+        "input",
+        "query",
+        "done",
+        "chapter_text",
+        "output",
+    };
 
     /// <summary>
     /// U125：两个分支引脚相对标题行中线的垂直错开量（真在上、假在下，等距对称）。

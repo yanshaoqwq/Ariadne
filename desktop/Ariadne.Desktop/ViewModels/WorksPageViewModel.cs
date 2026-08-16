@@ -121,6 +121,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         _documentTitle = displayNames.Text("ui.works.no_document_selected");
         WorksTreeRoots = new ObservableCollection<WorksTreeItemViewModel>();
         VisibleWorksTreeRoots = new ObservableCollection<WorksTreeItemViewModel>();
+        // U145：导入表单的章节 ID 候选。取值集合就是作品树里已有的章节
+        // （后端 ChapterDocumentIndex），此前是自由文本框——打错一个字符不会报错，
+        // 只是导入进一个谁也不会去读的孤儿章节 id。
+        ImportChapterIdCandidates = new ObservableCollection<string>();
         DocumentBlocks = new ObservableCollection<DocumentBlockViewModel>();
         ProjectAiBubbles = new ObservableCollection<ChatBubbleViewModel>();
         SummarySegments = new ObservableCollection<WorksSummarySegmentItemViewModel>();
@@ -438,6 +442,15 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     /// <summary>按标题搜索后的根投影；子层投影由每个节点的 VisibleChildren 维护。</summary>
     public ObservableCollection<WorksTreeItemViewModel> VisibleWorksTreeRoots { get; }
+
+    /// <summary>
+    /// U145：导入用的章节 ID 候选，来自作品树里已有的章节。
+    ///
+    /// 仍允许手打列表外的值：**导入新章节**本来就是要给出一个还不存在的 id，
+    /// 这个字段不能收成纯下拉。候选的用途是「覆盖既有章节」时对齐已有 id——
+    /// 那条路径下打错就是静默导入成一个孤儿章节。
+    /// </summary>
+    public ObservableCollection<string> ImportChapterIdCandidates { get; }
 
     public WorksTreeItemViewModel? SelectedWorksTreeNode
     {
@@ -3087,6 +3100,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             WorksTreeRoots.Add(root);
         }
         ApplyWorksTreeSearch();
+        // U145：章节 ID 候选跟着作品树走。挂在这个装配点而不是各调用处：
+        // 树只在这里被整体替换，漏一处就会出现「树已刷新但候选还是上一版」。
+        IdentifierCandidates.Sync(
+            ImportChapterIdCandidates,
+            IdentifierCandidates.Compose(
+                EnumerateWorksTreeNodes()
+                    .Where(node => node.IsChapter)
+                    .Select(node => node.ChapterId)));
         SetSelectedWorksTreeNode(
             selectedNodeId is not null && nodesById.TryGetValue(selectedNodeId, out var selected)
                 ? selected
