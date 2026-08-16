@@ -35,9 +35,9 @@ public sealed class BackendColdStartTests
     public async Task ColdStart_WithoutOpenProject_DoesNotReportTransportFailure()
     {
         var sidecar = ResolveSidecar();
-        if (sidecar is null)
+        if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
+                nameof(ColdStart_WithoutOpenProject_DoesNotReportTransportFailure)))
         {
-            // sidecar 未编译时不做断言：避免在纯前端环境里误报失败。
             return;
         }
 
@@ -61,7 +61,8 @@ public sealed class BackendColdStartTests
     public async Task ColdStart_CanCreateProjectAndThenReadProjectScopedSettings()
     {
         var sidecar = ResolveSidecar();
-        if (sidecar is null)
+        if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
+                nameof(ColdStart_CanCreateProjectAndThenReadProjectScopedSettings)))
         {
             return;
         }

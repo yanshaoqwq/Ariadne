@@ -109,9 +109,10 @@ public sealed class FrontendProductionJourneyTests : IDisposable
     public async Task DesktopJourney_CreateProject_ConfigureProvider_RunWorkflow_ReachesTerminalState()
     {
         var sidecar = ResolveSidecar();
-        if (sidecar is null)
+        if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
+                nameof(DesktopJourney_CreateProject_ConfigureProvider_RunWorkflow_ReachesTerminalState)))
         {
-            return; // 后端未编译的纯前端环境：跳过而非误报。
+            return;
         }
 
         using var client = new JsonLineBackendClient(sidecar);
@@ -188,7 +189,8 @@ public sealed class FrontendProductionJourneyTests : IDisposable
     public async Task DesktopJourney_UnreachableProvider_RunFailsLoudly()
     {
         var sidecar = ResolveSidecar();
-        if (sidecar is null)
+        if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
+                nameof(DesktopJourney_UnreachableProvider_RunFailsLoudly)))
         {
             return;
         }
@@ -242,7 +244,8 @@ public sealed class FrontendProductionJourneyTests : IDisposable
     public async Task DesktopJourney_SecondRunAfterEdit_StartsCleanly()
     {
         var sidecar = ResolveSidecar();
-        if (sidecar is null)
+        if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
+                nameof(DesktopJourney_SecondRunAfterEdit_StartsCleanly)))
         {
             return;
         }

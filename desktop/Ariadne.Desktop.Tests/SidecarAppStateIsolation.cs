@@ -134,4 +134,40 @@ internal static class SidecarAppStateIsolation
             ? null
             : Path.Combine(home, ".config", "Ariadne");
     }
+
+    /// <summary>
+    /// 找不到 sidecar 时该失败还是该跳过 —— **必须由环境显式表态**。
+    ///
+    /// U156 的教训：跨进程测试普遍写成
+    /// <code>var sidecar = ResolveSidecar(); if (sidecar is null) return;</code>
+    /// 理由是对的（纯前端环境不该误报失败），**但手段是错的**：
+    /// **xUnit 把 `return` 记成「通过」** ⇒ 没有覆盖伪装成有覆盖。
+    /// U156 那个 P0（点运行什么都不会发生）本来有 12 条跨进程测试能拦住它，
+    /// 但 CI 里不编 Rust 后端时那些测试**全部静默跳过、全部记成绿**，
+    /// 于是「测试全绿」与「主功能全废」同时成立了一整周。
+    ///
+    /// 改成：默认**失败**，只有显式设了 <c>ARIADNE_TESTS_ALLOW_MISSING_SIDECAR=1</c>
+    /// 才跳过。这样「我知道这里没后端、我接受没有这层覆盖」变成一个
+    /// 要有人主动写下来的决定，而不是一个谁都不会注意到的默认值。
+    ///
+    /// 返回 true 表示调用方应当跳过本条用例。
+    /// </summary>
+    internal static bool AllowSkipWhenSidecarMissing(string testHint)
+    {
+        var opted = Environment.GetEnvironmentVariable("ARIADNE_TESTS_ALLOW_MISSING_SIDECAR");
+        if (string.Equals(opted, "1", StringComparison.Ordinal)
+            || string.Equals(opted, "true", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        throw new InvalidOperationException(
+            $"找不到 sidecar 可执行文件，`{testHint}` 无法验证跨进程行为。\n"
+            + "先跑 `cargo build --bins`（产物是 target/debug/ariadne-ipc），"
+            + "或用 ARIADNE_BACKEND_IPC 指向它。\n"
+            + "⚠️ 这里刻意**失败而不是静默跳过**：xUnit 会把 `return` 记成通过，"
+            + "那样「没有覆盖」会伪装成「有覆盖」——U156 那个 P0"
+            + "（点运行什么都不会发生）就是这么在 12 条跨进程测试全绿的情况下溜过去的。\n"
+            + "确实要在无后端环境里跳过，请显式设 ARIADNE_TESTS_ALLOW_MISSING_SIDECAR=1。");
+    }
 }
