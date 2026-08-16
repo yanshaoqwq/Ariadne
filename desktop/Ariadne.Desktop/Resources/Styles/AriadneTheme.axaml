@@ -2147,6 +2147,7 @@
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="IsVisible" Value="False" />
   </Style>
+  <!-- NumericUpDown（作品页导入序号一处）内层就是 TextBox + ButtonSpinner：
        它的文字区自动继承上面的 TextBox 输入线，但**外层 ButtonSpinner 另有一圈盒子**，
        于是会出现「盒子里套一条线」。把外层压平，只留内层那条线。 -->
   <Style Selector="NumericUpDown">
