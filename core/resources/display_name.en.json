@@ -1294,5 +1294,8 @@
   "ui.settings.permissions.danger_tools": "Dangerous tools",
   "ui.settings.misc.track_non_sensitive_config": "Track non-sensitive config",
   "diagnostics.secrets.unprotected": "Provider credentials are stored in plain text on this machine; any program that can read the file can obtain your API keys.",
-  "diagnostics.secrets.locked": "Credential storage is locked, so saving keys will fail. Set a local master password, or explicitly accept plain-text storage."
+  "diagnostics.secrets.locked": "Credential storage is locked, so saving keys will fail. Set a local master password, or explicitly accept plain-text storage.",
+  "ui.run_log.message.workflow.run.succeeded": "Run succeeded",
+  "ui.run_log.message.workflow.run.stopped": "Run stopped",
+  "ui.run_log.message.workflow.run.paused": "Run paused, awaiting confirmation"
 }

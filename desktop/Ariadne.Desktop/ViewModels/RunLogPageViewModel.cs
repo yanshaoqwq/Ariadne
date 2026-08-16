@@ -671,7 +671,7 @@ public sealed class RunLogItemViewModel : ViewModelBase
         TimestampMs = entry.TimestampMs;
         Kind = entry.Kind;
         Level = entry.Level;
-        Message = entry.Message;
+        Message = LocalizeMessage(entry.Message, names);
         RunId = entry.RunId;
         NodeId = entry.NodeId;
         IsUnread = entry.Unread;
@@ -761,6 +761,39 @@ public sealed class RunLogItemViewModel : ViewModelBase
             field,
             value,
             () => ApplyFilterRequest?.Invoke(field, value)));
+    }
+
+    /// <summary>
+    /// 运行生命周期日志的 message 存的是**稳定 key**（`workflow.run.succeeded` 等），
+    /// 这里翻译成本地化文案。
+    ///
+    /// U158：后端记运行终态时刻意存 key 而非中文句子——core 不该硬编码展示文案
+    /// （与 `deliver_workflow_run_completion` 同一分层理由）。
+    ///
+    /// **两条性质合起来保证「非 key 的 message 不会被误翻」**，缺一不可：
+    /// 1. 查表用**带命名空间的前缀** `ui.run_log.message.{message}`。
+    ///    日志里绝大多数条目（worker 错误、Git 诊断）存的是**真实文本**，
+    ///    拼上这个前缀后不可能撞上任何真实存在的 key。
+    /// 2. 查不到时**回落到原文**而非显示 `[key]`。
+    ///
+    /// ⚠️ 这里曾多一道 `message.StartsWith("workflow.run.")` 白名单判定。
+    /// 变异测试证明它**没有行为效果**：摘掉后全部用例仍绿——因为上面两条已经
+    /// 覆盖了它要防的情况（前缀让碰撞不可能，回落让查不到无害）。
+    /// 按「变异后仍绿 ⇒ 那段代码本来就没有行为效果，该删并记录原因」删掉了，
+    /// 不留成一道看起来在防守、实际什么也没防的假防御。
+    ///
+    /// ⚠️ 但若将来把查表改成**无前缀**（直接 `names.Text(message)`），白名单就必须补回来——
+    /// 那时真实错误文本可能恰好等于某个已存在的 key（本仓库有 1200+ 个 key），
+    /// 会把可读的错误信息静默换成一句无关文案。
+    /// </summary>
+    private static string LocalizeMessage(string message, DisplayNameService names)
+    {
+        var localized = names.Text($"ui.run_log.message.{message}");
+        // 缺 key 时 Text 返回 `[key]`——那种情况下显示原始 message 比显示带方括号的
+        // 长串更可读，也能让人一眼看出「这里缺文案」。
+        return localized.StartsWith('[') && localized.EndsWith(']')
+            ? message
+            : localized;
     }
 
     private static string FormatTimestamp(long ms)

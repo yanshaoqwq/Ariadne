@@ -817,6 +817,124 @@ fn n8_project_owned_pack_receipt_has_no_recovery_authority() {
     assert!(!temp.path().join("workflows/default.json").exists());
 }
 
+/// U158（P1）：**成功的运行必须在「运行日志」页可见**。
+///
+/// 原缺陷：`UiRunLogStore::append` 全生产只有两个调用点、**都在失败路径上**
+/// （工作流 worker 出错 + Git 恢复诊断），**没有任何一处在「运行成功」时写日志**。
+/// 于是跑成功 10 次日志页空白、跑失败 1 次出现一条红色错误——
+/// 用户的结论是「这页只显示错误」或「日志功能坏了」。
+/// 连带侧边栏徽章只因失败而跳数，用户无法从徽章感知「后台跑完了」。
+///
+/// 数据不是没产生：同一次运行的 runtime events 有若干条，
+/// 只是产生在**另一张表**里而日志页不看那张表。
+///
+/// **判据取「日志页读得到这次运行」而不是「query_run_logs 不抛异常」**：
+/// 后者现在（缺陷版本下）就是绿的，一个恒返回空列表的实现照样能过。
+/// 这里走**真实运行**（IPC 入口 → 后台 worker → 终态）之后，
+/// 用**真实查询命令** `query_run_logs` 按 run_id 过滤，断言拿得到条目——
+/// 这条链路上任何一环没接线都会红。
+#[test]
+fn ipc_successful_run_is_visible_in_the_run_log_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    // 纯 start 节点：不调 LLM，因此能真的跑到 Succeeded。
+    // 用会调模型的节点会让用例变成「测连接失败」，那覆盖不到成功路径——
+    // 而本编号要防的恰恰是「成功路径不写日志」。
+    save_workflow_graph_impl(
+        temp.path(),
+        WorkflowGraphData {
+            workflow_id: "log-visible".to_owned(),
+            name: "Log Visible".to_owned(),
+            nodes: vec![CanvasNode {
+                id: "start-main".to_owned(),
+                r#type: "start".to_owned(),
+                label: Some("Start".to_owned()),
+                data: json!({ "work_dir": "main" }),
+                position: Value::Null,
+            }],
+            edges: Vec::new(),
+            metadata: Value::Null,
+            content_revision: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let state = AriadneAppState::new(
+        temp.path(),
+        app_state.path(),
+        Arc::new(MemorySecretStore::default()),
+    );
+
+    let response = handle_request(
+        &state,
+        IpcRequest {
+            method: "run_workflow".to_owned(),
+            params: json!({
+                "workflow_id": "log-visible",
+                "start_node_id": "start-main"
+            }),
+        },
+    );
+    assert!(response.ok, "{:?}", response.error);
+    let run_id = response
+        .data
+        .expect("run response must include data")["run_id"]
+        .as_str()
+        .expect("run_id should be a string")
+        .to_owned();
+
+    let store = SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
+    let run_state = wait_for_terminal_workflow_state(
+        &store,
+        &WorkflowId::from("log-visible"),
+        &RunId::from(run_id.clone()),
+    );
+    // 前置：这次运行**真的成功了**。若它其实失败了，下面拿到的日志会是失败路径
+    // 那条既有的错误日志，用例就变成了空测。
+    assert_eq!(
+        run_state.status,
+        RunStatus::Succeeded,
+        "本用例的前提是运行成功；失败则测不到「成功路径写日志」"
+    );
+
+    // 走真实查询命令，按 run_id 过滤——与日志页的做法一致。
+    let logs_response = handle_request(
+        &state,
+        IpcRequest {
+            method: "query_run_logs".to_owned(),
+            params: json!({ "filter": { "run_id": run_id } }),
+        },
+    );
+    assert!(logs_response.ok, "{:?}", logs_response.error);
+    let logs = logs_response
+        .data
+        .expect("query_run_logs must return data");
+    let entries = logs.as_array().expect("run logs must be an array");
+
+    assert!(
+        !entries.is_empty(),
+        "成功的运行必须在运行日志里留下条目，否则用户跑成功 10 次也只看到空白页（U158）"
+    );
+    // 内容判据：条目要能让用户认出「这是那次运行、结果是成功」。
+    // 只断言「非空」挡不住「写了一条空消息」——那在页面上是一行空白，等于没写。
+    let outcome = entries
+        .iter()
+        .find(|entry| entry["metadata"]["outcome"] == "succeeded")
+        .expect("必须有一条标记为 succeeded 的条目");
+    assert_eq!(outcome["run_id"], run_id);
+    assert_eq!(
+        outcome["level"], "info",
+        "成功不该以 error/warning 呈现——那正是「这页只显示错误」的观感来源"
+    );
+    assert!(
+        outcome["message"]
+            .as_str()
+            .is_some_and(|message| !message.trim().is_empty()),
+        "条目必须带非空消息，否则页面上是一行空白"
+    );
+}
+
 #[test]
 fn ipc_run_workflow_starts_background_run_for_tool_callers() {
     let temp = tempfile::tempdir().unwrap();

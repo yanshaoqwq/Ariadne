@@ -619,13 +619,19 @@ public sealed class DesktopUxHelpersTests
         var focusWithinSlice = theme.Substring(focusWithinBlock, Math.Min(280, theme.Length - focusWithinBlock));
         Assert.Contains("Ariadne.AccentPrimary", focusWithinSlice, StringComparison.Ordinal);
 
-        // Global TextBox:focus uses the accent border as the editable signal (shipped input language:
-        // borderless fill slot at rest, accent edge + slot fill on focus).
+        // 全局 TextBox:focus 仍以强调色作为「可编辑」信号，但载体已从「描边 + 品牌色填充槽」
+        // 换成**一条加粗的输入线**（U144）：填充槽整体拆掉，`Ariadne.InputFill` 不再出现在
+        // 聚焦样式里，强调色改由 LinearGradientBrush 的 GradientStop 承载。
+        //
+        // ⚠️ 切片宽度必须够到画刷内部：渐变写法让 `Ariadne.Color.AccentPrimary` 落在
+        // 选择器之后约 300 字符处，原先的 220 字符窗口连它都框不住——
+        // 「断言范围太窄」和「断言内容过期」是两种独立的失效，这里两者都发生过。
         var textBoxFocus = theme.IndexOf("TextBox:focus /template/ Border#PART_BorderElement", StringComparison.Ordinal);
         Assert.True(textBoxFocus >= 0, "expected explicit TextBox:focus style");
-        var textBoxFocusSlice = theme.Substring(textBoxFocus, Math.Min(220, theme.Length - textBoxFocus));
-        Assert.Contains("Ariadne.AccentPrimary", textBoxFocusSlice, StringComparison.Ordinal);
-        Assert.Contains("Ariadne.InputFill", textBoxFocusSlice, StringComparison.Ordinal);
+        var textBoxFocusSlice = theme.Substring(textBoxFocus, Math.Min(700, theme.Length - textBoxFocus));
+        Assert.Contains("Ariadne.Color.AccentPrimary", textBoxFocusSlice, StringComparison.Ordinal);
+        // 聚焦态**不得**铺回填充槽：铺底等于把 U144 刚拆掉的表单格子又装回来。
+        Assert.DoesNotContain("Ariadne.InputFill", textBoxFocusSlice, StringComparison.Ordinal);
         Assert.Contains("CaretBrush", theme, StringComparison.Ordinal);
     }
 

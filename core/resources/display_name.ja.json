@@ -1287,5 +1287,8 @@
   "ui.settings.permissions.danger_tools": "危険なツール",
   "ui.settings.misc.track_non_sensitive_config": "非機密設定を追跡",
   "diagnostics.secrets.unprotected": "プロバイダー資格情報がこのマシン上に平文で保存されています。ファイルを読めるプログラムは API キーを取得できます。",
-  "diagnostics.secrets.locked": "資格情報ストレージがロックされているため、キーの保存は失敗します。ローカルマスターパスワードを設定するか、平文保存を明示的に承諾してください。"
+  "diagnostics.secrets.locked": "資格情報ストレージがロックされているため、キーの保存は失敗します。ローカルマスターパスワードを設定するか、平文保存を明示的に承諾してください。",
+  "ui.run_log.message.workflow.run.succeeded": "実行に成功",
+  "ui.run_log.message.workflow.run.stopped": "実行を停止",
+  "ui.run_log.message.workflow.run.paused": "実行を一時停止（確認待ち）"
 }

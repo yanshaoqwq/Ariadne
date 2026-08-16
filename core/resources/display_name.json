@@ -1365,5 +1365,8 @@
   "ui.settings.permissions.path_chip.error_empty": "路径不能为空。",
   "ui.settings.permissions.path_chip.error_absolute": "必须是不含 .. 的绝对路径。",
   "ui.settings.permissions.path_chip.error_relative": "必须是项目内的相对路径，不能以 / 开头或含 .. 。",
-  "ui.settings.permissions.path_chip.error_duplicate": "这条路径已经在列表里了。"
+  "ui.settings.permissions.path_chip.error_duplicate": "这条路径已经在列表里了。",
+  "ui.run_log.message.workflow.run.succeeded": "运行成功",
+  "ui.run_log.message.workflow.run.stopped": "运行已停止",
+  "ui.run_log.message.workflow.run.paused": "运行已暂停，等待确认"
 }

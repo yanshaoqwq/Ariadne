@@ -34,6 +34,51 @@ public sealed class RunLogStateTests
         Assert.Equal("错误", item.LevelText);
     }
 
+    /// <summary>
+    /// U158：运行终态日志的 message 存的是**稳定 key**，前端要渲染成本地化文案。
+    ///
+    /// 后端刻意存 `workflow.run.succeeded` 而非中文句子——core 不该硬编码展示文案。
+    /// 若前端不翻译，用户在日志页看到的就是一行英文点分标识符。
+    /// </summary>
+    [Theory]
+    [InlineData("workflow.run.succeeded")]
+    [InlineData("workflow.run.stopped")]
+    [InlineData("workflow.run.paused")]
+    public void Item_LocalizesRunOutcomeMessageKeys(string messageKey)
+    {
+        var item = new RunLogItemViewModel(
+            new UiRunLogEntry("log-x", 1, "node", "info", messageKey, "default", "run-x", null, true),
+            DisplayNameService.LoadDefault());
+
+        Assert.NotEqual(messageKey, item.Message);
+        // 缺 key 时 DisplayNameService.Text 返回 `[key]`；那种情况下我们回落到原始 key，
+        // 所以这两条断言合起来才能证明「key 真的存在且被翻译了」。
+        Assert.DoesNotContain('[', item.Message);
+        Assert.False(string.IsNullOrWhiteSpace(item.Message));
+    }
+
+    /// <summary>
+    /// ⚠️ **白名单之外的 message 必须原样透出**（U158 的施工陷阱）。
+    ///
+    /// 日志里绝大多数条目（工作流 worker 错误、Git 恢复诊断）存的是**真实文本**而非 key。
+    /// 一律走 `DisplayNameService.Text` 会把它们变成 `[原文]`——
+    /// 那是把可读的错误信息变成噪音，比不翻译严重得多。
+    ///
+    /// 这条用例的存在本身就是判据：若有人「顺手」把翻译改成无条件查表，它立刻红。
+    /// </summary>
+    [Theory]
+    [InlineData("workflow_worker_failed: connection refused")]
+    [InlineData("git restore skipped: dirty work tree")]
+    [InlineData("节点 writer 执行失败")]
+    public void Item_LeavesPlainMessagesUntouched(string message)
+    {
+        var item = new RunLogItemViewModel(
+            new UiRunLogEntry("log-y", 1, "error", "error", message, "default", "run-y", null, true),
+            DisplayNameService.LoadDefault());
+
+        Assert.Equal(message, item.Message);
+    }
+
     [Fact]
     public async Task ClearFilters_ResetsEveryTextFilterAndRefreshesOnce()
     {

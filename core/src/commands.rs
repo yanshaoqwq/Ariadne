@@ -7042,6 +7042,37 @@ fn execute_workflow_runtime(
         .run_persisted(workflow, &mut executor, &store)
         .map_err(error_to_string)?;
 
+    // U158：把运行终态写进 UI 运行日志。
+    //
+    // 原缺陷：`UiRunLogStore::append` 全生产只有两个调用点、**都在失败路径上**
+    // ⇒ 跑成功 10 次日志页空白、跑失败 1 次出现一条红色错误，
+    // 用户的结论是「这页只显示错误」或「日志功能坏了」。
+    // 连带侧边栏徽章只因失败而跳数，用户无法从徽章感知「后台跑完了」。
+    //
+    // **为什么写在这里**：这是「执行一次工作流」的唯一收口（见上方注释），
+    // 两条启动路径与 Resume 后的终态都经过它 ⇒ 没有任何运行路径能绕过。
+    // 放进 runtime 内部则要让 runtime 依赖 UI 日志存储，破坏分层。
+    //
+    // **为什么只写运行级、不写节点级**：百万字项目一次运行的节点数成千上万，
+    // 逐节点写会把日志刷成噪音、把真正的错误挤出可见范围
+    // （`run_logs` 有 10 万条配额，节点级写入会让它按天轮转掉）。
+    // 节点粒度的追溯由 runtime events 承担，那是另一层的职责。
+    //
+    // 失败不改变运行结果：稿子已经写出来了，不能因为日志没记上就把成功的运行标成失败。
+    // 但也不静默 —— 打到 stderr 便于排查（与上方完成回报同一取舍）。
+    if let Err(log_error) = record_workflow_run_outcome_log(
+        project_root,
+        workflow.id.as_str(),
+        runtime.state.run_id.as_str(),
+        status,
+    ) {
+        eprintln!(
+            "[ariadne] failed to record run outcome log for {}/{}: {log_error}",
+            workflow.id.as_str(),
+            runtime.state.run_id.as_str()
+        );
+    }
+
     // 运行完成回报：项目空间 AI 启动的运行到达终态后，必须把结果送回发起对话。
     // 放在这里而不是 runtime 内部，是因为 runtime 不该依赖对话存储；
     // 这里是「执行一次工作流」的唯一收口，两条启动路径（直启 / 工具调用）
@@ -7060,6 +7091,69 @@ fn execute_workflow_runtime(
     }
 
     Ok(status)
+}
+
+/// 把运行终态写进 UI 运行日志（U158）。
+///
+/// **只在终态写、不在运行中写**：`Queued` / `Running` / `Stopping` 是过渡态，
+/// 写进日志会让同一次运行留下多条互相矛盾的记录（用户看到「运行中」下面还有一条
+/// 更早的「运行中」）。日志页要回答的是「这次跑完了没有、结果如何」。
+///
+/// `level` 按终态分级：成功 `Info`、失败 `Error`、停止/暂停 `Warning`。
+/// **失败态刻意不写**——失败路径上已有 `record_workflow_worker_failure` 那条
+/// （带 error code / context / recovery 建议，信息量比这里多），
+/// 两处都写会让同一次失败在日志页出现两条。这是 U158 报告点出的
+/// 「两来源去重」问题，在写入侧一次解决比在读取侧合并去重简单得多。
+fn record_workflow_run_outcome_log(
+    project_root: &Path,
+    workflow_id: &str,
+    run_id: &str,
+    status: crate::contracts::RunStatus,
+) -> CommandResult<()> {
+    use crate::contracts::RunStatus;
+
+    let (level, outcome_key) = match status {
+        RunStatus::Succeeded => (UiRunLogLevel::Info, "succeeded"),
+        RunStatus::Stopped => (UiRunLogLevel::Warning, "stopped"),
+        RunStatus::Paused => (UiRunLogLevel::Warning, "paused"),
+        // 失败由 record_workflow_worker_failure 单独记（信息更全），此处跳过避免重复。
+        RunStatus::Failed => return Ok(()),
+        // 过渡态不入日志。
+        RunStatus::Queued | RunStatus::Running | RunStatus::Stopping => return Ok(()),
+    };
+
+    let entry = UiRunLogEntry {
+        // log_id 含终态：同一次运行若因 Resume 二次到达终态（先 Paused 后 Succeeded），
+        // 两条都该留下——用户需要看到「它曾停在确认上、后来跑完了」这个过程。
+        // 若只用 run_id 作 id，第二次会覆盖第一次或撞主键。
+        log_id: format!("run-{outcome_key}-{run_id}"),
+        // 0 = 由存储层填当前时间（与既有两个 append 调用点一致）。
+        timestamp_ms: 0,
+        // 用 Node 类别：现有 UiRunLogKind 里没有「运行生命周期」这一项，
+        // 而 Node 是唯一与「工作流执行」同域的类别（Error/Diagnostic 语义是问题，
+        // Cost/Tool/Provider/Confirmation 各有所指）。
+        // ⚠️ 若将来加 `Run` 变体，前端过滤器的 kind 列表要同步（否则新类别被过滤掉后不可见）。
+        kind: UiRunLogKind::Node,
+        level,
+        // 文案由前端按 key 渲染；这里存稳定标识而非中文句子——
+        // core 不该硬编码展示文案（与 deliver_workflow_run_completion 同一分层理由）。
+        message: format!("workflow.run.{outcome_key}"),
+        workflow_id: Some(WorkflowId::from(workflow_id.to_owned())),
+        run_id: Some(RunId::from(run_id.to_owned())),
+        node_id: None,
+        unread: true,
+        metadata: json!({
+            "source": "workflow_run_outcome",
+            "outcome": outcome_key,
+        }),
+    };
+
+    // append 返回一个 UiToast（供「有新日志」提示用），这里刻意丢弃：
+    // 运行终态的通知走完成回报与侧边栏徽章，再弹一个 toast 是重复打扰。
+    UiRunLogStore::default_for_project(project_root)
+        .append(entry)
+        .map(|_toast| ())
+        .map_err(error_to_string)
 }
 
 /// 把运行完成回报写进发起对话。
