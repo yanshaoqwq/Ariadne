@@ -25,10 +25,21 @@ namespace Ariadne.Desktop.Tests;
 /// 所以这里钉的不是「不冲突」（那是推论），而是**推论依赖的三个前提**。
 /// 前提一变就红，并在失败信息里指出「要重新评估 U150 的手势冲突」。
 ///
-/// ⚠️ 这是**源码断言**，它不过 XAML 编译也不实体化视觉树——
-/// 本机 Avalonia headless 起不来，只能退到这一层。
+/// ⚠️ 这是**源码断言**，它不过 XAML 编译也不实体化视觉树。
 /// 代价要说清：它证明不了「运行时真的不冒泡」，只证明「代码仍是我实测时那个形状」。
-/// 真正的运行时验证要等能跑 headless 的环境。
+///
+/// ⚠️ **原注释写的「本机 Avalonia headless 起不来」是错的（2026-08-17 更正）。**
+/// 实测 `ReadingEditingParityTests` 6 条全绿、16 秒，且它真实
+/// `FindControl&lt;TextEditor&gt;("DocumentEditor")` 拿到活控件、量到 `TextView.DefaultLineHeight`
+/// ——headless 在本机是**部分**可用，不是全盘不可用。
+///
+/// 能不能起来取决于**实体化顺序**：可行配方见 `ReadingEditingParityTests.cs:322-336`
+/// ——**先**把 ViewModel 置成「树已加载 + 已打开文档 + 指定模式」，**再**挂进 `Window`，
+/// 这样首次布局的绑定求值就读到 `ShowDocumentChrome=true`，避开挂起路径。
+/// 反面记录在 `WorksReadModeScrollTests.cs:113`（顺序不对时 `TextEditor` 一进布局就挂住）。
+///
+/// ⇒ **本条的运行时版本是可以补的**，不必等别的环境。补的时候按上面那个顺序，
+/// 并断言「在提示词编辑框内 Ctrl+左键后节点未进入多选」这个用户可见结果。
 /// </summary>
 public sealed class ReferenceGestureRoutingTests
 {

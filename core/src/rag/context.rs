@@ -20,6 +20,13 @@ pub struct WritingContextAssembler<'a> {
     /// 没挂来源时，含引用的区块会 **fail-loud**（见 `expand_section_references`），
     /// 而不是把 `{{ref:...}}` 字面量送进 LLM 请求体。
     reference_documents: Option<&'a dyn ReferenceDocumentSource>,
+    /// 引用展开的长度与条数护栏，恒为 `Default`。
+    ///
+    /// U116：曾有一个 `with_reference_limits(limits)` builder 可覆盖它，但从落地起
+    /// 就零调用者——护栏值本身是**安全边界**（单条最大长度、单次最多条数），
+    /// 让调用方随意放宽等于把边界交给最不该决定它的那一层。
+    /// 真要按项目调，正确落点是配置层而不是 builder。所以直接留 `Default`，
+    /// 需要时从配置读，不要再加回那个 setter。
     reference_limits: ReferenceExpansionLimits,
 }
 
@@ -40,12 +47,6 @@ impl<'a> WritingContextAssembler<'a> {
     /// `ensure_path_under_root` 的那一层。
     pub fn with_reference_documents(mut self, documents: &'a dyn ReferenceDocumentSource) -> Self {
         self.reference_documents = Some(documents);
-        self
-    }
-
-    /// 覆盖引用展开的长度与条数护栏。
-    pub fn with_reference_limits(mut self, limits: ReferenceExpansionLimits) -> Self {
-        self.reference_limits = limits;
         self
     }
 
