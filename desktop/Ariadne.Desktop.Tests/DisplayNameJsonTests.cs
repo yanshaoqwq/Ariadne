@@ -90,6 +90,79 @@ public sealed class DisplayNameJsonTests
         }
     }
 
+    /// <summary>
+    /// 三份语言包的键集合差异必须**留下可执行的账**。
+    ///
+    /// ## 为什么不是「必须一致」
+    ///
+    /// 资源里有一条 `ui.i18n.release_scope` 写着「首发仅提供中文界面；英文/日文资源
+    /// 为占位，不作为已完成语言交付」——**缺键与这条已定决策一致，不是缺陷**。
+    /// 所以这条用例不要求键集合相等，那样它会在一个刻意的产品状态上长红，
+    /// 而长红的用例等于没有用例。
+    ///
+    /// ## 那它守什么
+    ///
+    /// 守**账目本身**。`DisplayNameService` 遇到缺键会静默回落中文：
+    /// 界面不报错、只是显示中文，所以缺键**没有任何自然发现途径**——
+    /// 不盯着就会一直缺，并且没人知道缺多少。
+    ///
+    /// 判据取「实际缺口数不超过已记录的基线」：
+    /// - 补了键 ⇒ 基线该往下调，用例提醒你调（否则基线会虚高，遮住新的缺失）
+    /// - **新增中文 key 却漏补 en/ja ⇒ 当场变红**，这是它真正要拦的形态
+    ///
+    /// 失败信息里**逐条列出缺哪些键**，不能只报数字：报数字的话下一个人还得
+    /// 自己写一遍这段脚本才能动手。
+    /// </summary>
+    [Fact]
+    public void DisplayNamePacks_KeyGapsStayWithinRecordedBaseline()
+    {
+        // 基线 = 2026-08-17 实测值。翻译推进时把这两个数往下改。
+        // 刻意写死而不是「读上次结果」：没有基线的漂移检测挡不住「一次多缺 50 个」。
+        const int EnglishBaseline = 79;
+        const int JapaneseBaseline = 86;
+
+        var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
+        var chinese = LoadPack(Path.Combine(resourceDir, "display_name.json"));
+
+        foreach (var (language, baseline) in new[] { ("en", EnglishBaseline), ("ja", JapaneseBaseline) })
+        {
+            var translated = LoadPack(Path.Combine(resourceDir, $"display_name.{language}.json"));
+            var missing = chinese.Keys
+                .Where(key => !translated.ContainsKey(key))
+                .OrderBy(key => key, StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.True(
+                missing.Length <= baseline,
+                $"{language} 语言包缺 {missing.Length} 个键，超过记录基线 {baseline}。"
+                + $"\n新增中文 key 时必须同步补 {language}——`DisplayNameService` 会静默回落中文，"
+                + $"界面不报错，所以漏补没有任何自然发现途径。"
+                + $"\n缺失的键（前 40 个）：\n  "
+                + string.Join("\n  ", missing.Take(40)));
+
+            // 反向：补完了就要把基线调下来，否则基线虚高会遮住后续新缺的键。
+            Assert.True(
+                missing.Length >= baseline - 20 || baseline == 0,
+                $"{language} 语言包只缺 {missing.Length} 个键，已明显低于基线 {baseline}。"
+                + $"这是好事，但请把本用例里的基线常量改成 {missing.Length}"
+                + "——基线虚高会让它挡不住下一次漏补。");
+        }
+    }
+
+    /// <summary>
+    /// 语言包必须是「键 → 字符串」的平坦映射。
+    ///
+    /// 单独抽出来是因为上面那条与下面几条都要用，而 `Deserialize` 失败时
+    /// 默认异常不会说是哪个文件。
+    /// </summary>
+    private static Dictionary<string, string> LoadPack(string path)
+    {
+        Assert.True(File.Exists(path), $"找不到语言包：{path}");
+        var map = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+        Assert.NotNull(map);
+        return map!;
+    }
+
     [Fact]
     public void EnglishOverlay_UiValuesDoNotContainAuthoringStubs()
     {
