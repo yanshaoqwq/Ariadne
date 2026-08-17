@@ -352,3 +352,118 @@ fn reference_escaping_the_document_root_fails_loudly() {
          应当标记为失效并继续，不该让整章写作停摆"
     );
 }
+
+// ════════════════════════════════════════════════════════
+// 与前端解析器的交叉验证（U150）
+// ════════════════════════════════════════════════════════
+
+/// **两侧共读同一份语料**，这是「C# 再实现一遍词法」这个决定的唯一防线。
+///
+/// U150 需要在每次按键后重扫占位符（高亮 + 折叠随输入实时更新），
+/// 走 IPC 意味着每敲一个字符跨一次进程边界，为一个纯词法判断付这个代价
+/// 不成比例。代价是**两份语法定义会漂移**——而 AGENTS.md 明确写着
+/// 「任何手抄的字段镜像都是这类缺陷的温床，优先收敛成单一来源」。
+///
+/// 收口办法：`core/tests/fixtures/content_reference_cases.json` 是**唯一**
+/// 期望值来源，Rust 侧（本用例）与 C# 侧（`ContentReferenceSyntaxTests`）
+/// 读同一个文件、断言同一批期望值。任一侧改了语法而没同步，红的是那一侧。
+///
+/// ⚠️ **刻意不比较偏移数值**：Rust 的 `TextRange` 是 UTF-8 byte 半开区间，
+/// C# string 索引是 UTF-16 code unit。正文是中文，同一个占位符在两种口径下
+/// 数值必然不同（一个汉字 3 byte vs 1 code unit）。
+/// 两侧共同断言的不变式是「**按各自偏移切出来的子串 == raw**」——
+/// 那才是偏移量真正要保证的性质，且在两种口径下都成立。
+#[test]
+fn shared_fixture_matches_the_rust_reference_lexer() {
+    use ariadne::rag::reference::{parse_content_references, ReferenceLocator};
+
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/content_reference_cases.json");
+    let raw = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|error| panic!("读不到共读语料 {fixture_path:?}：{error}"));
+    let fixture: Value = serde_json::from_str(&raw).expect("共读语料必须是合法 JSON");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("语料必须有 cases 数组");
+    assert!(!cases.is_empty(), "语料为空 ⇒ 这条交叉验证什么也没验");
+
+    for case in cases {
+        let name = case["name"].as_str().unwrap_or("(未命名)");
+        let text = case["text"].as_str().expect("每个 case 都要有 text");
+        let expected = case["expected"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: 缺 expected"));
+
+        let occurrences = parse_content_references(text);
+        assert_eq!(
+            occurrences.len(),
+            expected.len(),
+            "{name}: 扫出的占位符条数不符。文本={text:?}"
+        );
+
+        for (index, (actual, want)) in occurrences.iter().zip(expected).enumerate() {
+            let label = format!("{name} 第 {} 条", index + 1);
+
+            // 不变式：按偏移切出来的子串 == raw。两种偏移口径下都成立。
+            let start = usize::try_from(actual.placeholder.start).expect("偏移应可转 usize");
+            let end = usize::try_from(actual.placeholder.end).expect("偏移应可转 usize");
+            assert_eq!(
+                &text[start..end], actual.raw,
+                "{label}: 偏移切出来的子串与 raw 不一致 ⇒ 偏移算错了"
+            );
+            assert_eq!(
+                actual.raw,
+                want["raw"].as_str().unwrap_or_default(),
+                "{label}: raw 不符"
+            );
+
+            if want["expect_error"].as_bool().unwrap_or(false) {
+                // 只断言「都判为非法」这个结论，**不比错误文案**：
+                // 两侧措辞可以不同，重要的是判定一致。
+                assert!(
+                    actual.reference.is_none() && actual.parse_error.is_some(),
+                    "{label}: 语料标了 expect_error，Rust 侧却解析成功了"
+                );
+                continue;
+            }
+
+            let reference = actual
+                .reference
+                .as_ref()
+                .unwrap_or_else(|| panic!("{label}: 语料期望解析成功，实际失败：{:?}", actual.parse_error));
+            assert_eq!(
+                reference.document_id,
+                want["document_id"].as_str().unwrap_or_default(),
+                "{label}: document_id 不符"
+            );
+            assert_eq!(
+                reference.version.as_deref(),
+                want["version"].as_str(),
+                "{label}: version 不符"
+            );
+
+            let (kind, range_start, range_end) = match &reference.locator {
+                ReferenceLocator::Lines { start, end } => ("lines", *start, *end),
+                ReferenceLocator::Bytes(range) => ("bytes", range.start, range.end),
+                ReferenceLocator::Whole => ("whole", 0, 0),
+            };
+            assert_eq!(
+                kind,
+                want["locator"].as_str().unwrap_or_default(),
+                "{label}: locator 类别不符"
+            );
+            if kind != "whole" {
+                assert_eq!(
+                    range_start,
+                    want["range_start"].as_u64().unwrap_or_default(),
+                    "{label}: range_start 不符"
+                );
+                assert_eq!(
+                    range_end,
+                    want["range_end"].as_u64().unwrap_or_default(),
+                    "{label}: range_end 不符"
+                );
+            }
+        }
+    }
+}

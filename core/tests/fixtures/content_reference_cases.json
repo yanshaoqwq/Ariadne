@@ -1,0 +1,149 @@
+{
+  "_comment": [
+    "U150 共读语料：`{{ref:...}}` 词法的**唯一**期望值来源。",
+    "Rust 侧 core/tests/content_reference_expansion_contracts.rs 与 C# 侧",
+    "desktop/Ariadne.Desktop.Tests/ContentReferenceSyntaxTests.cs 都读这一份文件、",
+    "断言同一批期望值。任一侧改了语法而没同步，红的是那一侧的用例。",
+    "",
+    "为什么不比较偏移数值：Rust 的 TextRange 是 UTF-8 byte 半开区间，C# string 索引是",
+    "UTF-16 code unit。正文是中文，同一个占位符在两种口径下数值必然不同（一个汉字",
+    "3 byte vs 1 code unit）。两侧共同断言的不变式是「按各自偏移切出来的子串 == raw」",
+    "——那才是偏移量真正要保证的性质，且在两种口径下都成立。",
+    "",
+    "`expect_error: true` 表示该占位符语法非法。不比较错误文案本身（两侧措辞可以不同，",
+    "重要的是「都判为非法」这个结论一致）。"
+  ],
+  "cases": [
+    {
+      "name": "三种定位形态混排",
+      "text": "甲 {{ref:chapter-03.md#L2-L3}} 乙 {{ref:a.md@0-6}} 丙 {{ref:b.md}}",
+      "expected": [
+        { "raw": "{{ref:chapter-03.md#L2-L3}}", "document_id": "chapter-03.md", "locator": "lines", "range_start": 2, "range_end": 3 },
+        { "raw": "{{ref:a.md@0-6}}", "document_id": "a.md", "locator": "bytes", "range_start": 0, "range_end": 6 },
+        { "raw": "{{ref:b.md}}", "document_id": "b.md", "locator": "whole", "range_start": 0, "range_end": 0 }
+      ]
+    },
+    {
+      "name": "版本锚定不能与 byte 定位的 @ 混淆",
+      "text": "{{ref:chapter-03.md#L1-L2@v=abc123}}",
+      "expected": [
+        { "raw": "{{ref:chapter-03.md#L1-L2@v=abc123}}", "document_id": "chapter-03.md", "locator": "lines", "range_start": 1, "range_end": 2, "version": "abc123" }
+      ]
+    },
+    {
+      "name": "byte 定位同时带版本锚定",
+      "text": "{{ref:chapter-07.md@10-20@v=deadbeef}}",
+      "expected": [
+        { "raw": "{{ref:chapter-07.md@10-20@v=deadbeef}}", "document_id": "chapter-07.md", "locator": "bytes", "range_start": 10, "range_end": 20, "version": "deadbeef" }
+      ]
+    },
+    {
+      "name": "单行引用等价于起止同行",
+      "text": "{{ref:chapter-03.md#L120}}",
+      "expected": [
+        { "raw": "{{ref:chapter-03.md#L120}}", "document_id": "chapter-03.md", "locator": "lines", "range_start": 120, "range_end": 120 }
+      ]
+    },
+    {
+      "name": "中文前后文里的引用（偏移必须落在字符边界）",
+      "text": "回收玉佩伏笔。原文在此：{{ref:第三章.md#L5-L8}}语气要克制。",
+      "expected": [
+        { "raw": "{{ref:第三章.md#L5-L8}}", "document_id": "第三章.md", "locator": "lines", "range_start": 5, "range_end": 8 }
+      ]
+    },
+    {
+      "name": "行号 0 非法",
+      "text": "{{ref:a.md#L0-L3}}",
+      "expected": [
+        { "raw": "{{ref:a.md#L0-L3}}", "expect_error": true }
+      ]
+    },
+    {
+      "name": "起点大于终点非法",
+      "text": "{{ref:a.md#L9-L3}}",
+      "expected": [
+        { "raw": "{{ref:a.md#L9-L3}}", "expect_error": true }
+      ]
+    },
+    {
+      "name": "行号非数字非法",
+      "text": "{{ref:a.md#L甲-L乙}}",
+      "expected": [
+        { "raw": "{{ref:a.md#L甲-L乙}}", "expect_error": true }
+      ]
+    },
+    {
+      "name": "缺文档 ID 非法",
+      "text": "{{ref:#L1-L2}}",
+      "expected": [
+        { "raw": "{{ref:#L1-L2}}", "expect_error": true }
+      ]
+    },
+    {
+      "name": "空引用非法",
+      "text": "{{ref:}}",
+      "expected": [
+        { "raw": "{{ref:}}", "expect_error": true }
+      ]
+    },
+    {
+      "name": "版本锚定后为空非法",
+      "text": "{{ref:a.md#L1-L2@v=}}",
+      "expected": [
+        { "raw": "{{ref:a.md#L1-L2@v=}}", "expect_error": true }
+      ]
+    },
+    {
+      "name": "byte 区间缺短横非法",
+      "text": "{{ref:a.md@1024}}",
+      "expected": [
+        { "raw": "{{ref:a.md@1024}}", "expect_error": true }
+      ]
+    },
+    {
+      "name": "未闭合的占位符不记成 occurrence",
+      "text": "前文 {{ref:a.md#L1-L2 后面忘了闭合",
+      "expected": []
+    },
+    {
+      "name": "坏语法与好语法混排：坏的也要占位置",
+      "text": "{{ref:a.md#L0}} 与 {{ref:b.md#L4-L6}}",
+      "expected": [
+        { "raw": "{{ref:a.md#L0}}", "expect_error": true },
+        { "raw": "{{ref:b.md#L4-L6}}", "document_id": "b.md", "locator": "lines", "range_start": 4, "range_end": 6 }
+      ]
+    },
+    {
+      "name": "普通提示词变量不是正文引用",
+      "text": "请依据 {{本章大纲}} 与 {{var.章节标题}} 续写。",
+      "expected": []
+    },
+    {
+      "name": "无引用的纯文本",
+      "text": "你是一位极高水平的小说家。",
+      "expected": []
+    },
+    {
+      "name": "紧邻的两个引用",
+      "text": "{{ref:a.md#L1-L2}}{{ref:b.md#L3-L4}}",
+      "expected": [
+        { "raw": "{{ref:a.md#L1-L2}}", "document_id": "a.md", "locator": "lines", "range_start": 1, "range_end": 2 },
+        { "raw": "{{ref:b.md#L3-L4}}", "document_id": "b.md", "locator": "lines", "range_start": 3, "range_end": 4 }
+      ]
+    },
+    {
+      "name": "带目录的文档 id",
+      "text": "{{ref:planning/chapters/chapter-01.md#L10-L12}}",
+      "expected": [
+        { "raw": "{{ref:planning/chapters/chapter-01.md#L10-L12}}", "document_id": "planning/chapters/chapter-01.md", "locator": "lines", "range_start": 10, "range_end": 12 }
+      ]
+    },
+    {
+      "name": "定位串两侧空白要被吃掉",
+      "text": "{{ref:  a.md#L1 - L2  }}",
+      "expected": [
+        { "raw": "{{ref:  a.md#L1 - L2  }}", "document_id": "a.md", "locator": "lines", "range_start": 1, "range_end": 2 }
+      ]
+    }
+  ]
+}
