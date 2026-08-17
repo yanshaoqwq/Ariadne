@@ -469,12 +469,50 @@ impl AriadneAppState {
             .as_ref()
             .filter(|runtime| runtime.project_root() == canonical_root)
         {
-            return Ok(Arc::clone(runtime));
+            // ⚠️ 命中缓存还要看**配置是否仍匹配**，不能只比 project_root。
+            //
+            // 缺陷形态：用户在设置页配好 embedding Provider 后直接点运行，
+            // 报 `shared project retrieval runtime does not match workflow preflight
+            // configuration` 而运行被拒——因为这里按 root 命中了配置**变更前**建的 runtime，
+            // 而 `prepare_workflow_run_state` 那侧会拿它与新配置比对并 fail。
+            // **两处判据不一致**：这里「同一个项目就复用」，那边「配置必须一致」。
+            //
+            // 配置读取失败时保守视为不匹配（宁可重建一次，不要拿着可能过期的 runtime 跑）。
+            let config_matches = ConfigStore::with_app_state(&canonical_root, &self.app_state_root)
+                .load_or_create()
+                .ok()
+                .and_then(|config| runtime.matches_project_config(&config).ok())
+                .unwrap_or(false);
+            if config_matches {
+                return Ok(Arc::clone(runtime));
+            }
         }
-        let runtime = Arc::new(
-            ProjectRetrievalRuntime::open(&canonical_root, self.secret_store.as_ref())
+        // 走到这里有两种情况：没有缓存，或缓存的配置已过期。
+        // 后者把旧 runtime 作为 `previous` 传给 `from_config`——它会复用未变的
+        // 索引与 sidecar，只重建真正变了的那部分，避免每次改配置都重开 tantivy。
+        let previous_for_reuse = runtime_slot
+            .as_ref()
+            .filter(|runtime| runtime.project_root() == canonical_root)
+            .map(Arc::clone);
+        let runtime = match ConfigStore::with_app_state(&canonical_root, &self.app_state_root)
+            .load_or_create()
+        {
+            Ok(config) => Arc::new(
+                ProjectRetrievalRuntime::from_config(
+                    &canonical_root,
+                    self.secret_store.as_ref(),
+                    &config,
+                    previous_for_reuse.as_deref(),
+                )
                 .map_err(error_to_string)?,
-        );
+            ),
+            // 读不到项目配置时退回原路径：`open` 自己会去读配置，
+            // 报错信息比这里能给的更贴近真实原因。
+            Err(_) => Arc::new(
+                ProjectRetrievalRuntime::open(&canonical_root, self.secret_store.as_ref())
+                    .map_err(error_to_string)?,
+            ),
+        };
         let previous = runtime_slot.replace(Arc::clone(&runtime));
         drop(runtime_slot);
         drop(previous);
@@ -13171,7 +13209,22 @@ fn ensure_workflow_daily_budget_allows_call(
     // 为什么必须给个非零估算：若传 0，判定退化成「已经超了才拦」，
     // 那么最后一次把额度打穿的调用总是能过去，日预算实际比设定值多花一次。
     // 宁可保守一点提前拦，也不要让用户在超支之后才收到通知。
-    let projected = last_call_cost.unwrap_or(0.0).max(0.0);
+    //
+    // ⚠️ **今日首次调用同样需要非零估算**，这是上面那句话的必然推论，
+    // 但原实现漏了：`last_call_cost` 为 `None` 时 `unwrap_or(0.0)` 又把
+    // projected 打回 0 ⇒ 判定重新退化成「已经超了才拦」，而首次调用时
+    // `spent_today` 恒为 0、永不超 ⇒ **今日第一次调用无条件放行**。
+    // 后果是用户把日预算设成极小值（如 $0.000001）时门禁形同不存在：
+    // 第一次调用照发，钱花掉之后才开始拦。
+    //
+    // 用 `MIN_PROJECTED_CALL_COST_USD` 作首次调用的下限估算：它比任何真实
+    // LLM 调用都便宜（$0.0001 ≈ 千分之一美分），所以对正常预算没有任何影响；
+    // 但它是**非零**的，于是「预算比一次调用还小」这种设定能在**发出请求之前**
+    // 就被拦住——那正是用户设极小预算想要的效果。
+    const MIN_PROJECTED_CALL_COST_USD: f64 = 0.000_1;
+    let projected = last_call_cost
+        .unwrap_or(MIN_PROJECTED_CALL_COST_USD)
+        .max(MIN_PROJECTED_CALL_COST_USD);
     let decision = crate::costs::evaluate_budget(
         limits,
         auto_mode,

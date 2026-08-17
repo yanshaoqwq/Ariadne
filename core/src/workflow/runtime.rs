@@ -2472,6 +2472,33 @@ impl WorkflowRuntime {
                     "recovery_suggestion": error_state.recovery_suggestion,
                 }),
             );
+            // 把失败落到 `state.failure`：这是**前端唯一会显示的字段**。
+            //
+            // 缺陷形态：此前节点失败只推事件、不设 failure，而 `state.failure`
+            // 在整个 runtime 里零写入点（只有 `commands.rs` 的
+            // `mark_workflow_run_failed_in_store` 会写，那是外部恢复路径）。
+            // 于是节点失败后运行态是 `status=failed` + `failure=None` ⇒
+            // **用户在 UI 上只看到一个红点，不知道为什么失败**。
+            // 实测触发场景：日预算设成极小值 → 门禁挡住调用 → 红点无说明。
+            //
+            // 只在**首次**写入：一次运行可能有多个节点失败，第一个才是根因，
+            // 后续的多是级联结果；覆盖会把根因换成级联症状。
+            if self.state.failure.is_none() {
+                self.state.failure = Some(WorkflowRunFailure {
+                    // 用 serde 的 snake_case 表示（`budget` / `permission` / …）：
+                    // 它已经是这个枚举写进 runtime.db 的稳定形式，
+                    // 前端按它做分类展示时与事件 metadata 里的 `kind` 一致。
+                    // 转不出来时退回 `unknown`——`failure` 有值比字段缺失有用得多。
+                    code: serde_json::to_value(error_state.kind)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    // stage 取节点 id：用户在画布上按它定位到具体哪个方块。
+                    stage: node_id.as_str().to_owned(),
+                    message: error_state.message.clone(),
+                    recovery_suggestion: error_state.recovery_suggestion.clone(),
+                });
+            }
         }
         false
     }
