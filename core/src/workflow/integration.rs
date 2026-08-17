@@ -91,6 +91,21 @@ pub struct WorkflowWritingToolOptions<'a> {
     /// `document_id` 必须是**绝对**路径：`DocumentService::apply_patch` 直接
     /// `PathBuf::from(patch.document_id)`，而路径沙箱对相对路径一律拒绝。
     pub patch_session: Option<crate::rag::line_patch::PatchSession>,
+    /// 13-B：正文引用 `{{ref:文档ID#L起始-L结束}}` 的展开来源。
+    ///
+    /// 大纲类文本（`outline` / `details` / `global_outline` …）里可以写引用，
+    /// 装配层会**就地展开成原文**再交给模型——`{{ref:...}}` 字面量进请求体是安全缺口
+    /// （Auto Mode 的审计 LLM 会在「审的是占位符」的前提下给出虚假通过）。
+    ///
+    /// **为什么是一张预读好的表、而不是一个文件系统句柄**：
+    /// 引用可指向**任意** document_id（不限当前节点那一篇），读盘就需要项目根
+    /// 与路径沙箱（`ensure_path_under_root`）。那两样都在 `commands` 层，
+    /// **沙箱责任必须留在已经持有项目根的那一层**——把句柄传进 `rag` 会让
+    /// 越权检查散落到一个不该管这件事的模块里。
+    ///
+    /// 为 `None`（或表里没有被引文档）时，展开器把占位符换成可诊断标记并发警告，
+    /// 不静默放过、也不 panic。
+    pub reference_documents: Option<crate::rag::reference::InMemoryReferenceDocuments>,
 }
 
 struct RoutedExternalNodeHandler {
@@ -1158,6 +1173,25 @@ fn render_writing_node_prompt(
     let Some(writing) = writing else {
         return Ok(prompt.to_owned());
     };
+    // 13-B：正文引用先展开，**必须在模板渲染之前**。
+    //
+    // 引用的真实来源是**上游 Planner 的输出**：它经 `resolve_llm_input_prompt`
+    // 拼进这里收到的 `prompt`（格式 `{template}\n\n{input}`），
+    // 而不是任何 context section——`WritingContextRequest` 的 `outline` / `details`
+    // 等字段在生产里全是 `None`（见下方装配处），所以 13B 提案里
+    // 「在 writer_sections 的 outline 段就地替换」那条路在当前实现下走不通。
+    //
+    // ⚠️ **顺序不能反**：`render_prompt_template` 对未知变量 fail-loud，
+    // 而它不认识 `ref:` 前缀（`resolve_variable` 里没有这一支）⇒
+    // 先渲染会让每一条引用都变成「变量无法解析」，节点直接失败。
+    // 先展开则把 `{{ref:...}}` 换成原文，渲染器再也看不到它。
+    //
+    // ⚠️ 装配层的 `expand_section_references` 收口管的是 **context section**，
+    // 与这里互补而非重复：那条防的是「大纲值里带引用」（将来上游数据边接通后会有），
+    // 这条防的是「上游正文里带引用」（现在就有）。两处都必要。
+    let prompt = expand_prompt_content_references(prompt, writing)?;
+    let prompt = prompt.as_str();
+
     // 没有占位符的模板不必装配上下文，省一次知识库遍历。
     if !prompt.contains("{{") {
         return Ok(prompt.to_owned());
@@ -1203,14 +1237,74 @@ fn render_writing_node_prompt(
         context_request.current_draft_text = Some(document.text.to_owned());
     }
 
-    let bundle = crate::rag::context::WritingContextAssembler::new(writing.knowledge)
-        .assemble(context_request)?;
+    // 13-B：挂上正文引用来源，让大纲里的 `{{ref:...}}` 就地展开成原文。
+    //
+    // 没挂来源时装配器对含引用的区块 **fail-loud**（不是静默放过）——
+    // `{{ref:...}}` 字面量进 LLM 请求体是安全缺口：Auto Mode 的审计 LLM
+    // 会在「审的是占位符」的前提下给出虚假通过。
+    // 但**没有引用**的项目完全不受影响：`expand_section_references` 先用
+    // `contains_content_reference` 便宜地筛一遍，不含引用的区块直接跳过。
+    let assembler = crate::rag::context::WritingContextAssembler::new(writing.knowledge);
+    let assembler = match writing.reference_documents.as_ref() {
+        Some(documents) => assembler.with_reference_documents(documents),
+        None => assembler,
+    };
+    let bundle = assembler.assemble(context_request)?;
     let context = crate::rag::prompt_template::PromptTemplateContext::from_bundle(
         writing.agent,
         &prompts,
         &bundle,
     )?;
     crate::rag::prompt_template::render_prompt_template(prompt, &context)
+}
+
+/// 13-B：把 prompt 里的正文引用 `{{ref:文档ID#L起始-L结束}}` 展开成原文。
+///
+/// **没有引用就原样返回**（`contains_content_reference` 是一次便宜的 substring 检查），
+/// 所以不写引用的项目完全不受影响、也不会因为没挂来源而失败。
+///
+/// **有引用但没挂来源 ⇒ fail-loud。** 三个候选做法里只有这个是对的：
+/// - 原样放过 → `{{ref:...}}` 进 LLM 请求体，随后 `render_prompt_template`
+///   会把它当未知变量报错（信息含混：用户以为是自己拼错了变量名），
+///   更糟的是若将来渲染器放宽，占位符会直接进请求体，
+///   而 Auto Mode 的审计 LLM 会在「审的是占位符」的前提下给出虚假通过；
+/// - 静默删掉 → 写作者以为那条指示后面本来就没有原文，人也看不出少了什么；
+/// - fail-loud → 报错点名缺什么，用户当场知道该配什么。
+fn expand_prompt_content_references(
+    prompt: &str,
+    writing: &WorkflowWritingToolOptions<'_>,
+) -> CoreResult<String> {
+    if !crate::rag::reference::contains_content_reference(prompt) {
+        return Ok(prompt.to_owned());
+    }
+
+    let Some(documents) = writing.reference_documents.as_ref() else {
+        return Err(CoreError::validation(
+            "writing node prompt contains {{ref:...}} content references but no reference \
+             document source is available; the upstream node must be re-run so the referenced \
+             chapters get preloaded, or remove the references from the outline",
+        ));
+    };
+
+    let expansion = crate::rag::reference::expand_content_references(
+        prompt,
+        documents,
+        &crate::rag::reference::ReferenceExpansionLimits::default(),
+    )?;
+
+    // 展开后置条件：不能再有 `{{ref:` 残留。
+    //
+    // 展开器内部有若干「无法展开」的分支（文档缺失、越权、超条数、嵌套），
+    // 每一条都必须把占位符换成可诊断标记；哪天有人新加一条分支忘了替换，
+    // 占位符就会一路进到请求体。在这里 fail-loud 比在生产里静默批准好得多。
+    if crate::rag::reference::contains_content_reference(&expansion.text) {
+        return Err(CoreError::validation(
+            "writing node prompt still contains {{ref:...}} after expansion; refusing to hand \
+             unexpanded content references to a model",
+        ));
+    }
+
+    Ok(expansion.text)
 }
 
 /// U117：把确认项挂到节点输出上；非写作节点原样放过。

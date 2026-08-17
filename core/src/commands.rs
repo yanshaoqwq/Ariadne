@@ -6919,6 +6919,10 @@ fn execute_workflow_runtime(
                                             preauthorized_budget_usd: auto_mode_config
                                                 .preauthorized_budget_usd,
                                         },
+                                        // 13-B：预读好的被引文档表；没有引用时为 None。
+                                        reference_documents: context
+                                            .reference_documents
+                                            .clone(),
                                         // U108 阶段 3：不传会话 = 写作产出不落盘。
                                         patch_session: context
                                             .document
@@ -13054,6 +13058,12 @@ struct WorkflowWritingContext {
     /// U114：上下文装配的归属键，来自节点 config 的 `chapter_id`。
     /// 未声明时不装配上下文（提示词里若有占位符会 fail-loud）。
     chapter_id: Option<String>,
+    /// 13-B：本次执行可能被 `{{ref:...}}` 引到的文档，已预读进内存表。
+    ///
+    /// **在这一层预读而不是把文件系统句柄传进 `rag`**：解析 document_id 要项目文档根
+    /// 与路径沙箱（`ensure_path_under_root`），那两样都在本层；
+    /// 沙箱责任必须留在已经持有项目根的那一层。
+    reference_documents: Option<crate::rag::reference::InMemoryReferenceDocuments>,
 }
 
 struct WorkflowWritingDocument {
@@ -13206,12 +13216,18 @@ fn load_workflow_writing_context(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    // 13-B：预读本次可能被引用的文档。**在 document_id 分支之前做**——
+    // 引用来自上游 Planner 的输出，与本节点是否声明了可写文档无关
+    // （Detail/Critic 这些只读 agent 同样可能收到带引用的大纲）。
+    let reference_documents = preload_referenced_documents(project_root, document_root, request)?;
+
     let Some(document_id) = document_id else {
         return Ok(WorkflowWritingContext {
             agent,
             knowledge,
             chapter_id,
             document: None,
+            reference_documents,
         });
     };
 
@@ -13251,6 +13267,7 @@ fn load_workflow_writing_context(
         agent,
         knowledge,
         chapter_id,
+        reference_documents,
         document: Some(WorkflowWritingDocument {
             document_id: document_id.to_owned(),
             base_version: content.metadata.version,
@@ -13259,6 +13276,97 @@ fn load_workflow_writing_context(
             patch_session,
         }),
     })
+}
+
+/// 13-B：预读本次执行里 `{{ref:...}}` 指向的全部文档。
+///
+/// **扫描源是「节点配置的 prompt_template」+「上游数据边送来的文本」**：
+/// 引用的真实来源是上游 Planner 的输出，它经 `resolve_llm_input_prompt`
+/// 拼进最终 prompt。两处都扫，因为大纲既可能写死在模板里（用户手写），
+/// 也可能由上游节点生成（Planner 产出）。
+///
+/// **为什么在这一层读盘**：解析 document_id 需要项目文档根与路径沙箱，
+/// 两者都在本层。把文件系统句柄传进 `rag` 会让越权检查散落到一个
+/// 不该管这件事的模块里——沙箱责任留在已经持有项目根的那一层。
+///
+/// **越权与缺失的区别必须保留**：路径逃出文档根 ⇒ 返回 `Err`（安全事件，
+/// 整次执行 fail-loud）；文档不存在 ⇒ 不入表（展开器记成引用失效并继续，
+/// 那只是大纲写错了章节名）。把越权降级成「文档不存在」会掩盖真实的安全事件。
+fn preload_referenced_documents(
+    project_root: &Path,
+    document_root: &Path,
+    request: &crate::workflow::WorkflowNodeExecutionRequest,
+) -> CoreResult<Option<crate::rag::reference::InMemoryReferenceDocuments>> {
+    use crate::rag::reference::{
+        contains_content_reference, parse_content_references, InMemoryReferenceDocuments,
+        ReferenceDocument,
+    };
+
+    // 把可能带引用的文本都收集起来：节点模板 + 全部上游输入。
+    // 上游输入不预设 alias（`prompt` / `input` / `text` 之外还可能是自定义名），
+    // 全扫一遍最省心，代价只是几次 substring 检查。
+    let mut sources: Vec<String> = Vec::new();
+    if let Ok(config) =
+        serde_json::from_value::<crate::workflow::WorkflowLlmNodeConfig>(request.config.clone())
+    {
+        if let Some(template) = config.prompt_template {
+            sources.push(template);
+        }
+    }
+    // 上游文本走 `PortValue::Inline`（引用式数据流下大文本用 DocumentRef，
+    // 但 Planner 的大纲是内联字符串——见 `input_text` 的同款处理）。
+    for value in request.inputs.values() {
+        if let crate::contracts::PortValue::Inline { value } = value {
+            if let Some(text) = value.as_str() {
+                sources.push(text.to_owned());
+            }
+        }
+    }
+
+    if !sources.iter().any(|text| contains_content_reference(text)) {
+        return Ok(None);
+    }
+
+    let documents = document_service_with_artifacts(
+        document_root,
+        project_root.join(".runtime").join("artifacts"),
+        None,
+    );
+    let mut table = InMemoryReferenceDocuments::new();
+    let mut loaded: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for text in &sources {
+        for occurrence in parse_content_references(text) {
+            // 语法非法的引用不预读：展开器会把它换成可诊断标记并发警告。
+            let Some(reference) = occurrence.reference else {
+                continue;
+            };
+            if !loaded.insert(reference.document_id.clone()) {
+                continue;
+            }
+
+            let path = document_root.join(&reference.document_id);
+            // 越权是安全事件 ⇒ fail-loud，不降级成「文档不存在」。
+            crate::contracts::ensure_path_under_root(document_root, &path)?;
+
+            // 读不到就不入表：可能是大纲写错了章节名，属正常的引用失效，
+            // 由展开器记成警告并继续处理其余引用。
+            let Ok(content) = documents.open_document(crate::documents::DocumentReadRequest {
+                path,
+                format: None,
+            }) else {
+                continue;
+            };
+
+            table.insert(
+                reference.document_id.clone(),
+                ReferenceDocument::from_text(content.content)
+                    .with_label(reference.document_id.clone()),
+            );
+        }
+    }
+
+    Ok(Some(table))
 }
 
 /// U108：agent → 可写文档作用域，与 `创作总结机制` 中的分工一致。

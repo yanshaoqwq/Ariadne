@@ -398,12 +398,12 @@ impl WritingDocumentScope {
 /// 返回行号 patch 工具被允许写入的文档作用域；非行号工具返回 None。
 fn line_tool_required_scope(tool_name: &str) -> Option<WritingDocumentScope> {
     match tool_name {
-        TOOL_OUTLINER_INSERT_LINES
-        | TOOL_OUTLINER_REPLACE_LINES
-        | TOOL_OUTLINER_REWRITE_FILE => Some(WritingDocumentScope::GlobalOutline),
-        TOOL_DESIGNER_INSERT_LINES
-        | TOOL_DESIGNER_REPLACE_LINES
-        | TOOL_DESIGNER_REWRITE_FILE => Some(WritingDocumentScope::StageOutline),
+        TOOL_OUTLINER_INSERT_LINES | TOOL_OUTLINER_REPLACE_LINES | TOOL_OUTLINER_REWRITE_FILE => {
+            Some(WritingDocumentScope::GlobalOutline)
+        }
+        TOOL_DESIGNER_INSERT_LINES | TOOL_DESIGNER_REPLACE_LINES | TOOL_DESIGNER_REWRITE_FILE => {
+            Some(WritingDocumentScope::StageOutline)
+        }
         TOOL_PLANNER_INSERT_LINES | TOOL_PLANNER_REPLACE_LINES | TOOL_PLANNER_REWRITE_FILE => {
             Some(WritingDocumentScope::ChapterOutline)
         }
@@ -531,6 +531,8 @@ impl<'a> WritingToolExecutor<'a> {
         if include_text {
             self.attach_document_text(&mut response.results)?;
         }
+        // 13-B：引用坐标一律附上，与是否回填正文无关（理由见 attach_reference_syntax）。
+        Self::attach_reference_syntax(&mut response.results)?;
         Ok(ToolExecutionOutput {
             value: serde_json::to_value(&response)?,
             audit_metadata: json!({
@@ -769,6 +771,12 @@ impl<'a> WritingToolExecutor<'a> {
     }
 
     /// 对 find 结果按 SourceSpan 回填正文；只有显式 include_text 时调用。
+    ///
+    /// 13-B：同时给每条带坐标的结果附上可直接照抄的 `{{ref:...}}` 字面量。
+    /// Planner 提示词承诺「结果里的出处坐标可以直接写进大纲的引用」——那句话必须
+    /// 有对应产物，否则模型只能自己拼 document_id 与 offset，而凭空构造坐标正是
+    /// 它在这个语法上最容易出错的地方。**回填与否都要给**：坐标是轻量的，
+    /// 不该逼模型为了拿一个引用坐标而先把整段正文读进上下文。
     fn attach_document_text(&self, results: &mut [FindResult]) -> CoreResult<()> {
         let Some(document) = self.current_document else {
             return Ok(());
@@ -781,16 +789,30 @@ impl<'a> WritingToolExecutor<'a> {
             else {
                 continue;
             };
-            let start = usize::try_from(span.range.start)
-                .map_err(|_| CoreError::validation("source span start exceeds usize range"))?;
-            let end = usize::try_from(span.range.end)
-                .map_err(|_| CoreError::validation("source span end exceeds usize range"))?;
-            let Some(text) = document.text.get(start..end) else {
-                return Err(CoreError::validation(
-                    "source span is not aligned to UTF-8 character boundaries",
-                ));
-            };
+            // UTF-8 边界检查收口在 `reference::text_for_source_span`，与引用展开
+            // 共用一份实现；各写一遍早晚有一处忘了检查边界。
+            let text = crate::rag::reference::text_for_source_span(document.text, span)?;
             result.text = Some(text.to_owned());
+        }
+        Ok(())
+    }
+
+    /// 13-B：给每条带坐标的 find 结果补上可直接照抄的引用语法。
+    fn attach_reference_syntax(results: &mut [FindResult]) -> CoreResult<()> {
+        for result in results {
+            let Some(span) = result.spans.first() else {
+                continue;
+            };
+            let syntax = crate::rag::reference::reference_syntax_for_span(span);
+            let Some(object) = result.metadata.as_object_mut() else {
+                // metadata 缺省是 `Value::Null`，此时新建一个对象；不覆盖非对象值，
+                // 那会丢掉调用方已放进去的信息。
+                if result.metadata.is_null() {
+                    result.metadata = json!({ "content_reference": syntax });
+                }
+                continue;
+            };
+            object.insert("content_reference".to_owned(), json!(syntax));
         }
         Ok(())
     }
@@ -911,9 +933,7 @@ impl ToolExecutor for WritingToolExecutor<'_> {
             | TOOL_DESIGNER_REWRITE_FILE
             | TOOL_PLANNER_REWRITE_FILE
             | TOOL_WRITER_REWRITE_FILE
-            | TOOL_POLISHER_REWRITE_FILE => {
-                self.execute_rewrite_file(&call.name, &call.arguments)
-            }
+            | TOOL_POLISHER_REWRITE_FILE => self.execute_rewrite_file(&call.name, &call.arguments),
             TOOL_OUTLINER_WEB_SEARCH
             | TOOL_DESIGNER_WEB_SEARCH
             | TOOL_PLANNER_WEB_SEARCH

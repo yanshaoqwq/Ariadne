@@ -473,6 +473,71 @@ fn node_prompt_template_renders_inline_context_and_alias_inputs() {
     assert!(edited.contains("chapter-1"));
 }
 
+/// 验证**全部九种** agent 的默认模板都能渲染通过。
+///
+/// 上一条只渲染 writer，于是 U149 把 prudent 模板的 `{{意见者输出}}` 改名成
+/// `{{评审意见}}` 却漏改渲染器 `known_section_aliases` 时，测试**全绿而功能是断的**——
+/// 「拖一个审稿裁断节点到画布上，运行必报变量无法解析」，因为
+/// `render_prompt_template` 对未知变量是 fail-loud 的。
+///
+/// 判据刻意取「**每一种** agent 的产品自带模板都渲染成功」而不是
+/// 「渲染器认识某几个别名」：占位符改名是渲染器契约的一半，
+/// 而哪一半会被漏掉事先无从预测，只有全覆盖才拦得住下一次。
+#[test]
+fn every_agent_default_template_renders_without_unresolved_variables() {
+    let prompts = load_prompt_resources().unwrap();
+    let kb = MemoryWritingKnowledgeBase::new();
+    let assembler = WritingContextAssembler::new(&kb);
+
+    for agent in WritingAgentKind::ALL {
+        let template = prompts
+            .get(agent.default_template_key())
+            .map(|resource| resource.prompt.clone())
+            .unwrap_or_else(|| panic!("{agent:?} 缺默认模板资源"));
+
+        // 上下文一律给满：本用例要排除的是「占位符解析不了」，
+        // 而不是「某个区块恰好没数据」——后者是另一条性质，混在一起会让失败信息含混。
+        let bundle = assembler
+            .assemble(WritingContextRequest {
+                agent,
+                chapter_id: "chapter-1".to_owned(),
+                stage_id: Some("stage-1".to_owned()),
+                user_intent: Some("测试意图".to_owned()),
+                global_outline: Some("全局纲领".to_owned()),
+                stage_outline: Some("阶段纲领".to_owned()),
+                previous_stage_outline: Some("上一阶段纲领".to_owned()),
+                chapter_summaries: Some("前情摘要".to_owned()),
+                outline: Some("本章大纲".to_owned()),
+                details: Some("本章细节".to_owned()),
+                previous_chapter_text: Some("上一章原文".to_owned()),
+                current_draft_text: Some("当前稿件正文".to_owned()),
+                target_text: Some("待评价文本".to_owned()),
+                critic_outputs: Some("评审意见正文".to_owned()),
+                revision_context: Some("返修上下文".to_owned()),
+                template_inputs: std::collections::BTreeMap::new(),
+                metadata: Value::Null,
+            })
+            .unwrap_or_else(|error| panic!("{agent:?} 组装上下文失败：{error}"));
+
+        let context = PromptTemplateContext::from_bundle(agent, &prompts, &bundle)
+            .unwrap_or_else(|error| panic!("{agent:?} 构造模板上下文失败：{error}"));
+
+        let rendered = render_prompt_template(&template, &context).unwrap_or_else(|error| {
+            panic!(
+                "{agent:?} 的默认模板渲染失败：{error}\n\
+                 占位符改名必须同步 prompt_template.rs 的 known_section_aliases，\
+                 且旧名要保留为兼容别名（存量工作流存的是渲染前的模板字符串）"
+            )
+        });
+
+        // 渲染结果必须真的把区块内容填进去了，而不是恰好模板里一个占位符都没有。
+        assert!(
+            !rendered.trim().is_empty(),
+            "{agent:?} 渲染结果为空"
+        );
+    }
+}
+
 /// 验证缺失变量会返回可诊断错误，不会静默替换为空字符串。
 #[test]
 fn prompt_template_rejects_unresolved_variables() {

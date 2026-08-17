@@ -7,22 +7,52 @@ use crate::rag::models::{
     RegisterContent, RegisteredChangeStatus, WritingAgentKind, WritingContextBundle,
     WritingContextRequest, WritingContextSection,
 };
+use crate::rag::reference::{
+    contains_content_reference, expand_content_references, ReferenceDocumentSource,
+    ReferenceExpansionLimits, ReferenceWarning,
+};
 
 /// 写作节点上下文组装器；一个节点就是一个 agent。
 pub struct WritingContextAssembler<'a> {
     knowledge: &'a MemoryWritingKnowledgeBase,
+    /// 13-B：正文引用 `{{ref:...}}` 的文档来源。
+    ///
+    /// 没挂来源时，含引用的区块会 **fail-loud**（见 `expand_section_references`），
+    /// 而不是把 `{{ref:...}}` 字面量送进 LLM 请求体。
+    reference_documents: Option<&'a dyn ReferenceDocumentSource>,
+    reference_limits: ReferenceExpansionLimits,
 }
 
 impl<'a> WritingContextAssembler<'a> {
     /// 创建上下文组装器。
     pub fn new(knowledge: &'a MemoryWritingKnowledgeBase) -> Self {
-        Self { knowledge }
+        Self {
+            knowledge,
+            reference_documents: None,
+            reference_limits: ReferenceExpansionLimits::default(),
+        }
+    }
+
+    /// 13-B：挂上正文引用的文档来源，使大纲里的 `{{ref:...}}` 就地展开为原文。
+    ///
+    /// 由调用方注入而非组装器自己读盘：解析 `document_id` 需要项目根、路径沙箱与
+    /// 章节索引，那些都在 `documents` / `commands` 层，沙箱责任应留在已经持有
+    /// `ensure_path_under_root` 的那一层。
+    pub fn with_reference_documents(mut self, documents: &'a dyn ReferenceDocumentSource) -> Self {
+        self.reference_documents = Some(documents);
+        self
+    }
+
+    /// 覆盖引用展开的长度与条数护栏。
+    pub fn with_reference_limits(mut self, limits: ReferenceExpansionLimits) -> Self {
+        self.reference_limits = limits;
+        self
     }
 
     /// 按节点/agent 类型组装上下文。
     pub fn assemble(&self, request: WritingContextRequest) -> CoreResult<WritingContextBundle> {
         validate_chapter_id(&request.chapter_id)?;
-        let sections = match request.agent {
+        let mut sections = match request.agent {
             WritingAgentKind::Outliner => self.outliner_sections(&request)?,
             WritingAgentKind::Designer => self.designer_sections(&request)?,
             WritingAgentKind::Planner => self.planner_sections(&request)?,
@@ -34,12 +64,85 @@ impl<'a> WritingContextAssembler<'a> {
             WritingAgentKind::Summarizer => self.summarizer_sections(&request)?,
         };
 
+        // 13-B 约束 ③：展开在**唯一一处**收口，就在全部区块装配完之后。
+        //
+        // 刻意不放进各 `*_sections`：那样每新增一个 agent 就多一次「记得展开」的
+        // 机会，而漏掉的那一条就是一个会把 `{{ref:...}}` 送进 LLM 请求体的安全
+        // 缺口（约束 ②）。在这里收口意味着**没有任何 agent 路径能绕过它**。
+        let warnings = self.expand_section_references(&mut sections)?;
+
         Ok(WritingContextBundle {
             agent: request.agent,
             chapter_id: request.chapter_id,
             sections,
-            metadata: request.metadata,
+            metadata: merge_reference_warnings(request.metadata, &warnings)?,
         })
+    }
+
+    /// 就地展开全部区块里的正文引用，并把引用坐标记进 `section.sources`。
+    ///
+    /// 返回全部警告，交由调用方落进运行日志与确认项 metadata。
+    ///
+    /// **没挂文档来源却遇到引用 → fail-loud。** 三个候选做法里只有这个是对的：
+    /// - 原样放过 → `{{ref:...}}` 进 LLM 请求体，Auto Mode 的审计 LLM 会在「审的
+    ///   是占位符」的前提下给出虚假通过（约束 ②），这是安全倒退；
+    /// - 静默删掉 → Writer 以为那条指示后面本来就没有原文，人也看不出少了什么；
+    /// - fail-loud → 报错点名是哪个区块、缺什么，用户当场知道该配什么。
+    fn expand_section_references(
+        &self,
+        sections: &mut [WritingContextSection],
+    ) -> CoreResult<Vec<ReferenceWarning>> {
+        let mut warnings = Vec::new();
+        for section in sections.iter_mut() {
+            if !section_expands_content_references(&section.section_id) {
+                continue;
+            }
+            if !contains_content_reference(&section.content) {
+                continue;
+            }
+            let Some(documents) = self.reference_documents else {
+                return Err(CoreError::validation(format!(
+                    "writing context section `{}` contains {{{{ref:...}}}} content references but \
+                     no reference document source is configured; wire \
+                     WritingContextAssembler::with_reference_documents so the excerpts are \
+                     expanded before the text reaches any model",
+                    section.section_id
+                )));
+            };
+            let mut expansion =
+                expand_content_references(&section.content, documents, &self.reference_limits)?;
+            // ⚠️ 正文用 `take` 换出来、不做 `expansion.text` 的字段移动：
+            // `source_spans(&self)` 与 `merge_section_expansion_metadata(&expansion)`
+            // 后面都还要借用整个 `expansion`，而字段移动会让它**部分移动**，
+            // 之后任何借用都编译失败（E0382）。
+            // 用 `take` 而不是 `clone`：正文可能是整章数千字，克隆正是本项目
+            // 「引用式数据流」要避免的拷贝。
+            section.content = std::mem::take(&mut expansion.text);
+            // 展开后置条件：这个区块里**不能**再有 `{{ref:` 残留。
+            //
+            // 这条断言不是防御性冗余，它钉住的是约束 ②「任何送进 LLM 请求体的路径
+            // 都必须展开」。展开器内部有若干「无法展开」的分支（文档缺失、越权、
+            // 超条数、嵌套），每一条都必须把占位符换成可诊断标记；哪天有人新加一
+            // 条分支忘了替换，占位符就会一路进到请求体，而 Auto Mode 的审计 LLM
+            // 会在「审的是占位符」的前提下给出虚假通过。在这里 fail-loud，比在
+            // 生产里静默批准变更好得多。
+            if contains_content_reference(&section.content) {
+                return Err(CoreError::validation(format!(
+                    "writing context section `{}` still contains {{{{ref:...}}}} after expansion; \
+                     refusing to hand unexpanded content references to a model",
+                    section.section_id
+                )));
+            }
+            // 引用坐标进 `sources`：这是既有字段（`rag/models.rs`），正好用来记录
+            // 本区块展开了哪些引用，供审计溯源「Writer 看到的这段来自哪里」。
+            section.sources.extend(expansion.source_spans());
+            section.metadata = merge_section_expansion_metadata(
+                std::mem::take(&mut section.metadata),
+                &expansion,
+            )?;
+            warnings.extend(expansion.warnings);
+        }
+        Ok(warnings)
     }
 
     /// Outliner 上下文用于全局开局规划，重点接收用户初始意图和已有长期知识。
@@ -150,41 +253,59 @@ impl<'a> WritingContextAssembler<'a> {
                 Value::Null,
             ));
         }
+        // ⚠️ 下面三个区块是**知识库派生**的，必须**无条件产出**，空时给明确空态文本。
+        //
+        // 原实现是 `if !xxx.is_empty()`：空知识库下整个区块不入 sections，
+        // 而 `node_template.planner.default` **无条件**引用 `{{前文总结}}`
+        // `{{人物与关系当前状态}}` `{{未回收伏笔}}` 三者，于是
+        // **新项目写第一章时 Planner 节点必然渲染失败**（渲染器对未知变量 fail-loud）——
+        // 恰好是最该顺畅的那条路径。这不是 U149 引入的，从更早就有，
+        // 只因当时的用例只渲染 writer 模板而没被发现。
+        //
+        // 为什么修装配层而不是把模板改成条件引用：渲染器没有条件语法，
+        // 而「让每个模板作者自己记住哪几个变量可能缺席」是把陷阱留在原地。
+        // 空态文本也比缺席更好——它明确告诉模型「这里查过了，确实没有」，
+        // 而缺席会让模型以为是自己没拿到资料。
         let chapter_summaries = self.knowledge.chapter_summaries()?;
-        if !chapter_summaries.is_empty() {
-            sections.push(section(
-                "previous_summaries",
-                "前文总结",
-                format_ordered_map(&chapter_summaries),
-                Value::Null,
-            ));
-        }
+        sections.push(section(
+            "previous_summaries",
+            "前文总结",
+            if chapter_summaries.is_empty() {
+                "（暂无前文总结：这是开篇，没有需要承接的既有情节）".to_owned()
+            } else {
+                format_ordered_map(&chapter_summaries)
+            },
+            Value::Null,
+        ));
 
         let character_state =
             current_character_and_relationship_state(&self.knowledge.registered_changes()?);
-        if !character_state.is_empty() {
-            sections.push(section(
-                "character_state",
-                "人物与关系当前状态",
-                character_state,
-                Value::Null,
-            ));
-        }
+        sections.push(section(
+            "character_state",
+            "人物与关系当前状态",
+            if character_state.is_empty() {
+                "（暂无已登记的人物与关系：人物可在本章首次登场）".to_owned()
+            } else {
+                character_state
+            },
+            Value::Null,
+        ));
 
         let foreshadowing = self.knowledge.unresolved_foreshadowing()?;
-        if !foreshadowing.is_empty() {
-            let content = foreshadowing
-                .iter()
-                .map(|record| format!("- {}: {}", record.title, record.description))
-                .collect::<Vec<_>>()
-                .join("\n");
-            sections.push(section(
-                "unresolved_foreshadowing",
-                "未回收伏笔",
-                content,
-                Value::Null,
-            ));
-        }
+        sections.push(section(
+            "unresolved_foreshadowing",
+            "未回收伏笔",
+            if foreshadowing.is_empty() {
+                "（暂无未回收伏笔）".to_owned()
+            } else {
+                foreshadowing
+                    .iter()
+                    .map(|record| format!("- {}: {}", record.title, record.description))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            Value::Null,
+        ));
 
         if let Some(text) = non_empty_optional(&request.previous_chapter_text) {
             sections.push(section(
@@ -204,9 +325,18 @@ impl<'a> WritingContextAssembler<'a> {
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
         let mut sections = Vec::new();
-        if let Some(summary) = self.knowledge.chapter_summary(&request.chapter_id)? {
-            sections.push(section("chapter_summary", "章节总结", summary, Value::Null));
-        }
+        // 同 planner_sections 的理由：`node_template.detail.default` 无条件引用
+        // `{{章节总结}}`，而这个区块原先只在知识库里已有该章总结时才产出——
+        // 于是「先写细节、还没做总结」这条正常顺序下 Detail 节点必然渲染失败。
+        // 空态文本比缺席好：它明确告诉模型「这章还没有总结」。
+        sections.push(section(
+            "chapter_summary",
+            "章节总结",
+            self.knowledge
+                .chapter_summary(&request.chapter_id)?
+                .unwrap_or_else(|| "（本章暂无总结：尚未写作或尚未生成总结）".to_owned()),
+            Value::Null,
+        ));
         if let Some(outline) = non_empty_optional(&request.outline) {
             sections.push(section(
                 "outline",
@@ -553,4 +683,86 @@ fn validate_chapter_id(chapter_id: &str) -> CoreResult<()> {
         return Err(CoreError::validation("chapter_id cannot be empty"));
     }
     Ok(())
+}
+
+/// 哪些区块允许含正文引用。
+///
+/// 13-B 的引用是 **Planner 写进大纲**的，所以放行的是大纲类与规划类区块，以及
+/// 数据边灌进来的 `input.*`（Planner 的产出常经数据边传给 Writer 节点）。
+///
+/// **正文类区块刻意不放行**（`previous_chapter_text` / `line_numbered_draft` /
+/// `chapter_text` / `target_text`）：那些是小说正文本身。若正文里恰好出现
+/// `{{ref:` 字样（作者写了一段讲模板语法的对话、或粘了段配置），展开它等于按
+/// 用户正文里的字符串去读别的文件——把内容当指令，属注入面。放行清单是白名单
+/// 而非黑名单，正是为了让「新增区块默认不可注入」。
+///
+/// 带行号正文尤其不能展开：行号是 patch 工具的坐标系，展开会插入若干行，
+/// 使模型数出来的 `after_line` 与真实文档全部错位。
+fn section_expands_content_references(section_id: &str) -> bool {
+    section_id.starts_with("input.")
+        || matches!(
+            section_id,
+            "outline"
+                | "details"
+                | "global_outline"
+                | "stage_outline"
+                | "previous_stage_outline"
+                | "chapter_summaries"
+                | "revision_context"
+                | "revision_basis"
+                | "critic_outputs"
+        )
+}
+
+/// 把本区块的展开结果记进区块 metadata。
+///
+/// 人类 UI 靠这份结构化列表做折叠渲染（约束 ③：上游只产出展开态，折叠是纯前端
+/// 的显示变换）。`expanded_range` 给出展开块在**展开后文本**里的位置，正是折叠时
+/// 要替换掉的那一段。
+fn merge_section_expansion_metadata(
+    metadata: Value,
+    expansion: &crate::rag::reference::ExpandedOutline,
+) -> CoreResult<Value> {
+    let mut map = match metadata {
+        Value::Object(map) => map,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("previous_metadata".to_owned(), other);
+            map
+        }
+    };
+    map.insert(
+        "expanded_content_references".to_owned(),
+        serde_json::to_value(&expansion.expanded)?,
+    );
+    Ok(Value::Object(map))
+}
+
+/// 把展开警告汇总进 bundle metadata。
+///
+/// 警告必须随 bundle 一起往上走，否则「引用失效 / 被截断」只能靠肉眼在正文里找
+/// 失效标记——而确认项 payload 与运行日志都读 metadata。无警告时不插入这个键，
+/// 免得每个 bundle 都多一个空数组。
+fn merge_reference_warnings(
+    metadata: Value,
+    warnings: &[crate::rag::reference::ReferenceWarning],
+) -> CoreResult<Value> {
+    if warnings.is_empty() {
+        return Ok(metadata);
+    }
+    let mut map = match metadata {
+        Value::Object(map) => map,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("previous_metadata".to_owned(), other);
+            map
+        }
+    };
+    map.insert(
+        "content_reference_warnings".to_owned(),
+        serde_json::to_value(warnings)?,
+    );
+    Ok(Value::Object(map))
 }
