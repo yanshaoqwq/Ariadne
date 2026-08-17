@@ -3849,7 +3849,38 @@ fn truncate_provider_error(text: &str) -> String {
 
 pub fn list_confirmations(state: &AriadneAppState) -> CommandResult<Vec<ConfirmationLogEntry>> {
     let project_root = project_root_from_state(state, None)?;
-    list_pending_confirmations_impl(&project_root)
+    let mut entries = list_pending_confirmations_impl(&project_root)?;
+
+    // 已决议的确认项也要列出来——**审计链不能因为运行结束或重启而断**。
+    //
+    // 缺陷形态：`list_pending_confirmations_impl` 扫的是运行态库的
+    // `list_non_terminal_states()`，**已完成的运行压根不在扫描范围内**。
+    // 而已决议项其实一直存在 `confirmation_logs` 表里（`prune_confirmation_logs`
+    // 专门保留 10 万条已决议历史、只淘汰更旧的，`idx_confirmation_logs_state`
+    // 索引也正是为按状态查而建），只是**没有任何读取入口** ——
+    // 又一例「实现完整 + 生产零消费者」。
+    // 用户视角：第二天重开项目，昨天审过的确认项全不见了，
+    // 「我到底批准过什么」无从查证。
+    //
+    // 合并而不是新开一条命令：调用方要的是「这个项目的确认项」，
+    // 分成两条会让每个前端页面都得自己合并去重，而去重规则（按 id）是固定的。
+    let known: std::collections::BTreeSet<String> = entries
+        .iter()
+        .map(|entry| entry.confirmation_id.clone())
+        .collect();
+    let history = FileConfirmationLogStore::default_for_project(&project_root)
+        .read_all()
+        .map_err(error_to_string)?;
+    for entry in history {
+        // 运行态那份是**权威**：同一个 id 同时出现时，运行态的状态更新
+        // （日志库是投影，可能落后一次写入）。
+        if known.contains(&entry.confirmation_id) {
+            continue;
+        }
+        entries.push(entry);
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp_ms));
+    Ok(entries)
 }
 
 pub fn get_confirmation(

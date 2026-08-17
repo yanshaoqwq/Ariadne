@@ -871,17 +871,28 @@ public sealed class FrontendWritingChainJourneyTests : IDisposable
     }
 
     /// <summary>
-    /// 用户配了 Provider 但**没存密钥**就点运行：错误必须指向凭据。
+    /// 用户配了 Provider 但**没存密钥**就点运行。
     ///
-    /// 判据不是「失败了」，而是「失败信息能让用户知道去哪修」——
-    /// 一条 <c>internal error</c> 在功能上也是失败，但用户会以为是软件坏了。
-    /// </summary>
+    /// ⚠️ **本用例的原前提是错的，已重写。**
+    /// 原版断言「运行必须失败且错误指向凭据」，实测 `node node-1 succeeded`——
+    /// 而那是**正确行为**：仓库对此早有定论（见
+    /// `production_journey_contracts.rs` 的 `journey_provider_without_key_fails_loudly`
+    /// 注释「对 OpenAiCompatible 缺密钥是合法配置」）。
+    /// 本地自建服务（Ollama / LM Studio / vLLM）通常**不需要**密钥，
+    /// 强制要求密钥会让这批用户完全用不了产品。
+    ///
+    /// 所以真正该钉的性质不是「缺密钥要失败」，而是
+    /// **「缺密钥时不得把空凭据当成有效凭据发出去」**：
+    /// 请求里要么不带 Authorization 头，要么带一个真实的值，
+    /// 绝不能出现 `Authorization: Bearer `（空值）——那种请求会被真实
+    /// OpenAI 端点以 401 拒掉，而用户看到的是一条含混的连接错误，
+    /// 完全猜不到是「密钥没存上」。
     [Fact]
-    public async Task WritingChain_MissingApiKey_FailsWithCredentialPointingMessage()
+    public async Task WritingChain_MissingApiKey_DoesNotSendAnEmptyBearerToken()
     {
         var sidecar = ResolveSidecar();
         if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
-                nameof(WritingChain_MissingApiKey_FailsWithCredentialPointingMessage)))
+                nameof(WritingChain_MissingApiKey_DoesNotSendAnEmptyBearerToken)))
         {
             return;
         }
@@ -891,7 +902,7 @@ public sealed class FrontendWritingChainJourneyTests : IDisposable
         await client.CreateProjectAsync(projectRoot, "缺密钥");
         var documentId = SeedChapter(projectRoot, "第一章\n");
 
-        var (baseUrl, _) = SpawnPlainLlm("不该到这一步。");
+        var (baseUrl, captured) = SpawnPlainLlm("本地服务无需密钥。");
         // 只保存 Provider，**不**调 SaveProviderKeyAsync。
         await client.SaveProviderSettingsAsync(new ProviderSettingsUpdate(
             ProviderId, "open_ai_compatible", "无密钥服务", true, baseUrl,
@@ -903,30 +914,31 @@ public sealed class FrontendWritingChainJourneyTests : IDisposable
         var started = await client.RunWorkflowAsync("nokey-flow");
         var final = await WaitForTerminalStateAsync(client, "nokey-flow", started.RunId);
 
-        Assert.NotEqual("succeeded", final.Status.ToLowerInvariant());
+        // 无密钥的本地服务能跑通，这是产品要支持的场景。
+        Assert.Equal("succeeded", final.Status.ToLowerInvariant());
 
-        var diagnostic = string.Join(
-            " | ",
-            new[]
-            {
-                final.Failure?.Message,
-                final.Failure?.Code,
-                final.Failure?.RecoverySuggestion,
-                final.PauseReason,
-            }.Where(text => !string.IsNullOrWhiteSpace(text)));
+        var requests = await captured.WaitAsync(TimeSpan.FromSeconds(20));
+        var request = Assert.Single(requests);
 
-        Assert.False(
-            string.IsNullOrWhiteSpace(diagnostic),
-            "缺密钥导致的失败没有任何可读信息，用户无从判断该去设置页做什么");
+        // 判据：不得出现空的 Bearer。用逐行解析而不是整体 Contains——
+        // 请求体里可能恰好含 "Bearer " 之类的字样（提示词是用户可控内容）。
+        var authHeaders = request
+            .Split('\n')
+            .Select(line => line.TrimEnd('\r'))
+            .Where(line => line.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase))
+            .ToList();
 
-        // 必须提到凭据/密钥这一类词，否则用户会去查网络或模型配置。
-        var lowered = diagnostic.ToLowerInvariant();
-        Assert.True(
-            lowered.Contains("credential") || lowered.Contains("secret")
-            || lowered.Contains("api key") || lowered.Contains("api_key")
-            || lowered.Contains("key") || diagnostic.Contains("密钥")
-            || diagnostic.Contains("凭据"),
-            $"失败信息没有指向凭据，用户不知道去存密钥：{diagnostic}");
+        foreach (var header in authHeaders)
+        {
+            var value = header["Authorization:".Length..].Trim();
+            Assert.False(
+                string.IsNullOrWhiteSpace(value)
+                || value.Equals("Bearer", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("Bearer ", StringComparison.Ordinal),
+                $"没存密钥却发出了空的 Authorization：`{header}`。"
+                + "真实 OpenAI 端点会以 401 拒掉，而用户看到的是含混的连接错误，"
+                + "完全猜不到是「密钥没存上」——要么别带这个头，要么带真实值。");
+        }
     }
 
     // ════════════════════════════════════════════════════════
