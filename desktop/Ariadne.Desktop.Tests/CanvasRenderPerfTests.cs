@@ -48,6 +48,13 @@ namespace Ariadne.Desktop.Tests;
 /// **不要用 `DispatcherPriority.Render` 排空队列**——headless 没有渲染循环，
 /// 往 Render 优先级投的回调可能永不执行，`InvokeAsync` 一直不返回，
 /// 表现是「单条跑 280s 不结束」，与内存不足的日志长得一样，极易误判。
+///
+/// ## ⚠️ 本文件有一条**故意留红**的用例
+///
+/// `PageSwitch_ReturningToCanvas_CostDoesNotScaleWithNodeCount` 当前失败，
+/// 失败即 U159 这个缺陷仍然存在——它是**未修缺陷的回归护栏**，不是坏测试。
+/// 修好 U159 后它应自动转绿；若在修之前看到它绿了，先怀疑测量点被改坏了。
+/// 其余 7 条全绿。
 /// </summary>
 [Collection("AvaloniaHeadless")]
 public sealed class CanvasRenderPerfTests
@@ -137,14 +144,24 @@ public sealed class CanvasRenderPerfTests
     ///  15 节点：切回画布 3931ms、切去别页 426ms
     ///  60 节点：切回画布 6741ms、切去别页 556ms
     /// </code>
-    /// 每节点约 92ms，另有约 1.2s 画布视图固定重建代价；
+    /// 每节点约 92ms，另有约 1.2s 画布视图固定构建代价；
     /// 切去别页恒定约 0.5s、与画布节点数无关 ⇒ **代价全在画布这一侧**。
     ///
-    /// 根因：`MainWindowViewModel.GetOrCreatePage`（:628）缓存了**ViewModel**，
-    /// 但 `App.axaml:18-20` 用 `DataTemplate` 生成 **View**——
-    /// `ContentControl` 每次换 Content 都重建整棵视图树。
-    /// 画布的节点卡片模板是 274 行 XAML（`WorkspacePageView.axaml:495-768`），
-    /// 且用 `ItemsControl` + `Canvas` 面板、**零虚拟化**，于是 N 个卡片全量重建。
+    /// # ⚠️ 归因已被本用例自己否证一次，别再写回去
+    ///
+    /// 报告最初归因为「`GetOrCreatePage`（:628）缓存了 **ViewModel**，但 `App.axaml:18-20`
+    /// 的 `DataTemplate` 每次重建 **View**」，并据此提出「缓存 View 实例」的修法。
+    /// **那条归因不成立**，决定性证据就在下面的代码里：每一档只 `new` 一个
+    /// `WorkspacePageView`，预热与计时反复把**同一个实例**挂进 `window.Content`——
+    /// **视图树从未重建**，而耗时**仍然**随节点数线性增长。
+    ///
+    /// ⇒ 代价在**重挂载时的 measure / arrange**，不在视图树构建。
+    /// 缓存 View 实例（报告的路 A）已实现并回退，不成立。
+    ///
+    /// 真正的成因是画布用 `ItemsControl` + `Canvas` 面板、**零虚拟化**：
+    /// N 个节点卡片每次重挂载都要重新量一遍。剩两条路——
+    /// **视口虚拟化**（治本）或**削薄 274 行的节点卡片模板**
+    /// （`IsVisible=false` 的控件在 Avalonia 里**仍会被实体化**）。
     ///
     /// **判据取「与节点数的比例关系」而非绝对耗时**：headless + debug + ARM 板的
     /// 绝对值不可与真机比，但「切回代价随节点数线性」这个**形状**与机器速度无关。
@@ -214,9 +231,14 @@ public sealed class CanvasRenderPerfTests
                 perNode < 10,
                 $"切回画布页时每个节点要多付 {perNode:F0}ms（阈值 10ms）——"
                 + $"0 节点 {measured[0]:F0}ms、15 节点 {measured[15]:F0}ms、60 节点 {measured[60]:F0}ms。"
-                + "ViewModel 被 GetOrCreatePage 缓存了，但 View 由 App.axaml 的 DataTemplate "
-                + "每次重建，274 行的节点卡片模板 × N 全量重新实体化（U159）。"
-                + "用户表现为「每次切回画布页都要等几秒」");
+                + "用户表现为「每次切回画布页都要等几秒」（U159）。\n"
+                + "⚠️ 归因请勿写成「DataTemplate 每次重建 View」——**本用例自己否证了那条**："
+                + "它在每一档里复用**同一个** WorkspacePageView 实例（见上面的预热段，"
+                + "canvasView 只 new 一次、反复挂进 window.Content），视图树从未重建，"
+                + "而耗时仍随节点数线性增长。⇒ 代价在重挂载时的 measure/arrange，"
+                + "不在视图树构建。缓存 View 实例（报告的路 A）已试并回退，不成立。\n"
+                + "剩下两条路：视口虚拟化（治本，ItemsControl+Canvas 面板天然不虚拟化），"
+                + "或削薄 274 行的节点卡片模板（IsVisible=false 的控件仍会被实体化）。");
 
             return true;
         }, CancellationToken.None);
