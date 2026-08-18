@@ -1,6 +1,7 @@
 using System.Reflection;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
+using Ariadne.Desktop.ViewModels;
 using Xunit;
 
 namespace Ariadne.Desktop.Tests;
@@ -43,8 +44,11 @@ public sealed class SecretProtectionRecoveryReachableTests
     /// <summary>
     /// 诊断承诺的补救动作必须有对应的客户端能力。
     ///
-    /// 现在是红的：`IAriadneBackendClient` 上既没有设主密码、
-    /// 也没有接受明文的方法，所以任何界面都不可能触发它们。
+    /// U176 已修复：`IAriadneBackendClient` 现有
+    /// `SetLocalSecretMasterPasswordAsync` / `AllowUnprotectedLocalSecretsAsync`
+    /// / `GetSecretProtectionAsync`（`JsonLineBackendClient` 分别打到
+    /// `set_local_secret_master_password` / `allow_unprotected_local_secrets` /
+    /// `get_secret_protection`）。
     /// </summary>
     [Fact]
     public void SecretRecoveryCommands_MustBeReachableFromTheDesktopClient()
@@ -61,13 +65,26 @@ public sealed class SecretProtectionRecoveryReachableTests
         var hasAllowUnprotected = methods.Any(name =>
             name.Contains("Unprotected", StringComparison.OrdinalIgnoreCase));
 
+        // 修好之后判据收紧成「两条都要有」：原来写 `||` 是因为当时两条都缺、
+        // 只要接上任意一条就算脱离死胡同。现在两条都在，`||` 会让「后来删掉
+        // 接受明文那条」照样绿——而那正是 Locked 状态下用户不愿设主密码时
+        // 唯一的另一条出路。
         Assert.True(
-            hasMasterPassword || hasAllowUnprotected,
-            "`IAriadneBackendClient` 没有暴露任何凭据保护补救能力"
-            + "（设本地主密码 / 显式接受明文），"
+            hasMasterPassword && hasAllowUnprotected,
+            "`IAriadneBackendClient` 缺少凭据保护补救能力"
+            + $"（设本地主密码={hasMasterPassword}、显式接受明文={hasAllowUnprotected}），"
             + "而后端两个命令都在（ipc.rs:924、:931），"
             + "且诊断文案 `diagnostics.secrets.locked` 正在让用户「配置本地主密码」。"
             + "⇒ 用户被指向一个界面上做不到的操作（U176）。");
+
+        // 真实发出去的命令名也要钉住：接口有方法但打错命令名时，
+        // 上面那条照样绿，而用户点按钮只会收到一条 method not found。
+        var client = File.ReadAllText(ResolveDesktopSource("Backend", "JsonLineBackendClient.cs"));
+        Assert.Contains("\"set_local_secret_master_password\"", client, StringComparison.Ordinal);
+        Assert.Contains("\"allow_unprotected_local_secrets\"", client, StringComparison.Ordinal);
+        // 参数字段名必须是 master_password：后端 `SetMasterPasswordParams` 按该名
+        // 反序列化，写成 masterPassword 会得到「missing field」而非任何界面提示。
+        Assert.Contains("master_password = masterPassword", client, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -105,32 +122,85 @@ public sealed class SecretProtectionRecoveryReachableTests
     }
 
     /// <summary>
-    /// 这条**现在就该绿**：按钮文案还没建 key，是上面两条的连带工作量。
+    /// 按钮文案必须三份语言包齐备。
     ///
-    /// 它的作用是**记录施工清单**——修 U176 时需要新建这些 key（三份语言包），
-    /// 而不是复用诊断那几条描述性文案（那些是「问题说明」，不是「按钮标签」）。
-    /// 一旦有人建了 key，这条会转红，提醒把上面两条一起做完。
+    /// 这条**取代**了原先那条「文案还没建、故意绿着当施工清单」的标记用例
+    /// （`RecoveryButtonCopy_IsStillMissing_AndThatIsPartOfTheSameFix`）：
+    /// 入口已接好，那条按它自己的注释说明应当删掉，否则它会永远红着。
+    /// 判据由「文案还不存在」翻成「文案必须存在且不是描述性诊断文案」——
+    /// 后者才是接线之后需要长期守住的性质。
+    ///
+    /// ⚠️ 不检查 en/ja 的**内容**（用户会另行补翻译），只检查 key 存在：
+    /// `DisplayNameService` 缺键时静默回落中文，缺口只有键集合守卫能发现。
     /// </summary>
-    [Fact]
-    public void RecoveryButtonCopy_IsStillMissing_AndThatIsPartOfTheSameFix()
+    [Theory]
+    [InlineData("zh")]
+    [InlineData("en")]
+    [InlineData("ja")]
+    public void RecoveryButtonCopy_ExistsInEveryLanguage(string language)
     {
         var names = DisplayNameService.LoadDefault();
+        names.SwitchLanguage(language);
 
-        var candidateKeys = new[]
+        foreach (var key in new[]
+                 {
+                     "ui.settings.secrets.title",
+                     "ui.settings.secrets.status",
+                     "ui.settings.secrets.status.managed",
+                     "ui.settings.secrets.status.encrypted",
+                     "ui.settings.secrets.status.unprotected",
+                     "ui.settings.secrets.status.locked",
+                     "ui.settings.secrets.status.unknown",
+                     "ui.settings.secrets.locked_hint",
+                     "ui.settings.secrets.master_password_label",
+                     "ui.settings.secrets.master_password_placeholder",
+                     "ui.settings.secrets.set_master_password",
+                     "ui.settings.secrets.master_password_hint",
+                     "ui.settings.secrets.allow_plaintext",
+                     "ui.settings.secrets.allow_plaintext_warning",
+                     "ui.settings.secrets.master_password_required",
+                     "ui.settings.secrets.master_password_applied",
+                     "ui.settings.secrets.plaintext_applied",
+                     "ui.dialog.settings.allow_plaintext.title",
+                     "ui.dialog.settings.allow_plaintext.message",
+                     "ui.settings.section.secret_protection",
+                 })
         {
-            "ui.settings.secrets.set_master_password",
-            "ui.settings.secrets.allow_plaintext",
-        };
+            var text = names.Text(key);
+            Assert.False(
+                text == $"[{key}]",
+                $"{language} 缺少凭据保护文案 {key}——UI 上会显示方括号乱码（U176）");
+            Assert.False(string.IsNullOrWhiteSpace(text));
+        }
 
-        var existing = candidateKeys
-            .Where(key => names.Text(key) != $"[{key}]")
-            .ToList();
+        names.SwitchLanguage("zh");
 
-        Assert.True(
-            existing.Count == 0,
-            "凭据保护的按钮文案已经建了：" + string.Join(", ", existing)
-            + "。若入口也已接好，请删掉本用例；"
-            + "若只建了文案没接入口，那是半成品（U176）。");
+        // 按钮标签不能是那句诊断描述：混用会让按钮上出现一整句「请配置本地
+        // 主密码，或显式接受明文保存。」——文档第 3 节点名要避免的形态。
+        Assert.NotEqual(
+            names.Text("diagnostics.secrets.locked"),
+            names.Text("ui.settings.secrets.set_master_password"));
+        Assert.NotEqual(
+            names.Text("ui.settings.misc.diagnostics.recovery.secrets"),
+            names.Text("ui.settings.secrets.allow_plaintext"));
+    }
+
+
+
+    /// <summary>轮询等待异步命令跑完；超时按失败处理而不是静默放过。</summary>
+    private static async Task DrainAsync(Func<bool> done)
+    {
+        for (var attempt = 0; attempt < 500; attempt++)
+        {
+            if (done())
+            {
+                return;
+            }
+
+            await Task.Delay(2).ConfigureAwait(false);
+        }
+
+        Assert.Fail("等待凭据保护命令完成超时（500 × 2ms）");
     }
 
     private static string ResolveDesktopSource(params string[] parts)
@@ -149,5 +219,83 @@ public sealed class SecretProtectionRecoveryReachableTests
         }
 
         throw new FileNotFoundException(string.Join('/', parts));
+    }
+
+    /// <summary>
+    /// U176：模拟真实的凭据保护状态机——**从锁定开始**。
+    ///
+    /// 起始状态刻意是 `locked`，与干净装机后的真实形态一致
+    /// （`secrets.rs:584-588`：既无主密码也无明文许可 ⇒ Locked）。
+    /// 用 `encrypted` 当起点会让用例跑在一个真实用户从未见过的状态上，
+    /// 那正是这个缺陷长期藏身的原因：所有测试都靠
+    /// `ARIADNE_SECRET_MASTER_KEY` 从加密态起跑。
+    ///
+    /// 诊断报告**按当前保护状态现算**，不是固定桩：固定桩会让
+    /// 「设完主密码后诊断转健康」这条断言变成断言桩本身，
+    /// 摘掉前端的重取也照样绿。
+    ///
+    /// `DispatchProxy` 宿主不能 `sealed`（运行时要派生它）。
+    /// </summary>
+    private class SecretProtectionBackend : DispatchProxy
+    {
+        private string _status = "locked";
+
+        /// <summary>后端被问了几次诊断。基线差值就是「有没有重取」的判据。</summary>
+        public int DiagnosticsCalls { get; private set; }
+
+        /// <summary>真实出站的口令，用来钉住「按钮把用户敲的那串送出去了」。</summary>
+        public string? LastMasterPassword { get; private set; }
+
+        public static SecretProtectionBackend Create() =>
+            (SecretProtectionBackend)(object)Create<IAriadneBackendClient, SecretProtectionBackend>()!;
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            switch (targetMethod?.Name)
+            {
+                case nameof(IAriadneBackendClient.GetSecretProtectionAsync):
+                    return Task.FromResult(Report());
+
+                case nameof(IAriadneBackendClient.SetLocalSecretMasterPasswordAsync):
+                    LastMasterPassword = args?.Length > 0 ? args[0] as string : null;
+                    // 与后端一致：设了主密码即 Encrypted（secrets.rs:585）。
+                    _status = "encrypted";
+                    return Task.FromResult(Report());
+
+                case nameof(IAriadneBackendClient.AllowUnprotectedLocalSecretsAsync):
+                    _status = "unprotected";
+                    return Task.FromResult(Report());
+
+                case nameof(IAriadneBackendClient.GetBackendDiagnosticsAsync):
+                    DiagnosticsCalls++;
+                    return Task.FromResult(Diagnostics());
+
+                default:
+                    // 其余方法本用例不该碰。返回 null 会让生产代码吃 NRE
+                    // （mock 违约），所以直接炸掉：谁多调了一条立刻看得见。
+                    throw new NotSupportedException(targetMethod?.Name);
+            }
+        }
+
+        private SecretProtectionReport Report() =>
+            new(_status, string.Equals(_status, "locked", StringComparison.Ordinal));
+
+        /// <summary>
+        /// 诊断报告随保护状态现算，映射照抄后端 `commands.rs:5146-5157`：
+        /// encrypted/managed ⇒ healthy、unprotected ⇒ degraded、locked ⇒ unavailable。
+        /// </summary>
+        private BackendDiagnosticsReport Diagnostics()
+        {
+            var (status, reason) = _status switch
+            {
+                "encrypted" or "managed" => ("healthy", (string?)null),
+                "unprotected" => ("degraded", "diagnostics.secrets.unprotected"),
+                _ => ("unavailable", "diagnostics.secrets.locked"),
+            };
+
+            return new BackendDiagnosticsReport(
+                status,
+                new[] { new DiagnosticItem("secrets.protection", status, reason) });
+        }
     }
 }

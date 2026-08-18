@@ -49,6 +49,25 @@ impl BackendDiagnosticsReport {
         Self { status, items }
     }
 
+    /// U172-A：只含应用级组件的空报告，供**无打开项目**时使用。
+    ///
+    /// 为什么需要它：`collect` 的四个入参全部以项目根为前提
+    /// （runtime.db / 运行恢复 / 项目检索运行时都在项目目录内），
+    /// 无项目时一个都取不到。但诊断里有一半组件是应用级的
+    /// （凭据保护是应用状态目录里的一个文件，与项目无关），
+    /// 而「还没开项目」恰恰是用户最需要查「密钥存哪了、为什么连不上模型」的时刻。
+    ///
+    /// 空 items + Healthy 是刻意的：此刻确实没有任何**项目级**组件可判，
+    /// 调用方随后 `extend_items` 追加应用级项，总状态由 `aggregate_status` 重算。
+    /// 若这里预置一条「没有项目」的 Degraded 项，就等于把「没开项目」
+    /// 说成一种故障——它不是故障，是正常的启动状态。
+    pub fn app_scope_only() -> Self {
+        Self {
+            status: DiagnosticStatus::Healthy,
+            items: Vec::new(),
+        }
+    }
+
     /// 返回是否存在降级或不可用组件。
     pub fn requires_attention(&self) -> bool {
         self.status != DiagnosticStatus::Healthy

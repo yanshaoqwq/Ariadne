@@ -15,7 +15,20 @@ namespace Ariadne.Desktop.Tests;
 /// **判据一律取磁盘产物或后端再次读回的结果**，不取「命令返回 ok」。
 /// 理由是这一簇的失效形态都是「写成功了但另一条读路径看不见」——
 /// U174 已经实测出一个（save_document_content 写盘成功、作品树看不见）。
+///
+/// 【2026-08-18 验证结论：三条全绿，且**三条都经变异确认有鉴别力**】
+/// 产品在这条链路上**没有缺陷**——导入/编辑/导出的串联是真的通的
+/// （真实 sidecar 实测：导出物内容 = 编辑后正文，产物落在 `exports/` 下）。
+/// 逐条摘除对应产品保护后，红的位置都落在该用例的目标断言上：
+///   1. 主线：把 `save_document_content` 改成「返回 ok 但不落盘」
+///      ⇒ 红在第 5 步「再读回必须是编辑后内容」
+///   2. 重复导入：把冲突检查挪到写入之后（真正的半写形态）
+///      ⇒ 红在「正文逐字未变」那一行（**不是** `Assert.Throws` 那一行，
+///         详见该用例注释里两次测偏的记录）
+///   3. 导出落点：去掉 artifact id 的 `exports/` 前缀（U134 原缺陷形态）
+///      ⇒ 红在「路径不含 .runtime」那一行
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class WorksImportEditJourneyTests
 {
     private static string? ResolveSidecar()
@@ -105,9 +118,28 @@ public sealed class WorksImportEditJourneyTests
     /// <summary>
     /// 不带 overwrite 重复导入同一个 chapter_id 必须被拒，且**不能破坏已有正文**。
     ///
-    /// 这条测的是「拒绝要干净」：后端 `commands.rs:2271-2279` 会在冲突时返回
-    /// conflict，但那个检查发生在**写入之前还是之后**决定了正文会不会被截断。
+    /// 这条测的是「拒绝要干净」：后端会在冲突时返回 conflict，
+    /// 但那个检查发生在**写入之前还是之后**决定了正文会不会被覆盖。
     /// 判据取「被拒之后原正文逐字未变」——只断言「抛了异常」测不出半写。
+    ///
+    /// ⚠️ **变异测试记录（2026-08-18，两次才测准）**：
+    ///
+    /// 第一次变异摘掉 `commands.rs` 的外层冲突检查 ⇒ **仍然全绿**。
+    /// 原因是护栏有**两道且互相独立**：外层查章节索引（`load_chapter_index`），
+    /// 内层是 `documents/service.rs` 写入边界的 `create_only && path.try_exists()`。
+    /// 摘掉任一道，另一道照样拦住。⇒ 单摘一处证明不了本用例有鉴别力。
+    ///
+    /// 第二次把两道**同时**摘掉 ⇒ 变红了，但红在 **`Assert.ThrowsAsync`**（第 145 行）
+    /// 而不是下面那条正文断言。那种「红了」对目标判据的鉴别力**一无所知**——
+    /// 它只证明了「不拒绝时会报错」，而本用例真正要守的是
+    /// 「**拒绝了，但正文已经被改坏**」这个更隐蔽的形态。
+    ///
+    /// 真正测准的变异：保留冲突检查、把它**挪到 `import_chapter_document` 之后**
+    /// （写入照常发生，之后才返回 conflict）。这才是注释声称的「先写后检」半写缺陷，
+    /// 此时红在第 149 行的正文断言上——那才算通过。
+    ///
+    /// 教训：**「红了」不够，要确认红的位置就是你要验的那条断言。**
+    /// 下面把两条断言的**职责**写清，避免以后有人只看到第一条就以为够了。
     /// </summary>
     [Fact]
     public async Task ReimportingSameChapterWithoutOverwrite_IsRejectedAndLeavesProseIntact()
@@ -138,13 +170,22 @@ public sealed class WorksImportEditJourneyTests
             const string authored = "# 第一章\n\n作者亲手改过的正文，不能被覆盖。\n";
             await client.SaveDocumentContentAsync(targetPath, authored, details.Metadata?.Version);
 
+            // 前提自检：作者那一版**真的**落盘了。
+            // 少了这一步，若保存本身失效，下面「正文未变」会拿导入原稿去比，
+            // 断言仍可能因为「两边都不是 authored」而以别的理由失败，
+            // 把「毁稿」与「根本没存上」混成同一个红——两者修法完全不同。
+            Assert.Equal(authored, await File.ReadAllTextAsync(targetPath));
+
             // 换一份不同的源稿，再导入同一个 chapter_id。
             await File.WriteAllTextAsync(source, "# 第一章\n\n完全不同的第二版。\n");
 
+            // 断言之一：必须被拒。这条只守「有没有拦」，
+            // **守不住「拦了但已经写坏」**——那是下一条的职责。
             await Assert.ThrowsAsync<BackendException>(() => client.ImportChapterAsync(
                 new ChapterImportRequest("ch01", "第一章", 1, source, targetPath, Overwrite: false)));
 
-            // 关键判据：被拒之后，作者的正文必须**逐字未变**。
+            // 断言之二（**本用例的核心**）：被拒之后，作者的正文必须逐字未变。
+            // 变异测试须让红落在这一行，落在上一行的不算（见类注释的两次记录）。
             Assert.Equal(authored, await File.ReadAllTextAsync(targetPath));
         }
         finally

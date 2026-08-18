@@ -10,13 +10,18 @@ namespace Ariadne.Desktop.Tests;
 /// 本文件全部走**真实 sidecar 进程**，判据取「后端真实返回的 payload」
 /// 与「前端真实渲染出的字符串」，不取「命令没报错」。
 /// 理由：诊断分区的失效形态恰恰都是**成功返回**——
-/// 无项目时返回 validation 错误、新项目返回 status=unavailable、
-/// reason 字段带裸英文。三者都不会抛异常，进程内 mock 一律照过。
+/// 无项目时返回 validation 错误、reason 字段带裸英文。
+/// 两者都不会抛异常，进程内 mock 一律照过。
 ///
-/// 覆盖三条已实测确认的缺陷（每条都在真实 IPC 上复现过，见各用例注释）：
-///   A. 无项目时 `get_backend_diagnostics` 直接 validation 失败 ⇒ 分区永远空白
-///   B. 刚建好的干净项目总体状态 = `unavailable`（不可用）
-///   C. 部分 reason 是裸英文，直达中/日用户界面
+/// 三条用例的现状（2026-08-18 逐条在真实 IPC 上复核过 payload）：
+///   A. ✅ 已修（真缺陷）——无项目时 `get_backend_diagnostics` 直接 validation
+///      失败 ⇒ 分区永远空白，而 `secrets.protection` 本不依赖项目根
+///   B. ⚠️ **判据已改写**——原版断言「干净项目不该报 unavailable」，
+///      其前提（「保存凭据会失败只是假设性的」）被实测推翻：Locked 状态下
+///      `save_provider_key` **当场失败**。详见该用例注释里的完整实测链路。
+///      现改为钉住「这条真实阻断报得对」。
+///   C. ✅ 已修（真缺陷）——部分 reason 是裸英文，前端只对 `diagnostics.`
+///      前缀查表 ⇒ 后端知道具体成因，界面只显示通用兜底文案
 /// </summary>
 [Collection("RealSidecar")]
 public sealed class BackendDiagnosticsUsabilityTests
@@ -81,35 +86,47 @@ public sealed class BackendDiagnosticsUsabilityTests
     }
 
     /// <summary>
-    /// U172-B：**刚建好的干净项目，诊断总体状态是「不可用」。**
+    /// U172-B：**「凭据存储已锁定」必须报成真实阻断，而不是被降级成提醒。**
     ///
-    /// 实测（真实 sidecar，create_project 之后立刻查）：
-    ///   status = "unavailable"，唯一的 unavailable 项是
-    ///   `{"component":"secrets.protection","reason":"diagnostics.secrets.locked"}`
+    /// ⚠️ 本用例是**改写过的**。原版断言「干净项目不该报 overall=unavailable」，
+    /// 理由是「全新项目还没配 Provider、没有密钥要存，此时『保存凭据会失败』
+    /// 是**假设性**的」。**这个前提被实测推翻，所以原判据是错的。**
     ///
-    /// 链条（三处都已读代码确认）：
-    ///   1. `secrets.rs:584-588` —— 新项目既无主密码也无明文许可 ⇒ `Locked`
-    ///   2. `commands.rs:5081` —— `Locked` 映射成 `DiagnosticStatus::Unavailable`
-    ///   3. `diagnostics/mod.rs:48` `aggregate_status` —— 取最坏项 ⇒ 总体 unavailable
+    /// 实测（真实 sidecar，按序单条往返，不是批量——批量会被 8 worker 线程池乱序）：
+    ///   create_project                        → ok
+    ///   save_provider_settings(openai/gpt-4o) → ok
+    ///   save_provider_key(openai, sk-…)       → **ok=false**
+    ///     `validation failed: local secret store is locked:
+    ///      call set_local_secret_master_password to encrypt credentials,
+    ///      or allow_unprotected_local_secrets to store them in plain text`
+    ///   allow_unprotected_local_secrets       → ok
+    ///   save_provider_key（同一次调用重放）   → **ok=true**，
+    ///     诊断随之 unavailable → degraded
     ///
-    /// 每一步单独看都合理，**合起来的产品结论是错的**：全新项目还没配任何
-    /// Provider、没有任何密钥要存，此时「保存凭据会失败」是**假设性**的，
-    /// 不是当下的阻断。而它却把整个后端标成「不可用」。
+    /// ⇒ Locked 状态下保存密钥**当场就失败**，不是假设性的。用户配 Provider 的
+    /// 第一步就撞墙。`unavailable`（=坏了、拦住了）正是它应有的分级；
+    /// 把它降成 degraded 才是缺陷——那会让「配不了任何模型」显示成
+    /// 「仍可使用，只需检查配置」，与事实相反。
     ///
-    /// 用户可见后果：新建项目、什么都还没做，诊断页顶部写「总体：不可用」。
-    /// 这会让人以为装坏了。且它使总体状态失去分辨力——
-    /// 真的出故障时，状态栏文字**没有任何变化**。
+    /// 所以本用例改为钉住**正确的**那件事：这一项必须存在、必须是 unavailable、
+    /// 且 reason 必须指向可本地化的成因。判据取「后端真实返回的该项」。
     ///
-    /// **判据取总体状态**，而不是「有没有 secrets 那一项」：
-    /// 那一项本身是该报的（明文密钥要持续提醒，U118 已定夺），
-    /// 缺陷在于**它把总体拉成不可用**。
+    /// 为什么不干脆删掉：`aggregate_status` 取最坏项这件事值得有回归——
+    /// 若哪天有人为了「让新项目看起来干净」把 Locked 改判成 Degraded，
+    /// 本用例会当场变红，并把上面这段实测记录摆在他面前。
+    ///
+    /// ⚠️ 真正的产品缺口不在分级，而在**解锁入口前端三层全无**
+    /// （客户端无方法、配置页无控件、语言包无按钮文案），
+    /// 那条由 `SecretProtectionRecoveryReachableTests`（U176）钉。
+    /// 两者必须同批看：只调分级会把「配不了模型」这个事实藏起来，
+    /// 用户看到「需要注意」却依然无从下手。
     /// </summary>
     [Fact]
-    public async Task Diagnostics_OnFreshProject_MustNotReportOverallUnavailable()
+    public async Task Diagnostics_OnFreshProject_ReportsLockedCredentialsAsARealBlock()
     {
         var sidecar = ResolveSidecar();
         if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
-                nameof(Diagnostics_OnFreshProject_MustNotReportOverallUnavailable)))
+                nameof(Diagnostics_OnFreshProject_ReportsLockedCredentialsAsARealBlock)))
         {
             return;
         }
@@ -124,13 +141,20 @@ public sealed class BackendDiagnosticsUsabilityTests
             var report = await client.GetBackendDiagnosticsAsync();
             Assert.NotNull(report);
 
-            // 干净项目不该被判为「不可用」。degraded 可以接受
-            // （确实有「未配置模型」这类待办），unavailable 是「坏了」。
-            Assert.NotEqual("unavailable", report.Status);
+            var secrets = Assert.Single(
+                report.Items,
+                item => item.Component == "secrets.protection");
 
-            // 同时钉住这条结论的来源，避免将来有人靠「删掉 secrets 那一项」
-            // 来让本用例转绿——那会丢掉 U118 刻意保留的明文提醒。
-            Assert.Single(report.Items, item => item.Component == "secrets.protection");
+            // 分级必须是 unavailable：上面的实测证明此刻保存密钥必失败。
+            Assert.Equal("unavailable", secrets.Status);
+
+            // 成因必须可本地化，否则界面上只剩按 status 的兜底文案，
+            // 「凭据存储已锁定」这个唯一可据以行动的结论会丢失（同 U172-C）。
+            Assert.Equal("diagnostics.secrets.locked", secrets.Reason);
+
+            // 总体状态由最坏项决定 —— 有真实阻断时必须传导上去，
+            // 否则状态栏在「配不了任何模型」时仍显示健康/需注意。
+            Assert.Equal("unavailable", report.Status);
         }
         finally
         {

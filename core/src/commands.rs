@@ -5028,10 +5028,91 @@ fn workflow_runtime_recovery_report(project_root: &Path) -> Option<RuntimeRecove
     Some(merged)
 }
 
+/// U172-A：无打开项目时也必须给出**应用级**诊断，而不是整份 bail。
+///
+/// 原实现第一行就 `project_root_from_state(state, None)?`，于是应用刚启动、
+/// 还没开项目时进配置页看诊断，分区永远空白（前端 catch 到 validation 错误
+/// 只把它写进 StatusText）。而这正是最需要诊断的时刻——用户想查的
+/// 「密钥存哪了」「为什么连不上模型」两件事都不依赖项目根：
+/// 凭据保护读的是 app-state 目录下的一个文件，provider 目录也是全局的。
+///
+/// 处置：把诊断拆成「项目级」与「应用级」两段。有项目时行为**逐项不变**
+/// （回归见 command_contracts.rs 既有那批用例）；无项目时只跳过项目级那段。
+///
+/// 为什么不改成「无项目时返回一条 Degraded 说没开项目」：没开项目不是故障，
+/// 那样会让总体状态永远不健康，用户学会忽略它之后真故障也看不见了。
 pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<BackendDiagnosticsReport> {
-    let project_root = project_root_from_state(state, None)?;
-    let _project_mutation = acquire_project_mutation_guard(&project_root, "backend_diagnostics")?;
-    let config = ConfigStore::new(&project_root).load_or_create();
+    // 「没开项目」与「开着但坏了」必须分开处置，否则会用一个缺陷换另一个：
+    // 无脑吞掉全部错误的话，项目目录被移走/`.config/app.yaml` 被删这类真故障
+    // 会静默退化成「只报应用级」，而诊断页正是唯一该把它说出来的地方。
+    //
+    // 判据取「project_root 是否为空」：空 = 从未打开过项目（正常启动态）；
+    // 非空但校验失败 = 用户开着一个坏项目（真故障，必须报）。
+    // 这与 `get_app_status` 的处置**同构**（见那里「不能把损坏状态伪装成无项目」
+    // 一句）——同一个区分在两处用同一种方式表达，避免两处对「无项目」各有解释。
+    let configured_root = state.project_root()?;
+    let mut project_root = None;
+    let mut project_root_failure = None;
+    if !configured_root.as_os_str().is_empty() {
+        match project_root_from_state(state, None) {
+            Ok(root) => project_root = Some(root),
+            Err(error) => project_root_failure = Some(error),
+        }
+    }
+
+    let mut report = match project_root.as_deref() {
+        Some(project_root) => project_scope_diagnostics(state, project_root)?,
+        None => BackendDiagnosticsReport::app_scope_only(),
+    };
+
+    // 开着一个坏项目：报成 Unavailable 并带上诊断原文。
+    // 这一项的 reason 刻意保留底层错误文本（含路径），与其它项的「本地化 key」
+    // 约定不同——它是**排查用**的，路径是唯一有用的信息，而路径无法进语言包。
+    // 前端会落到按 status 的兜底文案，配合组件名已足够指向「项目根有问题」。
+    if let Some(error) = project_root_failure {
+        report.extend_items([DiagnosticItem {
+            component: "project.root".to_owned(),
+            status: DiagnosticStatus::Unavailable,
+            reason: error.diagnostic.clone(),
+        }]);
+    }
+
+    // ── 应用级组件：上面三种情况下都要报 ──
+    // U116：把 provider **实际连通性**并入诊断。
+    //
+    // 下面的 `provider_config_diagnostic_items` 只看配置是否自洽（能不能选出
+    // provider/model），答不了「这个 key 现在还能不能用」。此前产品完全没有统一探活
+    // 入口，用户只能靠真跑一次工作流才知道 provider 通不通——一次失败的工作流
+    // 既花钱又要等，还分不清是配置错、凭据过期还是对端故障。
+    report.extend_items(llm_provider_health_diagnostic_items(state));
+    report.extend_items([secret_protection_diagnostic_item(state)]);
+
+    // provider/rag 配置项只在有项目时可读（配置文件在项目 .config 下）。
+    // 无项目时不报这几项，而不是报成 Unavailable：读不到的原因是「还没开项目」，
+    // 把它说成配置损坏会误导排查方向。
+    if let Some(project_root) = project_root.as_deref() {
+        match ConfigStore::new(project_root).load_or_create() {
+            Ok(config) => report.extend_items(provider_config_diagnostic_items(
+                &config.providers,
+                &config.rag,
+            )),
+            Err(error) => report.extend_items([DiagnosticItem {
+                component: "project.config".to_owned(),
+                status: DiagnosticStatus::Unavailable,
+                reason: Some(error.to_string()),
+            }]),
+        }
+    }
+    Ok(report)
+}
+
+/// 项目级诊断：runtime.db、运行恢复、项目检索运行时。三者都在项目目录内，
+/// 因此整段以「已有项目根」为前提，由 `get_backend_diagnostics` 决定是否调用。
+fn project_scope_diagnostics(
+    state: &AriadneAppState,
+    project_root: &Path,
+) -> CommandResult<BackendDiagnosticsReport> {
+    let _project_mutation = acquire_project_mutation_guard(project_root, "backend_diagnostics")?;
     let retrieval_reports = match state.retrieval_runtime() {
         Ok(runtime) => runtime.health_check().unwrap_or_else(|error| {
             vec![crate::retrieval::StoreHealth::unavailable(
@@ -5044,32 +5125,12 @@ pub fn get_backend_diagnostics(state: &AriadneAppState) -> CommandResult<Backend
             error.to_string(),
         )],
     };
-    let mut report = BackendDiagnosticsReport::collect(
-        SqliteWorkflowRuntimeStore::health(&project_root),
-        workflow_runtime_recovery_report(&project_root),
+    Ok(BackendDiagnosticsReport::collect(
+        SqliteWorkflowRuntimeStore::health(project_root),
+        workflow_runtime_recovery_report(project_root),
         Vec::new(),
         retrieval_reports,
-    );
-    // U116：把 provider **实际连通性**并入诊断。
-    //
-    // 下面的 `provider_config_diagnostic_items` 只看配置是否自洽（能不能选出
-    // provider/model），答不了「这个 key 现在还能不能用」。此前产品完全没有统一探活
-    // 入口，用户只能靠真跑一次工作流才知道 provider 通不通——一次失败的工作流
-    // 既花钱又要等，还分不清是配置错、凭据过期还是对端故障。
-    report.extend_items(llm_provider_health_diagnostic_items(state));
-    report.extend_items([secret_protection_diagnostic_item(state)]);
-    match config {
-        Ok(config) => report.extend_items(provider_config_diagnostic_items(
-            &config.providers,
-            &config.rag,
-        )),
-        Err(error) => report.extend_items([DiagnosticItem {
-            component: "project.config".to_owned(),
-            status: DiagnosticStatus::Unavailable,
-            reason: Some(error.to_string()),
-        }]),
-    }
-    Ok(report)
+    ))
 }
 
 /// U118：把凭据保护状态做成常驻诊断项。
@@ -5138,6 +5199,53 @@ fn llm_provider_health_diagnostic_items(state: &AriadneAppState) -> Vec<Diagnost
         .collect()
 }
 
+/// U172-C：默认对话模型这一项的 reason 必须是本地化 key。
+///
+/// 原实现两条分支都是裸英文：
+///   - 成功：`format!("default LLM model: {}", model_id)`
+///   - 失败：`CommandError::to_string()`（如 "no enabled LLM provider is configured"）
+/// 而前端只对 `diagnostics.` 前缀查表，两者都会被兜底文案吞掉——
+/// 「没有启用任何对话模型」这个**用户唯一能据以行动**的结论就此丢失，
+/// 界面上只剩一句「该组件仍可使用，但需要检查配置」。
+///
+/// 成功分支改为 `reason: None`（与 `runtime.db`、`providers.config` 等
+/// 其它健康项一致），而不是新造一条「已就绪」文案：`model_id` 无法进语言包，
+/// 而它**今天在界面上本就看不到**——healthy + 裸英文 reason 会落到
+/// 「未发现问题。」这条兜底。为了带出它去发明一套 `key|参数` 编码，
+/// 是给一个没人看得见的字段增加协议复杂度。
+///
+/// 失败分支为什么不按底层错误细分：`select_llm_provider` / `select_llm_model`
+/// 的错误文本含 provider_id、model_id 等运行期值，做不成静态 key。
+/// 这里按「用户要做什么」分两类——完全没配（去加一个）与
+/// 配了但指向失效目标（去改默认项）——足够指路，且不泄露内部标识符。
+fn llm_default_config_diagnostic_item(
+    providers: &crate::config::ProvidersConfig,
+) -> DiagnosticItem {
+    match select_llm_provider(providers)
+        .and_then(|provider| select_llm_model(&provider, providers.default_llm_model_id.as_deref()))
+    {
+        Ok(_) => DiagnosticItem {
+            component: "providers.llm.default".to_owned(),
+            status: DiagnosticStatus::Healthy,
+            reason: None,
+        },
+        Err(_) => DiagnosticItem {
+            component: "providers.llm.default".to_owned(),
+            status: DiagnosticStatus::Degraded,
+            // 区分「一个都没配」与「配了但选不出来」：前者要新增 provider，
+            // 后者要改默认项指向，处置动作不同。
+            reason: Some(
+                if providers.providers.iter().any(|provider| provider.enabled) {
+                    "diagnostics.providers.llm.default_unresolvable"
+                } else {
+                    "diagnostics.providers.llm.none_enabled"
+                }
+                .to_owned(),
+            ),
+        },
+    }
+}
+
 fn provider_config_diagnostic_items(
     providers: &crate::config::ProvidersConfig,
     rag: &RagConfig,
@@ -5156,20 +5264,7 @@ fn provider_config_diagnostic_items(
         }),
     }
 
-    match select_llm_provider(providers)
-        .and_then(|provider| select_llm_model(&provider, providers.default_llm_model_id.as_deref()))
-    {
-        Ok(model) => items.push(DiagnosticItem {
-            component: "providers.llm.default".to_owned(),
-            status: DiagnosticStatus::Healthy,
-            reason: Some(format!("default LLM model: {}", model.model_id)),
-        }),
-        Err(reason) => items.push(DiagnosticItem {
-            component: "providers.llm.default".to_owned(),
-            status: DiagnosticStatus::Degraded,
-            reason: Some(reason.to_string()),
-        }),
-    }
+    items.push(llm_default_config_diagnostic_item(providers));
 
     items.push(provider_capability_config_diagnostic_item(
         providers,

@@ -163,11 +163,22 @@ impl KnowledgeIndexSynchronizer {
         })
     }
 
+    /// U172-C：三条 reason 一律用 `diagnostics.*` 本地化 key。
+    ///
+    /// 之前是裸英文，而前端 `DiagnosticReasonLabel` 只对 `diagnostics.` 前缀查表，
+    /// 其余落到按 status 分档的兜底文案——于是这三种**互相无关**的成因
+    /// 在界面上全变成同一句「该组件仍可使用，但需要检查配置」。
+    /// 后端明明知道是「清单缺失」还是「与 metadata.db 不一致」，
+    /// 却因约定不统一而无法呈现；用户拿不到可据以行动的信息。
+    ///
+    /// 三条 key 刻意分开而不合成一条「索引需要重建」：重建标记残留
+    /// （上次重建被打断）与清单不一致（数据漂移）的后续处置不同，
+    /// 合并会把这个区分丢掉。
     pub fn health_check(&self, vector_signature: Option<&str>) -> CoreResult<StoreHealth> {
         if read_marker(&self.marker_path)?.is_some() {
             return Ok(StoreHealth::rebuild_required(
                 "knowledge_retrieval_index",
-                "knowledge index rebuild marker is present",
+                "diagnostics.retrieval.knowledge_index.rebuild_marker",
             ));
         }
         let snapshot =
@@ -179,7 +190,7 @@ impl KnowledgeIndexSynchronizer {
         let Some(manifest) = read_manifest(&self.manifest_path)? else {
             return Ok(StoreHealth::rebuild_required(
                 "knowledge_retrieval_index",
-                "knowledge index manifest is missing",
+                "diagnostics.retrieval.knowledge_index.manifest_missing",
             ));
         };
         if manifest.schema_version != KNOWLEDGE_INDEX_SCHEMA_VERSION
@@ -189,7 +200,7 @@ impl KnowledgeIndexSynchronizer {
         {
             return Ok(StoreHealth::rebuild_required(
                 "knowledge_retrieval_index",
-                "knowledge index manifest does not match metadata.db",
+                "diagnostics.retrieval.knowledge_index.manifest_stale",
             ));
         }
         Ok(StoreHealth::healthy("knowledge_retrieval_index"))
