@@ -52,6 +52,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private string _importTargetPath = string.Empty;
     private string _importProjectRoot = string.Empty;
     private bool _allowImportOverwrite;
+    /// U174：面板处于「新建章节」模式还是「导入稿件」模式。
+    ///
+    /// 两种模式**共用同一套表单字段与校验**（章节 ID / 标题 / 排序 / 目标路径），
+    /// 唯一差别是正文来源：导入多一个源文件字段，新建不需要。
+    /// 刻意不做成两套表单：路径规则完全相同，复制一套必然漂移
+    /// （U174 文档已就 `ui.works.import.error.*` 复用做过同样的判断）。
+    private bool _isCreateChapterMode;
     private string _savedSnapshot = string.Empty;
     private bool _hasUnsavedChanges;
     private bool _suppressDirtyTracking;
@@ -139,6 +146,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         ToggleImportPanelCommand = new RelayCommand(ToggleImportPanel);
         BrowseImportSourceCommand = new RelayCommand(() => _ = BrowseImportSourceAsync());
         ImportCommand = new RelayCommand(() => _ = ImportChapterAsync(), CanImportChapter);
+        // U174：「新建章节」此前在全应用不存在——后端无命令、前端无入口、语言包无文案，
+        // 于是作者拿到空项目后必须先在项目外手工造一个 .md 再导入。
+        OpenCreateChapterPanelCommand = new RelayCommand(OpenCreateChapterPanel);
+        CreateChapterCommand = new RelayCommand(() => _ = CreateChapterAsync(), CanCreateChapter);
         ExportCommand = new RelayCommand(() => _ = ExportAsync(), () => WorksTreeRoots.Count > 0);
         SaveCommand = new RelayCommand(() => _ = SaveAsync(), () => HasCurrentDocument && !IsDocumentSaving);
         RetryWorksTreeCommand = new RelayCommand(() => _ = LoadWorksTreeAsync(), () => IsWorksTreeError && !IsWorksTreeLoading);
@@ -365,6 +376,42 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public RelayCommand ShowProjectAiCommand { get; }
 
     public RelayCommand OpenImportPanelCommand { get; }
+
+    /// <summary>
+    /// U174：打开「新建章节」表单。与 <see cref="OpenImportPanelCommand"/> 共用同一个面板，
+    /// 只是把它切到新建模式（源文件字段隐藏、提交按钮改调 create_chapter）。
+    /// </summary>
+    public RelayCommand OpenCreateChapterPanelCommand { get; }
+
+    /// <summary>
+    /// U174：提交新建。判据必须落在「作品树里能否看到」——
+    /// 走 <c>save_document_content</c> 也能让文件落盘并返回 ok，但那条路**不写章节索引**，
+    /// 而作品树读的正是索引，于是章节对用户完全隐形（U174-A 的原始形态）。
+    /// </summary>
+    public RelayCommand CreateChapterCommand { get; }
+
+    /// <summary>
+    /// 面板当前是「新建章节」还是「导入稿件」。
+    ///
+    /// 两模式共用字段是有意的：章节 ID / 标题 / 排序 / 目标路径的校验规则一字不差，
+    /// 分成两套表单只会让两处文案与规则各自漂移。
+    /// </summary>
+    public bool IsCreateChapterMode
+    {
+        get => _isCreateChapterMode;
+        private set
+        {
+            if (SetProperty(ref _isCreateChapterMode, value))
+            {
+                OnPropertyChanged(nameof(IsImportChapterMode));
+                OnPropertyChanged(nameof(ImportPanelTitle));
+                NotifyImportFormStateChanged();
+            }
+        }
+    }
+
+    /// <summary>源文件字段只在导入模式出现：新建没有源稿，摆一个空输入框只会让人以为必填。</summary>
+    public bool IsImportChapterMode => !_isCreateChapterMode;
 
     public RelayCommand ToggleImportPanelCommand { get; }
 
@@ -1020,6 +1067,33 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public string ImportSourceGroupText => _displayNames.Text("ui.works.import.source_group");
     public string ImportTargetGroupText => _displayNames.Text("ui.works.import.target_group");
     public string ImportOverwriteText => _displayNames.Text("ui.works.import.overwrite_confirm");
+
+    // U174：新建章节文案。
+    public string CreateChapterText => _displayNames.Text("ui.works.create_chapter");
+    public string CreateChapterHint => _displayNames.Text("ui.works.create.hint");
+    public string CreateChapterSubmitText => _displayNames.Text("ui.works.create.submit");
+
+    /// <summary>面板标题随模式切换：同一个面板承担两件事时，标题是用户唯一的定位依据。</summary>
+    public string ImportPanelTitle => _displayNames.Text(
+        IsCreateChapterMode ? "ui.works.create.title" : "ui.works.import.title");
+
+    /// <summary>
+    /// 撞名提示。新建**没有** overwrite 复选框，所以文案必须给出可行动作
+    /// （换 ID 或换路径），而不是照抄导入那句「确认覆盖后才能导入」——
+    /// 那会让用户去找一个不存在的复选框。
+    /// </summary>
+    public string CreateConflictText => HasImportConflict
+        ? _displayNames.Text("ui.works.create.conflict")
+        : string.Empty;
+
+    /// <summary>
+    /// 撞名提示的两个可见性开关。分开是必要的：两句文案指向的动作不同
+    /// （导入 → 勾覆盖；新建 → 换 ID/路径），只用 <see cref="HasImportConflict"/>
+    /// 会让新建模式下也显示「确认覆盖后才能导入」，把用户指向一个已隐藏的复选框。
+    /// </summary>
+    public bool HasImportConflictInImportMode => HasImportConflict && IsImportChapterMode;
+
+    public bool HasImportConflictInCreateMode => HasImportConflict && IsCreateChapterMode;
     public string ImportChapterIdErrorText => HasImportChapterIdError
         ? _displayNames.Text("ui.works.import.error.chapter_id_required")
         : string.Empty;
@@ -1095,6 +1169,26 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                && ImportSourceValidation.IsValid
                && ImportTargetValidation.IsValid
                && (!HasImportConflict || AllowImportOverwrite);
+    }
+
+    /// <summary>
+    /// 新建可否提交。与导入的差别只有两处，且两处都是**刻意**的：
+    ///
+    /// 1. **不查源文件路径**：新建没有源稿，把 `ImportSourceValidation` 也算进来
+    ///    会让「新建」永远不可点（空路径 = Required 错误）。
+    /// 2. **撞名一律拒，没有覆盖开关**：新建的语义里不存在「覆盖」。
+    ///    想替换已有章节的正文是保存或导入的事；让新建能覆盖，
+    ///    手滑一次就会静默毁掉已经写了三万字的那一章。
+    ///    后端也是同一判断（`create_chapter` 不接受 overwrite），
+    ///    这里挡在前面只是为了给出可读提示而不是等一条 conflict 异常。
+    /// </summary>
+    private bool CanCreateChapter()
+    {
+        return !HasImportChapterIdError
+               && !HasImportChapterTitleError
+               && !HasImportOrderError
+               && ImportTargetValidation.IsValid
+               && !HasImportConflict;
     }
 
     /// 导入源允许在项目外：作者从下载目录 / U 盘 / 别的写作软件导出目录挑稿子是常规用法，
@@ -1175,7 +1269,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         OnPropertyChanged(nameof(HasImportTargetPreview));
         OnPropertyChanged(nameof(HasImportConfirmation));
         OnPropertyChanged(nameof(HasImportConflict));
+        OnPropertyChanged(nameof(CreateConflictText));
+        OnPropertyChanged(nameof(HasImportConflictInImportMode));
+        OnPropertyChanged(nameof(HasImportConflictInCreateMode));
         ImportCommand.NotifyCanExecuteChanged();
+        CreateChapterCommand.NotifyCanExecuteChanged();
     }
 
     private bool CanGenerateQuickEdit()
@@ -2096,9 +2194,50 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
     }
 
-    private async Task SaveAsync()
+    /// <summary>
+    /// U174：提交「新建章节」。
+    ///
+    /// **必须走 `create_chapter` 而不是 `save_document_content`**：后者只写文件、
+    /// 不登记章节索引，而作品树读的是索引 ⇒ 文件落盘、命令返回 ok、用户在树里
+    /// 什么都看不到。那正是用户报的「一些东西还不能创建」的机制——
+    /// 创建动作本身成功了，只是没人认它。
+    ///
+    /// 收尾必须 `LoadWorksTreeAsync`：本方法的成功判据是「树里出现该章节」，
+    /// 不刷新树等于把可见性推给下一次页面切换，而用户此刻正等着看到它。
+    /// </summary>
+    private async Task CreateChapterAsync()
     {
-        if (IsDocumentSaving)
+        try
+        {
+            if (!CanCreateChapter())
+            {
+                return;
+            }
+
+            var target = ImportTargetValidation.NormalizedPath;
+            var title = ImportChapterTitle.Trim();
+            await _backend.CreateChapterAsync(new ChapterCreateRequest(
+                ImportChapterId.Trim(),
+                title,
+                decimal.ToInt64(ImportOrder!.Value),
+                target,
+                // 初始正文给空字符串：新建一章后作者自己写第一句是常态，
+                // 塞一行模板标题只会让人先去删它。
+                string.Empty)).ConfigureAwait(true);
+            StatusText = _displayNames.Format(
+                "ui.works.create.created",
+                new Dictionary<string, string> { ["title"] = title });
+            IsImportPanelOpen = false;
+            await LoadWorksTreeAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+    }
+
+    private async Task SaveAsync()
+    {        if (IsDocumentSaving)
         {
             return;
         }
@@ -2535,6 +2674,35 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     }
 
     private void OpenImportPanel()
+    {
+        IsCreateChapterMode = false;
+        OpenChapterPanel();
+    }
+
+    /// <summary>
+    /// U174：打开新建表单，并把目标路径预填成 `documents/chapters/{id}.md` 那一档。
+    ///
+    /// 预填的理由是 AGENTS.md 那条硬约束：**用户已知的值不要让用户手打**。
+    /// 后端对目标路径是精确校验（必须在 `documents/` 下），让用户凭空猜一条路径，
+    /// 猜错只会得到一句校验错误。这里给出可直接提交的默认值，作者仍可改。
+    /// </summary>
+    private void OpenCreateChapterPanel()
+    {
+        IsCreateChapterMode = true;
+        OpenChapterPanel();
+        // 只在字段还空着时填，不覆盖用户已经打了一半的内容。
+        if (string.IsNullOrWhiteSpace(ImportTargetPath))
+        {
+            var next = Math.Max(1, CountWorksTreeChapters() + 1);
+            ImportTargetPath = $"documents/chapters/ch{next:D2}.md";
+            if (string.IsNullOrWhiteSpace(ImportChapterId))
+            {
+                ImportChapterId = $"ch{next:D2}";
+            }
+        }
+    }
+
+    private void OpenChapterPanel()
     {
         IsRightPanelOpen = true;
         IsNavTreeTab = true;

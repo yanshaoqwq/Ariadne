@@ -47,6 +47,16 @@ public static class SettingsNavigationCatalog
         // switch（CanRestoreSelectedTab / SaveSelectedTabAsync），**不会跟随本表**。
         new("node_presets", "permissions", "NodePresetsSectionAnchor", "ui.settings.section.node_presets"),
         new("paths", "permissions", "PathsSectionAnchor", "ui.settings.section.paths"),
+        // U176：凭据保护（设本地主密码 / 显式接受明文）落在权限页。
+        // 它与 capabilities / tool_controls / paths 是同一组概念——「谁能读到什么」，
+        // 而 API Key 摊不摊在磁盘上正是这组问题里最直接的一条。
+        // 放在 paths 之后（本页最后一节）：它是**一次性处置**而非日常调节的配置，
+        // 不该占据用户每次进权限页都先看到的位置。
+        // ⚠️ 它**刻意不进** CanRestoreSelectedTab / SaveSelectedTabAsync 那两处
+        // 手写 switch：两个动作是即时命令（点一下就调后端），没有草稿态，
+        // 因此不存在「改了没存」。详见 SettingsPageViewModel 里
+        // _secretMasterPassword 字段处的注释。
+        new("secret_protection", "permissions", "SecretProtectionSectionAnchor", "ui.settings.section.secret_protection"),
         new("language", "personalization", "LanguageSectionAnchor", "ui.settings.section.language"),
         new("theme", "personalization", "ThemeSectionAnchor", "ui.settings.section.theme"),
         new("workspace", "personalization", "WorkspaceSectionAnchor", "ui.settings.section.workspace"),

@@ -77,7 +77,12 @@
             <Button Classes="icon-btn" ToolTip.Tip="{Binding QuickEditTitle}" AutomationProperties.Name="{Binding QuickEditTitle}" Command="{Binding OpenQuickEditCommand}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Sparkle}" />
             </Button>
-            <!-- 图标按钮：导入稿件 / 导出合并 / 保存 -->
+            <!-- 图标按钮：新建章节 / 导入稿件 / 导出合并 / 保存 -->
+            <!-- U174：「新建章节」此前在全应用不存在（后端无命令、这里无按钮、语言包无文案），
+                 作者拿到空项目后只能先去项目外手工造一个 .md 再走导入。 -->
+            <Button Classes="icon-btn" ToolTip.Tip="{Binding CreateChapterText}" AutomationProperties.Name="{Binding CreateChapterText}" Command="{Binding OpenCreateChapterPanelCommand}">
+              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Add}" />
+            </Button>
             <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" AutomationProperties.Name="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}">
               <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
             </Button>
@@ -124,7 +129,12 @@
               <TextBlock Text="{Binding EmptyIndexTitle}" Classes="title" HorizontalAlignment="Center" TextAlignment="Center" />
               <TextBlock Text="{Binding EmptyIndexHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
               <TextBlock Text="{Binding EmptyIndexText}" Classes="subtle" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+              <!-- U174：空态是新项目作者的第一落点，「新建章节」必须在这里就有。
+                   此前只摆「导入稿件」，等于告诉作者「先去别处写好再搬进来」。
+                   新建放主按钮、导入放次按钮：前者才是从零开始写的常规动作。 -->
               <Button Classes="primary" HorizontalAlignment="Center" Margin="0,8,0,0"
+                      Content="{Binding CreateChapterText}" Command="{Binding OpenCreateChapterPanelCommand}" />
+              <Button Classes="secondary" HorizontalAlignment="Center"
                       Content="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}" />
             </StackPanel>
           </Border>
@@ -461,13 +471,20 @@
                     </StackPanel>
                   </Button>
                 </StackPanel>
-                <!-- 导入表单：去掉描边盒，改为左缘强调脊的「展开工作区」 -->
+                <!-- 章节表单：去掉描边盒，改为左缘强调脊的「展开工作区」。
+                     U174：同一个面板承担「新建」与「导入」两种模式——两者的章节 ID /
+                     标题 / 排序 / 目标路径校验规则一字不差，分成两套表单必然让文案与规则漂移。
+                     区别只有正文来源：导入多一个源文件字段，新建不需要。 -->
                 <Border Classes="detail-row accent"
                         Margin="0,4,0,2"
                         Padding="13,3,0,3"
                         IsVisible="{Binding IsImportPanelOpen}">
                   <StackPanel Spacing="8">
-                    <TextBlock Text="{Binding ImportTitle}" Classes="subtitle" />
+                    <TextBlock Text="{Binding ImportPanelTitle}" Classes="subtitle" />
+                    <TextBlock Text="{Binding CreateChapterHint}"
+                               Classes="caption"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding IsCreateChapterMode}" />
                     <StackPanel Spacing="4">
                       <TextBlock Text="{Binding ImportChapterIdText}" Classes="caption" />
                       <!-- U145：候选是作品树里已有的章节 id（后端 ChapterDocumentIndex）。
@@ -507,20 +524,24 @@
                                  Foreground="{DynamicResource Ariadne.StatusError}"
                                  IsVisible="{Binding HasImportOrderError}" />
                     </StackPanel>
-                    <TextBlock Text="{Binding ImportSourceGroupText}" Classes="inspector-label" Margin="0,8,0,0" />
-                    <TextBlock Text="{Binding ImportSourcePathText}" Classes="caption" />
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                      <TextBox Grid.Column="0"
-                               Text="{Binding ImportSourcePath, Mode=TwoWay}"
-                               PlaceholderText="{Binding ImportSourcePlaceholder}"
-                               AutomationProperties.Name="{Binding ImportSourcePathText}" />
-                      <Button Grid.Column="1" Classes="secondary" Content="{Binding BrowseImportSourceText}" Command="{Binding BrowseImportSourceCommand}" />
-                    </Grid>
-                    <TextBlock Text="{Binding ImportSourceErrorText}"
-                               Classes="caption"
-                               TextWrapping="Wrap"
-                               Foreground="{DynamicResource Ariadne.StatusError}"
-                               IsVisible="{Binding HasImportSourceError}" />
+                    <!-- U174：源文件只属于导入。新建没有源稿，摆一个空输入框
+                         会让人以为必填，而它一填就会把新建变成导入。 -->
+                    <StackPanel Spacing="8" IsVisible="{Binding IsImportChapterMode}">
+                      <TextBlock Text="{Binding ImportSourceGroupText}" Classes="inspector-label" Margin="0,8,0,0" />
+                      <TextBlock Text="{Binding ImportSourcePathText}" Classes="caption" />
+                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <TextBox Grid.Column="0"
+                                 Text="{Binding ImportSourcePath, Mode=TwoWay}"
+                                 PlaceholderText="{Binding ImportSourcePlaceholder}"
+                                 AutomationProperties.Name="{Binding ImportSourcePathText}" />
+                        <Button Grid.Column="1" Classes="secondary" Content="{Binding BrowseImportSourceText}" Command="{Binding BrowseImportSourceCommand}" />
+                      </Grid>
+                      <TextBlock Text="{Binding ImportSourceErrorText}"
+                                 Classes="caption"
+                                 TextWrapping="Wrap"
+                                 Foreground="{DynamicResource Ariadne.StatusError}"
+                                 IsVisible="{Binding HasImportSourceError}" />
+                    </StackPanel>
                     <TextBlock Text="{Binding ImportTargetGroupText}" Classes="inspector-label" Margin="0,8,0,0" />
                     <TextBlock Text="{Binding ImportTargetPathText}" Classes="caption" />
                     <TextBox Text="{Binding ImportTargetPath, Mode=TwoWay}"
@@ -536,19 +557,36 @@
                                TextWrapping="Wrap"
                                Foreground="{DynamicResource Ariadne.StatusInfo}"
                                IsVisible="{Binding HasImportTargetPreview}" />
+                    <!-- 撞名提示分两套文案，因为两条路的可行动作不同：
+                         导入可以勾「覆盖」，新建**没有**覆盖这条路（会静默毁稿），
+                         所以新建那句必须指向「换 ID 或换路径」而不是让人去找一个不存在的复选框。
+                         两条各自带模式条件，不能只靠 HasImportConflict——
+                         否则切到新建后仍显示「确认覆盖后才能导入」，指向一个已隐藏的控件。 -->
                     <TextBlock Text="{Binding ImportConflictText}"
                                Classes="caption"
                                TextWrapping="Wrap"
                                Foreground="{DynamicResource Ariadne.StatusWarning}"
-                               IsVisible="{Binding HasImportConflict}" />
-                    <CheckBox IsChecked="{Binding AllowImportOverwrite, Mode=TwoWay}"
-                              Content="{Binding ImportOverwriteText}"
-                              IsVisible="{Binding HasImportConflict}" />
-                    <TextBlock Text="{Binding ImportConfirmationText}"
+                               IsVisible="{Binding HasImportConflictInImportMode}" />
+                    <TextBlock Text="{Binding CreateConflictText}"
                                Classes="caption"
                                TextWrapping="Wrap"
-                               IsVisible="{Binding HasImportConfirmation}" />
-                    <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
+                               Foreground="{DynamicResource Ariadne.StatusError}"
+                               IsVisible="{Binding HasImportConflictInCreateMode}" />
+                    <StackPanel Spacing="8" IsVisible="{Binding IsImportChapterMode}">
+                      <CheckBox IsChecked="{Binding AllowImportOverwrite, Mode=TwoWay}"
+                                Content="{Binding ImportOverwriteText}"
+                                IsVisible="{Binding HasImportConflict}" />
+                      <TextBlock Text="{Binding ImportConfirmationText}"
+                                 Classes="caption"
+                                 TextWrapping="Wrap"
+                                 IsVisible="{Binding HasImportConfirmation}" />
+                      <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
+                    </StackPanel>
+                    <StackPanel Spacing="8" IsVisible="{Binding IsCreateChapterMode}">
+                      <Button Classes="primary" HorizontalAlignment="Right"
+                              Content="{Binding CreateChapterSubmitText}"
+                              Command="{Binding CreateChapterCommand}" />
+                    </StackPanel>
                   </StackPanel>
                 </Border>
             </StackPanel>

@@ -81,7 +81,10 @@ public sealed class SettingsAccessibilityTests
     {
         var view = File.ReadAllText(ResolveDesktopSource("Views", "SettingsPageView.axaml"));
 
-        Assert.Equal(24, SettingsNavigationCatalog.Sections.Count);
+        // U176：24 → 25（权限页新增 secret_protection 一节）。
+        // 这个数字刻意写死：它不是「小节有多少个」的记录，而是「加/删小节时
+        // 必须来这里对一遍锚点是否也加了」的提醒。
+        Assert.Equal(25, SettingsNavigationCatalog.Sections.Count);
         Assert.Equal(
             SettingsNavigationCatalog.Sections.Count,
             SettingsNavigationCatalog.Sections.Select(item => item.Id).Distinct(StringComparer.Ordinal).Count());

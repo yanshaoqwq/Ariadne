@@ -251,6 +251,17 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         nameof(TemplateRepositorySourceText),
         nameof(AdvancedTemplateRepositoryText),
         nameof(RestoreOfficialTemplateRepositoryText),
+        // U176：凭据保护补救入口的文案。漏挂在这里的表现是切语言后
+        // 这一段仍是旧语言——不报错，只是显示不对。
+        nameof(SecretProtectionTitle),
+        nameof(SecretProtectionStatusText),
+        nameof(SecretMasterPasswordLabel),
+        nameof(SecretMasterPasswordPlaceholder),
+        nameof(SetSecretMasterPasswordText),
+        nameof(SecretMasterPasswordHint),
+        nameof(AllowPlaintextSecretsText),
+        nameof(AllowPlaintextSecretsWarning),
+        nameof(SecretStoreLockedHint),
     };
 
     private readonly DisplayNameService _displayNames;
@@ -395,6 +406,18 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private string _diagnosticsStatus = string.Empty;
     private bool _isDiagnosticsRefreshing;
     private BackendDiagnosticsReport? _diagnosticsReport;
+
+    // U176：凭据保护补救入口的状态。
+    //
+    // 这三个字段**刻意不进脏页判定**（见 CurrentSectionValues 的 PermissionsSection 清单）：
+    // 「设主密码」与「接受明文」是**即时命令**，点一下就调后端并当场生效，
+    // 不存在「草稿改了还没存」这个中间态。把它们塞进脏判定会让页面在用户
+    // 只是往密码框里打了半个字时就报「有未保存改动」，而那个字根本不该被保存——
+    // 主密码是一次性提交的口令，不是配置字段。
+    private string _secretMasterPassword = string.Empty;
+    private string _secretProtectionStatus = string.Empty;
+    private bool _isSecretProtectionBusy;
+
     private readonly ProjectAutomationState _projectAutomation;
 
     public SettingsPageViewModel(
@@ -588,6 +611,15 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         RefreshDiagnosticsCommand = new RelayCommand(
             () => _ = RefreshDiagnosticsAsync(),
             () => !IsDiagnosticsRefreshing);
+        // U176：凭据保护的两个补救动作。
+        // CanExecute 只看「有没有在途请求」，不看保护状态——即使已经加密，
+        // 用户也应当能改主密码；把它按状态灰掉会让「改密码」无路可走。
+        SetSecretMasterPasswordCommand = new RelayCommand(
+            () => _ = SetSecretMasterPasswordAsync(),
+            () => !IsSecretProtectionBusy);
+        AllowUnprotectedSecretsCommand = new RelayCommand(
+            () => _ = AllowUnprotectedSecretsAsync(),
+            () => !IsSecretProtectionBusy);
         ShowTutorialCommand = new RelayCommand(() => _ = ShowTutorialAsync());
         BrowseDocumentsDirCommand = new RelayCommand(() => _ = BrowseProjectDirectoryAsync(value => DocumentsDir = value));
         BrowseWorkflowsDirCommand = new RelayCommand(() => _ = BrowseProjectDirectoryAsync(value => WorkflowsDir = value));
@@ -1114,6 +1146,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public RelayCommand RestoreRecommendedDefaultsCommand { get; }
     public RelayCommand RestoreOfficialTemplateRepositoryCommand { get; }
     public RelayCommand RefreshDiagnosticsCommand { get; }
+
+    /// <summary>U176：设置本地主密码（诊断承诺的补救动作之一）。</summary>
+    public RelayCommand SetSecretMasterPasswordCommand { get; }
+
+    /// <summary>U176：显式接受明文保存；带确认弹窗，绝不静默生效。</summary>
+    public RelayCommand AllowUnprotectedSecretsCommand { get; }
     public RelayCommand ShowTutorialCommand { get; }
     public RelayCommand BrowseDocumentsDirCommand { get; }
     public RelayCommand BrowseWorkflowsDirCommand { get; }
@@ -1361,6 +1399,89 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     public string DiagnosticsCopyText => string.Join(
         Environment.NewLine,
         DiagnosticsItems.Select(item => $"{item.Component}: {item.Status} - {item.Reason} - {item.RecoveryAction}"));
+
+    // ── U176：凭据保护补救入口 ────────────────────────────────────────────────
+    // 原缺陷：后端两条命令齐备（ipc.rs:924/:931），前端三层全无，而诊断文案
+    // `diagnostics.secrets.locked` 正把用户指向「配置页设本地主密码」。
+    // 新项目默认就是 Locked（secrets.rs:584-588）⇒ 装完应用填 Provider、
+    // 点保存密钥失败、按诊断去配置页、配置页没这个入口 ⇒ 卡死。
+
+    public string SecretProtectionTitle => _displayNames.Text("ui.settings.secrets.title");
+
+    /// <summary>后端上报的原始状态串（managed / encrypted / unprotected / locked）。</summary>
+    public string SecretProtectionStatus
+    {
+        get => _secretProtectionStatus;
+        private set
+        {
+            if (SetProperty(ref _secretProtectionStatus, value ?? string.Empty))
+            {
+                OnPropertyChanged(nameof(SecretProtectionStatusText));
+                OnPropertyChanged(nameof(IsSecretStoreLocked));
+                OnPropertyChanged(nameof(IsSecretStorePlaintext));
+            }
+        }
+    }
+
+    public string SecretProtectionStatusText => _displayNames.Format(
+        "ui.settings.secrets.status",
+        new Dictionary<string, string> { ["status"] = SecretProtectionStatusLabel(SecretProtectionStatus) });
+
+    /// <summary>
+    /// 锁定态：此时保存 Provider 密钥**必定失败**，要在入口旁把这句话写出来。
+    ///
+    /// 判据取后端上报的状态串，不在前端按「有没有设过密码」自行推断——
+    /// 保护状态的真相源是后端 store（secrets.rs 的 protection_status），
+    /// 前端另算一套会在 managed（系统钥匙链）场景下误报锁定。
+    /// </summary>
+    public bool IsSecretStoreLocked =>
+        string.Equals(SecretProtectionStatus, "locked", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>明文态：用户已同意，但这件事要**持续**说出来（secrets.rs:87-103）。</summary>
+    public bool IsSecretStorePlaintext =>
+        string.Equals(SecretProtectionStatus, "unprotected", StringComparison.OrdinalIgnoreCase);
+
+    public string SecretMasterPasswordLabel => _displayNames.Text("ui.settings.secrets.master_password_label");
+    public string SecretMasterPasswordPlaceholder => _displayNames.Text("ui.settings.secrets.master_password_placeholder");
+    public string SetSecretMasterPasswordText => _displayNames.Text("ui.settings.secrets.set_master_password");
+
+    /// <summary>
+    /// 主密码说明。**必须包含两件不可省的事**（都已查证，不是猜的）：
+    /// (1) 密码只在进程内存里（secrets.rs:364 的 RwLock，无任何写盘点），
+    ///     重启即丢 ⇒ 每次启动要重新输入；
+    /// (2) 忘了不可恢复——后端没有任何重置/找回命令，`derive_legacy_v2_key_
+    ///     with_machine_migration` 只服务 version:2 历史信封，不是找回路径。
+    /// </summary>
+    public string SecretMasterPasswordHint => _displayNames.Text("ui.settings.secrets.master_password_hint");
+
+    public string AllowPlaintextSecretsText => _displayNames.Text("ui.settings.secrets.allow_plaintext");
+    public string AllowPlaintextSecretsWarning => _displayNames.Text("ui.settings.secrets.allow_plaintext_warning");
+    public string SecretStoreLockedHint => _displayNames.Text("ui.settings.secrets.locked_hint");
+
+    /// <summary>
+    /// 主密码输入。
+    ///
+    /// 刻意**不**参与脏页判定：它是一次性提交的口令，不是配置字段。
+    /// 详见字段声明处的注释。
+    /// </summary>
+    public string SecretMasterPassword
+    {
+        get => _secretMasterPassword;
+        set => SetProperty(ref _secretMasterPassword, value ?? string.Empty);
+    }
+
+    public bool IsSecretProtectionBusy
+    {
+        get => _isSecretProtectionBusy;
+        private set
+        {
+            if (SetProperty(ref _isSecretProtectionBusy, value))
+            {
+                SetSecretMasterPasswordCommand.NotifyCanExecuteChanged();
+                AllowUnprotectedSecretsCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
 
     public string ProjectName { get => _projectName; set => SetProperty(ref _projectName, value); }
     public string ProjectRoot
@@ -2298,6 +2419,9 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             // 项目身份不属于任何 section，单独发；它失败不能拖垮整页加载。
             var currentProjectTask = _backend.GetCurrentProjectAsync(cancellationToken);
             var diagnosticsTask = RefreshDiagnosticsAsync(generation, cancellationToken);
+            // U176：凭据保护状态同批发出。它也不属于任何 section——
+            // 保护状态不是可编辑配置，没有草稿/脏页概念，只是补救入口旁的状态行。
+            var secretProtectionTask = RefreshSecretProtectionAsync(cancellationToken);
 
             try
             {
@@ -2323,6 +2447,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 failed |= !await apply().ConfigureAwait(true);
             }
             failed |= !await diagnosticsTask.ConfigureAwait(true);
+            // U176：不并入 `failed`。保护状态读取失败最坏是状态行显示「状态未知」，
+            // 两个补救按钮照样可点；把它算进整页失败会让配置页报「加载失败」，
+            // 而用户来配置页正是为了解决凭据问题。
+            await secretProtectionTask.ConfigureAwait(true);
 
             EnsureDefaultConfirmationPoliciesIfEmpty();
             StatusText = failed
@@ -3045,6 +3173,132 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
     }
 
+    /// <summary>
+    /// U176：读取凭据保护状态。
+    ///
+    /// 失败不写 StatusText、也不抛：这条读取是补救入口的**装饰信息**
+    /// （状态行显示什么），失败最坏是状态行显示「状态未知」而两个按钮照样可点。
+    /// 把它做成会拖红整页加载的一环，会让「后端多一条读取失败」升级成
+    /// 「配置页打不开」——而配置页恰恰是用户来解决问题的地方。
+    /// </summary>
+    private async Task RefreshSecretProtectionAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var report = await _backend.GetSecretProtectionAsync(cancellationToken).ConfigureAwait(true);
+            SecretProtectionStatus = report?.Status ?? string.Empty;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            SecretProtectionStatus = string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// U176：设置本地主密码。
+    ///
+    /// 设完**必须刷新诊断分区**：`protection_status()` 转 Encrypted 后
+    /// `secret_protection_diagnostic_item` 就报 Healthy（commands.rs 的同名函数，
+    /// 刻意只记函数名不记行号：原先写的 5073/5144 两个行号都已过期），
+    /// 但那份报告是前端缓存的快照。不主动重取的话用户设完仍看到旧的
+    /// 「凭据存储已锁定」告警，会以为没生效、然后再点一次。
+    /// </summary>
+    private async Task SetSecretMasterPasswordAsync()
+    {
+        var password = SecretMasterPassword;
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            // 不能只把按钮灰掉：禁用的按钮旁必须写明原因（产品硬约束）。
+            StatusText = _displayNames.Text("ui.settings.secrets.master_password_required");
+            return;
+        }
+
+        IsSecretProtectionBusy = true;
+        try
+        {
+            var report = await _backend
+                .SetLocalSecretMasterPasswordAsync(password)
+                .ConfigureAwait(true);
+            SecretProtectionStatus = report?.Status ?? string.Empty;
+            // 口令用完即清：留在输入框里等于把它一直挂在屏幕上（虽然是 PasswordChar）。
+            SecretMasterPassword = string.Empty;
+            StatusText = _displayNames.Text("ui.settings.secrets.master_password_applied");
+            await RefreshDiagnosticsAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+        finally
+        {
+            IsSecretProtectionBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// U176：显式接受明文保存。
+    ///
+    /// **必须先弹危险确认**：`Unprotected` 与 `Locked` 分成两个状态是
+    /// secrets.rs:87-103 刻意的设计（用户当时同意了明文，三个月后未必记得）。
+    /// 做成一个不带警告的普通开关，等于让用户在不知情的情况下把 API Key
+    /// 摊在磁盘上。Danger 语义下 ConfirmDialogViewModel 不把 Enter 绑到确认键，
+    /// 正好避免误触。
+    /// </summary>
+    private async Task AllowUnprotectedSecretsAsync()
+    {
+        var dialog = new ConfirmDialogViewModel(
+            _displayNames.Text("ui.dialog.settings.allow_plaintext.title"),
+            _displayNames.Text("ui.dialog.settings.allow_plaintext.message"),
+            new[]
+            {
+                new DialogButton(AllowPlaintextSecretsText, DialogButtonVariant.Danger, 0),
+                new DialogButton(_displayNames.Text("ui.common.cancel"), DialogButtonVariant.Subtle, 1),
+            })
+        {
+            Severity = DialogSeverity.Danger,
+            ConfirmResultIndex = 0,
+            CancelResultIndex = 1,
+        };
+        dialog.SealKeyboardRoles();
+
+        if (await DialogService.Current.ConfirmAsync(dialog).ConfigureAwait(true) != 0)
+        {
+            return;
+        }
+
+        IsSecretProtectionBusy = true;
+        try
+        {
+            var report = await _backend.AllowUnprotectedLocalSecretsAsync().ConfigureAwait(true);
+            SecretProtectionStatus = report?.Status ?? string.Empty;
+            StatusText = _displayNames.Text("ui.settings.secrets.plaintext_applied");
+            // 明文态在诊断里是 Degraded 而非 Healthy，同样要立刻反映出来。
+            await RefreshDiagnosticsAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
+        finally
+        {
+            IsSecretProtectionBusy = false;
+        }
+    }
+
+    /// <summary>U176：保护状态 → 用户可读文案。未知状态落到「状态未知」而不是显示裸英文。</summary>
+    private string SecretProtectionStatusLabel(string? status) => status switch
+    {
+        "managed" => _displayNames.Text("ui.settings.secrets.status.managed"),
+        "encrypted" => _displayNames.Text("ui.settings.secrets.status.encrypted"),
+        "unprotected" => _displayNames.Text("ui.settings.secrets.status.unprotected"),
+        "locked" => _displayNames.Text("ui.settings.secrets.status.locked"),
+        _ => _displayNames.Text("ui.settings.secrets.status.unknown"),
+    };
+
     private void ApplyDiagnostics(BackendDiagnosticsReport report)
     {
         _diagnosticsReport = report;
@@ -3334,6 +3588,18 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     internal Task RefreshProviderModelsForTestsAsync() => FetchModelsAsync();
 
     internal void ApplyDiagnosticsForTests(BackendDiagnosticsReport report) => ApplyDiagnostics(report);
+
+    /// <summary>U176：读一次凭据保护状态（整页加载之外单独触发，用例用）。</summary>
+    internal Task RefreshSecretProtectionForTestsAsync() => RefreshSecretProtectionAsync();
+
+    /// <summary>
+    /// U176：重取诊断分区。
+    ///
+    /// 用例需要它来建立「设主密码之前的诊断基线」——判据是「设完之后后端
+    /// 又被问了一次 get_backend_diagnostics 且那条告警真的换了」，
+    /// 没有基线就分不清「重取了」与「本来就是这个值」。
+    /// </summary>
+    internal Task<bool> RefreshDiagnosticsForTestsAsync() => RefreshDiagnosticsAsync();
 
     internal void SelectProviderForTests(string providerId)
     {

@@ -576,6 +576,12 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<ChapterImportReport>("import_chapter", new { request }, cancellationToken);
     }
 
+    /// <summary>U174：新建章节。返回更新后的章节索引（与后端 create_chapter 一致）。</summary>
+    public Task<ChapterDocumentIndexResult> CreateChapterAsync(ChapterCreateRequest request, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<ChapterDocumentIndexResult>("create_chapter", new { request }, cancellationToken);
+    }
+
     public Task<CombinedExportReport> ExportChaptersAsync(IReadOnlyList<string> selectedChapterIds, string? artifactId = null, string format = "markdown", CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<CombinedExportReport>("export_chapters", new
@@ -713,6 +719,37 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
     public Task<BackendDiagnosticsReport> GetBackendDiagnosticsAsync(CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<BackendDiagnosticsReport>("get_backend_diagnostics", null, cancellationToken);
+    }
+
+    /// <summary>U176：读取凭据保护状态。</summary>
+    public Task<SecretProtectionReport> GetSecretProtectionAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<SecretProtectionReport>("get_secret_protection", null, cancellationToken);
+    }
+
+    /// <summary>
+    /// U176：设置本地主密码。
+    ///
+    /// 参数名必须是 <c>master_password</c>：后端 <c>SetMasterPasswordParams</c> 按该字段名
+    /// 反序列化，写错会得到一条「missing field」而不是任何界面提示。
+    /// </summary>
+    public Task<SecretProtectionReport> SetLocalSecretMasterPasswordAsync(
+        string masterPassword,
+        CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<SecretProtectionReport>(
+            "set_local_secret_master_password",
+            new { master_password = masterPassword },
+            cancellationToken);
+    }
+
+    /// <summary>U176：显式接受明文保存；无参数。</summary>
+    public Task<SecretProtectionReport> AllowUnprotectedLocalSecretsAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<SecretProtectionReport>(
+            "allow_unprotected_local_secrets",
+            null,
+            cancellationToken);
     }
 
     public async Task<T?> InvokeAsync<T>(

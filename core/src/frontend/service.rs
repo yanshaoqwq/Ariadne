@@ -1312,6 +1312,25 @@ pub struct ChapterImportRequest {
     pub outline_ref: Option<crate::contracts::SourceSpan>,
 }
 
+/// 章节新建请求（U174）。
+///
+/// 与 `ChapterImportRequest` 的唯一差别是正文来源：导入给 `source_path`
+/// （项目外的稿件），新建给 `initial_content`（调用方直接提供的初始正文）。
+/// 刻意不复用同一个结构体加 `Option<source_path>`：那会让「两个字段都给了
+/// 或都没给」成为可构造的状态，而两种来源的语义互斥。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChapterCreateRequest {
+    pub chapter_id: String,
+    pub title: String,
+    pub order: u64,
+    pub target_path: PathBuf,
+    /// 初始正文。缺省为空字符串——新建一章后作者自己写第一句是常态。
+    #[serde(default)]
+    pub initial_content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_ref: Option<crate::contracts::SourceSpan>,
+}
+
 /// 章节合并导出格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1465,6 +1484,58 @@ pub fn import_chapter_document(
     } else {
         documents.create_document(write_request)
     }?;
+    let entry = ChapterDocumentEntry {
+        chapter_id: request.chapter_id,
+        document_id: report.metadata.document_id,
+        path: report.metadata.path,
+        title: request.title,
+        order: request.order,
+        kind: ChapterDocumentKind::ChapterBody,
+        version: report.metadata.version,
+        word_count: Some(word_count),
+        outline_ref: request.outline_ref,
+    };
+    entry.validate()?;
+    Ok(ChapterImportReport {
+        entry,
+        index_invalidation: report.index_invalidation,
+    })
+}
+
+/// U174：**新建空白章节**，并返回章节索引条目。
+///
+/// 为什么必须新增这条路径，而不是让 `save_document_content` 顺手登记索引：
+///
+/// 1. `save_document_content` 是**通用文档写入**，作品页用它保存正文，
+///    但 planning/global.md、planning/stages/*.md、工作流产物也都走它。
+///    在那里按路径猜「这是不是章节」，等于把「章节正文以索引为准、
+///    不靠文件名猜测」这条既定设计（见 `ChapterDocumentEntry` 的文档注释）
+///    反过来——一旦猜错，planning 文档会被登记成章节，
+///    而那是**导出**的输入，用户会在成书里看到大纲。
+/// 2. 章节还需要 `chapter_id` / `title` / `order` 三个索引字段，
+///    它们无法从「一次文件保存」里推断。order 尤其不行：
+///    猜错的后果是导出时章节顺序错乱，而这在写作后期极难发现。
+///
+/// 所以正确的形状是「创建章节」本身成为一个显式动作——
+/// 与 `import_chapter_document` 并列，区别只在正文来源：
+/// 导入取自外部文件，新建取自调用方给的初始内容（通常为空或一行标题）。
+///
+/// 用 `create_document`（而非 `save_document`）：新建就该拒绝覆盖已有文件，
+/// 否则「新建第一章」会静默盖掉已经写了三万字的第一章。
+pub fn create_chapter_document(
+    documents: &FileDocumentService,
+    request: ChapterCreateRequest,
+) -> CoreResult<ChapterImportReport> {
+    validate_non_empty("chapter_id", &request.chapter_id)?;
+    validate_non_empty("chapter title", &request.title)?;
+    let content = request.initial_content;
+    let word_count = count_words_for_ui(&content);
+    let report = documents.create_document(DocumentWriteRequest {
+        path: request.target_path.clone(),
+        content,
+        format: None,
+        base_version: None,
+    })?;
     let entry = ChapterDocumentEntry {
         chapter_id: request.chapter_id,
         document_id: report.metadata.document_id,

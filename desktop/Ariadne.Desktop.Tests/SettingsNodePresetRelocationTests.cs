@@ -37,12 +37,14 @@ public sealed class SettingsNodePresetRelocationTests
         Assert.Equal("permissions", nodePresets.TabId);
 
         // 顺序也是判据的一部分：全局工具 → 按节点类型的工具覆盖 → 路径。
+        // U176 追加了 secret_protection 一节在最末（凭据保护属「谁能读到什么」同组概念，
+        // 但它是一次性处置而非日常调节，故不占前面的位置）。
         var permissionSections = sections
             .Where(item => item.TabId == "permissions")
             .Select(item => item.Id)
             .ToArray();
         Assert.Equal(
-            new[] { "capabilities", "tool_controls", "node_presets", "paths" },
+            new[] { "capabilities", "tool_controls", "node_presets", "paths", "secret_protection" },
             permissionSections);
 
         // 预设页搬走后剩下的三节仍成立（不必合并页签）。

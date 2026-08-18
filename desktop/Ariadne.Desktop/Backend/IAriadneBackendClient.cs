@@ -199,6 +199,20 @@ public interface IAriadneBackendClient
     Task<ChapterImportReport> ImportChapterAsync(ChapterImportRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// U174：新建一章（空白或带初始正文）。
+    ///
+    /// 与 <see cref="ImportChapterAsync"/> 并列，区别只在正文来源：导入取自项目外的
+    /// 稿件文件，新建取自 <c>InitialContent</c>。此前后端**只有导入**这一条路能让章节
+    /// 出现在作品树里，于是「新建一章」要求作者先去项目外手工造一个文件——
+    /// 用户报的「一些东西还不能创建」就是这件事。
+    ///
+    /// ⚠️ 不要改用 <see cref="SaveDocumentContentAsync"/> 来「新建」章节：
+    /// 那条路只写文件、**不登记章节索引**，而作品树读的是索引 ⇒ 文件落盘了但
+    /// 用户看不见（U174-A 的原始形态）。
+    /// </summary>
+    Task<ChapterDocumentIndexResult> CreateChapterAsync(ChapterCreateRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 合并导出章节。
     ///
     /// U134：<paramref name="artifactId"/> 传 null 时由**后端**命名
@@ -249,4 +263,34 @@ public interface IAriadneBackendClient
     Task SetAutoModeAsync(bool enabled, CancellationToken cancellationToken = default);
 
     Task<BackendDiagnosticsReport> GetBackendDiagnosticsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// U176：读取当前凭据保护状态（后端 <c>get_secret_protection</c>，ipc.rs:923）。
+    ///
+    /// 设置页据此决定「设主密码 / 接受明文」这两个入口显不显、以及提示哪一种。
+    /// </summary>
+    Task<SecretProtectionReport> GetSecretProtectionAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// U176：设置本地主密码，凭据自此以密文落盘（后端 <c>set_local_secret_master_password</c>，ipc.rs:924）。
+    ///
+    /// 此前后端命令齐备而前端三层全无，于是诊断文案 <c>diagnostics.secrets.locked</c>
+    /// 让用户「配置本地主密码」，而配置页根本没有那个入口——用户会在设置页
+    /// 反复找一个不存在的开关。新项目**默认**就是 <c>Locked</c>（secrets.rs:584-588），
+    /// 所以那是一条装完应用就撞上的死胡同。
+    /// </summary>
+    Task<SecretProtectionReport> SetLocalSecretMasterPasswordAsync(
+        string masterPassword,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// U176：显式接受明文保存（后端 <c>allow_unprotected_local_secrets</c>，ipc.rs:931）。
+    ///
+    /// **必须是显式动作、且调用点必须带警告**：<c>Unprotected</c> 与 <c>Locked</c>
+    /// 刻意分成两个状态（secrets.rs:87-103 写明理由——用户当时同意了明文，
+    /// 三个月后未必记得，诊断要能持续把这件事说出来）。做成一个不带警告的
+    /// 普通开关，等于让用户在不知情的情况下把 API Key 摊在磁盘上。
+    /// </summary>
+    Task<SecretProtectionReport> AllowUnprotectedLocalSecretsAsync(
+        CancellationToken cancellationToken = default);
 }

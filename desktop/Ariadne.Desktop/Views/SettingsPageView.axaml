@@ -1107,6 +1107,67 @@
                 </Grid>
               </StackPanel>
             </Border>
+            <!-- U176：凭据保护的补救入口。
+                 原缺陷是一条死胡同：新项目默认就是 Locked（secrets.rs:584-588），
+                 此时保存 Provider 密钥必定失败，诊断文案
+                 `ui.settings.misc.diagnostics.recovery.secrets` 让用户
+                 「在配置页为密钥配置本地主密码」——而配置页根本没有这个入口。
+                 后端两条命令一直都在（ipc.rs:924/:931），缺的只是前端三层接线。
+
+                 IsEnabled 刻意**不绑** IsPermissionsEditable：这两个动作是即时命令，
+                 不依赖权限 section 的读取基线。若权限读取失败就把它们灰掉，
+                 恰恰会在「后端有问题」的时候锁死用户唯一的补救出路——
+                 与本条缺陷同型（把补救入口挡在故障后面）。 -->
+            <Border Classes="settings-section" Padding="22">
+              <StackPanel Spacing="12">
+                <TextBlock x:Name="SecretProtectionSectionAnchor"
+                           Text="{Binding SecretProtectionTitle}"
+                           Classes="subtitle" />
+                <SelectableTextBlock Text="{Binding SecretProtectionStatusText}"
+                                     Classes="caption"
+                                     TextWrapping="Wrap"
+                                     AutomationProperties.LiveSetting="Polite" />
+                <!-- 锁定态要把「保存密钥会失败」直说，不能只摆两个按钮让用户猜该点哪个。 -->
+                <Border Classes="notice warning" IsVisible="{Binding IsSecretStoreLocked}">
+                  <TextBlock Text="{Binding SecretStoreLockedHint}"
+                             Classes="caption"
+                             TextWrapping="Wrap" />
+                </Border>
+                <TextBlock Text="{Binding SecretMasterPasswordLabel}" Classes="secondary" />
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                  <TextBox Grid.Column="0"
+                           Text="{Binding SecretMasterPassword, Mode=TwoWay}"
+                           PlaceholderText="{Binding SecretMasterPasswordPlaceholder}"
+                           PasswordChar="*"
+                           AutomationProperties.Name="{Binding SecretMasterPasswordLabel}"
+                           AutomationProperties.HelpText="{Binding SecretMasterPasswordHint}">
+                    <TextBox.KeyBindings>
+                      <KeyBinding Gesture="Enter" Command="{Binding SetSecretMasterPasswordCommand}" />
+                    </TextBox.KeyBindings>
+                  </TextBox>
+                  <Button Grid.Column="1"
+                          Classes="secondary"
+                          Content="{Binding SetSecretMasterPasswordText}"
+                          Command="{Binding SetSecretMasterPasswordCommand}" />
+                </Grid>
+                <!-- 说明里含「进程内存、重启要重输」与「忘记不可恢复」两件事，
+                     两条都查证过后端行为，不是保险话术：主密码无任何写盘点，
+                     后端也没有任何重置/找回命令。 -->
+                <TextBlock Text="{Binding SecretMasterPasswordHint}"
+                           Classes="caption"
+                           TextWrapping="Wrap" />
+                <!-- 明文那条的警告用 StatusWarning：它是「你正在放弃一层保护」，
+                     不是操作失败，所以不取 StatusError。 -->
+                <TextBlock Text="{Binding AllowPlaintextSecretsWarning}"
+                           Classes="caption"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource Ariadne.StatusWarning}" />
+                <Button Classes="danger"
+                        HorizontalAlignment="Left"
+                        Content="{Binding AllowPlaintextSecretsText}"
+                        Command="{Binding AllowUnprotectedSecretsCommand}" />
+              </StackPanel>
+            </Border>
               </StackPanel>
             </Expander>
           </StackPanel>

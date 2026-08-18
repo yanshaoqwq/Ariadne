@@ -497,6 +497,47 @@ public sealed record ChapterImportReport(
     [property: JsonPropertyName("entry")] object? Entry,
     [property: JsonPropertyName("index_invalidation")] object? IndexInvalidation);
 
+/// <summary>
+/// U174：新建章节请求，对应后端 <c>ChapterCreateRequest</c>（frontend/service.rs）。
+///
+/// <para>与 <see cref="ChapterImportRequest"/> 的唯一差别是正文来源：导入给
+/// <c>source_path</c>（项目外的稿件），新建给 <see cref="InitialContent"/>。
+/// 后端刻意分成两个结构体而不是「一个结构体加两个可选字段」——那会让
+/// 「两个来源都给了 / 都没给」成为可构造的状态，而两者语义互斥。</para>
+///
+/// <para>⚠️ 没有 <c>overwrite</c>，这是**故意**的：「覆盖已有章节」的语义是
+/// 替换正文，那属于保存或导入。让「新建」能覆盖，只会让手滑静默毁稿。
+/// 撞名时后端返回 <c>conflict</c>，前端要给出可读提示而不是静默失败。</para>
+/// </summary>
+public sealed record ChapterCreateRequest(
+    [property: JsonPropertyName("chapter_id")] string ChapterId,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("order")] long Order,
+    [property: JsonPropertyName("target_path")] string TargetPath,
+    [property: JsonPropertyName("initial_content")] string InitialContent);
+
+/// <summary>
+/// 章节索引，对应后端 <c>ChapterDocumentIndex</c>（documents/models.rs:131）。
+///
+/// <para><c>create_chapter</c> 返回**更新后的整份索引**而不是单条 entry：
+/// 调用方（作品页）拿到它就能直接判断「这一章真的进了索引」，
+/// 不必再发一次读请求——而「进了索引」正是作品树可见性的唯一依据。</para>
+/// </summary>
+public sealed record ChapterDocumentIndexResult(
+    [property: JsonPropertyName("index_version")] string IndexVersion,
+    [property: JsonPropertyName("entries")] IReadOnlyList<ChapterIndexEntry> Entries);
+
+/// <summary>章节索引条目，对应后端 <c>ChapterDocumentEntry</c>（documents/models.rs:99）。</summary>
+public sealed record ChapterIndexEntry(
+    [property: JsonPropertyName("chapter_id")] string ChapterId,
+    [property: JsonPropertyName("document_id")] string DocumentId,
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("order")] long Order,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("version")] string Version,
+    [property: JsonPropertyName("word_count")] long? WordCount);
+
 public sealed record ProjectReference(
     [property: JsonPropertyName("reference")] string Reference,
     [property: JsonPropertyName("kind")] string Kind,
@@ -703,6 +744,21 @@ public sealed record DiagnosticItem(
     [property: JsonPropertyName("component")] string Component,
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("reason")] string? Reason);
+
+/// <summary>
+/// U176：凭据保护状态，对应后端 <c>SecretProtectionReport</c>（commands.rs:4173）。
+///
+/// <para><see cref="Status"/> 取值与后端 <c>SecretProtectionStatus</c> 一致，
+/// serde 是 snake_case：<c>managed</c> / <c>encrypted</c> / <c>unprotected</c> / <c>locked</c>。
+/// 前端不把它做成 enum：后端将来加状态时，未知值应当落到「未知」文案而不是
+/// 反序列化整条崩掉——诊断面板恰恰是排查故障的地方，不能因为多了一个状态就打不开。</para>
+///
+/// <para><see cref="RequiresSetup"/> 由后端算（<c>status == Locked</c>），不在前端重算：
+/// 「什么状态算需要处置」是后端的判断，两边各算一套必然漂移。</para>
+/// </summary>
+public sealed record SecretProtectionReport(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("requires_setup")] bool RequiresSetup);
 
 public sealed record BackendDiagnosticsReport(
     [property: JsonPropertyName("status")] string Status,

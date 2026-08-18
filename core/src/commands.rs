@@ -2304,6 +2304,47 @@ pub fn import_chapter(
     Ok(index)
 }
 
+/// U174：新建一章。**作品页「新建章节」的后端入口。**
+///
+/// 修的缺陷：此前全后端**没有任何**「新建章节」命令，`import_chapter` 是
+/// 唯一能让章节出现在作品树里的路径——而它要求先有一个外部源文件。
+/// 于是「新建一章」这个最基本的写作动作，用户得先去项目外手工造一个 .md
+/// 再导入。作者报的「一些东西还不能创建」就是这件事。
+///
+/// 顺带说明**为什么不是**「让 `save_document_content` 顺手登记索引」
+/// （那是更省事、但错误的修法，理由见 `create_chapter_document` 的文档注释）：
+/// 通用文档保存分不清章节与 planning 文档，猜错会把大纲登记成章节并印进成书。
+///
+/// 与 `import_chapter` 共用同一套索引读改写与冲突判定，只是正文来源不同。
+/// 新建**不提供** overwrite：想覆盖已有章节的语义是「替换正文」，
+/// 那是保存或导入的事；让「新建」能覆盖，只会让误操作静默毁稿。
+pub fn create_chapter(
+    state: &AriadneAppState,
+    mut request: crate::frontend::ChapterCreateRequest,
+) -> CommandResult<ChapterDocumentIndex> {
+    let project_root = project_root_from_state(state, None)?;
+    let _project_mutation = acquire_project_mutation_guard(&project_root, "chapter_create")?;
+    // 落点必须在项目内：与导入同一条边界（沙箱只允许写项目内）。
+    request.target_path = project_path_buf(&project_root, &request.target_path)?;
+    let mut index = load_chapter_index(&project_root)?;
+    if index
+        .entries
+        .iter()
+        .any(|entry| entry.chapter_id == request.chapter_id || entry.path == request.target_path)
+    {
+        return Err(CommandError::conflict(
+            "chapter id or target document already exists",
+        ));
+    }
+    let documents = document_service(&project_root);
+    let report =
+        crate::frontend::create_chapter_document(&documents, request).map_err(error_to_string)?;
+    index.entries.push(report.entry);
+    save_chapter_index(&project_root, &index)?;
+    spawn_indexing_worker_for_state(state)?;
+    Ok(index)
+}
+
 /// 合并导出选中章节。
 ///
 /// U134：`artifact_id` 改为**可选**，缺省时由后端按「导出目录 + 作品名 + 本地时间戳

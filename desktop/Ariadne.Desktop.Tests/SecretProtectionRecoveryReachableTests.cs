@@ -96,6 +96,8 @@ public sealed class SecretProtectionRecoveryReachableTests
     /// ⚠️ 这条与上一条**不是重复**：客户端有方法 ≠ 界面上有按钮。
     /// 两条都红说明整条链都没接；只有第二条红说明后端能力已接进客户端、
     /// 但设置页忘了放入口——两种情况的修法不同。
+    ///
+    /// U176 已修复：入口落在**权限控制页**最末一节（`secret_protection`）。
     /// </summary>
     [Fact]
     public void SettingsPage_MustOfferTheRecoveryEntryItsDiagnosticPromises()
@@ -119,6 +121,33 @@ public sealed class SecretProtectionRecoveryReachableTests
             "设置页没有任何「设置本地主密码 / 接受明文保存」的入口，"
             + $"而诊断补救文案写着「{recovery}」——"
             + "用户会在配置页反复找一个不存在的开关（U176）。");
+
+        // 判据必须落到「按钮真的接了命令」上，不能只看关键词出现。
+        // 光提到 MasterPassword 的注释也能让上面那条绿，而注释点不动。
+        Assert.Contains(
+            "Command=\"{Binding SetSecretMasterPasswordCommand}\"",
+            view,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Command=\"{Binding AllowUnprotectedSecretsCommand}\"",
+            view,
+            StringComparison.Ordinal);
+
+        // 入口在权限页的可见性分组内，不是漂在别的页签里。
+        var anchor = view.IndexOf("x:Name=\"SecretProtectionSectionAnchor\"", StringComparison.Ordinal);
+        var permissionsGroup = view.IndexOf(
+            "IsVisible=\"{Binding IsPermissionsSelected}\"", StringComparison.Ordinal);
+        var personalizationGroup = view.IndexOf(
+            "IsVisible=\"{Binding IsPersonalizationSelected}\"", StringComparison.Ordinal);
+        Assert.True(anchor > 0 && permissionsGroup > 0);
+        Assert.InRange(anchor, permissionsGroup, personalizationGroup);
+
+        // 左侧页内索引必须能跳到它，否则长页里等于藏起来了。
+        var section = Assert.Single(
+            SettingsNavigationCatalog.Sections,
+            item => item.Id == "secret_protection");
+        Assert.Equal("permissions", section.TabId);
+        Assert.Equal("SecretProtectionSectionAnchor", section.AnchorName);
     }
 
     /// <summary>
@@ -183,6 +212,130 @@ public sealed class SecretProtectionRecoveryReachableTests
         Assert.NotEqual(
             names.Text("ui.settings.misc.diagnostics.recovery.secrets"),
             names.Text("ui.settings.secrets.allow_plaintext"));
+    }
+
+    /// <summary>
+    /// **本批最重要的一条**：点「设置本地主密码」→ 口令真的出站 →
+    /// 保护状态转 Encrypted → **诊断分区当场重取**。
+    ///
+    /// 判据刻意取三样**真实运行态**产物，而不是「命令能否执行」：
+    /// (1) 后端收到的口令等于用户敲进去的那串（不是某个常量、不是空串）；
+    /// (2) `DiagnosticsItems` 里那条 `secrets.protection` 的状态标签从
+    ///     「不可用」翻成「健康」；
+    /// (3) 后端诊断被**多问了一次**。
+    ///
+    /// 第 (3) 条是这条用例的核心：`protection_status()` 转 Encrypted 后后端就报
+    /// Healthy（`commands.rs` 的 `secret_protection_diagnostic_item` 早已就绪），但前端那份诊断报告是缓存快照。
+    /// 不主动重取，用户设完主密码仍看到「凭据存储已锁定」，会以为没生效然后再点一次。
+    /// 只断言 (1)(2) 挡不住这个：状态属性是命令返回值直接写的，
+    /// 摘掉 `RefreshDiagnosticsAsync` 后它俩照样对。
+    /// </summary>
+    [Fact]
+    public async Task SettingMasterPassword_SendsItOutAndTurnsTheDiagnosticHealthy()
+    {
+        var names = DisplayNameService.LoadDefault();
+        var backend = SecretProtectionBackend.Create();
+        var vm = new SettingsPageViewModel(names, (IAriadneBackendClient)(object)backend);
+
+        // 干净基线：从 locked 起跑（真实装机后的形态），并把诊断快照灌成
+        // 后端此刻真会给的那份「不可用」。
+        await vm.RefreshSecretProtectionForTestsAsync();
+        Assert.Equal("locked", vm.SecretProtectionStatus);
+        Assert.True(vm.IsSecretStoreLocked);
+
+        await vm.RefreshDiagnosticsForTestsAsync();
+        var lockedItem = Assert.Single(vm.DiagnosticsItems);
+        Assert.Equal(
+            names.Text("ui.settings.misc.diagnostics.status.unavailable"),
+            lockedItem.Status);
+        var diagnosticsBefore = backend.DiagnosticsCalls;
+
+        // 用户敲的口令：刻意不是任何默认值/空串，否则「口令送出去了」会恒真。
+        vm.SecretMasterPassword = "u176-typed-by-the-user";
+        vm.SetSecretMasterPasswordCommand.Execute(null);
+        await DrainAsync(() => !vm.IsSecretProtectionBusy && backend.LastMasterPassword is not null);
+
+        // (1) 真实出站的正是用户敲的那串。
+        Assert.Equal("u176-typed-by-the-user", backend.LastMasterPassword);
+        // 口令用完即清，不留在屏幕上。
+        Assert.Equal(string.Empty, vm.SecretMasterPassword);
+
+        // (2) 保护状态翻转，锁定提示随之消失。
+        Assert.Equal("encrypted", vm.SecretProtectionStatus);
+        Assert.False(vm.IsSecretStoreLocked);
+        Assert.Equal(
+            names.Format(
+                "ui.settings.secrets.status",
+                new Dictionary<string, string>
+                {
+                    ["status"] = names.Text("ui.settings.secrets.status.encrypted"),
+                }),
+            vm.SecretProtectionStatusText);
+
+        // (3) 诊断被重取，且那条 secrets.protection 现在是「健康」。
+        Assert.True(
+            backend.DiagnosticsCalls > diagnosticsBefore,
+            "设完主密码后设置页没有重取诊断——用户会继续看到「凭据存储已锁定」"
+            + "那条旧告警，从而以为没生效（U176）。");
+        var healthyItem = Assert.Single(vm.DiagnosticsItems);
+        Assert.Equal(
+            names.Text("ui.settings.misc.diagnostics.status.healthy"),
+            healthyItem.Status);
+    }
+
+    /// <summary>
+    /// 「接受明文」必须先过确认弹窗；**取消就什么都不做**。
+    ///
+    /// 判据取「后端一次都没被调」而不是「状态没变」：后者在
+    /// 「调了后端但状态刚好没翻」时也绿，而那已经是明文落盘了。
+    /// `DialogService` 无人应答时 `Completion` 永不完成，因此本用例
+    /// 只需确认命令**卡在弹窗上**、没有直接打后端。
+    /// </summary>
+    [Fact]
+    public async Task AllowingPlaintext_RequiresAnExplicitConfirmation()
+    {
+        var names = DisplayNameService.LoadDefault();
+        DialogService.Initialize(names);
+        var backend = SecretProtectionBackend.Create();
+        var vm = new SettingsPageViewModel(names, (IAriadneBackendClient)(object)backend);
+
+        await vm.RefreshSecretProtectionForTestsAsync();
+        Assert.Equal("locked", vm.SecretProtectionStatus);
+
+        vm.AllowUnprotectedSecretsCommand.Execute(null);
+
+        // 判据分两段。第一段：命令**必须先卡在弹窗上**。
+        // 摘掉确认弹窗的话它会直接打后端、把状态推成 unprotected，
+        // 此时 IsOpen 永远不为真——所以这里不能只 DrainAsync 到超时了事，
+        // 要显式区分「弹窗没弹出来」和「弹窗弹了但用户还没点」。
+        for (var attempt = 0; attempt < 500 && !DialogService.Current.IsOpen; attempt++)
+        {
+            // ConfigureAwait(true)：xUnit1030 —— (false) 会绕过并行度限制。
+            // 这里等的是 DialogService 的进程内状态，不需要脱离同步上下文。
+            await Task.Delay(2).ConfigureAwait(true);
+        }
+
+        Assert.True(
+            DialogService.Current.IsOpen,
+            "点「接受明文保存」没有弹确认框"
+            + $"（当前保护状态已经是「{vm.SecretProtectionStatus}」）——"
+            + "明文许可被静默施加了。`Unprotected` 与 `Locked` 分成两个状态是"
+            + "secrets.rs:87-103 刻意的设计：不带警告的开关等于让用户在不知情的"
+            + "情况下把 API Key 摊在磁盘上（U176）。");
+
+        var dialog = Assert.IsType<ConfirmDialogViewModel>(DialogService.Current.ActiveDialog);
+        // 危险语义：Enter 不绑确认键，避免「一路回车」把 API Key 摊到磁盘上。
+        Assert.Equal(DialogSeverity.Danger, dialog.Severity);
+        Assert.False(dialog.AllowEnterConfirm);
+        Assert.Equal(
+            names.Text("ui.dialog.settings.allow_plaintext.title"),
+            dialog.Title);
+
+        // 用户取消 ⇒ 后端一次都不该被碰，状态留在 locked。
+        dialog.Cancel();
+        await DrainAsync(() => !DialogService.Current.IsOpen);
+        Assert.Equal("locked", vm.SecretProtectionStatus);
+        Assert.False(vm.IsSecretStorePlaintext);
     }
 
 
@@ -281,7 +434,8 @@ public sealed class SecretProtectionRecoveryReachableTests
             new(_status, string.Equals(_status, "locked", StringComparison.Ordinal));
 
         /// <summary>
-        /// 诊断报告随保护状态现算，映射照抄后端 `commands.rs:5146-5157`：
+        /// 诊断报告随保护状态现算，映射照抄后端 `secret_protection_diagnostic_item`
+        /// （`core/src/commands.rs`，按函数名找而非行号——行号已过期过两次）：
         /// encrypted/managed ⇒ healthy、unprotected ⇒ degraded、locked ⇒ unavailable。
         /// </summary>
         private BackendDiagnosticsReport Diagnostics()

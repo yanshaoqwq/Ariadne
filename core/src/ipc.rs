@@ -552,6 +552,12 @@ fn dispatch_request(
                 params(request.params)?;
             ok(commands::import_chapter(state, params.request)?)
         }
+        // U174：新建章节。与 import_chapter 并列，正文来源不同（见 create_chapter）。
+        "create_chapter" => {
+            let params: RequestParam<crate::frontend::ChapterCreateRequest> =
+                params(request.params)?;
+            ok(commands::create_chapter(state, params.request)?)
+        }
         "export_chapters" => {
             let params: ExportChaptersParams = params(request.params)?;
             ok(commands::export_chapters(
