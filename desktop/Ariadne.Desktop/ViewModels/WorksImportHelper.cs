@@ -120,13 +120,27 @@ public static class WorksImportHelper
     }
 
     /// <summary>
-    /// 将手输或文件选择器返回的路径规范为项目相对路径。绝对路径必须能证明位于
-    /// 当前项目根内；目标路径还必须落在 documents/，与后端路径沙箱保持同一契约。
+    /// 将手输或文件选择器返回的路径规范为项目相对路径。目标路径的绝对形态必须能
+    /// 证明位于当前项目根内、且落在 documents/，与后端路径沙箱保持同一契约。
     /// </summary>
+    /// <param name="requireInsideProject">
+    /// 落点必须在项目内（我们要往那儿写）；**导入源不必**——作者从下载目录、U 盘、
+    /// 别的写作软件导出目录里挑稿子是最常见的用法，不是异常情况。
+    ///
+    /// 后端两个校验函数刻意不同：<c>import_source_path_buf</c>（commands.rs:14409）
+    /// 只禁 <c>..</c>，绝对路径原样放行；<c>project_path_buf</c>（:14418）额外要求
+    /// <c>ensure_path_under_root</c>。后端还专门为源在项目外时把**它所在目录**
+    /// 加进只读沙箱（commands.rs:2280 一带）。这里若沿用落点那套「必须在项目内」，
+    /// 等于前端把一条后端明确支持的能力挡死——而文件选择器又不受此限，
+    /// 于是形成「浏览让你选、选完告诉你不行」的死结（U163-B）。
+    ///
+    /// 放宽仅限「位置」这一维：<c>..</c> 与当前平台非法的路径形态仍然拒绝。
+    /// </param>
     public static ImportPathValidation ValidateProjectPath(
         string? rawPath,
         string? projectRoot,
-        bool requireDocumentsDirectory)
+        bool requireDocumentsDirectory,
+        bool requireInsideProject = true)
     {
         var raw = (rawPath ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(raw))
@@ -134,12 +148,30 @@ public static class WorksImportHelper
             return new ImportPathValidation(string.Empty, ImportPathError.Required);
         }
 
-        if (raw.StartsWith("~/", StringComparison.Ordinal)
-            || raw.StartsWith("~\\", StringComparison.Ordinal)
-            || (!OperatingSystem.IsWindows()
-                && (IsWindowsDrivePath(raw) || raw.StartsWith("\\\\", StringComparison.Ordinal))))
+        // 平台非法形态与「位置不对」是两类问题，必须用不同错误码：
+        // Linux 上收到 C:\... 或 \\server\share 是数据错误，放宽项目外时不能连带放行。
+        if (!OperatingSystem.IsWindows()
+            && (IsWindowsDrivePath(raw) || raw.StartsWith("\\\\", StringComparison.Ordinal)))
         {
-            return new ImportPathValidation(string.Empty, ImportPathError.OutsideProject);
+            return new ImportPathValidation(string.Empty, ImportPathError.UnsupportedPathForm);
+        }
+
+        // `~` 在 Linux 上是合法的家目录前缀，源路径放宽后 ~/Downloads/稿子.md 应当可用。
+        // 但后端不认 `~`（import_source_path_buf 会把它当相对路径拼到项目根下，
+        // 得到一个不存在的路径），所以必须在前端就展开成绝对路径再往下走。
+        var isHomePrefixed = raw.StartsWith("~/", StringComparison.Ordinal)
+                             || raw.StartsWith("~\\", StringComparison.Ordinal);
+        if (isHomePrefixed)
+        {
+            if (!requireInsideProject && TryExpandHomePath(raw, out var expanded))
+            {
+                raw = expanded;
+            }
+            else
+            {
+                // 落点侧：`~` 展开后几乎必然落在项目外，保持既有拒绝语义。
+                return new ImportPathValidation(string.Empty, ImportPathError.OutsideProject);
+            }
         }
 
         string candidate;
@@ -147,7 +179,14 @@ public static class WorksImportHelper
         {
             if (!ProjectPathHelper.TryMakeRelativeToProjectRoot(raw, projectRoot, out candidate))
             {
-                return new ImportPathValidation(string.Empty, ImportPathError.OutsideProject);
+                if (requireInsideProject)
+                {
+                    return new ImportPathValidation(string.Empty, ImportPathError.OutsideProject);
+                }
+
+                // 项目外的源：保留原始绝对路径交给后端。**不能**继续走下面那段
+                // 项目相对路径的规范化——那会把绝对路径当相对路径拼到项目根后面。
+                return ValidateOutsideProjectSource(raw);
             }
         }
         else
@@ -187,6 +226,58 @@ public static class WorksImportHelper
         return new ImportPathValidation(normalized, ImportPathError.None);
     }
 
+    /// <summary>
+    /// 项目外的导入源：只做「形态」检查，把绝对路径原样交给后端。
+    ///
+    /// 判据与后端 <c>import_source_path_buf</c> 对齐——它只跑
+    /// <c>ensure_no_parent_traversal</c>，不查项目根。这里额外挡掉便携非法字符，
+    /// 是为了在按钮禁用时就能给出原因，而不是等后端拒了再报错。
+    /// </summary>
+    private static ImportPathValidation ValidateOutsideProjectSource(string absolutePath)
+    {
+        var unified = absolutePath.Replace('\\', '/');
+        var segments = unified.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Any(segment => segment == ".."))
+        {
+            return new ImportPathValidation(string.Empty, ImportPathError.ParentTraversal);
+        }
+
+        // 首段可能是 Windows 盘符（`C:`），冒号在那里是合法的；只检查其余段。
+        // 非 Windows 平台的 `C:\...` 已在上游按 UnsupportedPathForm 挡掉。
+        var checkable = OperatingSystem.IsWindows() && segments.Length > 0 && IsWindowsDriveSegment(segments[0])
+            ? segments.Skip(1)
+            : segments;
+        if (segments.Length == 0
+            || checkable.Where(segment => segment != ".").Any(ContainsPortableInvalidPathCharacter))
+        {
+            return new ImportPathValidation(string.Empty, ImportPathError.Invalid);
+        }
+
+        // 归一化 `.` 段但保留绝对形态：后端要的是能直接打开的路径。
+        var normalized = Path.GetFullPath(absolutePath);
+        return new ImportPathValidation(normalized, ImportPathError.None);
+    }
+
+    /// <summary>把 <c>~/</c> 前缀展开成绝对家目录路径；取不到家目录时返回 false。</summary>
+    private static bool TryExpandHomePath(string raw, out string expanded)
+    {
+        expanded = string.Empty;
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(home))
+        {
+            return false;
+        }
+
+        var rest = raw[2..].Replace('\\', '/').TrimStart('/');
+        expanded = Path.Combine(home, rest);
+        return true;
+    }
+
+    private static bool IsWindowsDriveSegment(string segment)
+    {
+        return segment.Length == 2 && char.IsLetter(segment[0]) && segment[1] == ':';
+    }
+
     private static bool IsAbsoluteOrHomePath(string path)
     {
         return Path.IsPathRooted(path) || IsWindowsDrivePath(path);
@@ -220,6 +311,12 @@ public enum ImportPathError
     ParentTraversal,
     Invalid,
     TargetOutsideDocuments,
+    /// <summary>
+    /// 在当前平台上根本不合法的路径形态（Linux 上的 <c>C:\…</c> / UNC）。
+    /// 与 <see cref="OutsideProject"/> 分开是必需的：导入源放宽了「位置」这一维，
+    /// 若两者共用同一错误码，放宽会连带把非法形态一起放行（U163-B）。
+    /// </summary>
+    UnsupportedPathForm,
 }
 
 public readonly record struct ImportPathValidation(string NormalizedPath, ImportPathError Error)

@@ -73,7 +73,7 @@ public static class AppIconPainter
             insetFraction: 0.015);
     }
 
-    /// <summary>线描母版渲染（应用内 Logo）。</summary>
+    /// <summary>线描母版渲染（应用内 Logo + 桌面/开始菜单图标）。</summary>
     public static WriteableBitmap RenderLineBitmap(Color accent, Color paper, int size, bool transparentPaper = false)
     {
         var paperForMap = transparentPaper
@@ -84,7 +84,15 @@ public static class AppIconPainter
             accent,
             paperForMap,
             size,
-            insetFraction: 0.04);
+            // U163-D：不再额外内缩。线描母版自身已有约 2.8% 的留白（图案包围盒
+            // 483×408 / 512²），再叠 4% 会让图案只占最终位图 86.8% 宽、73.3% 高——
+            // 欢迎页 62px 圆牌里的 Logo 因此只占 47%，桌面图标也比邻居小一圈。
+            //
+            // 方向本来就反了：线描走的是应用内与桌面图标这类**大尺寸、清晰优先**的场合，
+            // 它的内缩不该大于小尺寸剪影（RenderTaskbarBitmap 的 0.015）。
+            // 那 1.5% 对实心剪影是有用的余量（贴边会被某些平台的圆角遮罩切掉），
+            // 对线描则纯属浪费。此处的 0 由 AppIconInsetTests 的不变量守住。
+            insetFraction: 0.0);
     }
 
     /// <summary>兼容旧调用：默认走线描（非任务栏）。</summary>

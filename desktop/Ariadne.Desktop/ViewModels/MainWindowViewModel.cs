@@ -849,6 +849,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
                 return;
             }
             // 回到开始页，但保留资源化错误摘要；工程诊断只进入统一诊断面板。
+            // U163-A：弹回开始页是**最后手段**，必须留下是哪一类异常导致的。
+            // 只写 NotificationText（本地化摘要）时，排查者看不出异常类型与来源页——
+            // 这正是「作品页莫名跳回欢迎界面」当初难以定位的原因。
+            Observe(UserFacingError.FromException(ex));
             NotificationText = UserFacingError.Format(ex, _displayNames);
             CurrentPage = Welcome;
             foreach (var nav in AllNavigationItems())

@@ -1097,10 +1097,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                && (!HasImportConflict || AllowImportOverwrite);
     }
 
+    /// 导入源允许在项目外：作者从下载目录 / U 盘 / 别的写作软件导出目录挑稿子是常规用法，
+    /// 后端 import_source_path_buf 也只禁 `..` 不查项目根（U163-B）。
     private ImportPathValidation ImportSourceValidation => WorksImportHelper.ValidateProjectPath(
         ImportSourcePath,
         _importProjectRoot,
-        requireDocumentsDirectory: false);
+        requireDocumentsDirectory: false,
+        requireInsideProject: false);
 
     private ImportPathValidation ImportTargetValidation => WorksImportHelper.ValidateProjectPath(
         ImportTargetPath,
@@ -1147,6 +1150,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             ImportPathError.Required => "ui.works.import.error.path_required",
             ImportPathError.OutsideProject => "ui.works.import.error.path_outside_project",
             ImportPathError.ParentTraversal => "ui.works.import.error.path_parent_traversal",
+            ImportPathError.UnsupportedPathForm => "ui.works.import.error.path_unsupported_form",
             ImportPathError.TargetOutsideDocuments => "ui.works.import.error.target_outside_documents",
             _ => "ui.works.import.error.path_invalid",
         };
@@ -1839,6 +1843,28 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         _worksTreeLoadCts?.Dispose();
         using var loadCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _worksTreeLoadCts = loadCts;
+        // U163-A：字段绝不能活过 `using` 作用域。loadCts 在方法返回时被 Dispose，
+        // 若 _worksTreeLoadCts 仍指着它，下一次 Cancel()/Dispose() 就会抛
+        // ObjectDisposedException——它不是取消异常，会一路冒泡到
+        // MainWindowViewModel 切页的 catch，把用户从作品页弹回欢迎界面。
+        // 原先只有内层 try 的 finally 清字段，而「无项目根」那条早返回绕过了它。
+        // 这里用 ReferenceEquals 而不是代次比较：只清自己那一个，
+        // 不能把后来者装进去的新 CTS 顺手清掉。
+        try
+        {
+            await LoadWorksTreeCoreAsync(generation, loadCts).ConfigureAwait(true);
+        }
+        finally
+        {
+            if (ReferenceEquals(_worksTreeLoadCts, loadCts))
+            {
+                _worksTreeLoadCts = null;
+            }
+        }
+    }
+
+    private async Task LoadWorksTreeCoreAsync(long generation, CancellationTokenSource loadCts)
+    {
         SetWorksTreeState(WorksTreeLoadState.Loading);
 
         if (!_backend.HasProjectRoot)
@@ -1893,7 +1919,8 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         {
             if (generation == _worksTreeLoadGeneration)
             {
-                _worksTreeLoadCts = null;
+                // 字段的清理已上移到 LoadWorksTreeAsync 的 finally（覆盖所有返回路径）；
+                // 这里只刷新重试按钮的可用性。
                 RetryWorksTreeCommand.NotifyCanExecuteChanged();
             }
         }
