@@ -213,6 +213,76 @@ public sealed class ThemeStyleUsageTests
         }
     }
 
+    /// <summary>
+    /// 每个 <c>{DynamicResource Ariadne.*}</c> 引用的 key 都必须在主题里真的有定义。
+    ///
+    /// **为什么需要这条守卫**：Avalonia 的 <c>DynamicResource</c> 在 key 缺失时
+    /// **既不报错、也不回落**——属性留在未赋值状态。后果按属性而异：
+    /// <c>Foreground</c> 退回继承值（看起来"只是颜色不对"），
+    /// 而 <c>Ellipse.Fill</c> 拿到 null 意味着**那个形状压根没画出来**。
+    ///
+    /// 实际发生过两处（2026-08-18 修）：
+    /// - <c>Ariadne.TextMuted</c>（正确名 <c>TextSubtle</c>）—— 作品页索引圆点
+    ///   从未画出，「未选中项更淡」这个设计意图也从未生效；
+    /// - <c>Ariadne.StatusDanger</c>（正确名 <c>StatusError</c>）——
+    ///   配置页 **7 处校验错误文案**字色未赋值。用户填错模型 id / 成本 /
+    ///   上下文长度时，错误提示不显危险色。
+    ///
+    /// 两处都是**拼错了一个近义词**，且都活了很久：没有任何编译期或运行期报错
+    /// 途径，只能靠键集合比对发现。（`display_name.json` 缺 key 至少会返回
+    /// `[key]` 让人看见，主题这边连这个都没有。）
+    ///
+    /// 判据取「引用集合 ⊆ 定义集合」而非逐个白名单：白名单要人工维护，
+    /// 新加一个 token 就多一处忘记更新的机会。
+    /// </summary>
+    [Fact]
+    public void EveryDynamicResourceTokenReferenceHasADefinition()
+    {
+        var theme = File.ReadAllText(ResolveThemePath());
+        var defined = Regex
+            .Matches(theme, @"x:Key=""(Ariadne\.[A-Za-z0-9.]+)""")
+            .Select(match => match.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.True(defined.Count > 50, $"主题里只解析出 {defined.Count} 个 token 定义，正则大概失效了");
+
+        var missing = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+        // 用现成的 EnumerateDesktopSources：它已排除 obj/bin——生成物里有 XAML
+        // 编译产生的副本，会把同一处使用重复计数。
+        foreach (var file in EnumerateDesktopSources())
+        {
+            if (!file.EndsWith(".axaml", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            var relative = Path.GetRelativePath(ResolveDesktopRoot(), file);
+            foreach (Match match in Regex.Matches(
+                File.ReadAllText(file), @"\{DynamicResource (Ariadne\.[A-Za-z0-9.]+)\}"))
+            {
+                var key = match.Groups[1].Value;
+                if (defined.Contains(key))
+                {
+                    continue;
+                }
+                if (!missing.TryGetValue(key, out var sites))
+                {
+                    sites = new List<string>();
+                    missing[key] = sites;
+                }
+                if (!sites.Contains(relative))
+                {
+                    sites.Add(relative);
+                }
+            }
+        }
+
+        Assert.True(
+            missing.Count == 0,
+            "以下 token 被引用但主题里没有定义。DynamicResource 缺 key 时**不报错也不回落**，"
+            + "属性会留在未赋值状态（Foreground 退回继承值、Fill 直接不画）：\n"
+            + string.Join("\n", missing.Select(entry =>
+                $"  {entry.Key} ← {string.Join('、', entry.Value)}")));
+    }
+
     private static string ResolveDesktopRoot() =>
         Path.Combine(ResolveSolutionDir(), "Ariadne.Desktop");
 

@@ -291,7 +291,7 @@
                             AutomationProperties.Name="{Binding OutlineCompareText}">
                       <PathIcon Width="12" Height="12"
                                 Data="{DynamicResource Ariadne.Icon.Close}"
-                                Foreground="{DynamicResource Ariadne.TextMuted}" />
+                                Foreground="{DynamicResource Ariadne.TextSubtle}" />
                     </Button>
                   </Grid>
                   <ScrollViewer Grid.Row="1"
@@ -345,7 +345,7 @@
                           AutomationProperties.Name="{Binding QuickEditCloseText}">
                     <PathIcon Width="12" Height="12"
                               Data="{DynamicResource Ariadne.Icon.Close}"
-                              Foreground="{DynamicResource Ariadne.TextMuted}" />
+                              Foreground="{DynamicResource Ariadne.TextSubtle}" />
                   </Button>
                 </Grid>
                 <TextBox x:Name="QuickEditInstructionBox" AutomationProperties.Name="{Binding QuickEditTitle}"
