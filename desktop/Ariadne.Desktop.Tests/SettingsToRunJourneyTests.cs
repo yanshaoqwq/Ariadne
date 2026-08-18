@@ -403,9 +403,9 @@ public sealed class SettingsToRunJourneyTests : IDisposable
     [Fact]
     public async Task TestConnection_UsesDraftWithoutPersistingIt()
     {
-        // 本用例独占的 provider id：凭据库是应用级共享的，共用 id 会互相抹掉密钥（见类注释）。
-        const string providerId = "first_run_draft";
-
+        // 这条用例不需要独占 provider id：它测的是「草稿不落盘」，
+        // 用的是就地字面量 "draft_provider"，而且断言之一正是
+        // 「调用后配置里没有这个 provider」——它从不写凭据库，因此不与他人相争。
         var sidecar = ResolveSidecar();
         if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
                 nameof(TestConnection_UsesDraftWithoutPersistingIt)))
