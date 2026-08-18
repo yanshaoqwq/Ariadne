@@ -160,8 +160,31 @@ public sealed class CanvasRenderPerfTests
     ///
     /// 真正的成因是画布用 `ItemsControl` + `Canvas` 面板、**零虚拟化**：
     /// N 个节点卡片每次重挂载都要重新量一遍。剩两条路——
-    /// **视口虚拟化**（治本）或**削薄 274 行的节点卡片模板**
-    /// （`IsVisible=false` 的控件在 Avalonia 里**仍会被实体化**）。
+    /// **视口虚拟化**（治本）或**削薄节点卡片模板**。
+    ///
+    /// ⚠️ **原先这里写的「`IsVisible=false` 的控件在 Avalonia 里仍会被实体化」
+    /// 有一半是错的，别照它推理**：Avalonia 12 的 `MeasureCore`
+    /// （`Layoutable.cs:544-546`）与 `ArrangeCore`（`:669-671`）**整个函数体
+    /// 包在 `if (IsVisible)` 里**，连 `ApplyStyling()` / `ApplyTemplate()` 一起跳过。
+    /// 不跳过的只有构建与 attach。所以「隐藏分支」省下的是实例化 + attach +
+    /// 样式匹配 + 绑定订阅，**不是 measure/arrange**——而瓶颈恰恰在后者。
+    ///
+    /// # 已做的一步：C-1 去掉 18 个静态文案的祖先绑定（2026-08-18）
+    ///
+    /// 节点模板内曾有 26 个 `$parent[UserControl].DataContext.*` 绑定，
+    /// 其中 18 个绑的是纯静态文案。祖先绑定每个都建一个 `ControlTracker`、
+    /// 订阅 attach/detach 两个事件、并跑 10 层 LINQ 祖先遍历——
+    /// **订阅的正是 attach/detach，成本恰好落在重挂载路径上**。
+    /// 已换成 `{loc:Text key}`（`Markup/TextExtension.cs`）。
+    ///
+    /// ⚠️ **但这一步的性能收益没能测出来，如实记录**：本机在 4 个并发编译任务下
+    /// 同一份代码的测量值在 **72 / 94 / 208 / 213 ms** 之间跳（3 倍差），
+    /// 回退后量到 203 / 278ms——与改后区间完全重叠。
+    /// **这台机器的当前负载下本用例无法分辨该改动的效果。**
+    /// 结构判据见 `NodeTemplate_HasNoAncestorBindingsForStaticText`：
+    /// 它不依赖计时，因此在噪声下依然可信。
+    /// 要判定 C-1 是否有效、以及是否该转路 B（视口虚拟化），
+    /// 需要在**机器空闲**时重量一次。
     ///
     /// **判据取「与节点数的比例关系」而非绝对耗时**：headless + debug + ARM 板的
     /// 绝对值不可与真机比，但「切回代价随节点数线性」这个**形状**与机器速度无关。
@@ -833,6 +856,111 @@ public sealed class CanvasRenderPerfTests
     {
         public static AppBuilder BuildAvaloniaApp() =>
             AppBuilder.Configure<App>().UseHeadless(new AvaloniaHeadlessPlatformOptions());
+    }
+
+    /// <summary>
+    /// U159 C-1 的**结构判据**：节点卡片模板里不得再有静态文案的祖先绑定。
+    ///
+    /// **为什么要一条不计时的用例**：本机在并发编译负载下，同一份代码的
+    /// 切页耗时测量值能在 72~278ms 之间跳（3 倍差），
+    /// 计时用例分辨不出这个改动。而「模板里还有没有那些绑定」是确定的事实，
+    /// 与机器负载无关 ⇒ 它才是能长期守住这一步成果的判据。
+    ///
+    /// 判的是**祖先绑定**（`$parent[UserControl]`）这个具体机制，
+    /// 不是「文案怎么取」：祖先绑定要建 `ControlTracker` 并订阅
+    /// attach/detach，成本落在切页重挂载路径上；而 `{loc:Text}` 在
+    /// `ProvideValue` 里一次取值、零订阅。
+    ///
+    /// 允许保留的只有真动态开关（`ShowCanvasDetails` /
+    /// `ShowCanvasPrecisionControls`）——它们随 zoom 变化，**必须**响应通知。
+    /// 所以本用例点名放过这两个，而不是断言「一个都不剩」：
+    /// 后者会逼人把该动态的东西也改成静态，那是功能倒退。
+    /// </summary>
+    [Fact]
+    public void NodeTemplate_HasNoAncestorBindingsForStaticText()
+    {
+        var path = ResolveDesktopView("WorkspacePageView.axaml");
+        var view = File.ReadAllText(path);
+
+        // 节点模板边界：DataType 为 WorkflowNodeViewModel 的那个 DataTemplate。
+        // 用标记定位而不是写死行号——行号会随任何编辑漂移，而这两个标记不会。
+        var start = view.IndexOf("<DataTemplate DataType=\"{x:Type vm:WorkflowNodeViewModel}\">", StringComparison.Ordinal);
+        Assert.True(start >= 0, "找不到节点卡片模板——模板结构变了，本用例要连带更新");
+        var end = view.IndexOf("</ItemsControl.ItemTemplate>", start, StringComparison.Ordinal);
+        Assert.True(end > start, "找不到节点模板结束标记");
+        var template = view[start..end];
+
+        var offenders = System.Text.RegularExpressions.Regex
+            .Matches(template, @"\{Binding \$parent\[UserControl\]\.DataContext\.(\w+)\}")
+            .Cast<System.Text.RegularExpressions.Match>()
+            .Select(m => m.Groups[1].Value)
+            .Where(name => name is not ("ShowCanvasDetails" or "ShowCanvasPrecisionControls"))
+            .Distinct()
+            .ToArray();
+
+        Assert.True(
+            offenders.Length == 0,
+            "节点模板里又出现了静态文案的祖先绑定：" + string.Join("、", offenders)
+            + "。每个这样的绑定都会在每个节点上建一个 ControlTracker、"
+            + "订阅 attach/detach 两个事件、并跑 10 层 LINQ 祖先遍历，"
+            + "而订阅的正是 attach/detach ⇒ 成本直接落在「切回画布页」这条路径上（U159）。"
+            + "静态文案请用 {loc:Text key}；确需响应变化的请绑节点自身的 VM 属性。");
+    }
+
+    /// <summary>
+    /// 定位 `desktop/Ariadne.Desktop/Views/` 下的源文件。
+    ///
+    /// 从测试程序集位置向上找仓库根，而不是用相对跳级路径：
+    /// 后者在输出目录层数变化时会静默指向别处。找不到就当场失败。
+    /// </summary>
+    private static string ResolveDesktopView(string fileName)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            var candidate = Path.Combine(dir.FullName, "desktop", "Ariadne.Desktop", "Views", fileName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+            dir = dir.Parent;
+        }
+        throw new FileNotFoundException($"从 {AppContext.BaseDirectory} 向上找不到 desktop/Ariadne.Desktop/Views/{fileName}");
+    }
+
+    /// <summary>
+    /// C-1 的另一半：`{loc:Text}` 必须**真的取到文案**，不是留下 `[key]` 或空。
+    ///
+    /// 上一条只证明「模板里没有祖先绑定了」——那不代表换上去的东西有效。
+    /// 缺 key 时 `DisplayNameService.Text` 返回 `[key]`（刻意如此，便于自查），
+    /// 而 markup extension 走的是 `DisplayNameService.Current` 这个**静态**入口：
+    /// 若 `App` 没 `Initialize` 过，`Current` 是个空字典 ⇒ 全部文案变成 `[key]`，
+    /// 用户看到的就是提示气泡里一串方括号 key。
+    /// **这正是「只断言文本存在」的用例抓不到的那一类**，所以这条必须实体化控件树。
+    /// </summary>
+    [Fact]
+    public async Task LocTextExtension_ResolvesRealCopyNotBracketedKey()
+    {
+        using var session = HeadlessUnitTestSession.StartNew(
+            typeof(HeadlessAppBuilder), AvaloniaTestIsolationLevel.PerTest);
+
+        await session.Dispatch(() =>
+        {
+            // 与生产同一条路：App 启动时会 Initialize，这里显式做一次。
+            DisplayNameService.Initialize(DisplayNameService.LoadDefault());
+            var extension = new Ariadne.Desktop.Markup.TextExtension("ui.workspace.port.data_in");
+            var value = extension.ProvideValue(null!) as string;
+
+            Assert.False(string.IsNullOrWhiteSpace(value), "loc:Text 取到空文案");
+            Assert.False(
+                value!.StartsWith('[') && value.EndsWith(']'),
+                $"loc:Text 返回了 [key] 占位（实际 {value}）——说明 key 不存在，"
+                + "用户会在提示气泡里看到一串方括号");
+
+            // 与 ViewModel 那条路取到的是同一份文案：两条路取值不一致会让
+            // 同一个概念在画布上和别处显示不同的说法。
+            Assert.Equal(DisplayNameService.Current.Text("ui.workspace.port.data_in"), value);
+        }, default);
     }
 
     /// <summary>

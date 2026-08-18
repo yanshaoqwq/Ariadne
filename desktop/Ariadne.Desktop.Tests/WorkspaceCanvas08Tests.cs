@@ -974,7 +974,20 @@ public sealed class WorkspaceCanvas08Tests
         Assert.Contains("KeyDown=\"OnNodeCardKeyDown\"", axaml, StringComparison.Ordinal);
         Assert.Contains("KeyDown=\"OnPortKeyDown\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Classes=\"pin-glass keyboard-target\"", axaml, StringComparison.Ordinal);
-        Assert.Contains("AutomationProperties.Name=\"{Binding $parent[UserControl].DataContext.PortDataInTip}\"", axaml, StringComparison.Ordinal);
+        // 数据入针脚必须有无障碍名。
+        //
+        // ⚠️ 判据刻意**不绑取值方式**：原先写死
+        // `AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PortDataInTip}"`，
+        // 于是 U159 C-1 把祖先绑定换成 `{loc:Text ...}` 时这条就红了——
+        // 而无障碍名一直在，只是换了取法。那种红是「测试前提变了」，
+        // 不是功能坏了，却会让人以为改动破坏了无障碍。
+        //
+        // 现在只断言「针脚上挂了 AutomationProperties.Name，且指向 data_in 那条文案」。
+        // 这样任何取值方式（祖先绑定 / loc:Text / 直接绑节点 VM）都通得过，
+        // 而**把无障碍名删掉**仍然会被拦住——那才是这条要守的事。
+        Assert.Matches(
+            @"AutomationProperties\.Name=""\{(?:loc:Text ui\.workspace\.port\.data_in|Binding [^""]*PortDataInTip)\}""",
+            axaml);
         Assert.Contains("Command=\"{Binding AddDataInPinCommand}\"", axaml, StringComparison.Ordinal);
         Assert.Contains("<Button Classes=\"library-chip entry keyboard-target\"", axaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding AddCommand}\"", axaml, StringComparison.Ordinal);
