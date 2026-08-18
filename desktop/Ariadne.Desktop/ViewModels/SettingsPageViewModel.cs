@@ -3351,6 +3351,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             "runtime.db" => _displayNames.Text("ui.settings.misc.diagnostics.component.runtime_store"),
             "workflow_runtime_recovery" => _displayNames.Text("ui.settings.misc.diagnostics.component.runtime_recovery"),
             "project.config" => _displayNames.Text("ui.settings.misc.diagnostics.component.project_config"),
+            // U172-D：这两项**只在特定条件下**才出现——`project.root` 只在项目损坏时、
+            // `providers.llm.reachability` 只在配了 Provider 后。所以它们长期落在
+            // 「其它运行组件」兜底名上却没人发现：跑一次拿到的 payload 里根本没有它们。
+            // 而它们恰恰是最需要被认出来的两项：一个说「你的项目目录有问题」，
+            // 另一个说「模型连不上」，看不出是哪个部件，排障就无从下手。
+            "project.root" => _displayNames.Text("ui.settings.misc.diagnostics.component.project_root"),
+            "providers.llm.reachability" => _displayNames.Text("ui.settings.misc.diagnostics.component.llm_reachability"),
             "providers.config" => _displayNames.Text("ui.settings.misc.diagnostics.component.provider_config"),
             "providers.llm.default" => _displayNames.Text("ui.settings.misc.diagnostics.component.default_llm"),
             "providers.embedding.default" => _displayNames.Text("ui.settings.misc.diagnostics.component.default_embedding"),

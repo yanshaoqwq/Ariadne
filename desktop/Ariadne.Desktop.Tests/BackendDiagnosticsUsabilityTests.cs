@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Ariadne.Desktop.Backend;
 using Ariadne.Desktop.Localization;
 using Xunit;
@@ -221,6 +222,92 @@ public sealed class BackendDiagnosticsUsabilityTests
         {
             TryCleanup(temp);
         }
+    }
+
+    /// <summary>
+    /// U172-D：**每个后端会真实产出的组件 id，界面上都必须有自己的名字。**
+    ///
+    /// 落到 `ui.settings.misc.diagnostics.component.other`（「其它运行组件」）
+    /// 意味着用户看到的是一条**无法定位的**诊断：状态和原因都在，但不知道说的是哪个部件。
+    /// 而排障的第一步恰恰是「哪儿坏了」。
+    ///
+    /// 判据取「后端源码里真实存在的 component 字面量」与前端映射表求差集，
+    /// 而不是「跑一次拿到的 payload」——后者只覆盖当次环境恰好触发的那几项，
+    /// `project.root`（只在项目损坏时出现）、`providers.llm.reachability`
+    /// （只在配了 Provider 后出现）这类**条件性**组件永远扫不到。
+    /// 这正是它们长期没有名字却没人发现的原因。
+    /// </summary>
+    [Fact]
+    public void EveryDiagnosticComponent_HasItsOwnLabelInsteadOfTheGenericFallback()
+    {
+        var repoRoot = FindRepositoryRoot();
+        var backendSources = new[]
+        {
+            Path.Combine(repoRoot, "core", "src", "commands.rs"),
+            Path.Combine(repoRoot, "core", "src", "diagnostics", "mod.rs"),
+        };
+
+        // 后端产出的组件 id：源码里 `component: "..."` 的字面量。
+        var produced = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var source in backendSources)
+        {
+            Assert.True(File.Exists(source), $"找不到后端源码：{source}");
+            foreach (Match match in Regex.Matches(
+                File.ReadAllText(source), "component: \"([^\"]+)\""))
+            {
+                produced.Add(match.Groups[1].Value);
+            }
+        }
+
+        Assert.True(
+            produced.Count >= 5,
+            $"只扫到 {produced.Count} 个组件 id，远少于预期。"
+            + " 大概率是正则或路径失效，本用例已无鉴别力——先修扫描，别改阈值。");
+
+        // 前端映射：`DiagnosticComponentLabel` 的 switch 分支 + 两条前缀规则。
+        var vmSource = File.ReadAllText(Path.Combine(
+            repoRoot, "desktop", "Ariadne.Desktop", "ViewModels", "SettingsPageViewModel.cs"));
+        var mapped = new HashSet<string>(
+            Regex.Matches(vmSource, "\"([a-z_][a-z0-9_.]*)\" => _displayNames\\.Text\\(")
+                .Select(match => match.Groups[1].Value),
+            StringComparer.Ordinal);
+
+        var unnamed = produced
+            .Where(component => !mapped.Contains(component))
+            // 前缀规则已覆盖的两类：Provider 逐项与检索侧。
+            .Where(component => !component.StartsWith("provider.", StringComparison.Ordinal))
+            .Where(component => !component.StartsWith("retrieval", StringComparison.Ordinal)
+                                && !component.Contains("qdrant", StringComparison.OrdinalIgnoreCase)
+                                && !component.Contains("tantivy", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        Assert.True(
+            unnamed.Count == 0,
+            "以下组件会落到「其它运行组件」兜底名，用户看得到状态却不知道是哪个部件出问题："
+            + $"\n  {string.Join("\n  ", unnamed)}"
+            + "\n在 `DiagnosticComponentLabel` 里补一条分支，并在三份语言包建对应 key。");
+    }
+
+    /// <summary>
+    /// 从测试程序集位置向上找仓库根（含 `core` 与 `desktop` 两个目录的那一层）。
+    /// 不写死相对跳级数：输出目录深度随 TFM/配置变化，写死会在换配置时静默扫错目录。
+    /// </summary>
+    private static string FindRepositoryRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (Directory.Exists(Path.Combine(dir.FullName, "core", "src"))
+                && Directory.Exists(Path.Combine(dir.FullName, "desktop")))
+            {
+                return dir.FullName;
+            }
+            dir = dir.Parent;
+        }
+
+        throw new InvalidOperationException(
+            $"从 {AppContext.BaseDirectory} 向上找不到仓库根（需同时含 core/src 与 desktop）。"
+            + " 本用例读源码作判据，找不到根就是判据失效，必须失败而不是跳过。");
     }
 
     /// <summary>

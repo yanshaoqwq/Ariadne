@@ -529,6 +529,8 @@
   "ui.settings.misc.diagnostics.component.retrieval": "检索与索引",
   "ui.settings.misc.diagnostics.component.other": "其它运行组件",
   "ui.settings.misc.diagnostics.component.secrets_protection": "凭据保护",
+  "ui.settings.misc.diagnostics.component.project_root": "项目目录",
+  "ui.settings.misc.diagnostics.component.llm_reachability": "对话模型连通性",
   "ui.settings.misc.diagnostics.recovery.secrets": "在配置页为密钥配置本地主密码，或确认明文存储的风险。",
   "ui.settings.misc.diagnostics.reason.healthy": "未发现问题。",
   "ui.settings.misc.diagnostics.reason.degraded": "该组件仍可使用，但需要检查配置或等待后台任务完成。",

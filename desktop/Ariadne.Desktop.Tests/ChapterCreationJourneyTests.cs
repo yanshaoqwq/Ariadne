@@ -270,6 +270,71 @@ public sealed class ChapterCreationJourneyTests
         }
     }
 
+    /// <summary>
+    /// U174-D：**「新建」撞名时必须拒绝，且绝不能碰已有正文。**
+    ///
+    /// 为什么这条不可省：`create_chapter` 刻意**不提供** overwrite——
+    /// 「覆盖已有章节」的语义是替换正文，那属于保存或导入。
+    /// 若新建能覆盖，作者手滑重建一次「第一章」就会静默毁掉已写的三万字，
+    /// 而且没有任何提示（文件已被替换、命令返回 ok）。
+    ///
+    /// **判据取「原稿逐字未变」，而不只是「抛了异常」**——这是前任在 U173 踩出来的教训：
+    /// 护栏有两道且互相独立（`commands.rs` 的索引冲突检查 + `documents/service.rs`
+    /// 的 `create_only && try_exists()`），两道同时摘会红在 `Assert.ThrowsAsync` 上，
+    /// 对「正文有没有被写坏」这个真正要保的性质**一无所知**。
+    /// 所以真正测得准的变异是「保留检查、把它挪到写入之后」的半写形态，
+    /// 而那种形态只有本条最后一行断言拦得住。
+    /// </summary>
+    [Fact]
+    public async Task CreatingAChapterTwice_IsRejectedAndLeavesTheExistingDraftByteIdentical()
+    {
+        var sidecar = ResolveSidecar();
+        if (sidecar is null && SidecarAppStateIsolation.AllowSkipWhenSidecarMissing(
+                nameof(CreatingAChapterTwice_IsRejectedAndLeavesTheExistingDraftByteIdentical)))
+        {
+            return;
+        }
+
+        var temp = Directory.CreateTempSubdirectory("ariadne-dupchapter-");
+        try
+        {
+            using var client = new JsonLineBackendClient(sidecar);
+            var projectRoot = Path.Combine(temp.FullName, "novel");
+            await client.CreateProjectAsync(projectRoot, "Dup Chapter");
+
+            var chapterPath = Path.Combine(projectRoot, "documents", "chapters", "ch01.md");
+            await client.CreateChapterAsync(new ChapterCreateRequest(
+                ChapterId: "ch01",
+                Title: "第一章",
+                Order: 1,
+                TargetPath: chapterPath,
+                InitialContent: string.Empty));
+
+            // 作者已经在这一章里写了正文——这就是「不能被静默毁掉」的那份稿子。
+            const string draft = "# 第一章\n\n她推开门，风雪灌进来。这一句必须活下来。\n";
+            await client.SaveDocumentContentAsync(chapterPath, draft);
+
+            // 重复新建同一章：必须被拒。
+            await Assert.ThrowsAnyAsync<Exception>(() => client.CreateChapterAsync(
+                new ChapterCreateRequest(
+                    ChapterId: "ch01",
+                    Title: "第一章（手滑重建）",
+                    Order: 1,
+                    TargetPath: chapterPath,
+                    InitialContent: string.Empty)));
+
+            // 关键判据：原稿**逐字未变**。
+            // 只断言「抛了异常」挡不住「先写后检」的半写形态——
+            // 那种形态同样会抛，但正文已经被空内容盖掉了。
+            var surviving = await client.GetDocumentContentAsync(chapterPath);
+            Assert.Equal(draft, surviving);
+        }
+        finally
+        {
+            TryCleanup(temp);
+        }
+    }
+
     private static int CountNodes(WorksTreeNode root) => Flatten(root).Count();
 
     private static IEnumerable<WorksTreeNode> Flatten(WorksTreeNode node)
