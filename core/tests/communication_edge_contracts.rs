@@ -597,3 +597,81 @@ fn communication_edge_with_canonical_port_names_can_be_saved() {
         "按契约常量 `communication` 填引脚名仍无法保存通信边：{saved:?}"
     );
 }
+
+// ————————————————————————————————————————————————
+// 断言 6（U182 依据）：默认上限 2 的真实失效形态
+// ————————————————————————————————————————————————
+
+/// **这条用例不是修复，是给产品决策做依据**（U182 待定夺，故意钉住现状）。
+///
+/// `DEFAULT_COMMUNICATION_MAX_MESSAGE_COUNT = 2`（`contracts/workflow.rs:30`），
+/// 而计数是**整条边累计、不分方向**（`runtime.rs:2574` 注释明写「按单条计数，
+/// 不按一来一回计数」）。于是最常见的「写→评→改」三步差一个额度：
+///
+/// | 步 | 消息 | 累计 |
+/// |---|---|---|
+/// | writer→critic | 第 1 条 | 1 |
+/// | critic→writer | 第 2 条 | 2 ← **撞上限** |
+/// | writer 读到意见后改稿 | 需要第 3 条 | 走不到 |
+///
+/// ## 失效形态比「消息没发出去」更容易误诊
+///
+/// 第 2 条**已经投递了**才 pause：`:2576` 先递增计数、推入 `messages`、
+/// 发 `CommunicationMessage` 事件，`:2620` 才判耗尽。所以用户看到的是
+/// **「消息在列表里，但对方节点没跑」**——很容易误诊成「critic 节点坏了」
+/// 或「模型没回话」，而真因是额度。
+///
+/// ## 判据为什么取「出站次数」而非「状态是 paused」
+///
+/// `paused` 有多种来源（预算、审批、显式暂停），断言它等于把本条用例
+/// 的鉴别力交给了别的机制。取「writer 那次改稿的调用**从未发生**」
+/// 才精确对应「读不到意见」这个后果。
+///
+/// ⚠️ 定夺后若把默认值改成 3，**本用例会转红，那是预期的**——
+/// 届时应把它改成「默认值足以走完写→评→改」的正向断言，而不是删掉它。
+#[test]
+fn u182_default_limit_of_two_cannot_finish_write_review_revise() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_state = tempfile::tempdir().unwrap();
+    ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
+
+    // 与 critic_feedback_returns_to_writer_outbound_prompt 完全相同的三段响应，
+    // 唯一区别是**不传 max_communication_count**（走默认 2）。
+    // 两条用例形成对照：同样的图 + 同样的模型回复，只因默认值走不完。
+    let llm = RecordingLlm::spawn(vec![
+        chat_response(WRITER_SAYS),
+        chat_response(CRITIC_SAYS),
+        chat_response("已按意见补上雨声。"),
+    ]);
+    let secrets = MemorySecretStore::default();
+    provision(temp.path(), &secrets, llm.base_url.clone());
+    save_communication_workflow(temp.path(), "comm-default", None).unwrap();
+
+    let status = run(temp.path(), &secrets, "comm-default");
+    let requests = llm.requests();
+
+    eprintln!("=== 默认上限下：状态 {status:?}，出站 {} 次", requests.len());
+
+    // 核心判据：writer 从未拿到 critic 的意见。
+    // 前两次是 writer 自述与 critic 评审，第 3 次（带 CRITIC_SAYS 的改稿）
+    // 在默认上限下压根不会发生。
+    let writer_ever_read_the_review = requests
+        .iter()
+        .skip(2)
+        .any(|request| request.contains(CRITIC_SAYS));
+    assert!(
+        !writer_ever_read_the_review,
+        "默认上限似乎已经够走完「写→评→改」了——若这是有意改动（U182 定夺为 3），\
+         请把本用例改成正向断言而不是删掉它：它是「默认值够不够用」这件事的唯一守卫。"
+    );
+
+    // 第二层判据：第 2 条消息**确实投递了**（不是「没发出去」）。
+    // 这一层决定用户看到的现象，也决定他会去查哪里——
+    // 「消息在列表里但对方没跑」会让人误诊成对端节点故障。
+    assert!(
+        requests.len() >= 2,
+        "连 critic 的评审都没发生（只有 {} 次出站），\
+         那本用例测的就不是「额度差一个」而是更早的断链，判据失效。",
+        requests.len()
+    );
+}
