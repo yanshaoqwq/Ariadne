@@ -44,7 +44,46 @@ public partial class WorkspacePageView : UserControl
     private CanvasMiniMapTransform _miniMapTransform = CanvasMiniMapHelpers.ComputeTransform(0, 0, 1400, 840);
     private bool _edgeSyncScheduled;
     private bool _edgeLabelLayoutScheduled;
+    // U178-C：与 _edgeLabelLayoutScheduled 同型的合并标志。
+    // 缩放/平移是连续手势，一格滚轮就发一次属性通知；没有这两个标志时
+    // 每格都会往队列里塞一个「遍历全部节点容器 + 递归整棵视觉树」的回调，
+    // 而这些回调彼此完全等价——只有最后一个的结果被用户看见，前面的全是白跑。
+    private bool _nodeContainerSyncScheduled;
+    private bool _miniMapSyncScheduled;
+    private bool _fullCanvasSyncScheduled;
     private bool? _executionLayoutCompact;
+
+    // ---- U178-C 性能护栏计数器（仅测试读取）----
+    // 为什么要计数而不是量毫秒：这台机器负载波动极大，毫秒数在同一份代码上
+    // 能差 3 倍（见 CanvasRenderPerfTests 的记录），分辨不出改动好坏。
+    // 「连续 N 格滚轮之后这个函数体实际执行了几次」是确定的事实，与机器速度无关。
+    internal int MiniMapSyncRunCount { get; private set; }
+    internal int NodeContainerSyncRunCount { get; private set; }
+    internal int EdgeLabelLayoutRunCount { get; private set; }
+    /// <summary>递归全树兜底路径的实际执行次数（索引路径已覆盖时应为 0）。</summary>
+    internal int NodeContainerFallbackWalkCount { get; private set; }
+    internal int MiniMapFallbackWalkCount { get; private set; }
+
+    internal void ResetCanvasSyncCounters()
+    {
+        MiniMapSyncRunCount = 0;
+        NodeContainerSyncRunCount = 0;
+        EdgeLabelLayoutRunCount = 0;
+        NodeContainerFallbackWalkCount = 0;
+        MiniMapFallbackWalkCount = 0;
+    }
+
+    /// <summary>
+    /// U178-C 护栏用例入口：**同步**跑一次节点容器 + 小地图位置同步。
+    ///
+    /// 刻意不走 Schedule*（那要等队列排空，且合并标志会吞掉第二次请求），
+    /// 用例要观察的是「同步函数体内部的兜底判定」，所以直接调函数体本身。
+    /// </summary>
+    internal void RequestCanvasSyncForTest()
+    {
+        SyncNodeContainerPositions();
+        SyncMiniMapPositions();
+    }
 
     // ---- 左键框选（空白处按下拖动）----
     private bool _marqueePointerDown;
@@ -610,9 +649,27 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
+    /// <summary>
+    /// 排一次节点容器位置同步。
+    ///
+    /// U178-C：与 <see cref="ScheduleEdgeLabelLayout"/> 同型的合并去重。
+    /// 缩放/平移一格就发一次通知，而每个回调都会遍历全部节点容器——
+    /// 连续手势期间排 N 个等价回调，只有最后一个的结果被看见。
+    /// 合并后语义不变：标志在回调**入口**清除，所以清除之后到达的新请求
+    /// 仍会排下一帧，不会丢掉「合并窗口之后」的状态变化。
+    /// </summary>
     private void ScheduleNodeContainerSync()
     {
-        Dispatcher.UIThread.Post(SyncNodeContainerPositions, DispatcherPriority.Background);
+        if (_nodeContainerSyncScheduled)
+        {
+            return;
+        }
+        _nodeContainerSyncScheduled = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _nodeContainerSyncScheduled = false;
+            SyncNodeContainerPositions();
+        }, DispatcherPriority.Background);
     }
 
     private void ScheduleEdgeSync()
@@ -643,9 +700,19 @@ public partial class WorkspacePageView : UserControl
         }, DispatcherPriority.Render);
     }
 
+    /// <summary>小地图同步：合并去重，理由同 <see cref="ScheduleNodeContainerSync"/>。</summary>
     private void ScheduleMiniMapSync()
     {
-        Dispatcher.UIThread.Post(SyncMiniMapPositions, DispatcherPriority.Background);
+        if (_miniMapSyncScheduled)
+        {
+            return;
+        }
+        _miniMapSyncScheduled = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _miniMapSyncScheduled = false;
+            SyncMiniMapPositions();
+        }, DispatcherPriority.Background);
     }
 
     private void ApplyRightPanelResponsiveLayout()
@@ -1176,14 +1243,34 @@ public partial class WorkspacePageView : UserControl
         }
     }
 
+    /// <summary>
+    /// 全画布同步：多档优先级各来一轮，确保容器在任一时点生成后都能落位。
+    ///
+    /// U178-C：整批加合并标志。这几个调用点（挂载、项目切换、导入、Fit）
+    /// 可能在同一帧内连发，每发一次就是 4 轮「遍历全部节点 + 小地图 UpdateLayout」。
+    /// 合并的**安全性**在于：每轮同步都是从 ViewModel 状态**全量重算**位置，
+    /// 不是增量累加 ⇒ 合并窗口内被丢弃的请求，其效果由仍将执行的后续轮次完整覆盖。
+    /// 标志在最后一轮入口清除，之后到达的请求会正常开启新一批。
+    /// </summary>
     private void ScheduleFullCanvasSync()
     {
+        if (_fullCanvasSyncScheduled)
+        {
+            return;
+        }
+        _fullCanvasSyncScheduled = true;
+
         // 容器尚未生成时立刻 Sync 会空跑；多档优先级确保落点可见。
         ScheduleNodeContainerSync();
         ScheduleEdgeSync();
         ScheduleMiniMapSync();
         Dispatcher.UIThread.Post(() =>
         {
+            // ⚠️ 标志在 **Loaded** 轮清除，不放在下面的 Render 轮：
+            // Render 优先级的回调在无渲染循环的环境（headless）里可能永不执行，
+            // 若把清除放在那里，标志会永久卡住 ⇒ 之后所有 ScheduleFullCanvasSync
+            // 变成静默空操作（切项目后画布再也不落位）。宁可少合并一轮。
+            _fullCanvasSyncScheduled = false;
             SyncNodeContainerPositions();
             SyncEdgePositions();
             SyncMiniMapPositions();
@@ -2670,11 +2757,14 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
+        NodeContainerSyncRunCount++;
+
         // U141：位置刷新与层尺寸同一时机——节点刚移到层外时若不长层，
         // 它这一帧就不参与测量，会出现「拖出去了但空一格」。
         RefreshNodeLayerSize();
 
         // 优先对 ItemsControl 容器设 Canvas 附加属性（DataTemplate 根上的 Canvas.Left 常不生效）
+        var missing = 0;
         foreach (var node in viewModel.Nodes)
         {
             if (FindNodeContainer(node, NodesItemsControl, _nodeContainersById) is { } container)
@@ -2682,10 +2772,33 @@ public partial class WorkspacePageView : UserControl
                 Canvas.SetLeft(container, node.X);
                 Canvas.SetTop(container, node.Y);
             }
+            else
+            {
+                missing++;
+            }
         }
 
-        // 兜底：遍历视觉树（旧路径）
-        SyncNodeContainerPositions(NodesItemsControl);
+        // 兜底：遍历视觉树（旧路径）。
+        //
+        // ⚠️ 为什么「missing == 0」是跳过兜底的**充分**条件：
+        // 兜底版 SyncNodeContainerPositions(Control) 做的事，是对视觉树里每个
+        // DataContext 为 WorkflowNodeViewModel 的控件写 Canvas.Left/Top。
+        // 而这样的控件只有两个来源——
+        //   (a) ItemsControl 为 Nodes 里某项生成的容器；
+        //   (b) 该容器**内部**继承同一 DataContext 的子控件。
+        // (a) 恰好就是上面循环已逐个写过的集合：missing==0 意味着
+        //     viewModel.Nodes 每一项都通过 ContainerFromItem 拿到了容器，
+        //     即 (a) 被**完整**覆盖，兜底不可能找到第 (a) 类漏网的。
+        // (b) 是**不该**写的：子控件在容器内部按模板布局，给它设 Canvas.Left
+        //     只有当它的直接父级是 Canvas 时才生效，而节点模板根是 Grid，
+        //     所以这些写入历来是无效副作用（本就没人依赖）。
+        // 反之 missing>0 时容器确实尚未生成（首帧、ItemsControl 回收），
+        // 那时兜底能补上按索引取不到的那些，必须保留。
+        if (missing > 0)
+        {
+            NodeContainerFallbackWalkCount++;
+            SyncNodeContainerPositions(NodesItemsControl);
+        }
     }
 
     private void FitViewToNodes()
@@ -2890,6 +3003,7 @@ public partial class WorkspacePageView : UserControl
         }
 
         // DataTemplate 完成测量后读取真实胶囊尺寸；不可见/尚未生成时才使用文本回退尺寸。
+        EdgeLabelLayoutRunCount++;
         EdgesItemsControl.UpdateLayout();
         var measuredSizes = EdgesItemsControl
             .GetVisualDescendants()
@@ -2961,6 +3075,7 @@ public partial class WorkspacePageView : UserControl
         }
 
         // 与主画布一致：对 item 容器设 Canvas 附加属性（DataTemplate 根上的 Canvas.Left 不生效）
+        MiniMapSyncRunCount++;
         _miniMapTransform = ComputeMiniMapTransform(viewModel);
         EnsureMiniMapItemsControlSize();
         MiniMapItemsControl.UpdateLayout();
@@ -2983,8 +3098,16 @@ public partial class WorkspacePageView : UserControl
             }
         }
 
-        // 兜底：遍历视觉树
-        SyncMiniMapContainerPositions(MiniMapItemsControl);
+        // 兜底：遍历视觉树。
+        // 判定同 SyncNodeContainerPositions：missing==0 ⇒ Nodes 每一项都按索引
+        // 取到了容器，兜底能找到的第一类控件已被全覆盖；余下的是容器内部继承
+        // 同一 DataContext 的子控件，对它们写 Canvas.Left 本就无效（父级不是 Canvas）。
+        if (missing > 0)
+        {
+            MiniMapFallbackWalkCount++;
+            SyncMiniMapContainerPositions(MiniMapItemsControl);
+        }
+
         SyncMiniMapViewportFrame();
 
         // 容器尚未生成时再补一帧

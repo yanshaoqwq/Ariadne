@@ -16,7 +16,7 @@ using Xunit.Abstractions;
 namespace Ariadne.Desktop.Tests;
 
 /// <summary>
-/// **渲染性能**：画布打开、节点拖动、页面切换。
+/// **渲染性能**：画布打开、节点拖动、页面切换、缩放（U178-C）。
 ///
 /// ## 为什么单立一个文件
 ///
@@ -54,7 +54,14 @@ namespace Ariadne.Desktop.Tests;
 /// `PageSwitch_ReturningToCanvas_CostDoesNotScaleWithNodeCount` 当前失败，
 /// 失败即 U159 这个缺陷仍然存在——它是**未修缺陷的回归护栏**，不是坏测试。
 /// 修好 U159 后它应自动转绿；若在修之前看到它绿了，先怀疑测量点被改坏了。
-/// 其余 7 条全绿。
+/// 其余用例全绿（数量不在此写死——它每轮都在变，写死只会变成又一处过期信息）。
+///
+/// ## 缩放段（U178-C）的判据一律是**计数**，不是毫秒
+///
+/// 本机在多 agent 并发编译时负载可达 6.5、可用内存 1G，
+/// 同一份代码的耗时能差 3 倍以上 ⇒ 毫秒判据既拦不住回归、又会间歇变红。
+/// 「N 格滚轮 ⇒ 同步函数体实际执行了几次」是确定事实，与机器速度无关。
+/// 计数器是 `WorkspacePageView` 上的 `internal` 属性（仅测试读取）。
 /// </summary>
 [Collection("AvaloniaHeadless")]
 public sealed class CanvasRenderPerfTests
@@ -261,7 +268,15 @@ public sealed class CanvasRenderPerfTests
                 + "而耗时仍随节点数线性增长。⇒ 代价在重挂载时的 measure/arrange，"
                 + "不在视图树构建。缓存 View 实例（报告的路 A）已试并回退，不成立。\n"
                 + "剩下两条路：视口虚拟化（治本，ItemsControl+Canvas 面板天然不虚拟化），"
-                + "或削薄 274 行的节点卡片模板（IsVisible=false 的控件仍会被实体化）。");
+                + "或削薄 274 行的节点卡片模板。\n"
+                + "⚠️ 削薄模板的收益**被高估过**：Avalonia 12 的 MeasureCore/ArrangeCore "
+                + "整个函数体包在 `if (IsVisible)` 里（Layoutable.cs:544-546 / :669-671）"
+                + "⇒ IsVisible=false 的控件**本来就不参与 measure/arrange**，"
+                + "只有构造与 attach 是无条件的。所以「把不可见的藏起来」不会有额外收益，"
+                + "要削就得真删控件或改成按需构造。\n"
+                + "📌 2026-08-18 实测每节点边际 **86ms**（U178-B 脱掉 8 个祖先绑定之后）。"
+                + "判据取「≥50ms ⇒ 路 C（削薄模板）已耗尽」——86 > 50，"
+                + "**结论是转路 B：视口虚拟化**。");
 
             return true;
         }, CancellationToken.None);
@@ -858,8 +873,186 @@ public sealed class CanvasRenderPerfTests
             AppBuilder.Configure<App>().UseHeadless(new AvaloniaHeadlessPlatformOptions());
     }
 
+    // ════════════════════════════════════════════════════════
+    // 4. 缩放（U178-C）
+    //
+    // 既有用例只覆盖**拖动**摊销，缩放这条路径一条都没有——
+    // 而缩放是最高频的连续手势（一次滚轮手势就是十几格）。
+    //
+    // ⚠️ **判据一律是「函数体实际执行了几次」，不是毫秒数**。
+    // 理由不只是抖动：本机在多 agent 并发编译时负载 6.5、可用内存 1G，
+    // 同一份代码的耗时能差 3 倍以上 ⇒ 毫秒判据既拦不住回归，
+    // 又会间歇性变红把人训练成忽略它。而「N 格滚轮 ⇒ 同步跑了几次」
+    // 是确定的事实，与机器速度无关。
+    // ════════════════════════════════════════════════════════
+
     /// <summary>
-    /// U159 C-1 的**结构判据**：节点卡片模板里不得再有静态文案的祖先绑定。
+    /// **连续缩放期的同步回调必须被合并**。
+    ///
+    /// `SyncMiniMapPositions` / `SyncNodeContainerPositions` 各自都要
+    /// 遍历全部节点、且（改前）无条件递归整棵视觉树。缩放每格都发一次
+    /// 属性通知，若调度不去重，一次十几格的滚轮手势就排十几个**彼此等价**
+    /// 的回调——只有最后一个的结果被用户看见，其余全是白跑。
+    ///
+    /// 判据：连续 <c>Steps</c> 格缩放后，小地图同步的实际执行次数
+    /// **必须远少于**缩放格数（阈值取 ≤ 格数的一半，且不超过 3 次）。
+    /// 取「远少于」而不是「恰好 1 次」：合并窗口的边界取决于队列排空时机，
+    /// 钉死 1 会造出一条依赖调度时序的脆测试。
+    ///
+    /// ⚠️ 同时验**行为**：zoom 必须真的变了，且同步至少跑过一次。
+    /// 只数上限的话，「什么都不同步」是最优解——那会让缩放后连线错位。
+    /// </summary>
+    [Fact]
+    public async Task CanvasZoom_ContinuousSteps_CoalesceSyncCallbacks()
+    {
+        await RunWithCanvasAsync(nodeCount: 60, edgesPerNode: 2, async (view, viewModel) =>
+        {
+            const int steps = 12;
+            var startZoom = viewModel.CanvasZoom;
+
+            view.ResetCanvasSyncCounters();
+            for (var i = 0; i < steps; i++)
+            {
+                // 走生产的滚轮入口，不直接调同步函数——量的必须是真实路径。
+                RaiseCanvasWheel(view, delta: -1);
+            }
+            await DrainAsync();
+
+            var miniMapRuns = view.MiniMapSyncRunCount;
+            var nodeRuns = view.NodeContainerSyncRunCount;
+            _output.WriteLine(
+                $"连续 {steps} 格缩放（{startZoom:F2} → {viewModel.CanvasZoom:F2}）："
+                + $"小地图同步执行 {miniMapRuns} 次、节点容器同步执行 {nodeRuns} 次");
+
+            // 先验行为：缩放真的发生了，否则计数为 0 只是因为什么都没做。
+            Assert.True(
+                Math.Abs(viewModel.CanvasZoom - startZoom) > 0.01,
+                $"滚了 {steps} 格但 CanvasZoom 没变（{startZoom} → {viewModel.CanvasZoom}）——计数没有意义");
+            Assert.True(
+                miniMapRuns >= 1,
+                "小地图同步一次都没跑：缩放后小地图标记与视口框会停在旧位置");
+
+            Assert.True(
+                miniMapRuns <= Math.Max(3, steps / 2),
+                $"连续 {steps} 格缩放触发了 {miniMapRuns} 次小地图全量同步"
+                + $"（阈值 {Math.Max(3, steps / 2)}）。每次都要遍历全部节点容器 + "
+                + "MiniMapItemsControl.UpdateLayout()，而同一手势内这些回调彼此等价 ⇒ "
+                + "ScheduleMiniMapSync 缺少与 _edgeLabelLayoutScheduled 同型的合并标志（U178-C）");
+        });
+    }
+
+    /// <summary>滚轮事件：走生产的 <c>OnCanvasPointerWheel</c>，与拖动用例同一策略。</summary>
+    private static void RaiseCanvasWheel(WorkspacePageView view, double delta)
+        => view.OnCanvasPointerWheel(view, CreateWheelArgs(view, delta));
+
+    /// <summary>
+    /// **容器齐全时不得再递归遍历整棵视觉树**。
+    ///
+    /// 改前 `SyncNodeContainerPositions` / `SyncMiniMapPositions` 按索引写完
+    /// 全部容器位置后，**无条件**再调一次递归全树版兜底。兜底只在容器尚未生成
+    /// 时有用，而代价每次都付——缩放/平移每帧都在付。
+    ///
+    /// 判据（结构性、可计数）：容器已全部生成的稳态下，连续缩放后
+    /// 兜底遍历的执行次数必须为 **0**，而按索引的同步照常发生（≥1）。
+    ///
+    /// ⚠️ 这条**不是**「兜底可以删」。missing&gt;0 时它仍要跑，
+    /// 那是首帧与 ItemsControl 回收后的唯一补位路径；
+    /// 本用例只钉「稳态零代价」，另一条用例钉「未覆盖时仍会跑」。
+    /// </summary>
+    [Fact]
+    public async Task CanvasZoom_WithAllContainersRealized_SkipsFullTreeFallbackWalk()
+    {
+        await RunWithCanvasAsync(nodeCount: 40, edgesPerNode: 2, async (view, viewModel) =>
+        {
+            // 先让容器全部生成并让索引热起来（这正是「稳态」的定义）。
+            view.PrepareReleaseProbe();
+            await DrainAsync();
+
+            view.ResetCanvasSyncCounters();
+            for (var i = 0; i < 8; i++)
+            {
+                RaiseCanvasWheel(view, delta: i % 2 == 0 ? 1 : -1);
+            }
+            await DrainAsync();
+            // 缩放只驱动小地图与边标签；节点容器同步另有入口，这里显式再要一次，
+            // 以便同一条用例同时覆盖两个兜底路径。
+            view.RequestCanvasSyncForTest();
+            await DrainAsync();
+
+            _output.WriteLine(
+                $"稳态缩放后：节点容器同步 {view.NodeContainerSyncRunCount} 次"
+                + $"（其中兜底全树遍历 {view.NodeContainerFallbackWalkCount} 次）、"
+                + $"小地图同步 {view.MiniMapSyncRunCount} 次"
+                + $"（兜底 {view.MiniMapFallbackWalkCount} 次）");
+
+            // 先验行为：同步真的跑了，否则「兜底 0 次」只是因为整条路径没执行。
+            Assert.True(
+                view.NodeContainerSyncRunCount >= 1 && view.MiniMapSyncRunCount >= 1,
+                "节点容器/小地图同步一次都没跑——兜底计数为 0 没有意义");
+
+            Assert.Equal(0, view.NodeContainerFallbackWalkCount);
+            Assert.Equal(0, view.MiniMapFallbackWalkCount);
+        });
+    }
+
+    /// <summary>
+    /// **兜底路径没被删掉**：条件必须是「按索引没覆盖到才跳过」，而不是无条件跳过。
+    ///
+    /// 上一条只说「稳态别跑」。若有人据此把兜底整段删了，上一条照样全绿，
+    /// 而首帧（容器尚未生成）就再没有东西给节点落位 ⇒ 节点全堆在左上角。
+    ///
+    /// ⚠️ **本条刻意用源码结构判据，不用运行时计数**。我先写的是运行时版
+    /// （新增一个节点后立刻同步，期待 `ContainerFromItem` 返回 null 而触发兜底），
+    /// 实测**造不出**那个状态：节点层用的是非虚拟化 `Canvas` 面板，
+    /// `ItemsControl` 在集合变更时**同步**生成容器 ⇒ 兜底计数恒为 0。
+    /// 那个用例断言的其实是「headless 下能否伪造未实体化状态」，不是生产语义，
+    /// 所以它红了也不代表缺陷。改判源码：兜底调用必须仍存在，且被
+    /// `missing` 条件守着。这条与上一条互补——
+    /// 上一条保证「不白跑」，本条保证「没删掉」。
+    /// </summary>
+    [Fact]
+    public void NodeSync_FallbackWalk_StaysGuardedByMissingCondition()
+    {
+        var source = File.ReadAllText(ResolveDesktopSourceFile("WorkspacePageView.axaml.cs"));
+
+        foreach (var fallbackCall in new[]
+                 {
+                     "SyncNodeContainerPositions(NodesItemsControl);",
+                     "SyncMiniMapContainerPositions(MiniMapItemsControl);",
+                 })
+        {
+            var at = source.IndexOf(fallbackCall, StringComparison.Ordinal);
+            Assert.True(
+                at >= 0,
+                $"找不到兜底调用 `{fallbackCall}` ——它是容器尚未生成时唯一的落位路径，"
+                + "删掉会让首帧节点全堆在左上角（U178-C）");
+
+            // 兜底调用必须落在 `if (missing > 0)` 之内：往前找最近的 if。
+            var guardAt = source.LastIndexOf("if (missing > 0)", at, StringComparison.Ordinal);
+            Assert.True(
+                guardAt >= 0 && at - guardAt < 400,
+                $"`{fallbackCall}` 没有被 `if (missing > 0)` 守住。"
+                + "无条件跑兜底 = 每次缩放/平移都递归遍历整棵节点视觉树，"
+                + "而索引路径已覆盖全部容器时它一个位置都改不动（U178-C）");
+        }
+    }
+
+    /// <summary>定位 `desktop/Ariadne.Desktop/Views/` 下的源文件（与 ResolveDesktopView 同路）。</summary>
+    private static string ResolveDesktopSourceFile(string fileName) => ResolveDesktopView(fileName);
+
+    private static PointerWheelEventArgs CreateWheelArgs(Control source, double delta)
+        => new(
+            source,
+            TestPointer,
+            source,
+            new Point(400, 300),
+            timestamp: 0,
+            new PointerPointProperties(RawInputModifiers.None, PointerUpdateKind.Other),
+            KeyModifiers.None,
+            new Vector(0, delta));
+
+    /// <summary>
+    /// U159 C-1 + U178-B 的**结构判据**：节点卡片模板里不得有任何祖先绑定。
     ///
     /// **为什么要一条不计时的用例**：本机在并发编译负载下，同一份代码的
     /// 切页耗时测量值能在 72~278ms 之间跳（3 倍差），
@@ -871,10 +1064,12 @@ public sealed class CanvasRenderPerfTests
     /// attach/detach，成本落在切页重挂载路径上；而 `{loc:Text}` 在
     /// `ProvideValue` 里一次取值、零订阅。
     ///
-    /// 允许保留的只有真动态开关（`ShowCanvasDetails` /
-    /// `ShowCanvasPrecisionControls`）——它们随 zoom 变化，**必须**响应通知。
-    /// 所以本用例点名放过这两个，而不是断言「一个都不剩」：
-    /// 后者会逼人把该动态的东西也改成静态，那是功能倒退。
+    /// ⚠️ **U178-B 起本用例不再放过任何名字**。C-1 时曾白名单
+    /// `ShowCanvasDetails` / `ShowCanvasPrecisionControls`，理由是「它们随 zoom
+    /// 变化，必须响应通知」——那个理由**只说明必须是绑定，不说明必须绑祖先**。
+    /// 现在两者已投影到节点 VM 自身（页面在跨阈值时下推），
+    /// 既保留了响应性又不付祖先遍历，所以白名单撤销。
+    /// 撤销白名单才有意义：留着它，把绑定改回祖先形式也照样绿。
     /// </summary>
     [Fact]
     public void NodeTemplate_HasNoAncestorBindingsForStaticText()
@@ -894,17 +1089,105 @@ public sealed class CanvasRenderPerfTests
             .Matches(template, @"\{Binding \$parent\[UserControl\]\.DataContext\.(\w+)\}")
             .Cast<System.Text.RegularExpressions.Match>()
             .Select(m => m.Groups[1].Value)
-            .Where(name => name is not ("ShowCanvasDetails" or "ShowCanvasPrecisionControls"))
             .Distinct()
             .ToArray();
 
         Assert.True(
             offenders.Length == 0,
-            "节点模板里又出现了静态文案的祖先绑定：" + string.Join("、", offenders)
+            "节点模板里又出现了祖先绑定：" + string.Join("、", offenders)
             + "。每个这样的绑定都会在每个节点上建一个 ControlTracker、"
             + "订阅 attach/detach 两个事件、并跑 10 层 LINQ 祖先遍历，"
             + "而订阅的正是 attach/detach ⇒ 成本直接落在「切回画布页」这条路径上（U159）。"
-            + "静态文案请用 {loc:Text key}；确需响应变化的请绑节点自身的 VM 属性。");
+            + "静态文案请用 {loc:Text key}；确需响应变化的请投影到节点自身的 VM 属性"
+            + "（页面级布尔见 BroadcastSemanticZoomToItems，U178-B）。");
+    }
+
+    /// <summary>
+    /// U178-B：边模板同样不得有祖先绑定。
+    ///
+    /// 边的数量通常是节点的两倍以上，`:441` 那处祖先绑定按边计费，
+    /// 落点与节点模板完全相同（重挂载时的 attach 订阅 + 祖先遍历）。
+    /// 单独一条用例是因为上一条只框住节点模板的字符范围。
+    /// </summary>
+    [Fact]
+    public void EdgeTemplate_HasNoAncestorBindings()
+    {
+        var view = File.ReadAllText(ResolveDesktopView("WorkspacePageView.axaml"));
+        var start = view.IndexOf("<DataTemplate DataType=\"{x:Type vm:WorkflowEdgeViewModel}\">", StringComparison.Ordinal);
+        Assert.True(start >= 0, "找不到边模板——模板结构变了，本用例要连带更新");
+        var end = view.IndexOf("</ItemsControl.ItemTemplate>", start, StringComparison.Ordinal);
+        Assert.True(end > start, "找不到边模板结束标记");
+
+        var offenders = System.Text.RegularExpressions.Regex
+            .Matches(view[start..end], @"\{Binding \$parent\[UserControl\]\.DataContext\.(\w+)\}")
+            .Cast<System.Text.RegularExpressions.Match>()
+            .Select(m => m.Groups[1].Value)
+            .Distinct()
+            .ToArray();
+
+        Assert.True(
+            offenders.Length == 0,
+            "边模板里出现了祖先绑定：" + string.Join("、", offenders)
+            + "。边数通常多于节点数，这个成本按边计费且落在重挂载路径上（U178-B）。"
+            + "页面级布尔请投影到 WorkflowEdgeViewModel 自身。");
+    }
+
+    /// <summary>
+    /// U178-B 的**行为**判据：投影不能是死值，缩放跨阈值时必须真的传到节点/边上。
+    ///
+    /// 上面两条只证明「模板不再绑祖先」。若投影属性从不被写，
+    /// 那两条照样全绿，而用户看到的是**缩小后引脚和详情不消失**——
+    /// 语义缩放整个失效。这正是「脱绑」最容易造出的回归，
+    /// 所以必须有一条断言真实状态跃迁的用例。
+    /// </summary>
+    [Fact]
+    public void SemanticZoom_ProjectsPageLevelBooleansOntoItems()
+    {
+        var displayNames = DisplayNameService.LoadDefault();
+        var backend = DispatchProxy.Create<IAriadneBackendClient, SoftBackend>();
+        var viewModel = BuildWorkspace(displayNames, backend, nodeCount: 3, edgesPerNode: 1);
+
+        var node = viewModel.Nodes[0];
+        var edge = viewModel.Edges[0];
+
+        // 1.0 倍：两个开关都该是开（阈值 0.75 / 0.8）。
+        viewModel.SetCanvasZoomAt(1.0, 0, 0);
+        Assert.True(node.ShowCanvasDetails, "1.0 倍下节点详情应可见");
+        Assert.True(node.ShowCanvasPrecisionControls, "1.0 倍下精度控件应可见");
+        Assert.True(edge.ShowCanvasDetails, "1.0 倍下边标签应可见");
+
+        // 缩到总览倍率：两个开关都该关，且**投影到了 item 上**而不只是页面属性变了。
+        viewModel.SetCanvasZoomAt(0.3, 0, 0);
+        Assert.False(viewModel.ShowCanvasDetails, "页面级开关自身应已关闭（阈值判定回归）");
+        Assert.False(
+            node.ShowCanvasDetails,
+            "缩到 0.3 倍后节点的 ShowCanvasDetails 仍为 true——"
+            + "页面级布尔没有下推到节点 VM（BroadcastSemanticZoomToItems 未接线），"
+            + "用户会看到总览倍率下详情与引脚不消失（U178-B）");
+        Assert.False(node.ShowCanvasPrecisionControls, "缩到 0.3 倍后精度控件应隐藏");
+        Assert.False(edge.ShowCanvasDetails, "缩到 0.3 倍后边标签应隐藏");
+
+        // 放回去要能恢复：单向失效同样是缺陷。
+        viewModel.SetCanvasZoomAt(1.0, 0, 0);
+        Assert.True(node.ShowCanvasPrecisionControls, "放回 1.0 倍后精度控件应重新出现");
+
+        // 缩小状态下**新加入**的节点要继承当前态，否则新卡片与周围不一致。
+        viewModel.SetCanvasZoomAt(0.3, 0, 0);
+        var late = new WorkflowNodeViewModel(
+            id: "late",
+            nodeType: "llm",
+            label: "后加入的节点",
+            defaultWorkDir: string.Empty,
+            x: 0,
+            y: 0,
+            runRequested: _ => { },
+            clearSelection: () => { },
+            markDirty: () => { });
+        viewModel.Nodes.Add(late);
+        Assert.False(
+            late.ShowCanvasPrecisionControls,
+            "在 0.3 倍下新建的节点带着默认 true 出现——"
+            + "创建路径没有继承当前语义缩放态，新卡片会比周围多显示一圈引脚（U178-B）");
     }
 
     /// <summary>

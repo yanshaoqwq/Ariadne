@@ -208,6 +208,26 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         InDoubtOperations = new ObservableCollection<WorkflowOperation>();
         Edges = new ObservableCollection<WorkflowEdgeViewModel>();
         RelatedEdges = new ObservableCollection<WorkflowEdgeViewModel>();
+        // U178-B：新入集合的节点/边立刻继承当前语义缩放态。
+        // 挂在集合上而不是逐个改造 new 的调用点：创建路径有好几条
+        // （新建、粘贴、按图加载、导入），漏一条就会出现「缩小状态下新建的卡片
+        // 引脚全显示」这种局部不一致，且只在特定路径复现、极难发现。
+        Nodes.CollectionChanged += (_, args) =>
+        {
+            foreach (var node in args.NewItems?.OfType<WorkflowNodeViewModel>()
+                                 ?? Enumerable.Empty<WorkflowNodeViewModel>())
+            {
+                ApplySemanticZoomTo(node);
+            }
+        };
+        Edges.CollectionChanged += (_, args) =>
+        {
+            foreach (var edge in args.NewItems?.OfType<WorkflowEdgeViewModel>()
+                                 ?? Enumerable.Empty<WorkflowEdgeViewModel>())
+            {
+                ApplySemanticZoomTo(edge);
+            }
+        };
         ProjectAiBubbles = new ObservableCollection<ChatBubbleViewModel>();
         EntryNodes = CreateNodeLibraryGroup("entry");
         WritingAgents = CreateNodeLibraryGroup("writing");
@@ -777,7 +797,50 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             OnPropertyChanged(nameof(CanvasZoomText));
             OnPropertyChanged(nameof(ShowCanvasDetails));
             OnPropertyChanged(nameof(ShowCanvasPrecisionControls));
+            BroadcastSemanticZoomToItems();
         }
+    }
+
+    /// <summary>
+    /// U178-B：把两个页面级语义缩放开关广播到每个节点/边 VM。
+    ///
+    /// 这是「脱掉 per-item 祖先绑定」的另一半——模板不再向上取值，
+    /// 就必须由页面主动下推，否则缩放后卡片不会跟着变。
+    ///
+    /// 只在 zoom **跨过阈值**时才真正写值：`SetProperty` 同值不发通知，
+    /// 所以连续缩放中绝大多数格数在这里是纯比较、零通知，
+    /// 不会把省下的祖先绑定成本换成一堆属性通知。
+    /// </summary>
+    private void BroadcastSemanticZoomToItems()
+    {
+        var details = ShowCanvasDetails;
+        var precision = ShowCanvasPrecisionControls;
+        foreach (var node in Nodes)
+        {
+            node.ShowCanvasDetails = details;
+            node.ShowCanvasPrecisionControls = precision;
+        }
+        foreach (var edge in Edges)
+        {
+            edge.ShowCanvasDetails = details;
+        }
+    }
+
+    /// <summary>
+    /// 新加入的节点/边要立刻拿到当前语义缩放态。
+    ///
+    /// 不做这一步的话，在缩得很小的画布上新建节点会带着「默认 true」的初值出现：
+    /// 全部引脚和详情都显示，与周围卡片不一致，直到用户下次缩放才纠正。
+    /// </summary>
+    internal void ApplySemanticZoomTo(WorkflowNodeViewModel node)
+    {
+        node.ShowCanvasDetails = ShowCanvasDetails;
+        node.ShowCanvasPrecisionControls = ShowCanvasPrecisionControls;
+    }
+
+    internal void ApplySemanticZoomTo(WorkflowEdgeViewModel edge)
+    {
+        edge.ShowCanvasDetails = ShowCanvasDetails;
     }
 
     /// <summary>W9：总览倍率隐藏正文和边标签，仅保留节点身份、运行态和拓扑骨架。</summary>
@@ -4996,6 +5059,17 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     private string _summarizerChapterTextAlias = "chapter_text";
     private bool _summarizerAutoMode;
     private int _nextDataInIndex = 1;
+    // U178-B：页面级语义缩放开关的**投影副本**。
+    // 这两个值逻辑上属于页面（由 CanvasZoom 决定），但节点卡片模板要按它们
+    // 显隐引脚与详情。原先模板里用 `$parent[UserControl].DataContext.X` 直接
+    // 向上取，代价是每节点 8 个祖先绑定：各建一个 ControlTracker、订阅
+    // attach/detach 两个事件、并跑 10 层 LINQ 祖先遍历，
+    // 而订阅的正是 attach/detach ⇒ 成本全落在「切回画布页」的重挂载路径（U159）。
+    // 投影到节点自身后模板改绑普通属性，零祖先遍历、零 attach 订阅。
+    // ⚠️ 与 C-1 那 18 个静态文案不同：这两个**会变**（用户缩放时切换），
+    // 所以必须仍是绑定，只是绑到节点 VM 上；页面在 zoom 跨阈值时广播给全部节点。
+    private bool _showCanvasDetails = true;
+    private bool _showCanvasPrecisionControls = true;
 
     public WorkflowNodeViewModel(
         string id,
@@ -5041,6 +5115,26 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public RelayCommand AddDataInPinCommand { get; }
     public RelayCommand RemoveDataInPinCommand { get; }
     public bool IsStartNode => _descriptor.ConfigKind == "start";
+
+    /// <summary>
+    /// U178-B：页面级「显示详情」开关在本节点上的投影。
+    ///
+    /// 值由页面 VM 在 zoom 跨阈值时统一写入（<see cref="WorkspacePageViewModel"/>
+    /// 的 NotifyCanvasZoomChanged）。节点模板绑这个而不是绑祖先，
+    /// 理由见字段处注释——祖先绑定的成本落在切页重挂载路径上。
+    /// </summary>
+    public bool ShowCanvasDetails
+    {
+        get => _showCanvasDetails;
+        internal set => SetProperty(ref _showCanvasDetails, value);
+    }
+
+    /// <summary>U178-B：页面级「显示精度控件」开关在本节点上的投影，同上。</summary>
+    public bool ShowCanvasPrecisionControls
+    {
+        get => _showCanvasPrecisionControls;
+        internal set => SetProperty(ref _showCanvasPrecisionControls, value);
+    }
 
     /// <summary>
     /// 起始节点的变量组；非起始节点为 null。
@@ -5727,6 +5821,9 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     private string _maxCommunicationCount;
     private bool _hasLabelLayout;
     private bool _labelLayoutVisible = true;
+    // U178-B：页面级「显示详情」在边上的投影（边标签胶囊按它显隐）。
+    // 与节点同理：原先是模板内的祖先绑定，成本落在重挂载路径上。
+    private bool _showCanvasDetails = true;
     private double _labelOffsetX;
     private double _labelOffsetY;
 
@@ -5851,6 +5948,13 @@ public sealed class WorkflowEdgeViewModel : ViewModelBase
     }
     public bool HasMidpointLabel => !string.IsNullOrWhiteSpace(MidpointLabel);
     public bool IsCanvasLabelVisible => HasMidpointLabel && _labelLayoutVisible;
+
+    /// <summary>U178-B：页面级「显示详情」开关在本边上的投影（由页面 VM 下推）。</summary>
+    public bool ShowCanvasDetails
+    {
+        get => _showCanvasDetails;
+        internal set => SetProperty(ref _showCanvasDetails, value);
+    }
 
     public void SetLabelLayout(double x, double y, bool isVisible)
     {
