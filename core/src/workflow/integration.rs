@@ -106,6 +106,39 @@ pub struct WorkflowWritingToolOptions<'a> {
     /// 为 `None`（或表里没有被引文档）时，展开器把占位符换成可诊断标记并发警告，
     /// 不静默放过、也不 panic。
     pub reference_documents: Option<crate::rag::reference::InMemoryReferenceDocuments>,
+    /// U175：本节点可用的规划正文（全局总纲 / 本章大纲），由调用方预读。
+    ///
+    /// **为什么是预读好的值、而不是一个文件系统句柄**：与 `reference_documents`
+    /// 同一个理由——解析这些路径需要项目文档根与路径沙箱
+    /// （`ensure_path_under_root`），那两样都在 `commands` 层。
+    /// 把句柄传进 `rag` 会让越权检查散落到一个不该管这件事的模块里。
+    ///
+    /// 为 `None`（或字段为 `None`）时装配层给空态文本，节点仍可运行。
+    pub planning: Option<WorkflowWritingPlanningContext>,
+}
+
+/// U175：写作节点的规划类上下文，从磁盘预读。
+///
+/// **只放路径映射无歧义的那几项**。判据是「由 id 到文件是不是一对一的直接映射」：
+/// - `global_outline` ← `planning/global.md`：**固定路径**，无歧义。
+/// - `outline` ← `planning/chapters/{chapter_id}.md`：由 `chapter_id` **直接**成名，
+///   无歧义（作用域约定见 CLAUDE.md「Tool Execution & Document Scope」）。
+///
+/// 刻意**不含** `stage_outline` 与 `previous_chapter_text`：
+/// - 阶段总纲在 `planning/stages/*.md`，但没有任何配置提供 `stage_id`
+///   ⇒ 要靠猜是哪一个文件；
+/// - 「上一章原文」要先知道**哪一章是上一章**，那需要一套章节排序约定
+///   （补零？分卷跨卷？），本项目尚未确立。
+///
+/// 两者的共同点是**猜错的代价是把错的材料当对的喂给模型**，比没有更糟：
+/// 作者要到成稿里才发现承接错了对象。所以它们保持空态文本，
+/// 由作者用数据边显式传入。
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowWritingPlanningContext {
+    /// `planning/global.md` 的正文。
+    pub global_outline: Option<String>,
+    /// `planning/chapters/{chapter_id}.md` 的正文。
+    pub outline: Option<String>,
 }
 
 struct RoutedExternalNodeHandler {
@@ -893,6 +926,34 @@ fn execute_llm_node_with_optional_search_tools<L: CostLedger>(
     // 装配所需的数据在 U108 里已经全部到手：知识库（人物状态/章节概括/
     // 未回收伏笔由 assembler 自行派生）与节点指名文档的正文。
     let prompt = render_writing_node_prompt(&prompt, options.writing_tools.as_ref())?;
+
+    // U147-c（2026-08-18）：把通信边送来的入站消息拼进 prompt。
+    //
+    // 这是**同一形态的第三个缺口**（前两个是 U147-a 的 `communication_output`
+    // 无生产者、U114 的上下文装配零调用）：`communication_messages` 一路从
+    // `collect_inbound_messages`（`runtime.rs:1424`）传进
+    // `WorkflowNodeExecutionRequest`，而 `integration.rs` **零处消费它** ⇒
+    // 轮转修好之后，critic 仍然读不到 writer 的原话，
+    // 用户画的通信边看起来转了（消息计数在涨）却完全不起作用。
+    //
+    // 拼在**最后**而不是最前：作者的角色设定与本章材料是长期语境，
+    // 对话方刚说的话是当下要回应的东西——放在末尾更接近「对话轮次」的语义，
+    // 也避免长语境把这句挤出模型的注意范围。
+    //
+    // `content` 是 runtime 里 `render_communication_template` 按**用户在边上配的
+    // 模板**渲染好的文本（含 `{{input.别名}}` 替换），所以这里只做拼接、
+    // 不再二次加工——加工两次会让边上那份模板配置形同虚设。
+    let prompt = match request.communication_messages.as_slice() {
+        [] => prompt,
+        messages => {
+            let inbound = messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            format!("{prompt}\n\n{inbound}")
+        }
+    };
     let mut messages = Vec::new();
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(crate::providers::LlmMessage {
@@ -1235,6 +1296,19 @@ fn render_writing_node_prompt(
     // 才可能调用 `*-insert-lines(after_line=N)`。
     if let Some(document) = writing.document {
         context_request.current_draft_text = Some(document.text.to_owned());
+    }
+    // U175：把预读好的规划正文填进装配请求。
+    //
+    // 此前这里除 `current_draft_text` 外**全部写死 `None`**，而产品自带的
+    // `node_template.*` 无条件引用 `{{本章大纲}}` `{{全局总纲}}` 等变量 ⇒
+    // 区块不产出 ⇒ 别名不登记 ⇒ 渲染器 fail-loud ⇒ **拖一个写作节点上画布
+    // 用预填提示词点运行必然失败**（U175）。
+    //
+    // 只填路径映射无歧义的那两项，理由见 `WorkflowWritingPlanningContext` 的
+    // doc 注释；其余仍由装配层给空态文本，节点可运行但明确告知模型缺什么。
+    if let Some(planning) = writing.planning.as_ref() {
+        context_request.global_outline = planning.global_outline.clone();
+        context_request.outline = planning.outline.clone();
     }
 
     // 13-B：挂上正文引用来源，让大纲里的 `{{ref:...}}` 就地展开成原文。

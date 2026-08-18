@@ -201,8 +201,6 @@ pub struct WorkflowNodeExecutionOutput {
     pub outputs: PortMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_control: Option<RunControl>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub communication_output: Option<String>,
     #[serde(default)]
     pub communication_control: CommunicationControl,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,7 +227,6 @@ impl Default for WorkflowNodeExecutionOutput {
         Self {
             outputs: PortMap::new(),
             run_control: None,
-            communication_output: None,
             communication_control: CommunicationControl::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -727,8 +724,6 @@ pub struct WorkflowNodeRuntimeState {
     pub status: RunStatus,
     #[serde(default)]
     pub outputs: PortMap,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub communication_output: Option<String>,
     #[serde(default)]
     pub communication_control: CommunicationControl,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1226,7 +1221,6 @@ impl WorkflowRuntime {
                 node_id: node_id.clone(),
                 status: RunStatus::Succeeded,
                 outputs: PortMap::new(),
-                communication_output: None,
                 communication_control: CommunicationControl::default(),
                 prompt_trace_hash: None,
                 patch_session_commit_id: None,
@@ -1909,7 +1903,6 @@ impl WorkflowRuntime {
                 node_id: node_id.clone(),
                 status: RunStatus::Succeeded,
                 outputs: injected_outputs,
-                communication_output: None,
                 communication_control: CommunicationControl::default(),
                 prompt_trace_hash: None,
                 patch_session_commit_id: None,
@@ -2227,7 +2220,6 @@ impl WorkflowRuntime {
                     node_id: node_id.clone(),
                     status: RunStatus::Succeeded,
                     outputs: PortMap::new(),
-                    communication_output: None,
                     communication_control: CommunicationControl::default(),
                     prompt_trace_hash: None,
                     patch_session_commit_id: None,
@@ -2302,7 +2294,6 @@ impl WorkflowRuntime {
                 node_id: node_id.clone(),
                 status,
                 outputs: output.outputs,
-                communication_output: output.communication_output,
                 communication_control: output.communication_control,
                 prompt_trace_hash: output.prompt_trace_hash,
                 patch_session_commit_id: output.patch_session_commit_id,
@@ -2388,7 +2379,6 @@ impl WorkflowRuntime {
                 node_id: node_id.clone(),
                 status: RunStatus::Running,
                 outputs: PortMap::new(),
-                communication_output: None,
                 communication_control: CommunicationControl::default(),
                 prompt_trace_hash: None,
                 patch_session_commit_id: None,
@@ -2430,7 +2420,6 @@ impl WorkflowRuntime {
                 node_id: node_id.clone(),
                 status,
                 outputs: PortMap::new(),
-                communication_output: None,
                 communication_control: CommunicationControl::default(),
                 prompt_trace_hash: None,
                 patch_session_commit_id: None,
@@ -2550,7 +2539,7 @@ impl WorkflowRuntime {
             let Some(node_state) = self.state.nodes.get(node_id) else {
                 continue;
             };
-            let output = node_state.communication_output.clone().unwrap_or_default();
+            let output = communication_text_from_outputs(&node_state.outputs).unwrap_or_default();
             let communication_approved = node_state.communication_control.approved;
             let continue_communication = node_state.communication_control.continue_communication;
             if output.trim().is_empty() {
@@ -3696,7 +3685,6 @@ fn should_pause_for_breakpoint(
             node_id: node_instance.id.clone(),
             status: RunStatus::Queued,
             outputs: PortMap::new(),
-            communication_output: None,
             communication_control: CommunicationControl::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -3843,6 +3831,31 @@ fn collect_downstream_closure_inner(
         })
     {
         collect_downstream_closure_inner(workflow, &edge.to.node_id, affected, seen);
+    }
+}
+
+/// 从节点输出提取通信内容。**固定取 `text` 键的 inline 字符串。**
+///
+/// U147-a（2026-08-18 修）：此前轮转读的是 `WorkflowNodeRuntimeState.communication_output`，
+/// 而那个字段**全仓没有任何生产者**——节点跑完它恒为 `None`，于是
+/// `advance_communication` 里 `if output.trim().is_empty() { continue; }` 恒真、
+/// 发言权永不轮转、下游节点的就绪条件恒 false，工作流停在
+/// 「no runnable nodes are ready」。字段、状态机、消费点全都在，唯独没人写。
+/// 该字段已随本次修复一并删除——留着就是第二个「看起来能用但没人写」的陷阱。
+///
+/// 取 `"text"` 而不是 `"message"` / `"tool_calls"`：`text` 是
+/// `llm_response_text` 把 response 各段合并出的纯文本，语义上正是
+/// 「这个节点说的话」，与通信边要传的东西一致；`message` 是结构化 JSON 对象，
+/// 发给对端读没有意义。
+///
+/// ⚠️ **刻意不做模糊回退**（不遍历找「第一个非空字符串输出」）：
+/// - 不同节点类型输出键不同，模糊匹配会让通信行为随节点类型漂移；
+/// - 将来给某节点加一个字符串输出，可能**静默改变**通信取的是哪个值；
+/// - 取不到时跳过轮转是安全的（与修复前行为一致），比取错值传给对端好。
+fn communication_text_from_outputs(outputs: &PortMap) -> Option<String> {
+    match outputs.get("text")? {
+        PortValue::Inline { value } => value.as_str().map(str::to_owned),
+        _ => None,
     }
 }
 

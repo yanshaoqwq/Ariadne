@@ -265,6 +265,10 @@ fn run_with_id(
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .map_err(|error| format!("{error:?}"))?;
@@ -285,6 +289,10 @@ fn run(
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .map_err(|error| format!("{error:?}"))?;
@@ -389,6 +397,19 @@ fn writer_message_reaches_critic_outbound_prompt() {
 
 /// 通信边声明了 `reverse_alias`/`reverse_template`，即设计上支持双向。
 /// 若反向不通，「critic 提意见 → writer 改稿」这个本产品的核心协作循环就不成立。
+///
+/// ⚠️ **必须显式设 `max_communication_count`（本例 3）**，不能传 `None`。
+/// 默认上限是 **2 条消息**（`DEFAULT_COMMUNICATION_MAX_MESSAGE_COUNT`）：
+/// writer→critic 是第 1 条、critic→writer 是第 2 条，**第 2 条一发就撞上限、
+/// 工作流立即 pause**，writer 永远没机会读到那条意见。
+///
+/// 也就是说默认配置下「一来一回」只完成了「一来一回的投递」，
+/// **没有完成「读到并回应」**——本用例要验的恰恰是后者，所以需要第 3 条的额度。
+/// 传 `None` 时本用例失败反映的是**它自己配置不足**，不是产品缺陷；
+/// 我第一次读到那个红以为是反向通信没实现，查到 pause 原因才看清。
+///
+/// 📌 这个默认值本身值得产品复核：`2` 让最常见的「写→评→改」三步走不完。
+/// 但那是产品决策（改默认值会影响所有既有工作流的花费），不在本用例范围内。
 #[test]
 fn critic_feedback_returns_to_writer_outbound_prompt() {
     let temp = tempfile::tempdir().unwrap();
@@ -402,7 +423,8 @@ fn critic_feedback_returns_to_writer_outbound_prompt() {
     ]);
     let secrets = MemorySecretStore::default();
     provision(temp.path(), &secrets, llm.base_url.clone());
-    save_communication_workflow(temp.path(), "comm-rev", None).unwrap();
+    // 3 = writer 说、critic 回、writer 再说一次（读到意见的那一次）。
+    save_communication_workflow(temp.path(), "comm-rev", Some(3)).unwrap();
 
     let status = run(temp.path(), &secrets, "comm-rev");
     let requests = llm.requests();
@@ -465,30 +487,37 @@ fn communication_count_limit_actually_stops_and_is_observable() {
 }
 
 // ————————————————————————————————————————————————
-// 断言 5（根因）：LLM 节点必须产出 communication_output，否则通信边永不轮转
+// 断言 5（根因）：节点必须产出可作通信内容的文本，否则通信边永不轮转
 // ————————————————————————————————————————————————
 
-/// **这条用例直指 U147 的根因。**
+/// **这条用例直指 U147-a 的根因。**
 ///
-/// `runtime.rs:2477-2481` 的轮转前置条件：
+/// 修复前（2026-08-18 之前）轮转的前置条件读的是一个死字段：
 ///
 /// ```ignore
 /// let output = node_state.communication_output.clone().unwrap_or_default();
-/// if output.trim().is_empty() {
-///     continue;   // ← 不轮转 next_sender_node_id
-/// }
+/// if output.trim().is_empty() { continue; }   // ← 恒真，不轮转 next_sender
 /// ```
 ///
 /// 而 `communication_output` 在 `core/src/` 里**只有 runtime.rs 自己出现**，
-/// 生产侧（commands.rs / integration.rs / llm/）**零写入**——
-/// `:2256` 只是把节点输出里的该字段搬进运行态，搬过来的永远是 `None`。
+/// 生产侧（commands.rs / integration.rs / llm/）**零写入**：
+/// `llm_response_to_output` 用 `..Default()` 构造输出，该字段默认就是 `None`。
 ///
 /// 后果链：
-/// writer 跑完 → `communication_output` 为 `None` → `continue` 跳过轮转
-/// → `next_sender` 仍是 writer → critic 的 `communication_start_ready` 恒为 false
-/// → 就绪队列空 → `pause("no runnable nodes are ready")`
+/// writer 跑完 → 判据取到空串 → `continue` 跳过轮转 → `next_sender` 仍是 writer
+/// → critic 的 `communication_start_ready` 恒为 false → 就绪队列空
+/// → `pause("no runnable nodes are ready")`
 ///
 /// 这与 U108/U114/U117 是同一个模式：**字段、状态机、消费点都在，唯独没有生产者。**
+///
+/// **修法（产品已定夺的方案 C）**：轮转改用节点主输出的 `"text"` 键
+/// （`communication_text_from_outputs`），死字段 `communication_output` 连同
+/// 定义一并删除——留着就是第二个「看起来能用但没人写」的陷阱。
+///
+/// ⚠️ **判据随之改为「节点的 `text` 输出非空」**，而不再读那个已不存在的字段。
+/// 这条用例因此**不再能靠「字段是 None」失败**——它现在真正验的是
+/// 「轮转依赖的那个值，节点到底有没有产出」，与取值机制解耦：
+/// 将来换成别的键也只需改这里一处，而「没有生产者」这个缺陷形态依然拦得住。
 #[test]
 fn llm_node_must_emit_communication_output_for_edge_to_advance() {
     let temp = tempfile::tempdir().unwrap();
@@ -504,7 +533,7 @@ fn llm_node_must_emit_communication_output_for_edge_to_advance() {
     let (status_text, run_id) = status.expect("运行应当返回状态与 run_id");
     eprintln!("=== 状态：{status_text}");
 
-    // 直接检查运行态：writer 成功后，它的 communication_output 是否非空。
+    // 直接检查运行态：writer 成功后，轮转要读的那个输出是否非空。
     let store = ariadne::workflow::SqliteWorkflowRuntimeStore::open(temp.path()).unwrap();
     let state = store
         .load_state(
@@ -520,8 +549,9 @@ fn llm_node_must_emit_communication_output_for_edge_to_advance() {
         .expect("writer 应当已执行");
 
     eprintln!(
-        "  writer.status={:?} communication_output={:?}",
-        writer.status, writer.communication_output
+        "  writer.status={:?} outputs.keys={:?}",
+        writer.status,
+        writer.outputs.keys().collect::<Vec<_>>()
     );
 
     assert_eq!(
@@ -530,22 +560,23 @@ fn llm_node_must_emit_communication_output_for_edge_to_advance() {
         "前提不成立：writer 自身就没跑成功"
     );
 
-    let emitted = writer
-        .communication_output
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    // 与生产同一条取值路径：`text` 键的 inline 字符串。
+    // 刻意不在测试里重写一套「找第一个字符串输出」的模糊逻辑——
+    // 那样测的就不是生产实际取的那个值了。
+    let emitted = match writer.outputs.get("text") {
+        Some(ariadne::contracts::PortValue::Inline { value }) => {
+            value.as_str().unwrap_or_default().trim().to_owned()
+        }
+        _ => String::new(),
+    };
 
     assert!(
         !emitted.is_empty(),
-        "**U147 根因**：writer 成功执行后 `communication_output` 为空（实际值 {:?}）。\
-         `runtime.rs:2477` 因此 `continue` 跳过轮转，`next_sender_node_id` 永远停在 writer，\
+        "**U147-a 根因**：writer 成功执行后没有可作通信内容的 `text` 输出（实际 outputs={:?}）。\
+         `advance_communication` 因此 `continue` 跳过轮转，`next_sender_node_id` 永远停在 writer，\
          critic 的 `communication_start_ready` 恒为 false，工作流停在 \
-         \"no runnable nodes are ready\"。\n\
-         全仓证据：`communication_output` 在 core/src/ 内**只有 runtime.rs 出现**，\
-         commands.rs / integration.rs / llm/ 三处零写入——LLM 节点从不产出该字段。",
-        writer.communication_output
+         \"no runnable nodes are ready\"——**用户画的通信边根本转不起来**。",
+        writer.outputs.keys().collect::<Vec<_>>()
     );
 }
 
