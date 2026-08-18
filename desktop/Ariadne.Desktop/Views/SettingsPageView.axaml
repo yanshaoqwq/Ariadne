@@ -19,33 +19,62 @@
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
     </Style>
-    <!-- 索引项无底色块无描边：文字悬在空白上，状态全部由小圆点与字色承担。 -->
+    <!-- 索引项无底色块无描边：文字悬在空白上，状态全部由左侧导轨段与字色承担。
+         U162-F：项距 0,5 → 0,7。TextWrapping=Wrap 下长标题折行后，
+         5px 上下内边距让相邻两项在视觉上黏成一团，分不出是两条还是一条折行。
+         字色从 Ariadne.TextMuted 改为 Ariadne.TextSubtle：**前者全主题零定义**
+         （headless 实测 TryGetResource=False），DynamicResource 找不到 key 时
+         **不报错也不回落**，属性保持未设值，于是索引字色一直是基础样式的
+         TextPrimary（亮 #1B1F22）——即「未选中态本该更淡」这个设计从未生效，
+         选中/未选中只差字重与导轨色。TextSubtle 是主题里真实存在的那一档。 -->
     <Style Selector="ListBox.settings-section-index ListBoxItem">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="CornerRadius" Value="0" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-      <Setter Property="Padding" Value="0,5" />
+      <Setter Property="Padding" Value="0,7" />
       <Setter Property="Margin" Value="0" />
-      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextMuted}" />
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
     </Style>
-    <Style Selector="ListBox.settings-section-index ListBoxItem Ellipse.index-dot">
-      <Setter Property="Fill" Value="{DynamicResource Ariadne.BorderStrong}" />
+    <!-- 字色必须直选到 TextBlock：主题里 `<Style Selector="TextBlock">` 把
+         Foreground 设在每个 TextBlock 自己身上（Style 优先级），
+         宿主上的值只以 Inherited 传下来，压不动它（U162-E 同一处实测结论）。
+         上面 ListBoxItem 那条 Foreground 保留是给非 TextBlock 子级兜底。 -->
+    <Style Selector="ListBox.settings-section-index ListBoxItem TextBlock.index-label">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+    </Style>
+    <!-- 导轨段：每项左侧一条 2px 竖线，未选中时用 BorderMuted 画出连续的一整条导轨
+         （项紧邻排列，段与段首尾相接 ⇒ 看起来是一条贯穿索引的细线），
+         选中项那一段换成强调色。这比孤立圆点更能表达「在整体的哪一段」，
+         且与 U162-E 的下划线选中语汇一致——同一个产品里选中态应当是同一套语言。
+         ⚠️ 导轨只覆盖索引项自身的高度，不贯穿整页：那是「悬浮索引」与「分栏」
+         的分界线，:244 记录的「不占布局列、不画全高栏」是已定夺的决定。 -->
+    <Style Selector="ListBox.settings-section-index ListBoxItem Border.index-rail-segment">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.14" />
+        </Transitions>
+      </Setter>
     </Style>
     <Style Selector="ListBox.settings-section-index ListBoxItem:pointerover">
       <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="ListBox.settings-section-index ListBoxItem:pointerover TextBlock.index-label">
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
     </Style>
-    <Style Selector="ListBox.settings-section-index ListBoxItem:pointerover Ellipse.index-dot">
-      <Setter Property="Fill" Value="{DynamicResource Ariadne.TextMuted}" />
+    <Style Selector="ListBox.settings-section-index ListBoxItem:pointerover Border.index-rail-segment">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BorderStrong}" />
     </Style>
     <Style Selector="ListBox.settings-section-index ListBoxItem:selected">
       <Setter Property="Background" Value="Transparent" />
-      <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
-    <Style Selector="ListBox.settings-section-index ListBoxItem:selected Ellipse.index-dot">
-      <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    <Style Selector="ListBox.settings-section-index ListBoxItem:selected TextBlock.index-label">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    </Style>
+    <Style Selector="ListBox.settings-section-index ListBoxItem:selected Border.index-rail-segment">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.AccentPrimary}" />
     </Style>
     <!-- 选中态的默认 ListBoxItem 模板会画一层底，这里连模板层一起压平 -->
     <Style Selector="ListBox.settings-section-index ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
@@ -68,22 +97,63 @@
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
     </Style>
+    <!-- U162-E：标签页选中态从「底色块 + 四边描边」改为下划线。
+         ⚠️ 未选中态也必须占住那 2px 底边（BorderBrush=Transparent），
+         否则选中/未选中的**布局高度不同**，切换标签时整条会上下跳动。
+         这就是把原先的 BorderThickness="1"（四边）换成 "0,0,0,2" 的原因，
+         而不是换成 "0"——几何必须恒定，可见性才交给颜色。
+         CornerRadius 归零：下划线是一条直边，7px 圆角会让它两端翘起来。 -->
     <Style Selector="ListBox.settings-tabs ListBoxItem">
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Margin" Value="0,0,4,0" />
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="7" />
+      <Setter Property="BorderThickness" Value="0,0,0,2" />
+      <Setter Property="CornerRadius" Value="0" />
     </Style>
     <Style Selector="ListBox.settings-tabs ListBoxItem:pointerover">
       <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
     </Style>
+    <!-- 下划线态：不铺底、不描四边，仅底边一条强调色 2px + 字色转强调。
+         BorderThickness 四值顺序是 左,上,右,下。
+         必须声明在通用 ListBox.settings-tabs ListBoxItem **之后**：
+         Avalonia 同优先级按文档顺序后者胜，没有 CSS 那种特异性权重（U154 踩过）。
+         ⚠️ 这里**不设 Foreground**（U162 报告建议设，实测无效，已证伪）：
+         主题里 `<Style Selector="TextBlock">` 那条把 Foreground=TextPrimary 设在
+         每个 TextBlock 自己身上，优先级是 Style；而宿主设值只能以 Inherited
+         传到子级——Inherited 比 Style 弱，所以设在 ListBoxItem 上的字色
+         **压不动模板里那个 TextBlock**（headless 实测：hostFg=Red 但 textFg 仍是
+         #ff1b1f22）。字色必须直选到 TextBlock 上，见下一条。
+         FontWeight 相反：主题没给 TextBlock 设过，所以它能正常继承下去（实测 DemiBold）。 -->
     <Style Selector="ListBox.settings-tabs ListBoxItem:selected">
-      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentPrimary}" />
+      <Setter Property="BorderThickness" Value="0,0,0,2" />
+      <Setter Property="CornerRadius" Value="0" />
       <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <!-- 选中标签的字色：必须直选到 TextBlock（理由见上一条）。 -->
+    <Style Selector="ListBox.settings-tabs ListBoxItem:selected TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    </Style>
+    <!-- 必须连模板层一起压：ListBoxItem 的选中底真正画在模板内的
+         PART_ContentPresenter 上，主题里那条全局规则
+         `ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter`
+         给它铺了 AccentLight。设在宿主 ListBoxItem 上的 Background="Transparent"
+         压不掉它——两者作用在**不同对象**上，宿主的值只会以 Template 优先级
+         经 TemplateBinding 下传，而带伪类的规则是 StyleTrigger 优先级（数值更小=更强）。
+         本条与那条全局规则同为 StyleTrigger，靠「局部样式后应用」取胜，
+         与页内索引 :51-54 那条是同一手法（实测过 PART_ContentPresenter 的
+         BackgroundDiagnostic：未选中 = Template，选中 = StyleTrigger）。
+         Foreground 也要一起压：那条全局规则连字色都改了。 -->
+    <Style Selector="ListBox.settings-tabs ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
+    </Style>
+    <Style Selector="ListBox.settings-tabs ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
     </Style>
     <!-- U110：工具开关虽已勾选，但被硬权限 policy 否决（目前只有 web-search 有此判定）。 -->
     <Style Selector="CheckBox.policy-blocked">
@@ -222,9 +292,12 @@
               </ListBox.ItemsPanel>
               <ListBox.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:SettingsTabViewModel}">
+                  <!-- 下内边距 7→9（U162-E）：2px 下划线紧贴文字底会显得挤，
+                       多 2px 让线与字之间有一口气。上下不对称是刻意的——
+                       下划线在下方，视觉重心本来就要往上提一点才居中。 -->
                   <TextBlock Text="{Binding Title}"
                              MinWidth="84"
-                             Padding="13,7"
+                             Padding="13,7,13,9"
                              TextAlignment="Center"
                              AutomationProperties.Name="{Binding Title}" />
                 </DataTemplate>
@@ -505,23 +578,23 @@
                                            IsTextCompletionEnabled="False"
                                            AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelIdColumnLabel}"
                                            AutomationProperties.HelpText="{Binding ModelIdError}" />
-                          <TextBlock Text="{Binding ModelIdError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasModelIdError}" TextWrapping="Wrap" />
+                          <TextBlock Text="{Binding ModelIdError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasModelIdError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="3">
                           <ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.ProviderCapabilityOptions}" SelectedValue="{Binding Capability, Mode=TwoWay}" SelectedValueBinding="{Binding Value}" DisplayMemberBinding="{Binding Label}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelCapabilityColumnLabel}" AutomationProperties.HelpText="{Binding CapabilityError}" />
-                          <TextBlock Text="{Binding CapabilityError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasCapabilityError}" TextWrapping="Wrap" />
+                          <TextBlock Text="{Binding CapabilityError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasCapabilityError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="2" Spacing="3">
                           <TextBox Text="{Binding MaxContextTokens, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelContextColumnLabel}" AutomationProperties.HelpText="{Binding MaxContextTokensError}" />
-                          <TextBlock Text="{Binding MaxContextTokensError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasMaxContextTokensError}" TextWrapping="Wrap" />
+                          <TextBlock Text="{Binding MaxContextTokensError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasMaxContextTokensError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="3" Spacing="3">
                           <TextBox Text="{Binding InputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelInputCostColumnLabel}" AutomationProperties.HelpText="{Binding InputCostError}" />
-                          <TextBlock Text="{Binding InputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasInputCostError}" TextWrapping="Wrap" />
+                          <TextBlock Text="{Binding InputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasInputCostError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="4" Spacing="3">
                           <TextBox Text="{Binding OutputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelOutputCostColumnLabel}" AutomationProperties.HelpText="{Binding OutputCostError}" />
-                          <TextBlock Text="{Binding OutputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusDanger}" IsVisible="{Binding HasOutputCostError}" TextWrapping="Wrap" />
+                          <TextBlock Text="{Binding OutputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasOutputCostError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <Button Grid.Column="5" Classes="subtle" Content="{Binding $parent[UserControl].DataContext.RemoveModelText}" Command="{Binding RemoveCommand}" />
                       </Grid>
@@ -578,87 +651,6 @@
                           </ComboBox.ItemTemplate>
                         </ComboBox>
                       </Grid>
-                    </DataTemplate>
-                  </ItemsControl.ItemTemplate>
-                </ItemsControl>
-              </StackPanel>
-            </Border>
-            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPresetsEditable}">
-              <StackPanel Spacing="12">
-                <TextBlock x:Name="NodePresetsSectionAnchor" Text="{Binding NodePresetsSectionTitle}" Classes="subtitle" />
-                <Grid ColumnDefinitions="1.2*,2*,130,120" ColumnSpacing="12">
-                  <TextBlock Grid.Column="0" Text="{Binding PresetNodeTypeLabel}" Classes="caption" />
-                  <TextBlock Grid.Column="1" Text="{Binding PresetNodeModelLabel}" Classes="caption" />
-                  <TextBlock Grid.Column="2" Text="{Binding PresetNodeTimeoutLabel}" Classes="caption" />
-                  <TextBlock Grid.Column="3" Text="{Binding PresetNodeBudgetLabel}" Classes="caption" />
-                </Grid>
-                <ItemsControl ItemsSource="{Binding NodePresets}">
-                  <ItemsControl.ItemTemplate>
-                    <DataTemplate DataType="{x:Type vm:NodeTypePresetViewModel}">
-                      <StackPanel Spacing="8" Margin="0,4,0,10">
-                        <Grid ColumnDefinitions="1.2*,2*,130,120" ColumnSpacing="12">
-                          <TextBlock Grid.Column="0" Text="{Binding DisplayName}" VerticalAlignment="Center" TextWrapping="Wrap" />
-                          <ComboBox Grid.Column="1"
-                                    ItemsSource="{Binding $parent[UserControl].DataContext.AvailableLlmModelOptions}"
-                                    SelectedItem="{Binding SelectedModelOption, Mode=TwoWay}"
-                                    AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeModelLabel}"
-                                    HorizontalAlignment="Stretch">
-                            <ComboBox.ItemTemplate>
-                              <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
-                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
-                              </DataTemplate>
-                            </ComboBox.ItemTemplate>
-                          </ComboBox>
-                          <TextBox Grid.Column="2"
-                                   Text="{Binding TimeoutMs, Mode=TwoWay}"
-                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeTimeoutLabel}" />
-                          <TextBox Grid.Column="3"
-                                   Text="{Binding BudgetUsd, Mode=TwoWay}"
-                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeBudgetLabel}" />
-                        </Grid>
-                        <Expander Header="{Binding $parent[UserControl].DataContext.PresetAccessTitle}">
-                          <Border Classes="detail-row accent" Margin="0,8,0,2" Padding="14,3,0,3">
-                            <StackPanel Spacing="10">
-                              <CheckBox IsChecked="{Binding Permissions.InheritGlobal, Mode=TwoWay}"
-                                        Content="{Binding $parent[UserControl].DataContext.InheritNodePermissionsText}" />
-                              <StackPanel IsEnabled="{Binding Permissions.IsOverrideEnabled}" Spacing="8">
-                                <WrapPanel>
-                                  <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowNetworkText}" />
-                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWebSearch, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWebSearchText}" />
-                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowHttpSkill, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowHttpSkillText}" />
-                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWasmNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWasmNetworkText}" />
-                                  <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowSecretRead, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowSecretReadText}" />
-                                </WrapPanel>
-                                <!-- U146 站点 1/2（节点预设的权限覆盖）：换行分隔文本框 → chip 列表。
-                                     标签是必须的：原先只有 AutomationProperties.Name，
-                                     视力正常的用户靠 PlaceholderText 猜这框是「可读」还是「可写」。 -->
-                                <TextBlock Text="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}"
-                                           Classes="caption" />
-                                <ContentControl Content="{Binding Permissions.ReadableRootChips}"
-                                                ContentTemplate="{StaticResource PathChipListTemplate}" />
-                                <TextBlock Text="{Binding $parent[UserControl].DataContext.WritableRootsLabel}"
-                                           Classes="caption" />
-                                <ContentControl Content="{Binding Permissions.WritableRootChips}"
-                                                ContentTemplate="{StaticResource PathChipListTemplate}" />
-                              </StackPanel>
-                              <TextBlock Text="{Binding $parent[UserControl].DataContext.PresetToolsTitle}" Classes="caption" FontWeight="SemiBold" />
-                              <ItemsControl ItemsSource="{Binding ToolControls}">
-                                <ItemsControl.ItemsPanel>
-                                  <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                  <DataTemplate DataType="{x:Type vm:ToolControlItemViewModel}">
-                                    <CheckBox Margin="0,0,18,8"
-                                              IsThreeState="True"
-                                              IsChecked="{Binding IsEnabled, Mode=TwoWay}"
-                                              Content="{Binding DisplayName}" />
-                                  </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                              </ItemsControl>
-                            </StackPanel>
-                          </Border>
-                        </Expander>
-                      </StackPanel>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
@@ -816,7 +808,7 @@
                                                AutomationProperties.HelpText="{Binding ApprovalPromptError}" />
                                       <TextBlock Text="{Binding ApprovalPromptError}"
                                                  Classes="caption"
-                                                 Foreground="{DynamicResource Ariadne.StatusDanger}"
+                                                 Foreground="{DynamicResource Ariadne.StatusError}"
                                                  IsVisible="{Binding HasApprovalPromptError}"
                                                  TextWrapping="Wrap" />
                                     </StackPanel>
@@ -1000,6 +992,96 @@
                             </ItemsControl>
                           </StackPanel>
                         </Border>
+                      </StackPanel>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Border>
+            <!-- U164-A：节点类型预设从「预设」页搬到这里。
+                 它的主体是按节点类型的权限覆盖 + 工具覆盖，与上方 tool_controls（全局工具）、
+                 下方 paths 是同一组概念的不同作用域；分在两页时用户要弄清
+                 「这个节点能不能联网」得来回切页签。
+                 ⚠️ IsEnabled 仍绑 IsPresetsEditable 而不是 IsPermissionsEditable：
+                 页签归属是 UI 概念，脏页/保存 section 是数据概念，两者刻意不统一——
+                 这些字段仍由 presets section 写回（SavePresetsAsync）。
+                 顺手「统一」成 IsPermissionsEditable 会在预设读取失败、权限读取成功时
+                 放开一片没有基线的表单。 -->
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPresetsEditable}">
+              <StackPanel Spacing="12">
+                <TextBlock x:Name="NodePresetsSectionAnchor" Text="{Binding NodePresetsSectionTitle}" Classes="subtitle" />
+                <Grid ColumnDefinitions="1.2*,2*,130,120" ColumnSpacing="12">
+                  <TextBlock Grid.Column="0" Text="{Binding PresetNodeTypeLabel}" Classes="caption" />
+                  <TextBlock Grid.Column="1" Text="{Binding PresetNodeModelLabel}" Classes="caption" />
+                  <TextBlock Grid.Column="2" Text="{Binding PresetNodeTimeoutLabel}" Classes="caption" />
+                  <TextBlock Grid.Column="3" Text="{Binding PresetNodeBudgetLabel}" Classes="caption" />
+                </Grid>
+                <ItemsControl ItemsSource="{Binding NodePresets}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:NodeTypePresetViewModel}">
+                      <StackPanel Spacing="8" Margin="0,4,0,10">
+                        <Grid ColumnDefinitions="1.2*,2*,130,120" ColumnSpacing="12">
+                          <TextBlock Grid.Column="0" Text="{Binding DisplayName}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                          <ComboBox Grid.Column="1"
+                                    ItemsSource="{Binding $parent[UserControl].DataContext.AvailableLlmModelOptions}"
+                                    SelectedItem="{Binding SelectedModelOption, Mode=TwoWay}"
+                                    AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeModelLabel}"
+                                    HorizontalAlignment="Stretch">
+                            <ComboBox.ItemTemplate>
+                              <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
+                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                              </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                          </ComboBox>
+                          <TextBox Grid.Column="2"
+                                   Text="{Binding TimeoutMs, Mode=TwoWay}"
+                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeTimeoutLabel}" />
+                          <TextBox Grid.Column="3"
+                                   Text="{Binding BudgetUsd, Mode=TwoWay}"
+                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeBudgetLabel}" />
+                        </Grid>
+                        <Expander Header="{Binding $parent[UserControl].DataContext.PresetAccessTitle}">
+                          <Border Classes="detail-row accent" Margin="0,8,0,2" Padding="14,3,0,3">
+                            <StackPanel Spacing="10">
+                              <CheckBox IsChecked="{Binding Permissions.InheritGlobal, Mode=TwoWay}"
+                                        Content="{Binding $parent[UserControl].DataContext.InheritNodePermissionsText}" />
+                              <StackPanel IsEnabled="{Binding Permissions.IsOverrideEnabled}" Spacing="8">
+                                <WrapPanel>
+                                  <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowNetworkText}" />
+                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWebSearch, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWebSearchText}" />
+                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowHttpSkill, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowHttpSkillText}" />
+                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWasmNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWasmNetworkText}" />
+                                  <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowSecretRead, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowSecretReadText}" />
+                                </WrapPanel>
+                                <!-- U146 站点 1/2（节点预设的权限覆盖）：换行分隔文本框 → chip 列表。
+                                     标签是必须的：原先只有 AutomationProperties.Name，
+                                     视力正常的用户靠 PlaceholderText 猜这框是「可读」还是「可写」。 -->
+                                <TextBlock Text="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}"
+                                           Classes="caption" />
+                                <ContentControl Content="{Binding Permissions.ReadableRootChips}"
+                                                ContentTemplate="{StaticResource PathChipListTemplate}" />
+                                <TextBlock Text="{Binding $parent[UserControl].DataContext.WritableRootsLabel}"
+                                           Classes="caption" />
+                                <ContentControl Content="{Binding Permissions.WritableRootChips}"
+                                                ContentTemplate="{StaticResource PathChipListTemplate}" />
+                              </StackPanel>
+                              <TextBlock Text="{Binding $parent[UserControl].DataContext.PresetToolsTitle}" Classes="caption" FontWeight="SemiBold" />
+                              <ItemsControl ItemsSource="{Binding ToolControls}">
+                                <ItemsControl.ItemsPanel>
+                                  <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                  <DataTemplate DataType="{x:Type vm:ToolControlItemViewModel}">
+                                    <CheckBox Margin="0,0,18,8"
+                                              IsThreeState="True"
+                                              IsChecked="{Binding IsEnabled, Mode=TwoWay}"
+                                              Content="{Binding DisplayName}" />
+                                  </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                              </ItemsControl>
+                            </StackPanel>
+                          </Border>
+                        </Expander>
                       </StackPanel>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
@@ -1275,7 +1357,7 @@
                                AutomationProperties.HelpText="{Binding QdrantApiKeyErrorText}" />
                       <TextBlock Text="{Binding QdrantApiKeyErrorText}"
                                  Classes="caption"
-                                 Foreground="{DynamicResource Ariadne.StatusDanger}"
+                                 Foreground="{DynamicResource Ariadne.StatusError}"
                                  IsVisible="{Binding HasQdrantApiKeyError}"
                                  TextWrapping="Wrap" />
                       <TextBlock Text="{Binding QdrantApiKeyStatusText}" Classes="caption" />
@@ -1392,14 +1474,21 @@
       </ScrollViewer>
 
       <!-- 章节索引：贴左缘垂直居中，无浮层无描边无投影——文字直接悬在空白上，
-           靠每行前面的小圆点成列。索引是导览而非控件，给它一个面反而抢走正文的主次。
-           窄窗（Window.compact）下仍整块隐藏。 -->
+           靠左侧一条细导轨成列。索引是导览而非控件，给它一个面反而抢走正文的主次。
+           窄窗（Window.compact）下仍整块隐藏。
+           U162-F：**去掉了 MaxHeight="470"**，不换成 token 也不加转换器。
+           470 是魔数（不随字号走，调大正文字号后版心跟不上），而它想表达的
+           「不超过内容区高度」本就是**默认行为**：这个 Border 在 Panel 里
+           VerticalAlignment=Center，测量约束已经是「Panel 高减去 24+24 边距」，
+           ListBox 自带的 ScrollViewer(Auto) 会在超出时接手。
+           顺带一条事实：当前每个页签最多 4 个小节（SettingsNavigationCatalog），
+           实测高度约 124px，470 这个上限**从来没有生效过**——
+           它是个既是魔数又不起作用的数字，删掉比包装成 token 更诚实。 -->
       <Border Classes="settings-index-rail"
               HorizontalAlignment="Left"
               VerticalAlignment="Center"
               Margin="18,24,0,24"
               Width="166"
-              MaxHeight="470"
               Background="Transparent">
         <ListBox x:Name="SettingsSectionIndex"
                  Classes="settings-section-index"
@@ -1411,18 +1500,29 @@
                  ScrollViewer.VerticalScrollBarVisibility="Auto">
           <ListBox.ItemTemplate>
             <DataTemplate DataType="{x:Type vm:SettingsSectionNavigationItemViewModel}">
-              <!-- 小圆点承担「这是一条目录项」和「当前在哪一节」两件事：
-                   选中态由圆点填实 + 文字转强调色表达，不靠底色块。 -->
-              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="9">
-                <Ellipse Grid.Column="0"
-                         Classes="index-dot"
-                         Width="5" Height="5"
-                         VerticalAlignment="Center" />
+              <!-- 左侧导轨段（2px 竖线）承担「这是一条目录项」和「当前在哪一段」两件事：
+                   段与段首尾相接，未选中的淡色段连成一条完整导轨，选中那一段转强调色。
+                   VerticalAlignment=Stretch 是关键：段高必须等于项高，
+                   否则段之间会出现缝隙，「一条连续导轨」这个效果就没了。
+                   取代原先居中的 5px 圆点——孤立圆点表达不出「在整体的哪一段」，
+                   而且 5px 在亮色主题的淡色上几乎不可见。 -->
+              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                <Border Grid.Column="0"
+                        Classes="index-rail-segment"
+                        Width="2"
+                        VerticalAlignment="Stretch" />
+                <!-- MaxLines=2 + 省略号：Width=166 下三行标题会把项撑得很高，
+                     整条索引跟着变长。截断后必须给 ToolTip 才看得到全称
+                     （原先只有 AutomationProperties.Name，读屏能读、眼睛看不到）。 -->
                 <TextBlock Grid.Column="1"
+                           Classes="index-label"
                            Text="{Binding Title}"
                            FontSize="12.5"
                            TextWrapping="Wrap"
+                           MaxLines="2"
+                           TextTrimming="CharacterEllipsis"
                            VerticalAlignment="Center"
+                           ToolTip.Tip="{Binding Title}"
                            AutomationProperties.Name="{Binding Title}" />
               </Grid>
             </DataTemplate>

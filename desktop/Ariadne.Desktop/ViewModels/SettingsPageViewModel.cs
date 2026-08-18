@@ -2692,10 +2692,20 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         {
             "general" => _draftState.IsSectionDirty(GeneralSection, CurrentSectionValues(GeneralSection)),
             "models" => _draftState.IsSectionDirty(ModelsSection, CurrentSectionValues(ModelsSection)),
+            // U164-A：presets **section**（数据概念）的字段被两个页签共同承载——
+            // model_aliases / defaults 留在预设页，node_presets 搬到了权限页。
+            // 所以两个页签的脏判定都要含 PresetsSection，**不能**把它从这里去掉：
+            // 去掉会让预设页改模型别名后保存钮不亮，与搬迁前那条缺陷完全同型（只是换了个受害者）。
             "presets" => _draftState.IsSectionDirty(PresetsSection, CurrentSectionValues(PresetsSection))
                          || _draftState.IsSectionDirty(TemplateRepositorySection, CurrentSectionValues(TemplateRepositorySection)),
             "automation" => _draftState.IsSectionDirty(AutomationSection, CurrentSectionValues(AutomationSection)),
-            "permissions" => _draftState.IsSectionDirty(PermissionsSection, CurrentSectionValues(PermissionsSection)),
+            // U164-A：node_presets 章节搬到 permissions 页后，presets section 的脏判定
+            // 必须**也**覆盖这一页。页签→section 的映射是**手写的**，不从
+            // SettingsNavigationCatalog 推导，所以搬 UI 不会自动带上这一条。
+            // 漏改的后果是最坏的一种：用户在权限页改了节点权限 → 保存钮不亮 →
+            // 切页后改动被丢弃，且**全程无报错**。
+            "permissions" => _draftState.IsSectionDirty(PermissionsSection, CurrentSectionValues(PermissionsSection))
+                             || _draftState.IsSectionDirty(PresetsSection, CurrentSectionValues(PresetsSection)),
             "personalization" => _draftState.IsSectionDirty(PersonalizationSection, CurrentSectionValues(PersonalizationSection)),
             "retrieval" => _draftState.IsSectionDirty(AppRuntimeSection, CurrentSectionValues(AppRuntimeSection))
                            || _draftState.IsSectionDirty(RetrievalSection, CurrentSectionValues(RetrievalSection)),
@@ -2740,6 +2750,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 break;
             case "permissions":
                 await SavePermissionsAsync().ConfigureAwait(true);
+                // U164-A：权限页现在还承载 node_presets 章节（按节点类型的权限与工具覆盖），
+                // 那些字段属 presets section，必须一起写回。
+                // 只存 permissions 会让用户改的节点权限**静默丢失**——比「亮着存不下去」
+                // 更隐蔽，因为保存看起来成功了。
+                await SavePresetsAsync().ConfigureAwait(true);
                 break;
             case "personalization":
                 await SavePersonalizationAsync().ConfigureAwait(true);
@@ -2900,11 +2915,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     CheckpointEnabled = value.Item2.Workflow.CheckpointEnabled;
                     RunEventRetentionDays = value.Item2.Workflow.RunEventRetentionDays.ToString(CultureInfo.InvariantCulture);
                 }).ConfigureAwait(true),
-            "permissions" => await LoadSectionAsync(
-                generation,
-                PermissionsSection,
-                () => _backend.GetPermissionsSettingsAsync(),
-                ApplyPermissions).ConfigureAwait(true),
+            // U164-A：权限页的「还原」要同时还原 permissions 与 presets 两个 section——
+            // node_presets 章节现在挂在这一页，而 CanRestoreSelectedTab 已把 presets 的脏
+            // 算进这一页。若这里只重载 permissions，按钮会亮起、点下去却还原不了节点预设，
+            // 用户看到的是「还原没生效」。刚好合并读取函数本来就一次拿两者，用它零额外往返。
+            "permissions" => await LoadPermissionPresetSectionsAsync(generation).ConfigureAwait(true),
             "personalization" => await LoadSectionAsync(
                 generation,
                 PersonalizationSection,
