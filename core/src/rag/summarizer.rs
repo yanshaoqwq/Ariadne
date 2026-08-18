@@ -194,6 +194,23 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
     }
 
     /// 使用当前节点的 provider/model 执行单项自动审批，并返回结构化决定。
+    ///
+    /// U114 遗漏路径（2026-08-18 修）：审批提示词此前是 `format!` 原文直传，
+    /// **不过 `render_prompt_template`**。作者在设置页的审批提示词框里写
+    /// `{{本章大纲}}`，审阅模型收到的就是字面量 `{{本章大纲}}`——
+    /// 它在「审的是占位符」的前提下给出通过判定，是安全缺口而非文案瑕疵
+    /// （与 13-B 那条「`{{ref:...}}` 字面量进请求体」同源）。
+    ///
+    /// 两处刻意的取舍：
+    /// - **不复用 `WritingContextAssembler`**。装配器要 `MemoryWritingKnowledgeBase`，
+    ///   而这里在写锁之外、手上只有 `SummaryGenerationContext` 与 `draft`
+    ///   （见 `integration.rs` 的调用点：`load_summary_working_set` 要等到取写锁后
+    ///   才带 draft 重新读）。硬凑一个知识库等于把长耗时 LLM 调用挪进写锁内。
+    ///   所以这里自建变量表，别名沿用 `known_section_aliases` 的同一套中文名——
+    ///   **作者在两个框里写同一个 `{{本章大纲}}` 必须指同一件东西**。
+    /// - **变量按确认类型分别给**（报告验收第 3 条）。`StageSummary` 要阶段总纲，
+    ///   `SegmentSummary` 要本章正文与注册项；无差别塞全部上下文会撑爆审阅调用的
+    ///   token，且让模型在噪声里找不到该对照的那一条。
     pub fn audit_confirmation(
         &self,
         kind: ConfirmationKind,
@@ -213,6 +230,7 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
             .map(|operation| SqliteWritingKnowledgeStore::open(&operation.project_root))
             .transpose()?;
         let candidate = audit_candidate(kind, chapter_text, draft)?;
+        let approval_prompt = self.render_approval_prompt(kind, approval_prompt, chapter_text)?;
         let instruction = format!(
             "{}\n\n待审确认类型：{}\n\n候选内容：\n{}\n\n只输出 JSON：\
              {{\"approved\":true,\"reason\":\"明确说明通过或拒绝的依据\"}}。\
@@ -236,6 +254,143 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
             approved: parsed.approved,
             reason: parsed.reason.trim().to_owned(),
         })
+    }
+
+    /// 把审批提示词过一遍模板渲染器，并按确认类型灌入对应的规划依据。
+    ///
+    /// **不含 `{{` 的提示词原样返回**——内置那 10 条审批提示词都不带占位符，
+    /// 不能让它们白跑一趟装配（也不能因为「审阅上下文凑不齐」而把它们判失败）。
+    ///
+    /// 未知变量走 `render_prompt_template` 的 fail-loud：作者把
+    /// `{{本章大纲}}` 拼错成 `{{章节大纲}}` 时当场报错指名变量，
+    /// 而不是把字面量发给审阅模型换回一个虚假通过。
+    fn render_approval_prompt(
+        &self,
+        kind: ConfirmationKind,
+        approval_prompt: &str,
+        chapter_text: &str,
+    ) -> CoreResult<String> {
+        let approval_prompt = approval_prompt.trim();
+        if !approval_prompt.contains("{{") {
+            return Ok(approval_prompt.to_owned());
+        }
+        let mut context = crate::rag::prompt_template::PromptTemplateContext {
+            // 审批提示词本身就是「角色设定」那一格的内容：审阅者的身份由作者
+            // 在这个框里定，没有另一份 agent 提示词可填。指向自身会造成
+            // `{{角色设定}}` 自引用，但渲染器只扫模板不扫代入值（见
+            // `prompt_template.rs` 的说明），不会无限展开。
+            prompt_text: approval_prompt.to_owned(),
+            ..Default::default()
+        };
+        for (alias, content) in self.audit_context_sections(kind, chapter_text) {
+            // 每个区块登记全部中文别名：作者在审批框和节点提示词框里写同一个
+            // `{{本章大纲}}`，必须指向同一件东西，否则「两个框的变量名不一样」
+            // 会成为一类永远查不出的困惑。
+            context.inputs.insert(alias.to_owned(), content);
+        }
+        crate::rag::prompt_template::render_prompt_template(approval_prompt, &context)
+    }
+
+    /// 按确认类型给出可供对照的规划依据（别名 → 正文）。
+    ///
+    /// 报告验收第 3 条要求「不同 `ConfirmationKind` 拿到的上下文不同」：
+    /// 审阅一份**阶段**总结要看阶段总纲与该阶段已有章节总结；审阅**故事段**
+    /// 划分要看本章正文与本章待核对的注册项。全都塞一遍反而降低判准。
+    ///
+    /// 数据只取 `SummaryGenerationContext`（dispatch 前由持久化层严格加载，
+    /// 见 `SummarizerConfig::generation_context` 的 F15/F18 注释）——
+    /// 不在这里读盘：审阅发生在写锁之外，读盘会让它和主链路的快照漂移。
+    fn audit_context_sections(
+        &self,
+        kind: ConfirmationKind,
+        chapter_text: &str,
+    ) -> Vec<(&'static str, String)> {
+        let context = &self.config.generation_context;
+        let mut sections: Vec<(&'static str, String)> = Vec::new();
+        let mut push = |aliases: &[&'static str], content: String| {
+            for alias in aliases {
+                sections.push((alias, content.clone()));
+            }
+        };
+
+        // 本章正文对每一类都是对照基准：判「总结写的是不是正文里确实发生的」
+        // 离不开正文本身（内置 `auto_audit.summary` 提示词正是这么要求的）。
+        push(&["chapter_text", "当前章节正文"], chapter_text.to_owned());
+
+        // 未回收伏笔：审「伏笔更新」必须知道原本登记的是什么，否则模型只能
+        // 确认自己刚写的东西自洽，构不成审阅。
+        if !context.foreshadowing.is_empty() {
+            let digest = context
+                .foreshadowing
+                .iter()
+                .filter(|record| {
+                    !matches!(
+                        record.status,
+                        ForeshadowingStatus::Recovered | ForeshadowingStatus::Abandoned
+                    )
+                })
+                .map(|record| {
+                    format!(
+                        "{}（{}，状态 {:?}）：{}",
+                        record.title, record.foreshadowing_id, record.status, record.description
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            push(&["unresolved_foreshadowing", "未回收伏笔"], digest);
+        }
+
+        match kind {
+            // 段/事件/章节三层的对照物是「本章原本计划改什么」——
+            // Planner 登记的待核对变化。
+            ConfirmationKind::SegmentSummary
+            | ConfirmationKind::EventSummary
+            | ConfirmationKind::ChapterSummary => {
+                if !context.planned_changes.is_empty() {
+                    let digest = context
+                        .planned_changes
+                        .iter()
+                        .filter(|change| change.status == RegisteredChangeStatus::Planned)
+                        .map(|change| {
+                            format!("{}（{:?}）", change.change_id, change.function)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    push(&["planned_changes", "本章待核对登记项"], digest);
+                }
+            }
+            // 阶段总结的对照物是阶段总纲与该阶段已有的正式章节总结：
+            // 判「本章该不该归到这个阶段」只能靠这两样。
+            ConfirmationKind::StageSummary => {
+                let current = context.current_stage_id.as_deref();
+                if let Some(stage) = context
+                    .stages
+                    .iter()
+                    .find(|stage| Some(stage.stage_id.as_str()) == current)
+                    .or_else(|| context.stages.last())
+                {
+                    if let Some(summary) = stage.stage_summary.as_deref() {
+                        push(
+                            &["stage_outline", "阶段总纲", "当前阶段总纲"],
+                            summary.to_owned(),
+                        );
+                    }
+                    if !stage.chapter_summaries.is_empty() {
+                        let digest = stage
+                            .chapter_summaries
+                            .iter()
+                            .map(|(chapter, summary)| format!("{chapter}：{summary}"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        push(&["chapter_summaries", "章节概括"], digest);
+                    }
+                }
+            }
+            // 其余确认类型不由 summarizer 发起（`audit_candidate` 对它们直接报错），
+            // 这里不预置上下文，留给 fail-loud 指名。
+            _ => {}
+        }
+        sections
     }
 
     /// 步骤 1：把正文按“连续且属于同一事件”切分为故事段，编号并概括。

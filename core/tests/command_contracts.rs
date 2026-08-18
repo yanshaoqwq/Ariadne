@@ -322,6 +322,10 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect_err("empty initial_inputs must fail required schema");
@@ -340,6 +344,10 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             initial_inputs: wrong_type,
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect_err("wrong type must fail");
@@ -359,6 +367,10 @@ fn f10c_start_workflow_rejects_missing_required_initial_inputs_before_persist() 
             initial_inputs: unknown,
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect_err("unknown property must fail");
@@ -1495,6 +1507,10 @@ fn f8_summarizer_graph_is_validated_before_save_and_before_run_creation() {
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap_err();
@@ -1530,6 +1546,10 @@ fn explicit_missing_workflow_id_is_not_loaded_as_default_graph() {
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap_err();
@@ -2029,6 +2049,10 @@ fn run_workflow_executes_document_nodes_with_real_document_service() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();
@@ -2323,6 +2347,10 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();
@@ -2335,6 +2363,10 @@ fn run_workflow_from_start_node_executes_only_that_branch() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();
@@ -2455,6 +2487,10 @@ fn async_run_persists_inputs_and_expired_lease_resume_uses_prepared_snapshot() {
             initial_inputs,
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();
@@ -2575,6 +2611,10 @@ fn run_workflow_start_node_id_must_reference_start_node() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap_err();
@@ -2618,6 +2658,10 @@ fn run_workflow_llm_node_requires_configured_provider_instead_of_noop() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap_err();
@@ -2747,6 +2791,10 @@ fn workflow_llm_node_routes_to_declared_provider_instead_of_project_default() {
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();
@@ -3601,6 +3649,10 @@ fn malicious_project_secret_ref_is_rejected_before_all_provider_network_entrypoi
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         }
     )
     .unwrap_err()
@@ -6172,6 +6224,10 @@ fn failed_git_restore_persists_maintenance_gate_for_document_writes() {
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap_err();
@@ -6860,6 +6916,10 @@ fn executor_adapter_web_search_uses_project_permission_policy_in_product_workflo
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();
@@ -7017,6 +7077,10 @@ fn executor_adapter_llm_routes_to_manifest_provider_instead_of_project_default()
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();
@@ -7189,6 +7253,10 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();
@@ -7221,6 +7289,10 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap_err();
@@ -7251,6 +7323,10 @@ fn n25_workflow_dependency_plans_isolate_unreferenced_and_referenced_bad_skills(
             initial_inputs: BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .unwrap();

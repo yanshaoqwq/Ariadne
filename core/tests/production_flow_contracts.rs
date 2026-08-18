@@ -204,6 +204,10 @@ fn production_flow_minimal_llm_node_runs_to_success() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     );
     let _ = server.join();
@@ -289,6 +293,10 @@ fn production_flow_tool_use_model_completes_whole_journey() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     );
     let _ = server.join();
@@ -359,6 +367,10 @@ fn production_flow_writer_node_offers_write_tool_to_the_model() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     );
 
@@ -421,6 +433,10 @@ fn production_flow_writer_without_document_gets_no_write_tools() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     );
     let run = run.expect("未指名文档的写作节点仍应能做纯文本生成");
@@ -490,6 +506,10 @@ fn production_flow_disabled_write_permission_removes_write_tools() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     );
     let run = run.expect("权限关闭只影响工具清单，不应让节点运行失败");
@@ -645,6 +665,10 @@ fn production_flow_global_loop_limit_constrains_runaway_workflow() {
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     );
 

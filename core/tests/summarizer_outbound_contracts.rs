@@ -551,3 +551,217 @@ fn later_steps_consume_earlier_step_outputs() {
         "事件层产物没有进入章节或阶段总结的请求——上层总结看不到下层结论"
     );
 }
+
+// ════════════════════════════════════════════════════════
+// Auto Mode 自动审阅：U114 的遗漏路径（2026-08-18）
+// ════════════════════════════════════════════════════════
+//
+// U114 只接了**写作节点**那条渲染路径（`render_writing_node_prompt`）。
+// 自动审阅走的是 `audit_confirmation` 里一条独立的 `format!` 拼串，
+// 审批提示词原文直传、**不过 `render_prompt_template`**。
+//
+// 判据同样取真实出站 HTTP 请求体（报告的验收要求，与本文件其余用例同一标准）：
+// 断言「`{{}}` 已被替换成真实内容」必须看**发出去的字节**——
+// 看返回值看不出提示词是什么样，看 draft 结构更看不出。
+
+/// 跑完四步再审一项，返回审阅那一次请求的 body。
+///
+/// 走完整的 `summarize_chapter` 而不是手搓 draft：审阅的候选内容来自 draft，
+/// 手搓的 draft 可能和真实产物形状不同，那样测的就不是生产路径。
+fn audit_request_body(
+    approval_prompt: &str,
+    kind: ariadne::rag::models::ConfirmationKind,
+    context: SummaryGenerationContext,
+) -> String {
+    // 阶段那一步的响应必须与传入的 `stages` 一致：后端双向校验
+    // 「已有阶段报成新的」和「选了不存在的阶段」都拒绝（见 `summarize_stage`）。
+    // 上下文里已有 stage-1 时就得 is_new_stage=false，否则被合法地拒掉——
+    // 那是校验在正常工作，不是缺陷。
+    let has_known_stage = !context.stages.is_empty();
+    let mut responses = four_step_responses();
+    if has_known_stage {
+        let stage_id = context.stages[0].stage_id.clone();
+        responses.pop();
+        responses.push(chat_response(&json!({
+            "stage_id": stage_id,
+            "stage_summary": "第一阶段：李砚离乡南下。",
+            "is_new_stage": false
+        })));
+    }
+    responses.push(chat_response(&json!({
+        "approved": true,
+        "reason": "总结与正文一致"
+    })));
+    let (base_url, server) = spawn_recording_llm(responses, 2);
+    let provider = provider_for(base_url);
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    let mut config = summarizer_config(None);
+    config.generation_context = context;
+    let executor = SummarizerExecutor::new(&provider, &ledger, &prompts, config);
+
+    let draft = executor
+        .summarize_chapter("chapter-1", CHAPTER_TEXT)
+        .expect("四步总结应当成功");
+    executor
+        .audit_confirmation(kind, approval_prompt, CHAPTER_TEXT, &draft)
+        .expect("自动审阅应当成功");
+
+    let seen = server.join().unwrap();
+    assert_eq!(seen.len(), 5, "四步总结 + 一次审阅 = 5 次请求");
+    request_body(&seen[4])
+}
+
+/// 判据七：**审批提示词里的占位符在出站请求体里已被替换成真实内容**。
+///
+/// 这是 U114 遗漏路径的核心判据。缺陷版本下审阅模型收到的是字面量
+/// `{{当前章节正文}}`——它会在「审的是占位符」的前提下给出通过判定，
+/// 属安全缺口而非文案瑕疵。
+///
+/// 变异测试点：摘掉 `render_approval_prompt` 调用后，
+/// 出站 body 里会出现 `{{当前章节正文}}` 字面量 ⇒ 本用例失败。
+#[test]
+fn audit_prompt_placeholders_are_expanded_in_the_real_outbound_request() {
+    let body = audit_request_body(
+        "审这份总结前先读一遍正文：\n{{当前章节正文}}",
+        ariadne::rag::models::ConfirmationKind::SegmentSummary,
+        SummaryGenerationContext::default(),
+    );
+
+    assert!(
+        !body.contains("{{当前章节正文}}"),
+        "审批提示词里的占位符以**字面量**发给了审阅模型——\
+         它会在「审的是 {{{{}}}} 而不是正文」的前提下给出虚假通过（U114 遗漏路径）"
+    );
+    // 正文里的独特词组：确认替换进去的是**真内容**，不是空串。
+    // 只断言「不含 {{}}」是不够的——静默替换成空串同样能通过那一条。
+    assert!(
+        body.contains("李砚在渡口等了一夜"),
+        "占位符被消掉了却没换上真实正文——静默置空比留着字面量更糟：\
+         审阅模型会以为这一段本来就没有内容"
+    );
+}
+
+/// 判据八：**拼错的变量名当场报错，不静默发出去**。
+///
+/// 作者把 `{{当前章节正文}}` 打成 `{{章节正文}}` 时必须 fail-loud 指名变量，
+/// 否则那次审阅是在「少了一段上下文」的情况下做的，而没人会知道。
+#[test]
+fn audit_prompt_with_an_unknown_variable_fails_loudly() {
+    let (base_url, server) = spawn_recording_llm(four_step_responses(), 2);
+    let provider = provider_for(base_url);
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    let executor = SummarizerExecutor::new(&provider, &ledger, &prompts, summarizer_config(None));
+
+    let draft = executor
+        .summarize_chapter("chapter-1", CHAPTER_TEXT)
+        .expect("四步总结应当成功");
+    let error = executor
+        .audit_confirmation(
+            ariadne::rag::models::ConfirmationKind::SegmentSummary,
+            "对照 {{章节正文}} 审这份总结",
+            CHAPTER_TEXT,
+            &draft,
+        )
+        .expect_err("未知变量必须报错，不能静默把字面量发出去");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("章节正文"),
+        "报错信息里没指名是哪个变量拼错了，作者无从修：{message}"
+    );
+
+    // 审阅那一次请求**根本不该发出去**：错在提示词上，发出去只是白花钱。
+    let seen = server.join().unwrap();
+    assert_eq!(
+        seen.len(),
+        4,
+        "渲染失败后仍发出了审阅请求——那次调用注定审的是错东西，还要计费"
+    );
+}
+
+/// 判据九：**不同确认类型拿到的上下文不同**（报告验收第 3 条）。
+///
+/// 审「阶段总结」要能对照阶段总纲；审「故事段」不需要它。
+/// 无差别塞全部上下文会撑爆审阅调用的 token，并让模型在噪声里
+/// 找不到该对照的那一条——所以「都给」和「都不给」一样是错的。
+#[test]
+fn audit_context_differs_by_confirmation_kind() {
+    use ariadne::rag::models::{ConfirmationKind, SummaryStageContext};
+
+    let stage_marker = "第一阶段总纲：李砚离乡，沈昀留守。";
+    let context = SummaryGenerationContext {
+        stages: vec![SummaryStageContext {
+            stage_id: "stage-1".to_owned(),
+            stage_summary: Some(stage_marker.to_owned()),
+            chapter_summaries: Default::default(),
+        }],
+        current_stage_id: Some("stage-1".to_owned()),
+        ..Default::default()
+    };
+
+    // 阶段总结：`{{阶段总纲}}` 必须解析得出。
+    let stage_body = audit_request_body(
+        "对照阶段总纲审这份阶段总结：\n{{阶段总纲}}",
+        ConfirmationKind::StageSummary,
+        context.clone(),
+    );
+    assert!(
+        stage_body.contains(stage_marker),
+        "审阶段总结时拿不到阶段总纲——模型只能看它是否自洽，判不了它与规划是否一致"
+    );
+
+    // 故事段：同一个变量**不该**可用。审段落划分不需要阶段总纲，
+    // 给了只是噪声；这里用 fail-loud 反证「上下文确实按类型区分」，
+    // 而不是所有类型都拿到同一个大包。
+    let mut responses = four_step_responses();
+    responses.pop();
+    responses.push(chat_response(&json!({
+        "stage_id": "stage-1",
+        "stage_summary": "第一阶段：李砚离乡南下。",
+        "is_new_stage": false
+    })));
+    let (base_url, server) = spawn_recording_llm(responses, 2);
+    let provider = provider_for(base_url);
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    let mut config = summarizer_config(None);
+    config.generation_context = context;
+    let executor = SummarizerExecutor::new(&provider, &ledger, &prompts, config);
+    let draft = executor
+        .summarize_chapter("chapter-1", CHAPTER_TEXT)
+        .expect("四步总结应当成功");
+    let result = executor.audit_confirmation(
+        ConfirmationKind::SegmentSummary,
+        "对照阶段总纲审这份段落划分：\n{{阶段总纲}}",
+        CHAPTER_TEXT,
+        &draft,
+    );
+    assert!(
+        result.is_err(),
+        "段落划分的审阅也拿到了阶段总纲——说明上下文没按确认类型区分，\
+         是无差别塞了全部（撑 token 且降判准）"
+    );
+    let _ = server.join();
+}
+
+/// 判据十：**不含占位符的审批提示词原样发出**，不因「上下文凑不齐」而失败。
+///
+/// 内置那 10 条审批提示词（`prompt_list.json` 的 `auto_audit.*`）都不带占位符。
+/// 若把渲染做成无条件必经之路，它们会一并受装配失败牵连——
+/// 那是拿一条安全修复换掉整个 Auto Mode 的可用性。
+#[test]
+fn audit_prompt_without_placeholders_passes_through_untouched() {
+    let plain = "你在代替作者过一遍这份总结。只看写的是不是正文里确实发生的。";
+    let body = audit_request_body(
+        plain,
+        ariadne::rag::models::ConfirmationKind::ChapterSummary,
+        SummaryGenerationContext::default(),
+    );
+    assert!(
+        body.contains("只看写的是不是正文里确实发生的"),
+        "不含占位符的审批提示词没原样进入请求体"
+    );
+}
+

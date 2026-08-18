@@ -254,6 +254,10 @@ fn run_writer_node(
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .map(|started| started.run_id)

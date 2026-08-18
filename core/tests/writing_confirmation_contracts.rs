@@ -155,6 +155,11 @@ fn run(project_root: &std::path::Path, secrets: &MemorySecretStore, workflow_id:
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：本文件测的是写作确认项，不测变量来源的拒绝门。
+            // 取 `Default`（= `ProjectAi`，宽松那一侧）而不是显式写
+            // `ExecutionPage`——后者会连带把 hidden 变量的拒绝行为拉进本文件，
+            // 让「确认项有没有入库」这条判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .map(|started| started.run_id)

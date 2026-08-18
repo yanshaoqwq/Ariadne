@@ -1027,6 +1027,10 @@ fn project_ai_run_delivers_completion_message_into_conversation() {
             variables: BTreeMap::new(),
             // 关键：标明发起对话。人工启动时这里是 None，也就不该有回报。
             origin_conversation_id: Some("conv-closed-loop".to_owned()),
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect("运行工作流应当成功");
@@ -1084,6 +1088,10 @@ fn manual_run_delivers_nothing_to_any_conversation() {
             initial_inputs: BTreeMap::new(),
             variables: BTreeMap::new(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect("运行工作流应当成功");
@@ -1127,6 +1135,10 @@ fn project_ai_injected_variables_reach_the_run() {
             initial_inputs: BTreeMap::new(),
             variables,
             origin_conversation_id: Some("conv-inject".to_owned()),
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect("运行工作流应当成功");
@@ -1185,6 +1197,10 @@ fn blank_required_variable_blocks_real_start_and_names_it() {
             initial_inputs: BTreeMap::new(),
             variables: BTreeMap::new(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect_err("required 变量留空必须拒绝启动");
@@ -1206,6 +1222,10 @@ fn blank_required_variable_blocks_real_start_and_names_it() {
             initial_inputs: BTreeMap::new(),
             variables: blank,
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect_err("空白串必须视为空");
@@ -1222,6 +1242,10 @@ fn blank_required_variable_blocks_real_start_and_names_it() {
             initial_inputs: BTreeMap::new(),
             variables: filled,
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect("填了真实值应当放行");
@@ -1260,6 +1284,10 @@ fn required_zero_and_false_pass_real_start() {
             initial_inputs: BTreeMap::new(),
             variables,
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .expect("0 与 false 是合法取值，必须放行");
