@@ -151,23 +151,27 @@ impl<'a> WritingContextAssembler<'a> {
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
-        let mut sections = Vec::new();
-        if let Some(intent) = non_empty_optional(&request.user_intent) {
-            sections.push(section(
+        // U175：两个区块无条件产出。`node_template.outliner.default` 无条件引用
+        // `{{用户初始意图}}` 与 `{{已有全局总纲}}`——首次开局时二者天然都没有
+        // （总纲正是这个节点要写出来的东西），缺席即渲染失败，
+        // 恰好把「新项目开第一篇」这条最该顺畅的路径堵死。
+        let mut sections = vec![
+            section_or_absent(
                 "user_intent",
                 "用户初始意图",
-                intent.to_owned(),
+                non_empty_optional(&request.user_intent),
+                "（作者没有另外交代初始构想：请按本节点提示词自行拟定，\
+                 或在上游用数据边把创作意图传进来）",
                 Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.global_outline) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "global_outline",
                 "已有全局总纲",
-                outline.to_owned(),
+                non_empty_optional(&request.global_outline),
+                "（暂无全局总纲：这是开篇，总纲由你从零拟定）",
                 Value::Null,
-            ));
-        }
+            ),
+        ];
         let character_state =
             current_character_and_relationship_state(&self.knowledge.registered_changes()?);
         if !character_state.is_empty() {
@@ -187,39 +191,37 @@ impl<'a> WritingContextAssembler<'a> {
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
-        let mut sections = Vec::new();
-        if let Some(outline) = non_empty_optional(&request.global_outline) {
-            sections.push(section(
+        // U175：四个区块无条件产出，`node_template.designer.default` 全都无条件引用。
+        let mut sections = vec![
+            section_or_absent(
                 "global_outline",
                 "全局总纲",
-                outline.to_owned(),
+                non_empty_optional(&request.global_outline),
+                "（暂无全局总纲：请先让全局纲领节点写出总纲，或按本节点提示词自行把握全局）",
                 Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.previous_stage_outline) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "previous_stage_outline",
                 "之前阶段总纲",
-                outline.to_owned(),
+                non_empty_optional(&request.previous_stage_outline),
+                "（这是第一个阶段，没有需要承接的上一阶段）",
                 Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.stage_outline) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "stage_outline",
                 "既有阶段总纲",
-                outline.to_owned(),
+                non_empty_optional(&request.stage_outline),
+                "（本阶段尚无总纲：由你从零拟定）",
                 Value::Null,
-            ));
-        }
-        if let Some(summaries) = non_empty_optional(&request.chapter_summaries) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "chapter_summaries",
                 "章节概括",
-                summaries.to_owned(),
+                non_empty_optional(&request.chapter_summaries),
+                "（暂无章节概括：本阶段还没有已写就的章节）",
                 Value::Null,
-            ));
-        }
+            ),
+        ];
         append_template_inputs(&mut sections, &request.template_inputs)?;
         Ok(sections)
     }
@@ -229,31 +231,33 @@ impl<'a> WritingContextAssembler<'a> {
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
-        let mut sections = Vec::new();
-        if let Some(outline) = non_empty_optional(&request.global_outline) {
-            sections.push(section(
+        // U175：三个 outline 类区块也要无条件产出。
+        // 此前只有下面那三个「知识库派生」的是无条件的，这三个仍是条件产出——
+        // 而 `node_template.planner.default` 对 `{{全局总纲}}`
+        // `{{当前阶段总纲}}` 同样是无条件引用。
+        let mut sections = vec![
+            section_or_absent(
                 "global_outline",
                 "全局总纲",
-                outline.to_owned(),
+                non_empty_optional(&request.global_outline),
+                "（暂无全局总纲）",
                 Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.stage_outline) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "stage_outline",
                 "当前阶段总纲",
-                outline.to_owned(),
+                non_empty_optional(&request.stage_outline),
+                "（暂无本阶段总纲：请按全局总纲与前文自行判断本章的位置）",
                 Value::Null,
-            ));
-        }
-        if let Some(summaries) = non_empty_optional(&request.chapter_summaries) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "chapter_summaries",
                 "当前阶段章节概括",
-                summaries.to_owned(),
+                non_empty_optional(&request.chapter_summaries),
+                "（暂无本阶段章节概括）",
                 Value::Null,
-            ));
-        }
+            ),
+        ];
         // ⚠️ 下面三个区块是**知识库派生**的，必须**无条件产出**，空时给明确空态文本。
         //
         // 原实现是 `if !xxx.is_empty()`：空知识库下整个区块不入 sections，
@@ -308,14 +312,26 @@ impl<'a> WritingContextAssembler<'a> {
             Value::Null,
         ));
 
-        if let Some(text) = non_empty_optional(&request.previous_chapter_text) {
-            sections.push(section(
-                "previous_chapter_text",
-                "上一章全文",
-                text.to_owned(),
-                Value::Null,
-            ));
-        }
+        // U175 / 「上一章原文」的处置：**降级为空态说明，不接线读盘**。
+        //
+        // 取「章节 id → 上一章文档」需要一套章节顺序与命名约定（chapter-02 的上一章
+        // 是 chapter-01？chapter-1？序号带补零吗？分卷时跨卷怎么算？），
+        // 那套约定在本项目尚未确立——CLAUDE.md 记着「故本次不猜测」这个决定。
+        // 猜错的代价是**把错的章节当上一章喂给模型**，比没有更糟：作者要在成稿里
+        // 才发现文风承接错了对象。
+        //
+        // 但「不猜测」不能等于「节点必然失败」（那正是 U175）。所以这里明确告知
+        // 模型这项材料当前不供给、以及作者可以怎么手动给（数据边）。
+        // 真要接线，正确落点是先确立章节目录约定，再在 `commands.rs` 装配处
+        // （持有项目根与路径沙箱的那一层）读盘填 `previous_chapter_text`。
+        sections.push(section_or_absent(
+            "previous_chapter_text",
+            "上一章全文",
+            non_empty_optional(&request.previous_chapter_text),
+            "（未提供上一章正文：本项目尚未确立章节→文档的目录约定，系统不会自行猜测是哪一篇。\
+             需要承接上一章时，请用数据边把上一章正文传进本节点）",
+            Value::Null,
+        ));
         append_template_inputs(&mut sections, &request.template_inputs)?;
         Ok(sections)
     }
@@ -338,14 +354,16 @@ impl<'a> WritingContextAssembler<'a> {
                 .unwrap_or_else(|| "（本章暂无总结：尚未写作或尚未生成总结）".to_owned()),
             Value::Null,
         ));
-        if let Some(outline) = non_empty_optional(&request.outline) {
-            sections.push(section(
-                "outline",
-                "本章大纲",
-                outline.to_owned(),
-                Value::Null,
-            ));
-        }
+        // U175：`本章大纲` 无条件产出。detail 的工作方式是「随大纲每一步备料」
+        // （见 agent_prompt.detail），没有大纲时必须明说，否则模型会凭空造素材。
+        sections.push(section_or_absent(
+            "outline",
+            "本章大纲",
+            non_empty_optional(&request.outline),
+            "（本章暂无大纲：请把章节大纲节点用数据边连到本节点，或在本节点提示词里\
+             直接交代要为哪些场景备料）",
+            Value::Null,
+        ));
         append_template_inputs(&mut sections, &request.template_inputs)?;
         Ok(sections)
     }
@@ -355,47 +373,59 @@ impl<'a> WritingContextAssembler<'a> {
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
-        let mut sections = Vec::new();
-        if let Some(text) = non_empty_optional(&request.previous_chapter_text) {
-            sections.push(section(
+        // U175：五个区块无条件产出。`node_template.writer.default` 引用了
+        // `{{上一章原文}}` `{{本章大纲}}` `{{本章细节}}` `{{返修上下文}}` 四个，
+        // 生产装配处只填得上 `current_draft_text`（而模板还偏偏没引用它）
+        // ⇒ 拖一个「执笔」节点上画布直接运行，四个变量全解析不出来。
+        let mut sections = vec![
+            // 「上一章原文」同 planner：不猜测章节→文档映射，见那里的长注释。
+            section_or_absent(
                 "previous_chapter_text",
                 "上一章全文",
-                text.to_owned(),
+                non_empty_optional(&request.previous_chapter_text),
+                "（未提供上一章正文：本项目尚未确立章节→文档的目录约定，系统不会自行猜测是哪一篇。\
+                 需要沿用上一章文风时，请用数据边把上一章正文传进本节点）",
                 Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.outline) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "outline",
                 "本章大纲",
-                outline.to_owned(),
+                non_empty_optional(&request.outline),
+                "（本章暂无大纲：请把章节大纲节点用数据边连到本节点，\
+                 或在本节点提示词里直接交代这一章要写什么）",
                 Value::Null,
-            ));
-        }
-        if let Some(details) = non_empty_optional(&request.details) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "details",
                 "本章细节",
-                details.to_owned(),
+                non_empty_optional(&request.details),
+                "（没有备好的细节素材：需要时自行落实到可感知的具体事物）",
                 Value::Null,
-            ));
-        }
-        if let Some(draft) = non_empty_optional(&request.current_draft_text) {
-            sections.push(section(
+            ),
+        ];
+        // 带行号正文：空态不编行号（同 polisher_sections 的理由——
+        // 给空串编上 `1: ` 会让模型对着不存在的正文调行号修改工具）。
+        sections.push(match non_empty_optional(&request.current_draft_text) {
+            Some(draft) => section(
                 "line_numbered_draft",
                 "带行号正文",
                 line_numbered_text(draft),
                 json!({ "line_numbered": true }),
-            ));
-        }
-        if let Some(revision) = non_empty_optional(&request.revision_context) {
-            sections.push(section(
-                "revision_context",
-                "审慎者返修上下文",
-                revision.to_owned(),
+            ),
+            None => section(
+                "line_numbered_draft",
+                "带行号正文",
+                "（本章还没有正文：这是从零起笔，不要调用行号修改工具——行号无所指）".to_owned(),
                 Value::Null,
-            ));
-        }
+            ),
+        });
+        sections.push(section_or_absent(
+            "revision_context",
+            "审慎者返修上下文",
+            non_empty_optional(&request.revision_context),
+            "（不是返修：这是初稿，没有需要照着改的意见）",
+            Value::Null,
+        ));
         append_template_inputs(&mut sections, &request.template_inputs)?;
         Ok(sections)
     }
@@ -405,35 +435,41 @@ impl<'a> WritingContextAssembler<'a> {
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
-        let mut sections = Vec::new();
-        if let Some(text) = non_empty_optional(&request.target_text) {
-            sections.push(section(
+        // U175：三个区块一律无条件产出，缺席时给空态文本。
+        //
+        // `node_template.critic.default` 无条件引用 `{{待评价文本}}`
+        // `{{本章大纲}}` `{{阶段总纲}}`，而生产装配处（`integration.rs` 的
+        // `render_writing_node_prompt`）对 critic 只可能填到 `target_text`
+        // ——于是拖一个「意见者」节点上画布、用预填提示词运行必然渲染失败。
+        let mut sections = vec![
+            section_or_absent(
                 "target_text",
                 "待评价文本",
-                text.to_owned(),
+                non_empty_optional(&request.target_text),
+                "（没有收到待评价的正文：请把产出正文的节点用数据边连到本节点）",
                 Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.outline) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "outline",
                 "本章大纲",
-                outline.to_owned(),
+                non_empty_optional(&request.outline),
+                "（本章暂无大纲：请按正文自身的完成度评价，不要臆测大纲要求）",
                 Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.stage_outline) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "stage_outline",
                 "阶段总纲",
-                outline.to_owned(),
+                non_empty_optional(&request.stage_outline),
+                "（暂无阶段总纲）",
                 Value::Null,
-            ));
-        }
+            ),
+        ];
         append_template_inputs(&mut sections, &request.template_inputs)?;
-        if sections.is_empty() {
-            return Err(CoreError::validation("critic context requires target_text"));
-        }
+        // ⚠️ 原先这里是 `if sections.is_empty() { return Err("requires target_text") }`。
+        // 那道守卫**从来没拦住过真正的问题**，只拦住了产品自己：`target_text` 在生产
+        // 恒为 `None`（装配处没填），所以它把「拖一个意见者节点直接运行」判成错误。
+        // 「没有正文可评」这件事现在由空态文本明确告知模型，比整个节点 failed 好——
+        // 后者让用户完全无从判断是自己配错了还是产品坏了。
         Ok(sections)
     }
 
@@ -442,40 +478,36 @@ impl<'a> WritingContextAssembler<'a> {
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
-        let mut sections = Vec::new();
-        if let Some(outputs) = non_empty_optional(&request.critic_outputs) {
-            sections.push(section(
+        // U175：同 critic_sections 的理由，三个区块无条件产出。
+        // `node_template.prudent.default` 无条件引用 `{{评审意见}}`
+        // `{{待评价文本}}` `{{本章大纲}}`，而生产装配处一个都填不上。
+        let mut sections = vec![
+            section_or_absent(
                 "critic_outputs",
                 "意见者输出",
-                outputs.to_owned(),
+                non_empty_optional(&request.critic_outputs),
+                "（没有收到评审意见：请把产出评审意见的节点用数据边连到本节点）",
                 Value::Null,
-            ));
-        }
-        if let Some(text) = non_empty_optional(&request.target_text) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "target_text",
                 "待评价文本",
-                text.to_owned(),
+                non_empty_optional(&request.target_text),
+                "（没有收到被评的正文：请把产出正文的节点用数据边连到本节点）",
                 Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.outline) {
-            sections.push(section(
+            ),
+            section_or_absent(
                 "outline",
                 "本章大纲",
-                outline.to_owned(),
+                non_empty_optional(&request.outline),
+                "（本章暂无大纲）",
                 Value::Null,
-            ));
-        }
+            ),
+        ];
         append_template_inputs(&mut sections, &request.template_inputs)?;
-        if !sections
-            .iter()
-            .any(|section| section.section_id == "critic_outputs" || section.title == "意见者输出")
-        {
-            return Err(CoreError::validation(
-                "prudent context requires critic_outputs",
-            ));
-        }
+        // ⚠️ 原先这里 `return Err("prudent context requires critic_outputs")`。
+        // 与 critic 同一个病：`critic_outputs` 生产恒为 `None`，这道守卫的唯一
+        // 实际效果是让「拖一个审稿裁断节点直接运行」必然失败。
         Ok(sections)
     }
 
@@ -484,70 +516,70 @@ impl<'a> WritingContextAssembler<'a> {
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
-        let mut sections = Vec::new();
         let critic_outputs = non_empty_optional(&request.critic_outputs);
         let revision_context = non_empty_optional(&request.revision_context);
-        if let Some(draft) = non_empty_optional(&request.current_draft_text) {
-            sections.push(section(
+        // 带行号正文是 polisher 的工作对象，也是行号 patch 工具的坐标系。
+        //
+        // ⚠️ 空态时**不能**走 `line_numbered_text`：那会给空串编上一个 `1: ` 行号，
+        // 模型可能据此调用 `polisher-replace-lines(1, 1, ...)` 去改一段不存在的正文。
+        // 空态文本必须是明摆着不像正文的说明。
+        let mut sections = vec![match non_empty_optional(&request.current_draft_text) {
+            Some(draft) => section(
                 "line_numbered_draft",
                 "带行号正文",
                 line_numbered_text(draft),
                 json!({ "line_numbered": true }),
-            ));
-        }
-        if let Some(outputs) = critic_outputs {
-            sections.push(section(
-                "critic_outputs",
-                "意见者输出",
-                outputs.to_owned(),
+            ),
+            None => section(
+                "line_numbered_draft",
+                "带行号正文",
+                "（没有拿到正文：请在本节点上指定要润色的文档，或把产出正文的节点用数据边连过来。                 没有正文时不要调用行号修改工具——行号无所指）"
+                    .to_owned(),
                 Value::Null,
-            ));
-        }
-        if let Some(revision) = revision_context {
-            sections.push(section(
-                "revision_context",
-                "审慎者返修上下文",
-                revision.to_owned(),
-                Value::Null,
-            ));
-        }
+            ),
+        }];
+        // U175：`意见者输出` / `审慎者返修上下文` / `返修依据` 三者都无条件产出。
+        // `node_template.polisher.default` 引用的是 `{{返修依据}}`（两者的合并），
+        // 而它此前只在至少一个来源非空时才产出。
+        sections.push(section_or_absent(
+            "critic_outputs",
+            "意见者输出",
+            critic_outputs,
+            "（没有收到评审意见）",
+            Value::Null,
+        ));
+        sections.push(section_or_absent(
+            "revision_context",
+            "审慎者返修上下文",
+            revision_context,
+            "（没有收到返修要求）",
+            Value::Null,
+        ));
         let revision_basis = [critic_outputs, revision_context]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
             .join("\n");
-        if !revision_basis.is_empty() {
-            sections.push(section(
-                "revision_basis",
-                "返修依据",
-                revision_basis,
-                Value::Null,
-            ));
-        }
-        if let Some(outline) = non_empty_optional(&request.outline) {
-            sections.push(section(
-                "outline",
-                "本章大纲",
-                outline.to_owned(),
-                Value::Null,
-            ));
-        }
+        sections.push(section_or_absent(
+            "revision_basis",
+            "返修依据",
+            non_empty_str(&revision_basis),
+            "（没有收到具体的返修依据：请把意见者或审稿裁断节点用数据边连到本节点。             缺少依据时不要自行大改，只做明显的文字修正）",
+            Value::Null,
+        ));
+        sections.push(section_or_absent(
+            "outline",
+            "本章大纲",
+            non_empty_optional(&request.outline),
+            "（本章暂无大纲）",
+            Value::Null,
+        ));
         append_template_inputs(&mut sections, &request.template_inputs)?;
-        if !sections
-            .iter()
-            .any(|section| section.section_id == "line_numbered_draft")
-        {
-            return Err(CoreError::validation(
-                "polisher context requires current_draft_text",
-            ));
-        }
-        if !sections.iter().any(|section| {
-            section.section_id == "critic_outputs" || section.section_id == "revision_context"
-        }) {
-            return Err(CoreError::validation(
-                "polisher context requires critic_outputs or revision_context",
-            ));
-        }
+        // ⚠️ 原先这里有两道 `return Err(...)`（要求 current_draft_text、
+        // 要求 critic_outputs 或 revision_context）。两道守的字段在生产装配处
+        // 都填不上（只有 `current_draft_text` 在节点指名了 document_id 时有值），
+        // 所以它们的实际效果就是让「拖一个润色节点直接运行」必然失败。
+        // 现在这些前提由空态文本明确告知模型，节点本身可运行。
         Ok(sections)
     }
 
@@ -556,20 +588,20 @@ impl<'a> WritingContextAssembler<'a> {
         &self,
         request: &WritingContextRequest,
     ) -> CoreResult<Vec<WritingContextSection>> {
-        let mut sections = Vec::new();
-        if let Some(draft) = non_empty_optional(&request.current_draft_text) {
-            sections.push(section(
-                "chapter_text",
-                "当前章节正文",
-                draft.to_owned(),
-                Value::Null,
-            ));
-        }
-        if sections.is_empty() {
-            return Err(CoreError::validation(
-                "summarizer context requires current_draft_text",
-            ));
-        }
+        // U175：`当前章节正文` 无条件产出。
+        //
+        // ⚠️ 这一支在**当前**产品里走不到：summarizer 节点走的是四步总结生产链
+        // （`execute_summarizer_node_*`），它的 prompt 经 `author_template_prefix()`
+        // 原文拼接，**不过 `render_prompt_template`**，所以不会调用本函数。
+        // 但装配器是公开契约、`WritingAgentKind::Summarizer` 是合法入参，
+        // 留一个「凑不齐上下文就整个失败」的分支只会在将来接线时重演 U175。
+        let mut sections = vec![section_or_absent(
+            "chapter_text",
+            "当前章节正文",
+            non_empty_optional(&request.current_draft_text),
+            "（没有拿到章节正文：请把产出正文的节点用数据边连到本节点）",
+            Value::Null,
+        )];
         append_template_inputs(&mut sections, &request.template_inputs)?;
         Ok(sections)
     }
@@ -588,6 +620,38 @@ fn section(
         content: content.into(),
         sources: Vec::new(),
         metadata,
+    }
+}
+
+/// 产出一个上下文区块；值缺席时用**明确的空态文本**代替，而不是不产出区块。
+///
+/// U175：这是本文件的核心不变量。产品自带的 `node_template.{agent}.default`
+/// **无条件**引用它那几个变量，而 `render_prompt_template` 对未知变量 fail-loud
+/// ⇒ 区块缺席 = 别名不登记 = 用户拖一个该类型节点上画布、用预填提示词点运行
+/// **必然报错**（实测 9 个自带模板里 8 个如此，见 U175 报告）。
+///
+/// 三个候选做法里只有空态文本是对的：
+/// - **区块缺席** → 渲染器 fail-loud，节点 failed、零次出站请求。产品自带的
+///   默认值成了一个必然失败的配置，这是 U175 本身。
+/// - **静默替换成空串** → 比留字面量更糟：模型会以为「这一章本来就没有大纲」，
+///   于是自由发挥，而人看不出少喂了材料。
+/// - **空态文本** → 明确告诉模型「这项查过了，确实没有」，模型据此调整行为
+///   （比如没有上一章就不必强行承接），人读请求体也一眼看得出缺什么。
+///
+/// ⚠️ 这**不会**放过拼错的变量名：空态只给产品自己认识的那些 section
+/// （即各 `*_sections` 里显式列出的），`{{这个变量根本不存在}}` 依旧
+/// fail-loud（`unknown_prompt_placeholder_fails_loudly` 守的就是这条）。
+fn section_or_absent(
+    section_id: &str,
+    title: &str,
+    value: Option<&str>,
+    absent_note: &str,
+    metadata: Value,
+) -> WritingContextSection {
+    match value {
+        Some(value) => section(section_id, title, value.to_owned(), metadata),
+        // 空态文本刻意不带 metadata：它不是真实材料，不该被当作可溯源的内容。
+        None => section(section_id, title, absent_note.to_owned(), Value::Null),
     }
 }
 
@@ -668,6 +732,19 @@ fn current_character_and_relationship_state(
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 返回非空字符串切片；全空白视作缺席。
+///
+/// 与 `non_empty_optional` 的区别只是入参不是 `Option`——`revision_basis`
+/// 是就地拼出来的 `String`，没有 `Option` 外壳。
+fn non_empty_str(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// 返回非空可选字符串。

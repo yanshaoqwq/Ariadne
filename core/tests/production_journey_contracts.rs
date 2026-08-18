@@ -133,6 +133,41 @@ fn user_builds_single_node_workflow(
     model_id: &str,
     prompt: &str,
 ) {
+    user_builds_single_node_workflow_with(
+        project_root,
+        workflow_id,
+        node_type,
+        model_id,
+        prompt,
+        json!({}),
+    );
+}
+
+/// 同上，但允许追加节点 config 键（如 `chapter_id`、`document_id`）。
+///
+/// 上下文装配需要 `chapter_id` 作为归属键（知识库按章查总结），
+/// 缺它时 `render_writing_node_prompt` 会 fail-loud。所以任何要验
+/// 「上下文真的进了请求」的用例都必须配它——否则测到的是报错路径，
+/// 而报错路径下出站请求根本不存在，`!outbound.contains("{{")` 之类的
+/// 断言会因为 outbound 是空串而**恒真**。
+fn user_builds_single_node_workflow_with(
+    project_root: &std::path::Path,
+    workflow_id: &str,
+    node_type: &str,
+    model_id: &str,
+    prompt: &str,
+    extra_config: Value,
+) {
+    let mut data = json!({
+        "provider_id": PROVIDER_ID,
+        "model_id": model_id,
+        "prompt_template": prompt
+    });
+    if let (Some(target), Some(extra)) = (data.as_object_mut(), extra_config.as_object()) {
+        for (key, value) in extra {
+            target.insert(key.clone(), value.clone());
+        }
+    }
     save_workflow_graph_impl(
         project_root,
         WorkflowGraphData {
@@ -142,11 +177,7 @@ fn user_builds_single_node_workflow(
                 id: "node-1".to_owned(),
                 r#type: node_type.to_owned(),
                 label: None,
-                data: json!({
-                    "provider_id": PROVIDER_ID,
-                    "model_id": model_id,
-                    "prompt_template": prompt
-                }),
+                data,
                 position: Value::Null,
             }],
             edges: Vec::new(),
@@ -186,6 +217,10 @@ fn user_clicks_run(
             initial_inputs: std::collections::BTreeMap::new(),
             variables: Default::default(),
             origin_conversation_id: None,
+            // U165：变量来源取 Default（= ProjectAi，宽松那一侧）。
+            // 显式写 ExecutionPage 会把 hidden 变量的拒绝行为拉进这些用例，
+            // 让它们各自的判据受一个无关开关影响。
+            variable_source: Default::default(),
         },
     )
     .map_err(|error| format!("{error:?}"))
@@ -330,12 +365,27 @@ fn journey_reopen_project_preserves_provider_and_workflow() {
 // 旅程 2：文学 agent 的核心——写作节点要真的懂这本小说
 // ════════════════════════════════════════════════════════
 
-/// **U114**：writer 节点必须拿到这本小说的上下文。
+/// **U114**：writer 节点拿上下文的**触发条件是占位符**，不是「节点类型是 writer」。
 ///
-/// 用户已经写好了大纲与前文，此时运行 writer 节点。
-/// 发给 LLM 的请求里必须含这些材料——否则 LLM 是在凭空写作。
+/// ⚠️ 本用例曾长期是红的，而**没人看见过**——它所在的文件因缺 `variable_source`
+/// 字段编译不过（2026-08-18 补齐时才暴露）。红的原因不是产品退回，
+/// 是用例自己的前提站不住：它给节点配的 `prompt_template` 是裸文本「写第二章」，
+/// 既无 `{{}}` 占位符、也无 `chapter_id`，然后期望上下文被自动注入。
+///
+/// **产品的设计是占位符驱动注入**（`render_writing_node_prompt`）：
+/// 模板不含 `{{` 就原样发出，省一次知识库遍历。这是刻意的取舍——
+/// 「凡是 writer 节点就无条件塞进全部大纲/前文/设定」在百万字长篇里
+/// 每次调用都要拖一整本书，而作者对**这一次**要不要前文是有判断的，
+/// 占位符就是他表达判断的手段。
+///
+/// 所以本用例改为断言那条真实契约：**同一个节点，加了占位符就拿到材料**。
+/// 前后对照写在一条用例里，是为了让「注入由什么驱动」这件事在读用例时
+/// 就看得见——分成两条会让人以为裸文本那条是缺陷。
+///
+/// U114 真正的主判据在邻居 `journey_prompt_placeholders_are_never_sent_literally`
+/// （占位符不得以字面量出站），那条一直是绿的。
 #[test]
-fn journey_writer_node_receives_novel_context() {
+fn journey_writer_context_is_driven_by_placeholders_not_node_type() {
     let temp = tempfile::tempdir().unwrap();
     let app_state = tempfile::tempdir().unwrap();
     ariadne::config::bind_project_app_state(temp.path(), app_state.path()).unwrap();
@@ -358,23 +408,71 @@ fn journey_writer_node_receives_novel_context() {
     )
     .unwrap();
 
+    // ① 裸文本模板：原样发出，不拖知识库。这是**产品承诺的行为**，不是缺陷。
     let (base_url, server) = spawn_fake_llm(vec![chat_response("w", "雨落下来。")]);
     let secrets = MemorySecretStore::default();
     user_configures_provider(temp.path(), &secrets, base_url, "w");
-    user_builds_single_node_workflow(temp.path(), "write-ch2", "writer", "w", "写第二章");
+    user_builds_single_node_workflow(temp.path(), "write-plain", "writer", "w", "写第二章");
 
-    let run = user_clicks_run(temp.path(), &secrets, "write-ch2");
-    let requests = server.join().unwrap_or_default();
-    let outbound = requests.first().cloned().unwrap_or_default();
-
-    run.expect("writer 节点应当能运行");
-
-    // 核心断言：LLM 必须看到这本小说的材料
+    let run = user_clicks_run(temp.path(), &secrets, "write-plain");
+    let plain = server
+        .join()
+        .unwrap_or_default()
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    run.expect("裸文本提示词的 writer 节点应当能运行");
     assert!(
-        outbound.contains("苏禾") || outbound.contains("玉佩") || outbound.contains("大纲"),
-        "U114：writer 节点发给 LLM 的请求里没有这本小说的任何上下文——\
-         没有大纲、没有前文、没有设定，LLM 只能凭空写作。\n实际出站请求：{}",
-        outbound.chars().take(900).collect::<String>()
+        plain.contains("写第二章"),
+        "裸文本提示词没原样出站，说明连基本发送都断了：{}",
+        plain.chars().take(400).collect::<String>()
+    );
+    assert!(
+        !plain.contains("苏禾"),
+        "裸文本模板也被塞进了大纲——那意味着每次调用都拖一整本书，\
+         而作者没有任何手段说「这次不要前文」"
+    );
+
+    // ② 同一个节点类型、同样的项目材料，只把占位符加上：材料必须进请求。
+    //    这才是 U114 的真实契约。
+    let (base_url2, server2) = spawn_fake_llm(vec![chat_response("w", "雨落下来。")]);
+    user_configures_provider(temp.path(), &secrets, base_url2, "w");
+    user_builds_single_node_workflow_with(
+        temp.path(),
+        "write-ctx",
+        "writer",
+        "w",
+        "本章大纲：{{本章大纲}}\n\n照它写第二章。",
+        // chapter_id 是上下文装配的归属键，缺它会 fail-loud（见 helper 注释）。
+        json!({ "chapter_id": "chapter-02" }),
+    );
+
+    let run2 = user_clicks_run(temp.path(), &secrets, "write-ctx");
+    let contextual = server2
+        .join()
+        .unwrap_or_default()
+        .first()
+        .cloned()
+        .unwrap_or_default();
+
+    // 先判运行本身：装配失败时出站请求是空的，下面的断言会因为
+    // 「空串不含 {{」而恒真——那是空测，必须先把这条路堵掉。
+    run2.expect("配了 chapter_id 与占位符的 writer 节点应当能运行");
+    assert!(
+        !contextual.is_empty(),
+        "带占位符的节点没发出任何请求——装配或渲染在发射前就失败了，\
+         此时任何「请求里没有 {{{{}}}}」的断言都是恒真的空测"
+    );
+    assert!(
+        !contextual.contains("{{"),
+        "U115：占位符以字面量出站。\n实际出站请求：{}",
+        contextual.chars().take(900).collect::<String>()
+    );
+    assert!(
+        contextual.contains("苏禾") || contextual.contains("玉佩"),
+        "U114：占位符被替换掉了，但换上去的不是真实大纲内容——\
+         静默置空比留着字面量更糟：模型会以为这一章本来就没有大纲。\n实际出站请求：{}",
+        contextual.chars().take(900).collect::<String>()
     );
 }
 
@@ -394,18 +492,27 @@ fn journey_prompt_placeholders_are_never_sent_literally() {
     user_configures_provider(temp.path(), &secrets, base_url, "w");
 
     // 用户使用了含占位符的模板（这是产品自带的 node_template 形态）
-    user_builds_single_node_workflow(
+    user_builds_single_node_workflow_with(
         temp.path(),
         "tpl-flow",
         "writer",
         "w",
         "根据上一章继续写：{{上一章原文}}\n本章大纲：{{本章大纲}}",
+        // 必须配 chapter_id：缺它时装配 fail-loud、请求根本不发出，
+        // 而 `!outbound.contains("{{")` 对空串恒真 ⇒ 这条用例会变成空测。
+        // 它此前正是这个状态（还 `let _ = run` 把运行结果丢掉了）。
+        json!({ "chapter_id": "chapter-02" }),
     );
 
     let run = user_clicks_run(temp.path(), &secrets, "tpl-flow");
     let requests = server.join().unwrap_or_default();
     let outbound = requests.first().cloned().unwrap_or_default();
-    let _ = run;
+
+    run.expect("含占位符的模板配齐 chapter_id 后应当能运行");
+    assert!(
+        !outbound.is_empty(),
+        "没发出任何请求 ⇒ 下面那条断言是恒真的空测，先修这里"
+    );
 
     assert!(
         !outbound.contains("{{"),

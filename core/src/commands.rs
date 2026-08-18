@@ -7054,6 +7054,10 @@ fn execute_workflow_runtime(
                                         reference_documents: context
                                             .reference_documents
                                             .clone(),
+                                        // U175：预读好的规划正文（全局总纲 / 本章大纲）。
+                                        // 不传 = 装配层拿不到大纲 = 自带模板的
+                                        // `{{本章大纲}}` 解析不出来、节点必然失败。
+                                        planning: Some(context.planning.clone()),
                                         // U108 阶段 3：不传会话 = 写作产出不落盘。
                                         patch_session: context
                                             .document
@@ -13203,6 +13207,12 @@ struct WorkflowWritingContext {
     /// 与路径沙箱（`ensure_path_under_root`），那两样都在本层；
     /// 沙箱责任必须留在已经持有项目根的那一层。
     reference_documents: Option<crate::rag::reference::InMemoryReferenceDocuments>,
+    /// U175：预读好的规划正文（全局总纲 / 本章大纲）。
+    ///
+    /// 同 `reference_documents` 的分层理由：读盘要项目文档根与路径沙箱，
+    /// 二者都在本层。只读路径映射**无歧义**的那两项，详见
+    /// `WorkflowWritingPlanningContext` 的 doc 注释。
+    planning: crate::workflow::WorkflowWritingPlanningContext,
 }
 
 struct WorkflowWritingDocument {
@@ -13374,6 +13384,9 @@ fn load_workflow_writing_context(
     // 引用来自上游 Planner 的输出，与本节点是否声明了可写文档无关
     // （Detail/Critic 这些只读 agent 同样可能收到带引用的大纲）。
     let reference_documents = preload_referenced_documents(project_root, document_root, request)?;
+    // U175：预读规划正文。放在 document_id 分支**之前**——它与本节点是否声明了
+    // 可写文档无关（Detail/Critic 这些只读 agent 同样要读本章大纲）。
+    let planning = preload_writing_planning_context(document_root, chapter_id.as_deref())?;
 
     let Some(document_id) = document_id else {
         return Ok(WorkflowWritingContext {
@@ -13382,6 +13395,7 @@ fn load_workflow_writing_context(
             chapter_id,
             document: None,
             reference_documents,
+            planning,
         });
     };
 
@@ -13422,6 +13436,7 @@ fn load_workflow_writing_context(
         knowledge,
         chapter_id,
         reference_documents,
+        planning,
         document: Some(WorkflowWritingDocument {
             document_id: document_id.to_owned(),
             base_version: content.metadata.version,
@@ -13429,6 +13444,60 @@ fn load_workflow_writing_context(
             scope,
             patch_session,
         }),
+    })
+}
+
+/// U175：预读写作节点的规划正文（全局总纲 / 本章大纲）。
+///
+/// **只读路径映射无歧义的那两项**，判据是「由 id 到文件是不是一对一的直接映射」：
+/// - `planning/global.md` —— 固定路径，无歧义；
+/// - `planning/chapters/{chapter_id}.md` —— 由 `chapter_id` 直接成名，无歧义。
+///   路径约定见 CLAUDE.md「Tool Execution & Document Scope」（Planner 的写入作用域
+///   就是这个目录），所以这不是猜测，是既定约定的读取方向。
+///
+/// **刻意不读阶段总纲与上一章正文**：`planning/stages/*.md` 需要 `stage_id`
+/// （无任何配置提供它），「上一章」需要一套章节排序约定（补零？分卷？）——
+/// 两者都要靠猜，而猜错的代价是**把错的材料当对的喂给模型**，比不给更糟。
+/// 那两项由装配层给空态文本，作者可用数据边显式传入。
+///
+/// **读不到一律当缺席（`None`），不报错**：新项目本来就没有 `planning/global.md`，
+/// 「文件不存在」是正常状态而非故障。但**越权仍然 fail-loud**：
+/// `chapter_id` 是用户可填字段，形如 `../../etc/passwd` 时必须撞在路径沙箱上，
+/// 不能降级成「读不到就算了」——那会让一个安全事件静默通过。
+fn preload_writing_planning_context(
+    document_root: &Path,
+    chapter_id: Option<&str>,
+) -> CoreResult<crate::workflow::WorkflowWritingPlanningContext> {
+    let documents = document_service_with_artifacts(
+        document_root,
+        document_root.join(".runtime").join("artifacts"),
+        None,
+    );
+    // 读一个规划文件：越权 → Err；不存在/读不出 → None。
+    let read = |relative: &str| -> CoreResult<Option<String>> {
+        let path = document_root.join(relative);
+        // 越权是安全事件，必须 fail-loud（chapter_id 是用户可填字段）。
+        crate::contracts::ensure_path_under_root(document_root, &path)?;
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let Ok(content) = documents.open_document(crate::documents::DocumentReadRequest {
+            path,
+            format: None,
+        }) else {
+            return Ok(None);
+        };
+        Ok(Some(content.content).filter(|text| !text.trim().is_empty()))
+    };
+
+    let global_outline = read("planning/global.md")?;
+    let outline = match chapter_id {
+        Some(chapter_id) => read(&format!("planning/chapters/{chapter_id}.md"))?,
+        None => None,
+    };
+    Ok(crate::workflow::WorkflowWritingPlanningContext {
+        global_outline,
+        outline,
     })
 }
 
