@@ -1,0 +1,43 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ctl="clr-namespace:Ariadne.Desktop.Controls"
+             x:Class="Ariadne.Desktop.Controls.ProjectAiPanel"
+             HorizontalAlignment="Stretch"
+             HorizontalContentAlignment="Stretch"
+             x:CompileBindings="False">
+  <!--
+    U164-E：AutoMode + 输入框的组合面。
+
+    **为什么要多这一层控件**，而不是让两个宿主各挂一份 AutoMode：
+    AutoMode 要移到对话框**外面**（用户要求「离开对话框，浮在对话框上，
+    并没有任何边框」），而 `ProjectAiComposer` 是作品页与工作区**共用**的。
+    若让两个宿主各写一份 AutoMode，两页的它会各自漂移——
+    而 `ProjectAiComposer` 本身就是为消除这种两页重复才抽出来的
+    （见 `WorkspacePageView.axaml` 那处注释）。同样的错不重犯第二次。
+
+    宿主改挂本控件即可，AutoMode 与对话框的相对关系在这里定义一次。
+  -->
+  <StackPanel Spacing="6" HorizontalAlignment="Stretch">
+    <!-- AutoMode：在对话框**外**、其上方，**无边框无底**。
+         用 subtle 按钮而非 ToggleSwitch：项目里这一处的既有交互是整块点击切换，
+         换成开关会改变命中区语义（U164-D 另有一条专门讨论「应该是滑块」，
+         那条待做，此处不预先改，避免两条互相盖）。
+
+         ⚠️ 左右 Padding 取 0：共同左基线由宿主 Padding 单独决定。
+         AutoMode 移出框后**不需要顶部 Padding**——这是它与发送键的关键差别：
+         它已经不在框内，框的内边距管不到它，自己撑高度只会把两者推远。 -->
+    <Button Classes="subtle"
+            ctl:SelectedClass.IsSelected="{Binding ProjectAutomation.IsEnabled}"
+            HorizontalAlignment="Stretch"
+            HorizontalContentAlignment="Stretch"
+            Padding="0,2"
+            Command="{Binding ProjectAutomation.ToggleCommand}"
+            AutomationProperties.Name="{Binding ProjectAutomation.Label}">
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+        <TextBlock Grid.Column="0" Text="{Binding ProjectAutomation.Label}" Classes="caption" />
+        <TextBlock Grid.Column="1" Text="{Binding ProjectAutomation.StateText}" Classes="caption" />
+      </Grid>
+    </Button>
+    <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
+  </StackPanel>
+</UserControl>

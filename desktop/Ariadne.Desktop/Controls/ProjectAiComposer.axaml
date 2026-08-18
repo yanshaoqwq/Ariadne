@@ -19,45 +19,39 @@
     （声明位置必须在通用 TextBox 样式之后，否则会被盖掉，见 U154）。
     **别把内联属性当成压平手段**——它治不了模板层，只会让人以为治了。
   -->
-  <!-- MinHeight 按内容实算（U148）：
-       Row0 自动化按钮 27（Padding 上下 5×2 + caption 行高≈17）
-       + RowSpacing 8 + Row1 输入 72 + RowSpacing 8 + Row2 发送键 36
-       = 内容 151；+ 外框 Padding 上下 10×2 = 20；+ Border 1px×2 = 2 ⇒ 173。
-       原值 128 比实需小 45px，**从来没生效过**——外框高度不是设计出来的、
-       是被内容顶出来的，这正是用户说「外框比例巨差」的来源。
-       改这个数就要同步改上面那笔加法，否则又会漂成一个装饰性数字。 -->
+  <!-- U164-E：**布局模型改了**，从「三行竖排」变成「单格叠放」。
+       用户定的形状：「整个对话框应该是只有对话框大小，而其它控件都是浮在上方的」。
+
+       ⚠️ **`MinHeight` 已连根删除，不要加回来。** 这不是「换了个更准的数」，
+       是让高度不再由一个独立的数声明：
+       - 旧模型 `RowDefinitions="Auto,*,Auto"` 下三个控件竖着抢高度，
+         173 = 27 + 8 + 72 + 8 + 36 + 20 + 2，那笔加法**算得没错**，
+         但它必须与 padding / spacing / 字号**逐项同步**，其中任一项变动
+         （U144 的输入线改造就动了 padding）差值就重新出现。
+         这个数因此失效过**两次**（128 → 173 → 实需 178），
+         每次都是「把算出来的数抄进 XAML」这个修法本身的问题（U148 第三步）。
+       - 现在高度只由 TextBox 的 `MinHeight="72"` 决定，外框自然包住它
+         ⇒ **没有第二个数需要同步**，也就没有可漂移的余地。
+       想限制「输入面不要无限长高」请挂 `MaxHeight` 在本 Border 或宿主行上
+       （那才是限高的正确落点），不要恢复 `MinHeight`。
+
+       AutoMode 已移到本控件**外面**（见宿主 `ProjectAiPanel`）：用户要求它
+       「离开对话框，浮在对话框上，并没有任何边框」，且对话框高度不该包含它。
+       发送键**仍在框内**、压在右下角遮住对话框——两者刻意分属不同层。 -->
   <Border Classes="ai-composer"
           HorizontalAlignment="Stretch"
-          MinHeight="173"
           Padding="12,10">
-    <Grid RowDefinitions="Auto,*,Auto" RowSpacing="8" HorizontalAlignment="Stretch">
-      <!-- Padding 左右取 0（U148 第二步）：原先按钮是 8,5，文字左缘落在 12+8=20，
-           而 Row1 输入文字左缘是 12，**差 8px 不成一条线**。
-           既然要「一体」，共同左基线只能由外框 Padding 单独决定，
-           内部元素一律不再自行左内缩；上下仍留 5px 撑出按钮高度。 -->
-      <Button Grid.Row="0"
-              Classes="subtle"
-              ctl:SelectedClass.IsSelected="{Binding ProjectAutomation.IsEnabled}"
-              HorizontalAlignment="Stretch"
-              HorizontalContentAlignment="Stretch"
-              Padding="0,5"
-              Command="{Binding ProjectAutomation.ToggleCommand}"
-              AutomationProperties.Name="{Binding ProjectAutomation.Label}">
-        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-          <TextBlock Grid.Column="0" Text="{Binding ProjectAutomation.Label}" Classes="caption" />
-          <TextBlock Grid.Column="1" Text="{Binding ProjectAutomation.StateText}" Classes="caption" />
-        </Grid>
-      </Button>
-      <!-- 输入框占满整框宽度，发送键落到它下方右侧。
-           原本发送键与输入框分列同一行，输入框因此只剩局部宽度——
-           写长段时可写区域比看到的框窄一截，是这个面最别扭的地方。
-           ⚠️ 原先这里有 `MaxHeight="140"`，在正常尺寸下**不可达**：
-           Row1 是 `*`，要触到 140 得先把外框拉到 241px 以上。
-           限高的真正需求是「输入面不要无限长高」，那属于外框（`MaxHeight` 该挂在
-           `Border.ai-composer` 或宿主行上），挂在 `*` 行的子控件上永远不生效。
-           已删除，不用一个不起作用的数字冒充有限高。 -->
-      <TextBox Grid.Row="1"
-               Text="{Binding ProjectAiMessage, Mode=TwoWay}"
+    <!-- ⚠️ 单格 Panel，不是 Grid 的多行。改回 RowDefinitions 会让高度
+         重新变成「输入框 + 发送键」之和，U164-E 就白做了。
+         ⚠️ 发送键必须声明在 TextBox **之后**：Panel 里后声明的在上层，
+            反过来它会被输入框盖住、点不到。 -->
+    <Panel>
+      <!-- ⚠️ 右侧让位用 `Padding` 而**不是** `Margin`：
+           `Margin` 会缩小 TextBox 本体的可视区，滚动条与选区高亮跟着内缩，
+           视觉上又变出一个内框——那正是 U148 花力气消掉的东西。
+           `Padding` 只让文字避让，控件本身仍满格。
+           44 = 发送键 36 + 右缘间隙 4 + 文字与键之间 4。 -->
+      <TextBox Text="{Binding ProjectAiMessage, Mode=TwoWay}"
                AcceptsReturn="True"
                TextWrapping="Wrap"
                BorderThickness="0"
@@ -67,14 +61,15 @@
                MinWidth="0"
                HorizontalAlignment="Stretch"
                HorizontalContentAlignment="Stretch"
-               Padding="0"
+               Padding="0,0,44,0"
                VerticalContentAlignment="Top"
                VerticalAlignment="Stretch"
                PlaceholderText="{Binding ProjectAiPlaceholder}" />
-      <Button Grid.Row="2"
-              Classes="primary"
+      <Button Classes="primary"
               Width="36" Height="36" Padding="0"
+              VerticalAlignment="Bottom"
               HorizontalAlignment="Right"
+              Margin="0,0,4,4"
               Command="{Binding SendProjectAiCommand}"
               ToolTip.Tip="{Binding ProjectAiText}"
               AutomationProperties.Name="{Binding ProjectAiText}">
@@ -82,6 +77,6 @@
               Stroke="{DynamicResource Ariadne.TextOnAccent}"
               Data="M4,12 L20,4 L14,20 L11,13 Z M11,13 L4,12" />
       </Button>
-    </Grid>
+    </Panel>
   </Border>
 </UserControl>

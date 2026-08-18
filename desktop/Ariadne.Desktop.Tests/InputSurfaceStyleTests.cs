@@ -268,12 +268,22 @@ public sealed class InputSurfaceStyleTests
     /// 原值 128 比实需 173 小 45px——外框高度不是设计出来的、是被内容顶出来的，
     /// 这正是「外框比例巨差」的来源。
     ///
-    /// 判据取「实测高度是否等于声明的 MinHeight」而不是「MinHeight 等于 173」：
-    /// 后者是把同一个数抄进测试（改 padding 时不会红），
-    /// 前者在**任何**「声明值 < 内容实需」时都会红，包括将来加一行按钮。
+    /// ⚠️ **判据在 U164-E 之后改过一次，理由必须留档**：
+    /// 原判据是「实测高度是否等于声明的 `MinHeight`」，它比「MinHeight 等于 173」好
+    /// （后者是把同一个数抄进测试，改 padding 时不会红），但它有个隐含前提——
+    /// **必须存在一个声明的 `MinHeight`**。
+    ///
+    /// U164-E 把这个前提推翻了：布局模型从「三行竖排」改成「单格叠放」，
+    /// 高度只由 TextBox 的 `MinHeight="72"` 决定，外框自然包住它
+    /// ⇒ **外框不该再有独立的 MinHeight**。那个数失效过两次
+    /// （128 → 173 → 实需 178），根因是「把算出来的数抄进 XAML」这个修法本身：
+    /// 它必须与 padding / spacing / 字号逐项同步，其中任一项变动差值就重现。
+    ///
+    /// 所以现在守的是**真正的性质**：框包住了输入框、且没有塌。
+    /// 「外框声明了某个数」不是性质，是实现手段——而那个手段已被判定为错的。
     /// </summary>
     [Fact]
-    public async Task AiComposerShell_MinHeightActuallyBindsTheLayout()
+    public async Task AiComposerShell_WrapsTheInputWithoutADeclaredHeightNumber()
     {
         await RunWithWorksAsync(projectAiTab: true, async view =>
         {
@@ -282,15 +292,27 @@ public sealed class InputSurfaceStyleTests
                 .FirstOrDefault(candidate => candidate.Classes.Contains("ai-composer"));
             Assert.NotNull(shell);
 
-            var declared = shell!.MinHeight;
-            Assert.True(declared > 0, "外框必须声明 MinHeight，否则塌成一条");
+            var input = shell!.GetVisualDescendants().OfType<TextBox>().FirstOrDefault();
+            Assert.NotNull(input);
 
-            // 内容实需 ≤ 声明值时，Bounds.Height 会等于声明值（MinHeight 生效）；
-            // 内容顶破声明值时会大于它 ⇒ 说明那个数字是装饰性的。
+            // 性质一：外框**没有**独立声明的高度数字。
+            // 这是 U164-E 的核心——不是「换了个更准的数」，而是让高度不再由
+            // 一个需要人工同步的数声明。加回 MinHeight 会让这条红，那是对的。
             Assert.True(
-                shell.Bounds.Height <= declared + 0.5,
-                $"MinHeight={declared} 小于内容实需 {shell.Bounds.Height}——"
-                + "这个数字没在约束布局，改它不会有任何视觉变化（U148）");
+                shell.MinHeight is 0 or double.NaN,
+                $"外框又声明了 MinHeight={shell.MinHeight}。U164-E 刻意删掉了它："
+                + "那个数与 padding/spacing/字号耦合，已经失效过两次（128 → 173 → 实需 178）。"
+                + "要限制「输入面不要无限长高」请挂 MaxHeight，不要恢复 MinHeight。");
+
+            // 性质二：框真的包住了输入框，没有塌成一条。
+            // 这是删掉 MinHeight 之后唯一需要担心的失效形态。
+            Assert.True(
+                shell.Bounds.Height >= input!.Bounds.Height,
+                $"外框高度 {shell.Bounds.Height} 小于输入框 {input.Bounds.Height}——框塌了。");
+            Assert.True(
+                input.Bounds.Height >= 72,
+                $"输入框实测高度 {input.Bounds.Height} 小于它自己声明的 MinHeight=72，"
+                + "说明父容器在压它——单格 Panel 不该发生这种事。");
         });
     }
 

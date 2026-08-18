@@ -226,10 +226,12 @@
       <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="IsHitTestVisible" Value="False" />
     </Style>
-    <Style Selector="Expander.inspector-expander">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-    </Style>
+    <!-- U164-B：这里曾有一条 `Expander.inspector-expander`（Background=Transparent +
+         HorizontalContentAlignment=Stretch）—— 死样式，已删。
+         判据：本文件 `<Expander` 计数为 0，且全仓无任何控件挂 `inspector-expander`。
+         Expander 的项目侧语汇现已统一到 `AriadneTheme.axaml` 末尾那一套
+         （资源键覆盖 + 头部 hover 过渡），本地不再另开一份定义——
+         两份定义只会分叉，这正是 U152 反复出现的形态。 -->
     <!-- Border.inspector-object-row 已提升到 AriadneTheme.axaml（改为淡底块 +
          hover 加深，不再描边）；此处不再局部覆盖，避免两份定义打架。 -->
     <Style Selector="Button.inspector-edge-row">
@@ -438,7 +440,7 @@
                 <Panel x:Name="EdgeLabelPlacementHost"
                        Canvas.Left="{Binding LabelX}"
                        Canvas.Top="{Binding LabelY}"
-                       IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasDetails}">
+                       IsVisible="{Binding ShowCanvasDetails}">
                   <Border Background="{DynamicResource Ariadne.BackgroundSurface}"
                           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
                           BorderThickness="1"
@@ -547,7 +549,7 @@
                         PointerPressed="OnPortPointerPressed"
                         PointerMoved="OnPortPointerMoved"
                         PointerReleased="OnPortPointerReleased"
-                        IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}"
+                        IsVisible="{Binding ShowCanvasPrecisionControls}"
                         ZIndex="3">
                   <Border Width="9" Height="9"
                           CornerRadius="3"
@@ -613,7 +615,7 @@
                                 PointerPressed="OnPortPointerPressed"
                                 PointerMoved="OnPortPointerMoved"
                                 PointerReleased="OnPortPointerReleased"
-                                IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                                IsVisible="{Binding ShowCanvasPrecisionControls}">
                           <Path Width="12" Height="12" Stretch="Uniform"
                                 Classes="control-port"
                                 Classes.connected="{Binding PortControlInConnected}"
@@ -631,7 +633,7 @@
                         <StackPanel Grid.Column="2"
                                     Orientation="Horizontal"
                                     Spacing="3"
-                                    IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                                    IsVisible="{Binding ShowCanvasPrecisionControls}">
                           <Button Width="22" Height="20" Padding="0"
                                   HorizontalContentAlignment="Center"
                                   VerticalContentAlignment="Center"
@@ -655,7 +657,7 @@
                              内层两种形态按节点类型互斥切换。 -->
                         <Panel Grid.Column="{Binding ExecOutColumn}"
                                VerticalAlignment="Center"
-                               IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                               IsVisible="{Binding ShowCanvasPrecisionControls}">
                         <Border Width="16" Height="16"
                                 VerticalAlignment="Center"
                                 Classes="pin-glass-soft keyboard-target"
@@ -750,7 +752,7 @@
                         <StackPanel Grid.Column="0"
                                     VerticalAlignment="Top"
                                     Spacing="3"
-                                    IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                                    IsVisible="{Binding ShowCanvasPrecisionControls}">
                         <ItemsControl ItemsSource="{Binding DataInPins}">
                           <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
@@ -800,7 +802,7 @@
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Top" Margin="0,0,0,0">
                           <!-- 节点名只在标题栏出现一次（这里原本又画了一遍 Name，同一个名字上下重复） -->
-                          <Panel IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasDetails}">
+                          <Panel IsVisible="{Binding ShowCanvasDetails}">
                             <TextBlock Text="{Binding ImportPathDisplay}" Classes="caption mono"
                                        TextTrimming="CharacterEllipsis" Opacity="0.85"
                                        IsVisible="{Binding IsImportNode}" />
@@ -813,7 +815,7 @@
                                        TextTrimming="CharacterEllipsis"
                                        ToolTip.Tip="{Binding StatusText}"
                                        Opacity="0.9"
-                                       IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasDetails}" />
+                                       IsVisible="{Binding ShowCanvasDetails}" />
                           </Grid>
                         </StackPanel>
                         <!-- 数据出与首个数据入同一顶对齐基线。
@@ -821,7 +823,7 @@
                              condition 不要数据出口（分支已由两个执行出引脚承载）。 -->
                         <Panel Grid.Column="2"
                                VerticalAlignment="Top"
-                               IsVisible="{Binding $parent[UserControl].DataContext.ShowCanvasPrecisionControls}">
+                               IsVisible="{Binding ShowCanvasPrecisionControls}">
                         <Border Width="14" Height="14"
                                 VerticalAlignment="Top"
                                 Classes="pin-glass keyboard-target"
@@ -1779,8 +1781,10 @@
                       Classes="dock-rail-header"
                       Padding="12,10"
                       HorizontalAlignment="Stretch">
-                <!-- 与作品页共用 ProjectAiComposer；输入面始终跟随实际对话栏宽度。 -->
-                <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
+                <!-- 与作品页共用 ProjectAiPanel（U164-E 后 AutoMode 移到了对话框外，
+                     两者的相对关系在该控件里定义一次，避免两页各自漂移）。
+                     输入面始终跟随实际对话栏宽度。 -->
+                <ctl:ProjectAiPanel HorizontalAlignment="Stretch" />
               </Border>
             </Grid>
 

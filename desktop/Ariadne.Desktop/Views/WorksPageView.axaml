@@ -869,8 +869,10 @@
             <Border Grid.Row="1" Padding="12,10"
                     HorizontalAlignment="Stretch"
                     BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,1,0,0">
-              <!-- 与工作区共用 ProjectAiComposer；输入面始终跟随实际对话栏宽度。 -->
-              <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
+              <!-- 与工作区共用 ProjectAiPanel（U164-E 后 AutoMode 移到了对话框外，
+                   两者的相对关系在该控件里定义一次，避免两页各自漂移）。
+                   输入面始终跟随实际对话栏宽度。 -->
+              <ctl:ProjectAiPanel HorizontalAlignment="Stretch" />
             </Border>
           </Grid>
         </Grid>
