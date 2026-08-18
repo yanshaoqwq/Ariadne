@@ -29,6 +29,13 @@ public sealed class CanvasAuthoringJourneyTests : IDisposable
     // （我第一版就踩了这个，记在此以免下次重来。）
     private const string ProviderId = "authoring_provider";
     private const string ModelId = "authoring-model";
+
+    /// <summary>
+    /// 第二个模型，只用来当「不该被选中的那个」。
+    /// 它排在 Provider 模型列表首位，因此是 `select_llm_model` 回落路径的结果；
+    /// 任何断言若在预设/显式设置指向 `ModelId` 时看到了它，就说明配置没生效。
+    /// </summary>
+    private const string FallbackModelId = "authoring-fallback-model";
     private const string CanvasWorkflowId = "default";
 
     private readonly DirectoryInfo _temp =
@@ -112,7 +119,10 @@ public sealed class CanvasAuthoringJourneyTests : IDisposable
         Assert.DoesNotContain("占位提示词", request, StringComparison.Ordinal);
 
         // 判据二：模型名是作者选的那个，而不是某个默认值。
+        // 必须同时排除 `FallbackModelId`：只断言「含 ModelId」在单模型配置下恒真，
+        // 有了第二个模型这条才真的在分辨「显式设置生效」与「回落恰好同名」。
         Assert.Contains(ModelId, request, StringComparison.Ordinal);
+        Assert.DoesNotContain(FallbackModelId, request, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -240,6 +250,17 @@ public sealed class CanvasAuthoringJourneyTests : IDisposable
     /// 「预设存下来了，但运行时读的是内置默认值」——
     /// 既有 `Settings_NodePresets_RoundTripPerNodeTypeValues` 只验了往返落盘，
     /// 没验「运行时是否采用」。判据取出站请求里的模型名。
+    ///
+    /// ⚠️ 两处前提是查证后定下的，改之前先读：
+    /// (1) **节点连 `provider_id` 都不能写**。`commands.rs:7654-7662` 的规则是
+    ///     「任一节点级字段出现即进入显式覆盖层」——写了 `provider_id` 就会让
+    ///     `preferred_model_id` 直接取 `None`（**刻意不再拼入预设的 model**，
+    ///     以免混搭出属于别的 Provider 的模型），于是模型落到 `select_llm_model`
+    ///     的回落值而不是预设值。第一版写了 `provider_id`，等于在测回落路径、
+    ///     而它恰好和预设值相同 ⇒ 断言恒真。Provider 由项目默认补齐
+    ///     （`SeedProjectAsync` 里 make_default_llm=true）。
+    /// (2) 判据必须同时断言「**不是** `FallbackModelId`」。只断言「含 ModelId」
+    ///     在单模型配置下永远成立，见 `SeedProjectAsync` 的注释。
     /// </summary>
     [Fact]
     public async Task NodeTypePreset_SuppliesTheModelForNodesWithoutAnExplicitOne()
@@ -255,12 +276,12 @@ public sealed class CanvasAuthoringJourneyTests : IDisposable
         using var client = new JsonLineBackendClient(sidecar);
         await SeedProjectAsync(client, "预设生效", model.BaseUrl);
 
-        // 关键：节点 data 里**不写** model_id，让它只能来自预设。
+        // 关键：节点 data 里**既不写 model_id 也不写 provider_id**，
+        // 让模型只能来自节点类型预设（理由见方法注释第 (1) 条）。
         await SaveCanvasAsync(client, "预设生效", new[]
         {
             new CanvasNode("node-写", "llm", null, new Dictionary<string, object?>
             {
-                ["provider_id"] = ProviderId,
                 ["prompt_template"] = "写点什么。",
             }, new CanvasPosition(40, 60)),
         });
@@ -274,7 +295,7 @@ public sealed class CanvasAuthoringJourneyTests : IDisposable
             DefaultModelId = ModelId,
             DefaultProviderId = ProviderId,
             Presets = presets.Presets
-                .Select(preset => preset with { ModelId = ModelId })
+                .Select(preset => preset with { ModelId = ModelId, ProviderId = ProviderId })
                 .ToList(),
         });
 
@@ -282,12 +303,25 @@ public sealed class CanvasAuthoringJourneyTests : IDisposable
 
         var request = await model.FirstRequestAsync();
         Assert.Contains(ModelId, request, StringComparison.Ordinal);
+
+        // 关键对照：不能是回落模型。少了这条，单模型配置下断言恒真。
+        Assert.DoesNotContain(FallbackModelId, request, StringComparison.Ordinal);
     }
 
     // ════════════════════════════════════════════════════════
     // 脚手架
     // ════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// 起一个真实项目 + 真实 Provider。
+    ///
+    /// **必须配两个模型**（`ModelId` 与 `FallbackModelId`）：只配一个时，
+    /// 「预设生效」这类判据是恒真的——`select_llm_model`（`commands.rs:13090-13096`）
+    /// 在找不到指定模型时会回落到「该 Provider 第一个 llm 能力的模型」，
+    /// 唯一模型的情况下无论走哪条解析路径，出站请求里都是同一个名字，
+    /// 断言分辨不出「预设真的被采用」与「预设被忽略、恰好回落到同一个」。
+    /// 把 `FallbackModelId` 放在**列表首位**，让回落路径与预设路径指向不同的值。
+    /// </summary>
     private async Task<string> SeedProjectAsync(
         IAriadneBackendClient client, string name, string modelBaseUrl)
     {
@@ -296,7 +330,11 @@ public sealed class CanvasAuthoringJourneyTests : IDisposable
         await client.SaveProviderSettingsAsync(new ProviderSettingsUpdate(
             ProviderId, "open_ai_compatible", "画布测试服务", true,
             modelBaseUrl,
-            new[] { new ModelConfig(ModelId, "llm", null, null, null) },
+            new[]
+            {
+                new ModelConfig(FallbackModelId, "llm", null, null, null),
+                new ModelConfig(ModelId, "llm", null, null, null),
+            },
             true, false, false, false));
         await client.SaveProviderKeyAsync(ProviderId, "sk-canvas-authoring");
         return projectRoot;

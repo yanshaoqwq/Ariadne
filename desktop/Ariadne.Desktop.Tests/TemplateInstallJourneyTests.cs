@@ -88,16 +88,47 @@ public sealed class TemplateInstallJourneyTests
 
             // ── 4. 关键判据：装完的节点必须出现在**项目画布**上。
             // 前三步全绿而这一步红 = HTTP 与落盘都对、合并进画布那段断了。
+            //
+            // ⚠️ 判据取**节点集合**而不是「序列化后的 JSON 里含某个子串」
+            // （第一版就是后者，属于弱判据）：边的 source/target 里也写着节点 id，
+            // 所以「只并入了边、节点一个都没进来」这种半合并状态照样能让子串命中。
+            // 合并会给 id 加命名空间前缀（`project_canvas.rs:171` 的 `unique_id`
+            // 拼成 `{namespace}--{原 id}`），因此按后缀匹配而非全等。
             var canvas = await client.LoadProjectCanvasAsync();
-            var canvasJson = JsonSerializer.Serialize(canvas);
-            Assert.Contains(
-                "journey-writer-MUTATED",
-                canvasJson,
-                StringComparison.Ordinal);
+            var installedNodes = canvas.Nodes
+                .Where(node => node.Id.EndsWith("journey-writer", StringComparison.Ordinal))
+                .ToList();
+            Assert.True(
+                installedNodes.Count == 1,
+                "项目画布里的 journey-writer 节点数应为 1，实际 "
+                + $"{installedNodes.Count}。画布现有节点：["
+                + string.Join(", ", canvas.Nodes.Select(node => node.Id))
+                + "]。装完的模板没合并进画布 ⇒ 用户在画布上找不到刚装的模板。");
 
-            // ── 5. 装完的图必须能通过后端自己的校验（否则装了个跑不起来的图）
-            var graphs = await client.ListWorkflowGraphsAsync();
-            Assert.NotEmpty(graphs);
+            // 节点的类型也必须跟着过来——只有 id 而 type 丢了，画布上是个渲染不出的空壳。
+            Assert.Equal("writer", installedNodes[0].Type);
+
+            // 边也必须一起并进来，且两端都指向真实存在的节点（不能有悬空引用）。
+            var installedEdge = Assert.Single(
+                canvas.Edges,
+                edge => edge.Id.EndsWith("journey-plan-to-write", StringComparison.Ordinal));
+            var nodeIds = canvas.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+            Assert.Contains(installedEdge.Source, nodeIds);
+            Assert.Contains(installedEdge.Target, nodeIds);
+
+            // ── 5. 装完的图必须能通过后端自己的校验（否则装了个跑不起来的图）。
+            //
+            // ⚠️ 这里**不能**用 `ListWorkflowGraphsAsync()` + `Assert.NotEmpty`
+            // （第一版如此，是恒真断言）：`list_workflow_graphs_impl`
+            // （`commands.rs:5721`）无条件返回**恰好一个** WorkflowSummary，
+            // 它描述的是项目画布本身、与装了什么模板无关，永远非空。
+            // 改成把画布回喂给后端的拓扑/契约校验，那才是「装进来的图跑得起来」。
+            await client.ValidateWorkflowGraphAsync(canvas);
+
+            // 顺带钉住摘要的节点计数与画布一致：这两个数字来自不同代码路径，
+            // 对不上说明列表页显示的规模与画布真实内容脱节。
+            var summary = Assert.Single(await client.ListWorkflowGraphsAsync());
+            Assert.Equal(canvas.Nodes.Count, summary.NodeCount);
         }
         finally
         {
@@ -108,9 +139,19 @@ public sealed class TemplateInstallJourneyTests
     /// <summary>
     /// 仓库返回 5xx 时，安装必须**明确失败**且不留半装状态。
     ///
-    /// 判据取「抛错 + 画布未被改动」两条。只断言抛错测不出半装：
-    /// 安装链路里 manifest 下载与画布合并是两步（`commands.rs:4931` 与 `:4958`），
-    /// 中途失败若已经写了 workflows/ 文件，用户会看到一个装了一半的模板。
+    /// 判据取「抛错 + 画布未被改动 + workflows/ 下没有半个 manifest」三条。
+    ///
+    /// ⚠️ 关于原注释里「下载与画布合并是两步、中途失败会留下半装」那个说法：
+    /// 我查证后确认**这条用例覆盖不到那个场景**。5xx 挂在
+    /// `template_client(...).download(&id)`（`commands.rs:4931`）这一步，
+    /// 而落盘发生在它之后的 `install_workflow_template_manifest`
+    /// （`frontend/service.rs:2908-2910`）。也就是说下载失败时后端**根本还没开始写**，
+    /// 「画布未变」在这条路径上近乎恒真——它是个弱判据，不是护栏。
+    /// 保留它的价值只剩「fail loud」那一半（变异验证过：把仓库换成 200 后
+    /// `ThrowsAsync` 确实红）。
+    /// 补上的 manifest 目录断言把「没写」这件事也钉住：真实的半装形态是
+    /// manifest 已 `atomic_write` 落盘、后续拓扑校验或画布合并失败，
+    /// 那时 workflows/{id}/ 会留下一个用户在画布上看不到、却真实存在的目录。
     /// </summary>
     [Fact]
     public async Task RepositoryFailure_FailsLoudlyAndLeavesCanvasUnchanged()
@@ -138,6 +179,13 @@ public sealed class TemplateInstallJourneyTests
             // 画布必须逐字未变——安装失败不能留下半个模板。
             var after = JsonSerializer.Serialize(await client.LoadProjectCanvasAsync());
             Assert.Equal(before, after);
+
+            // workflows/{模板 id}/ 也不能存在：留下它就是「用户在画布上看不到、
+            // 但磁盘上真有一份」的半装状态，下次安装还会撞上它。
+            var installedDir = Path.Combine(projectRoot, "workflows", TemplateId);
+            Assert.False(
+                Directory.Exists(installedDir),
+                $"安装失败却留下了 {installedDir}：半装状态，用户在画布上看不到它");
         }
         finally
         {
@@ -151,6 +199,15 @@ public sealed class TemplateInstallJourneyTests
     /// 这是 `ensure_active_project_identity`（`commands.rs:4930`）的护栏：
     /// 下载是慢操作，期间用户可能切了项目；把迟到的下载写回**已经离开的项目**
     /// 会污染另一个作品。判据取「拒绝」+「两个项目的画布都没被改」。
+    ///
+    /// ⚠️ 第一版只查了 active 的画布，而**受害者是 other**（被越权写入的那个），
+    /// 所以真正该钉住的那一边反倒漏了。现在两边都查。
+    /// other 一侧的判据取「`workflows/` 下的文件清单不变」：
+    /// 新建项目只会**创建空的 `workflows/` 目录**，`default.json` 是首次保存时
+    /// 才惰性写出的（实测 `create_project` 的 created_dirs 里有 workflows、
+    /// 但目录里一个文件都没有），所以不能去读它的 default.json——
+    /// 我第一版就这么写，测试因 FileNotFound 而红，那是**断言错**不是产品缺陷。
+    /// 比清单而不是比某个文件的内容，越权写入无论落成哪个文件都跑不掉。
     /// </summary>
     [Fact]
     public async Task InstallingIntoAMismatchedProjectRoot_IsRejected()
@@ -173,17 +230,42 @@ public sealed class TemplateInstallJourneyTests
             await client.CreateProjectAsync(active, "Active");
 
             var before = JsonSerializer.Serialize(await client.LoadProjectCanvasAsync());
+            var otherWorkflows = Path.Combine(other, "workflows");
+            var otherFilesBefore = SnapshotWorkflowsDir(otherWorkflows);
 
             // 当前活动项目是 active，却声称要装进 other。
             await Assert.ThrowsAsync<BackendException>(() =>
                 client.InstallTemplateAsync(repo.BaseUrl, TemplateId, other));
 
             Assert.Equal(before, JsonSerializer.Serialize(await client.LoadProjectCanvasAsync()));
+
+            // 受害项目 other 的 workflows/ 必须一个字节都没多——这才是这条护栏保护的对象。
+            Assert.Equal(otherFilesBefore, SnapshotWorkflowsDir(otherWorkflows));
         }
         finally
         {
             TryCleanup(temp);
         }
+    }
+
+    /// <summary>
+    /// 取某个项目 `workflows/` 目录下的「相对路径 → 内容」快照，用于比对是否被越权写入。
+    /// 目录不存在时返回空表（新建项目可能还没有任何工作流文件）。
+    /// </summary>
+    private static SortedDictionary<string, string> SnapshotWorkflowsDir(string workflowsRoot)
+    {
+        var snapshot = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        if (!Directory.Exists(workflowsRoot))
+        {
+            return snapshot;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(
+            workflowsRoot, "*", SearchOption.AllDirectories))
+        {
+            snapshot[Path.GetRelativePath(workflowsRoot, file)] = File.ReadAllText(file);
+        }
+        return snapshot;
     }
 
     /// <summary>
