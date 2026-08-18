@@ -416,6 +416,100 @@ fn summarizer_rejects_segment_ranges_with_gaps() {
     );
 }
 
+/// 判据五之二：**作者模板里的占位符在四步的出站请求体里都已展开**。
+///
+/// U175 遗留（2026-08-18 修）：`author_template_prefix` 此前原文直传。
+/// 而产品自带的 `node_template.summarizer.default` 就是
+/// `{{角色设定}}\n\n本章定稿正文：\n{{当前章节正文}}` ⇒ 手动粘贴该模板时
+/// 占位符字面量进请求体，模型读到「本章定稿正文：{{当前章节正文}}」。
+///
+/// ⚠️ **这条比 U114 那条更隐蔽**：总结链不校验模板 ⇒ 节点**照样跑完、
+/// 照样报成功**，四层总结全部基于一份空洞指令产出。用户拿到的是
+/// 「看起来正常」的总结，而它没读过正文。所以判据必须取**出站字节**，
+/// 取「运行是否成功」在缺陷版本下照样绿。
+///
+/// 四步都查：前缀在四步都拼一次，只在第一步展开等于后三步仍然发出字面量。
+#[test]
+fn author_template_placeholders_are_expanded_in_all_four_steps() {
+    let (base_url, server) = spawn_recording_llm(four_step_responses(), 2);
+    let provider = provider_for(base_url);
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    // 与产品自带 node_template.summarizer.default 同形（含两个占位符）。
+    let executor = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        summarizer_config(Some(
+            "【作者口径】人名一律用全名。\n\n本章定稿正文：\n{{当前章节正文}}".to_owned(),
+        )),
+    );
+
+    executor
+        .summarize_chapter("chapter-1", CHAPTER_TEXT)
+        .expect("含占位符的作者模板应当能跑完");
+
+    let seen = server.join().unwrap();
+    assert_eq!(seen.len(), 4, "应当有 4 次请求");
+    for (index, raw) in seen.iter().enumerate() {
+        let body = request_body(raw);
+        assert!(
+            !body.contains("{{当前章节正文}}"),
+            "第 {} 步的出站请求里占位符仍是**字面量**——模型读到的是\
+             「本章定稿正文：{{{{当前章节正文}}}}」，而节点会照样报成功（U175 遗留）",
+            index + 1
+        );
+        // 只断言「不含 {{}}」不够：静默替换成空串同样能过那一条，
+        // 而那比留字面量更糟（模型会以为这章本来就没有正文）。
+        assert!(
+            body.contains("李砚在渡口等了一夜"),
+            "第 {} 步占位符被消掉了却没换上真实正文——静默置空",
+            index + 1
+        );
+    }
+}
+
+/// 判据五之三：**作者模板里拼错的变量名当场报错，不静默发出去**。
+///
+/// 与 `audit_prompt_with_an_unknown_variable_fails_loudly` 同一条契约，
+/// 只是落在节点主模板这条路上。缺了这条，作者把 `{{当前章节正文}}`
+/// 打成 `{{章节正文}}` 时会得到一份「基于空洞指令的成功总结」。
+#[test]
+fn author_template_with_an_unknown_variable_fails_loudly() {
+    // 预置**零个**响应：本用例期望一次请求都不发出。
+    // 传 four_step_responses() 会让录制端在「等第 1 次请求」处 panic
+    // （它对预期内的轮次等 15 秒然后 `panic!("等待第 N 次 LLM 请求超时")`），
+    // 那个 panic 会盖住真正要验的断言——我第一版就踩了这个。
+    // `extra_capacity: 2` 仍保留：若被测代码**真的**发了请求，
+    // 这里能接住并让下面的 `seen.len() == 0` 报出真实数字。
+    let (base_url, server) = spawn_recording_llm(Vec::new(), 2);
+    let provider = provider_for(base_url);
+    let ledger = SqliteCostLedger::open_in_memory().unwrap();
+    let prompts = load_prompt_resources().unwrap();
+    let executor = SummarizerExecutor::new(
+        &provider,
+        &ledger,
+        &prompts,
+        summarizer_config(Some("对照 {{章节正文}} 做总结".to_owned())),
+    );
+
+    let error = executor
+        .summarize_chapter("chapter-1", CHAPTER_TEXT)
+        .expect_err("未知变量必须报错，不能静默把字面量发出去");
+    assert!(
+        error.to_string().contains("章节正文"),
+        "报错信息里没指名是哪个变量拼错了：{error}"
+    );
+
+    // 一次请求都不该发出：错在模板上，发出去只是白花钱换一份错总结。
+    let seen = server.join().unwrap();
+    assert_eq!(
+        seen.len(),
+        0,
+        "渲染失败后仍发出了请求——那些调用注定基于错的指令，还要计费"
+    );
+}
+
 /// 判据五：**作者在设置页填的那一份角色提示词，会进入全部四步**。
 ///
 /// 这解释了「只看见一个提示词」为什么不等于「只有一层」：

@@ -157,7 +157,8 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
         // 步骤 1：故事段划分并概括。
         let segments = self.summarize_segments(stage_store.as_ref(), chapter_id, chapter_text)?;
         // 步骤 2：事件归并（喂入本章段概括 + 既有事件概括）。
-        let events = self.merge_events(stage_store.as_ref(), chapter_id, &segments, context)?;
+        let events =
+            self.merge_events(stage_store.as_ref(), chapter_id, chapter_text, &segments, context)?;
         // 步骤 3：章节总结（喂入正文、事件对比、计划变化和伏笔）。
         let chapter = self.summarize_chapter_text(
             stage_store.as_ref(),
@@ -405,7 +406,7 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
              {{\"segments\":[{{\"number\":\"1\",\"summary\":\"本段概括\",\
              \"start_line\":1,\"end_line\":20}}]}}。\
              number 为故事段编号（可含小数如 1.5），start_line/end_line 为正文行范围。\n\n正文：\n{}",
-            self.author_template_prefix(),
+            self.author_template_prefix(chapter_text)?,
             self.prompt("summarizer.segments")?,
             chapter_text,
         );
@@ -466,6 +467,9 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
         &self,
         stage_store: Option<&SqliteWritingKnowledgeStore>,
         chapter_id: &str,
+        // U175 遗留修复：作者模板里的 `{{当前章节正文}}` 要渲染，故本步也需正文。
+        // 事件归并本身只吃段落摘要，正文仅用于渲染前缀，不进指令主体。
+        chapter_text: &str,
         segments: &[StorySegment],
         context: &SummaryGenerationContext,
     ) -> CoreResult<Vec<StoryEvent>> {
@@ -483,7 +487,7 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
              status 取 ongoing/paused/completed。segment_ids 只能引用本章上面的段 id，\
              不要重复输出既有跨章 segment id；系统会按复用的 event_id 保留历史双向关系。\
              每个本章故事段必须至少属于一个事件。",
-            self.author_template_prefix(),
+            self.author_template_prefix(chapter_text)?,
             self.prompt("summarizer.events")?,
             existing_event_digest,
             segment_digest,
@@ -585,7 +589,7 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
              realized_changes 只能引用上面的 Planned change 与本章段；未落地项不要输出。\
              foreshadowing status 只能是 planted/recovered，必须引用正式伏笔 id 与本章段。\
              没有变化时输出空数组，不得虚构 id。\n\n正文：\n{}",
-            self.author_template_prefix(),
+            self.author_template_prefix(chapter_text)?,
             self.prompt("summarizer.chapter_summary")?,
             event_digest,
             planned_change_digest,
@@ -626,7 +630,7 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
              \n\n本章 id：{}\n本章正文：\n{}\n\n本章总结：{}\n\n请只输出 JSON，格式：\
              {{\"stage_id\":\"stage-1\",\"stage_summary\":\"阶段概括\",\"is_new_stage\":false}}。\
              已有阶段请 is_new_stage=false 且使用已有 stage_id；新阶段 is_new_stage=true。",
-            self.author_template_prefix(),
+            self.author_template_prefix(chapter_text)?,
             self.prompt("summarizer.stage_summary")?,
             current_stage,
             stage_digest,
@@ -663,12 +667,50 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
         Ok((parsed.stage_id, parsed.stage_summary, parsed.is_new_stage))
     }
 
-    /// F24：作者/节点 template 前缀（可空）。
-    fn author_template_prefix(&self) -> String {
-        match &self.config.prompt_template {
-            Some(t) if !t.trim().is_empty() => format!("{}\n\n", t.trim()),
-            _ => String::new(),
+    /// F24：作者/节点 template 前缀（可空），**并渲染其中的占位符**。
+    ///
+    /// U175 遗留（2026-08-18 修）：此前是 `prompt_template` 原文直传。
+    /// 而产品自带的 `node_template.summarizer.default` 就是
+    /// `{{角色设定}}\n\n本章定稿正文：\n{{当前章节正文}}` ⇒ 手动粘贴该模板时
+    /// **占位符字面量进请求体**，模型收到的是「本章定稿正文：{{当前章节正文}}」。
+    ///
+    /// ⚠️ **这条比 U114 那条更隐蔽**：总结链不校验模板，
+    /// 于是节点**照样跑完、照样报成功**，四层总结全部基于一份空洞的指令产出——
+    /// 用户拿到的是「看起来正常」的总结，而它没读过正文。
+    ///
+    /// 与 `render_approval_prompt` 复用同一套机制（变量名沿用
+    /// `known_section_aliases` 的中文别名），理由见那个函数的注释：
+    /// 作者在不同框里写同一个 `{{当前章节正文}}` 必须指同一件东西。
+    ///
+    /// 不含 `{{` 的模板原样返回——前端默认预填的是无占位符的
+    /// `agent_prompt.summarizer`，不能让它白跑一趟。
+    fn author_template_prefix(&self, chapter_text: &str) -> CoreResult<String> {
+        let Some(template) = self
+            .config
+            .prompt_template
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(String::new());
+        };
+        if !template.contains("{{") {
+            return Ok(format!("{template}\n\n"));
         }
+        let mut context = crate::rag::prompt_template::PromptTemplateContext {
+            // 这里的「角色设定」就是作者在节点提示词框里写的这份模板自身
+            // （summarizer 没有另一份 agent 提示词可填）。渲染器只扫模板、
+            // 不扫代入值，所以自引用不会无限展开。
+            prompt_text: template.to_owned(),
+            ..Default::default()
+        };
+        for alias in ["chapter_text", "当前章节正文"] {
+            context
+                .inputs
+                .insert(alias.to_owned(), chapter_text.to_owned());
+        }
+        let rendered = crate::rag::prompt_template::render_prompt_template(template, &context)?;
+        Ok(format!("{rendered}\n\n"))
     }
 
     /// 取指定提示词本体。
@@ -687,7 +729,7 @@ impl<'a, L: CostLedger> SummarizerExecutor<'a, L> {
     ) -> CoreResult<String> {
         Ok(format!(
             "{}{}\n\n{}",
-            self.author_template_prefix(),
+            self.author_template_prefix(body)?,
             self.prompt(step_prompt_key)?,
             body
         ))
