@@ -3,6 +3,7 @@ using Xunit;
 
 namespace Ariadne.Desktop.Tests;
 
+[Collection("RealSidecar")]
 public sealed class JsonLineBackendClientCancellationTests
 {
     [Fact]

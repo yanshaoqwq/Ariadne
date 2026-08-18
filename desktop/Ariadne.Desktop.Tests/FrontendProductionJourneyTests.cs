@@ -18,6 +18,7 @@ namespace Ariadne.Desktop.Tests;
 ///
 /// sidecar 未编译时自动跳过（与 BackendColdStartTests 同约定）。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class FrontendProductionJourneyTests : IDisposable
 {
     private readonly DirectoryInfo _temp =
@@ -46,8 +47,7 @@ public sealed class FrontendProductionJourneyTests : IDisposable
         // （core/src/config/secrets.rs:315）。真实产品在 Linux 上同样会踩到
         // 「保存密钥必报错且无主密码 UI」——已立 U118 跟踪；测试先注入
         // 变量以便继续验证其余链路。
-        Environment.SetEnvironmentVariable(
-            "ARIADNE_SECRET_MASTER_KEY", "frontend-journey-master-key");
+        SidecarAppStateIsolation.UseSharedSecretMasterKey();
 
         var fromEnv = Environment.GetEnvironmentVariable("ARIADNE_BACKEND_IPC");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))

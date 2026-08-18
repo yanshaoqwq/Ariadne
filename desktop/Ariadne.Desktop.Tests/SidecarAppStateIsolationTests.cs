@@ -11,6 +11,7 @@ namespace Ariadne.Desktop.Tests;
 /// 是否落在临时区内——而不是「测试有没有记得设环境变量」：
 /// 后者在缺陷版本下也能靠人工自觉通过，拦不住下一个忘记设的人。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class SidecarAppStateIsolationTests
 {
     /// <summary>

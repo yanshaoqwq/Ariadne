@@ -13,6 +13,7 @@ namespace Ariadne.Desktop.Tests;
 /// 已用真实 `git` 二进制验过回档那一步，本份把**其余动作串成完整链路**，
 /// 并补上它没覆盖的：脏状态识别、检查点与历史的对应、分支图、.gitignore 生效。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class GitOperationJourneyTests
 {
     private static string? ResolveSidecar()

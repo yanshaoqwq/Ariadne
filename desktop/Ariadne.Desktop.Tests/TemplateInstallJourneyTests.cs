@@ -24,6 +24,7 @@ namespace Ariadne.Desktop.Tests;
 /// `ARIADNE_ALLOW_LOCAL_TEMPLATE_REPOSITORY` 才能用 loopback——
 /// 这个开关是**给测试用的**，不是把防线关掉：它只放宽 host 检查。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class TemplateInstallJourneyTests
 {
     /// <summary>协议由 `frontend/service.rs:2706/2720/2733` 定：三个端点。</summary>

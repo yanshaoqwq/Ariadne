@@ -29,6 +29,7 @@ namespace Ariadne.Desktop.Tests;
 /// 本缺陷能活到发布前，正因为 Rust 侧测试进程内直调 `commands::`（不过 IPC 序列化层）、
 /// 桌面侧测试用内存假客户端（不做 serde 反序列化），两边都绕开了出问题的那一层。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class WorkflowRunParamsSerializationTests : IDisposable
 {
     private readonly DirectoryInfo _temp =

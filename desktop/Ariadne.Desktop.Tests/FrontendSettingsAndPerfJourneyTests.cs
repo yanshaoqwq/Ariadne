@@ -37,6 +37,7 @@ namespace Ariadne.Desktop.Tests;
 ///
 /// sidecar 未编译时跳过（与 <see cref="BackendColdStartTests"/> 同约定）。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class FrontendSettingsAndPerfJourneyTests : IDisposable
 {
     private const string ProviderId = "primary";
@@ -67,8 +68,7 @@ public sealed class FrontendSettingsAndPerfJourneyTests : IDisposable
     private static string? ResolveSidecar()
     {
         SidecarAppStateIsolation.RequireIsolatedAppState();
-        Environment.SetEnvironmentVariable(
-            "ARIADNE_SECRET_MASTER_KEY", "settings-perf-master-key");
+        SidecarAppStateIsolation.UseSharedSecretMasterKey();
 
         var fromEnv = Environment.GetEnvironmentVariable("ARIADNE_BACKEND_IPC");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))

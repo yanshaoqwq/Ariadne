@@ -31,6 +31,7 @@ namespace Ariadne.Desktop.Tests;
 ///
 /// sidecar 未编译时跳过（与 <see cref="BackendColdStartTests"/> 同约定）。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class FrontendUserActionJourneyTests : IDisposable
 {
     private const string ProviderId = "primary";
@@ -57,8 +58,7 @@ public sealed class FrontendUserActionJourneyTests : IDisposable
         // 写进用户真实 recent_projects.json 并挤掉用户自己的项目（20 条上限）。
         // **本文件尤其要紧**：它专门测「最近项目」的增删，不隔离等于直接改用户数据。
         SidecarAppStateIsolation.RequireIsolatedAppState();
-        Environment.SetEnvironmentVariable(
-            "ARIADNE_SECRET_MASTER_KEY", "user-action-master-key");
+        SidecarAppStateIsolation.UseSharedSecretMasterKey();
 
         var fromEnv = Environment.GetEnvironmentVariable("ARIADNE_BACKEND_IPC");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))

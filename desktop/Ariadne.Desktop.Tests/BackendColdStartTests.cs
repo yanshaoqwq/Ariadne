@@ -12,6 +12,7 @@ namespace Ariadne.Desktop.Tests;
 ///
 /// sidecar 不存在时自动跳过，避免在未编译后端的环境里误报失败。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class BackendColdStartTests
 {
     private static string? ResolveSidecar()

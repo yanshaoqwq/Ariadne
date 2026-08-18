@@ -69,6 +69,45 @@ internal static class SidecarAppStateIsolation
         };
     }
 
+    /// <summary>
+    /// U181：**整个测试进程共用同一把凭据主密钥**。
+    ///
+    /// 事故经过：7 个起真实 sidecar 的测试类各在 `ResolveSidecar()` 里设了一把
+    /// **不同**的 `ARIADNE_SECRET_MASTER_KEY`（`first-run-master-key`、
+    /// `canvas-authoring-master-key` …）。但 Provider 凭据存在**应用级**
+    /// `secrets.json`（`commands.rs:5274`），全进程只有一份，
+    /// 且在整个测试进程生命周期里累积。于是：
+    /// 类 A 用 K1 加密写下文件 → 类 B 带 K2 调 `set_secret` →
+    /// `set_secret` 是读-改-写（`secrets.rs:598` 先 `read_values()`）→
+    /// K2 去解 K1 的密文 ⇒ `local secret encryption failed: aead::Error`。
+    ///
+    /// **为什么单靠 `[Collection("RealSidecar")]` 串行不够**（实测，不是推理）：
+    /// 加满 16 个特性后跑 SettingsToRun + FrontendProduction + CanvasAuthoring 三类，
+    /// 仍有 **7 条稳定失败**——第一个类跑完并留下 K1 的密文，
+    /// 后两个类整类全红。串行只把「随机红」变成「稳定红」，
+    /// 因为成因是**磁盘残留 + 密钥不一致**，与并发交错无关。
+    /// 两条防线各管一半：集合管并发写坏文件，本方法管跨类解不开。
+    ///
+    /// **为什么统一成一把而不是每类清一次文件**：清文件要求「以后每个写跨进程测试的人
+    /// 都记得清」——这正是 U142 类注释里已经否掉的思路。
+    /// 统一密钥不需要任何人记得：值由这里给，各类照调即可。
+    /// 也不能各自设值后再改回来（`finally` 恢复）：sidecar 是在 spawn 那一刻
+    /// 读环境变量的，子进程存活期跨越恢复点，恢复只会让谁拿到哪把更难预测。
+    /// </summary>
+    internal const string SharedSecretMasterKey = "ariadne-tests-shared-master-key";
+
+    /// <summary>
+    /// 起 sidecar 前注入共享主密钥。
+    ///
+    /// 用主密码而非「允许明文」：走的是真实加密路径，
+    /// 与用户配好主密码后的生产形态一致（原各类注释里的理由，保留）。
+    /// </summary>
+    internal static void UseSharedSecretMasterKey()
+    {
+        Environment.SetEnvironmentVariable(
+            "ARIADNE_SECRET_MASTER_KEY", SharedSecretMasterKey);
+    }
+
     /// <summary>路径是否落在本进程的隔离根之下。</summary>
     internal static bool IsIsolated(string? path)
     {

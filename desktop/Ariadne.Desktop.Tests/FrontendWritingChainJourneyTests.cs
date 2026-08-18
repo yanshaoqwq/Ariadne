@@ -38,6 +38,7 @@ namespace Ariadne.Desktop.Tests;
 /// 2026-08-08 的回归之前是绿的）。
 /// U156 修好后本文件应转绿；若仍不绿，剩下的失败才是新发现。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class FrontendWritingChainJourneyTests : IDisposable
 {
     private const string ProviderId = "primary";
@@ -68,8 +69,7 @@ public sealed class FrontendWritingChainJourneyTests : IDisposable
         // 无 keychain 的开发构建里 LocalFileSecretStore 只认这个变量
         // （core/src/config/secrets.rs）。U118 跟踪「Linux 上无主密码 UI」，
         // 这里先注入以便验证其余链路。
-        Environment.SetEnvironmentVariable(
-            "ARIADNE_SECRET_MASTER_KEY", "writing-chain-master-key");
+        SidecarAppStateIsolation.UseSharedSecretMasterKey();
 
         var fromEnv = Environment.GetEnvironmentVariable("ARIADNE_BACKEND_IPC");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))

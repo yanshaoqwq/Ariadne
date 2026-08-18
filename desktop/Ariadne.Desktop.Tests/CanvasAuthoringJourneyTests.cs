@@ -20,6 +20,7 @@ namespace Ariadne.Desktop.Tests;
 /// 磁盘断言与运行成功断言都拦不住它——只有把请求体抓下来读才行。
 /// 所以这里自起 TcpListener 当模型服务端，捕获真实请求。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class CanvasAuthoringJourneyTests : IDisposable
 {
     // ⚠️ 不能带连字符：后端 `normalize_provider`（`commands.rs:14340`）
@@ -49,8 +50,7 @@ public sealed class CanvasAuthoringJourneyTests : IDisposable
         // （`secrets.rs:584-588`：既无主密码也无明文许可 ⇒ Locked）。
         // 用主密码而非「允许明文」：前者走的是真实加密路径，
         // 与用户配好主密码后的生产形态一致。
-        Environment.SetEnvironmentVariable(
-            "ARIADNE_SECRET_MASTER_KEY", "canvas-authoring-master-key");
+        SidecarAppStateIsolation.UseSharedSecretMasterKey();
 
         var fromEnv = Environment.GetEnvironmentVariable("ARIADNE_BACKEND_IPC");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))

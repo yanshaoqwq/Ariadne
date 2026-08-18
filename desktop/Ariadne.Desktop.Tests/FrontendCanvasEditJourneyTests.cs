@@ -30,6 +30,7 @@ namespace Ariadne.Desktop.Tests;
 /// sidecar 未编译时按 <see cref="SidecarAppStateIsolation"/> 约定**显式失败**，
 /// 不静默跳过（U156 的教训：xUnit 把 `return` 记成绿）。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class FrontendCanvasEditJourneyTests : IDisposable
 {
     private const string ProviderId = "primary";
@@ -60,8 +61,7 @@ public sealed class FrontendCanvasEditJourneyTests : IDisposable
     private static string? ResolveSidecar()
     {
         SidecarAppStateIsolation.RequireIsolatedAppState();
-        Environment.SetEnvironmentVariable(
-            "ARIADNE_SECRET_MASTER_KEY", "canvas-edit-master-key");
+        SidecarAppStateIsolation.UseSharedSecretMasterKey();
 
         var fromEnv = Environment.GetEnvironmentVariable("ARIADNE_BACKEND_IPC");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))

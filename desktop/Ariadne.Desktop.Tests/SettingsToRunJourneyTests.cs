@@ -25,6 +25,7 @@ namespace Ariadne.Desktop.Tests;
 /// 但请求打到别处 / 带着空 Bearer / 用的是默认模型」。
 /// 磁盘断言和「运行返回 ok」都拦不住——只有把真实请求接住才行。
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class SettingsToRunJourneyTests : IDisposable
 {
     // ⚠️ provider id 不能带连字符：后端 `normalize_provider`（`commands.rs:14340`）
@@ -54,8 +55,7 @@ public sealed class SettingsToRunJourneyTests : IDisposable
         // 保存密钥前必须先解锁凭据存储，否则后端拒绝落盘
         // （`secrets.rs:584-588`：既无主密码也无明文许可 ⇒ Locked）。
         // 这也是 U172-B 的成因：新项目默认就是 Locked。
-        Environment.SetEnvironmentVariable(
-            "ARIADNE_SECRET_MASTER_KEY", "first-run-master-key");
+        SidecarAppStateIsolation.UseSharedSecretMasterKey();
 
         var fromEnv = Environment.GetEnvironmentVariable("ARIADNE_BACKEND_IPC");
         if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))
