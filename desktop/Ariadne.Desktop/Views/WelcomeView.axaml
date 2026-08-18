@@ -34,9 +34,16 @@
 
     <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                   VerticalScrollBarVisibility="Auto">
-      <Grid MaxWidth="1180"
+      <!-- U163-C：整体收一档、外圈多留白。
+           MaxWidth 1180→1040 是主要手段（直接加左右留白，不动内部比例）；
+           MinHeight 540 **刻意不动**——它是窗口变矮时防止内容被压扁的下限，
+           改小会让小窗口下布局塌陷，那比「太挤」更糟。
+           ⚠️ MaxWidth 与 ColumnDefinitions 的比例是耦合的：收到 1040 后
+           右栏（最近项目）实际宽 ≈ (1040-48)×0.92/2 ≈ 456，仍容得下卡片内
+           Auto,*,Auto 三列；再往下收要先确认路径文本不被 TextTrimming 挤成省略号。 -->
+      <Grid MaxWidth="1040"
             MinHeight="540"
-            Margin="54,38"
+            Margin="72,52"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
             RowDefinitions="Auto,30,*"
@@ -48,8 +55,8 @@
             <!-- 品牌徽记：去掉「灰底描边小卡」，改成强调色渐变圆牌 +
                  一圈极淡光环。Logo 反白落在实色上，对比度足够，
                  也让整页有一个真正的视觉焦点（而不是一块灰补丁）。 -->
-            <Panel Grid.Column="0" Width="80" Height="80" VerticalAlignment="Center">
-              <Ellipse Width="80" Height="80" Opacity="0.16">
+            <Panel Grid.Column="0" Width="68" Height="68" VerticalAlignment="Center">
+              <Ellipse Width="68" Height="68" Opacity="0.16">
                 <Ellipse.Fill>
                   <RadialGradientBrush GradientOrigin="50%,50%" Center="50%,50%" RadiusX="50%" RadiusY="50%">
                     <GradientStop Offset="0.55" Color="{DynamicResource Ariadne.Color.AccentPrimary}" />
@@ -57,7 +64,7 @@
                   </RadialGradientBrush>
                 </Ellipse.Fill>
               </Ellipse>
-              <Border Width="62" Height="62" CornerRadius="18"
+              <Border Width="54" Height="54" CornerRadius="16"
                       HorizontalAlignment="Center" VerticalAlignment="Center"
                       BoxShadow="{DynamicResource Ariadne.Shadow.Card}">
                 <Border.Background>
@@ -66,7 +73,13 @@
                     <GradientStop Offset="1" Color="{DynamicResource Ariadne.Color.AccentPressed}" />
                   </LinearGradientBrush>
                 </Border.Background>
-                <ctl:BrandLogo Width="40" Height="40" OnAccent="True"
+                <!-- U163-D：图案在圆牌里放大。圆牌从 62→54（U163-C 整体收档），
+                     Logo 反而从 40→44：叠加 RenderLineBitmap 的 inset 归零后，
+                     图案实际高从原先占圆牌 47% 提到约 77%，这才是「图标图案偏小」的解。
+                     44 已接近 54 的贴边上限，再大会压到圆牌圆角。
+                     OnAccent="True" 在这里是**正确用法**（Logo 确实压在强调色渐变圆牌上），
+                     与 U162-A 要改的标题栏两处不同，勿一并改。 -->
+                <ctl:BrandLogo Width="44" Height="44" OnAccent="True"
                                HorizontalAlignment="Center" VerticalAlignment="Center" />
               </Border>
             </Panel>
@@ -76,19 +89,21 @@
                       Background="{DynamicResource Ariadne.AccentPrimary}"
                       HorizontalAlignment="Left" />
               <TextBlock Text="{Binding BrandName}"
-                         FontSize="46"
+                         FontSize="38"
                          FontWeight="SemiBold"
                          Foreground="{DynamicResource Ariadne.TextHeading}"
                          LetterSpacing="0" />
             </StackPanel>
           </Grid>
 
+          <!-- U163-C：字号从 16 收到 15 后每行字数变多，MaxWidth 也随之从 510 收到 480，
+               否则折行位置外扩、副标题会比标题显得更宽（魔数不跟随字号是 AGENTS.md 点过的坑）。 -->
           <TextBlock Text="{Binding Subtitle}"
                      Classes="secondary"
-                     FontSize="16"
-                     LineHeight="25"
+                     FontSize="15"
+                     LineHeight="24"
                      TextWrapping="Wrap"
-                     MaxWidth="510" />
+                     MaxWidth="480" />
 
           <!-- 引言：左缘强调脊 + 极淡强调底，与全局「受光左缘」语汇一致 -->
           <Border HorizontalAlignment="Left"
@@ -113,7 +128,7 @@
                   HorizontalAlignment="Stretch"
                   HorizontalContentAlignment="Stretch">
             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14" Margin="2">
-              <Border Grid.Column="0" Width="42" Height="42" CornerRadius="8"
+              <Border Grid.Column="0" Width="38" Height="38" CornerRadius="8"
                       Background="{DynamicResource Ariadne.GlassBorder}" VerticalAlignment="Center">
                 <Path Classes="icon" Width="18" Height="18"
                       Stroke="{DynamicResource Ariadne.TextOnAccent}"
@@ -140,7 +155,7 @@
                   HorizontalAlignment="Stretch"
                   HorizontalContentAlignment="Stretch">
             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14" Margin="2">
-              <Border Grid.Column="0" Width="42" Height="42" CornerRadius="8"
+              <Border Grid.Column="0" Width="38" Height="38" CornerRadius="8"
                       Background="{DynamicResource Ariadne.AccentLight}"
                       VerticalAlignment="Center">
                 <Path Classes="icon" Width="18" Height="18"
@@ -193,7 +208,7 @@
                 CornerRadius="10"
                 BoxShadow="{DynamicResource Ariadne.Shadow.Card}"
                 Padding="0"
-                MaxHeight="520"
+                MaxHeight="460"
                 VerticalAlignment="Center"
                 ClipToBounds="True">
           <Grid RowDefinitions="Auto,*">

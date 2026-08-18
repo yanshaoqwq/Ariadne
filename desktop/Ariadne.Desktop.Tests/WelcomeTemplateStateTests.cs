@@ -433,7 +433,9 @@ public sealed class WelcomeTemplateStateTests
             "WelcomeView.axaml"));
 
         Assert.Contains("x:Name=\"RecentProjectsCard\"", view, StringComparison.Ordinal);
-        Assert.Contains("MaxHeight=\"520\"", view, StringComparison.Ordinal);
+        // U163-C 把卡片高度上限从 520 收到 460（开始界面整体收一档）。
+        // 这条断言的用意是「卡片有高度上限 + 可滚动」，不是钉死某个具体像素值。
+        Assert.Contains("MaxHeight=\"460\"", view, StringComparison.Ordinal);
         Assert.Contains("VerticalAlignment=\"Center\"", view, StringComparison.Ordinal);
         Assert.Contains("VerticalScrollBarVisibility=\"Auto\"", view, StringComparison.Ordinal);
         Assert.DoesNotContain("MinHeight=\"440\"", view, StringComparison.Ordinal);

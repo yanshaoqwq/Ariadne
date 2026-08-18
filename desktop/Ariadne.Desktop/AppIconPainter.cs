@@ -62,6 +62,25 @@ public static class AppIconPainter
         return RenderLineBitmap(accent, paper, size, transparentPaper: false);
     }
 
+    /// <summary>
+    /// 实心剪影的内缩余量。**保留这 1.5%**：实心图案贴边时，
+    /// 某些平台的圆角/圆形遮罩会把边缘像素切掉，这点余量是有用的。
+    /// </summary>
+    internal const double SolidInsetFraction = 0.015;
+
+    /// <summary>
+    /// 线描母版的内缩。U163-D 从 0.04 降到 0：线描母版自身已有约 2.8% 留白
+    /// （图案包围盒 483×408 / 512²，实测），再叠 4% 会让图案只占最终位图
+    /// 86.8% 宽、73.3% 高——欢迎页 62px 圆牌里的 Logo 因此只占 47%，
+    /// 桌面图标在图标网格里也比邻居小一圈。
+    ///
+    /// 更关键的是**方向本来就反了**：线描走的是应用内 Logo 与桌面/开始菜单图标
+    /// 这类大尺寸、清晰优先的场合，它的内缩不该大于小尺寸实心剪影的。
+    /// 这个不变量（线描 ≤ 实心）由 <c>AppIconInsetTests</c> 守住，
+    /// 防的是将来有人又把它调大。
+    /// </summary>
+    internal const double LineInsetFraction = 0.0;
+
     /// <summary>任务栏专用：实心剪影、透明底、画大。</summary>
     public static WriteableBitmap RenderTaskbarBitmap(Color accent, int size)
     {
@@ -70,7 +89,7 @@ public static class AppIconPainter
             accent,
             Color.FromArgb(0, 0, 0, 0),
             size,
-            insetFraction: 0.015);
+            insetFraction: SolidInsetFraction);
     }
 
     /// <summary>线描母版渲染（应用内 Logo + 桌面/开始菜单图标）。</summary>
@@ -84,15 +103,7 @@ public static class AppIconPainter
             accent,
             paperForMap,
             size,
-            // U163-D：不再额外内缩。线描母版自身已有约 2.8% 的留白（图案包围盒
-            // 483×408 / 512²），再叠 4% 会让图案只占最终位图 86.8% 宽、73.3% 高——
-            // 欢迎页 62px 圆牌里的 Logo 因此只占 47%，桌面图标也比邻居小一圈。
-            //
-            // 方向本来就反了：线描走的是应用内与桌面图标这类**大尺寸、清晰优先**的场合，
-            // 它的内缩不该大于小尺寸剪影（RenderTaskbarBitmap 的 0.015）。
-            // 那 1.5% 对实心剪影是有用的余量（贴边会被某些平台的圆角遮罩切掉），
-            // 对线描则纯属浪费。此处的 0 由 AppIconInsetTests 的不变量守住。
-            insetFraction: 0.0);
+            insetFraction: LineInsetFraction);
     }
 
     /// <summary>兼容旧调用：默认走线描（非任务栏）。</summary>
