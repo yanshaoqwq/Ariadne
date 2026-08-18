@@ -48,17 +48,29 @@
                 BorderBrush="{DynamicResource Ariadne.BorderMuted}"
                 BorderThickness="0,0,1,0">
           <Panel>
+            <!-- U162-A：这里必须是 OnAccent="False"。
+                 OnAccent=true 走的是「Logo 压在一整片强调色上」那条路：笔画取
+                 Ariadne.TextOnAccent（= 压在强调色块上的文字色），所以暗色主题下笔画是
+                 #07110F 近黑，亮色下是纯白——两者都不是「主题色的 Logo」。
+                 而这条品牌轨道的底是 Ariadne.BackgroundSubtle（亮 #E2E7E4 / 暗 #191C1E），
+                 都不是强调色；on-accent 类只好自己补一块青绿圆角底来让白/黑笔画有对比度，
+                 于是品牌标识退化成「一个色块徽章」。
+                 OnAccent=false 走 CreateThemedBitmap：笔画 = Ariadne.AccentPrimary、
+                 纸面 = BackgroundElevated，容器底为 Transparent（on-paper 类），
+                 Logo 直接落在侧栏底上，笔画就是主题强调色。
+                 ⚠️ WelcomeView 那处的 OnAccent="True" 是对的——它确实嵌在一块
+                 AccentHover→AccentPressed 的渐变方块里，别一起改。 -->
             <StackPanel Orientation="Horizontal" Spacing="10" Margin="14,0"
                         VerticalAlignment="Center"
                         IsVisible="{Binding SidebarExpanded}">
-              <ctl:BrandLogo Width="30" Height="30" OnAccent="True" VerticalAlignment="Center" />
+              <ctl:BrandLogo Width="30" Height="30" OnAccent="False" VerticalAlignment="Center" />
               <TextBlock Text="{Binding AppName}"
                          Foreground="{DynamicResource Ariadne.TextPrimary}"
                          FontSize="15"
                          FontWeight="SemiBold"
                          VerticalAlignment="Center" />
             </StackPanel>
-            <ctl:BrandLogo Width="30" Height="30" OnAccent="True"
+            <ctl:BrandLogo Width="30" Height="30" OnAccent="False"
                            HorizontalAlignment="Center" VerticalAlignment="Center"
                            IsVisible="{Binding SidebarCollapsed}" />
           </Panel>
@@ -138,12 +150,20 @@
                      ToolTip.Tip="{Binding BudgetStatusText}" />
         </StackPanel>
 
-        <!-- 窗口控制 -->
+        <!-- 窗口控制。U162-C：整组「再小一点、再低一点」。
+             「低一点」= 垂直位置更靠下，用 4px 上边距实现，**不改成
+             VerticalAlignment="Bottom"**——那会让它贴住下方维护横幅的边界，
+             窗口最大化时更明显。右边距 4→8：键位缩小后离窗角太近，
+             与外层 10px 圆角的窗体边缘挤在一起。
+             ⚠️ Center 对齐下上边距只产生**一半**位移：Avalonia 的 arrange 是
+             `top + (slotH - top - bottom - h) / 2`，故 top=4 实际下移 2px
+             （30px 键在 54px 行内从 y=12 挪到 y=14）。想再低就继续加这个值，
+             别以为「设了 4 却只动了 2」是没生效。 -->
         <StackPanel
             Grid.Column="3"
             Orientation="Horizontal"
             Spacing="2"
-            Margin="0,0,4,0"
+            Margin="0,4,8,0"
             VerticalAlignment="Center"
             HorizontalAlignment="Right">
           <Button

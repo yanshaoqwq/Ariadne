@@ -78,9 +78,11 @@
           <Color x:Key="Ariadne.Color.CanvasBackground">#E9EEEC</Color>
           <Color x:Key="Ariadne.Color.CanvasGrid">#CCD5D2</Color>
           <Color x:Key="Ariadne.Color.NodeBackground">#FFFFFF</Color>
-          <!-- 磨砂玻璃节点底：半透明白，让画布点阵隐隐透出，营造玻璃悬浮感 -->
-          <Color x:Key="Ariadne.Color.NodeGlass">#F2FBFCFD</Color>
-          <Color x:Key="Ariadne.Color.NodeGlassHeader">#D6FFFFFF</Color>
+          <!-- 磨砂玻璃节点底：半透明白，让画布点阵透出，营造玻璃悬浮感。
+               U162-D：alpha 从 F2(94.9%) 降到 B8(72%)。原值只让 5% 的画布透出来，
+               在 #E9EEEC 底与 #CCD5D2 点阵之间只差 1/255——视觉上等于纯色，
+               「玻璃」这个说法名不副实。72% 时两者差 8/255，点阵确实隐隐可见。 -->
+          <Color x:Key="Ariadne.Color.NodeGlass">#B8FBFCFD</Color>
           <!-- 节点底渐变的实心端：与玻璃端同色相、全不透明，形成「上透下实」的纵深 -->
           <Color x:Key="Ariadne.Color.NodeGlassSolid">#FFFBFCFD</Color>
           <Color x:Key="Ariadne.Color.NodeBorder">#C9D3DD</Color>
@@ -144,11 +146,20 @@
           <SolidColorBrush x:Key="Ariadne.CanvasGrid" Color="{StaticResource Ariadne.Color.CanvasGrid}" />
           <SolidColorBrush x:Key="Ariadne.NodeBackground" Color="{StaticResource Ariadne.Color.NodeBackground}" />
           <SolidColorBrush x:Key="Ariadne.NodeGlass" Color="{StaticResource Ariadne.Color.NodeGlass}" />
-          <SolidColorBrush x:Key="Ariadne.NodeGlassHeader" Color="{StaticResource Ariadne.Color.NodeGlassHeader}" />
-          <!-- 节点卡片底：顶部毛玻璃（画布点阵透出）纵向过渡到底部实心，取代类型色晕染 -->
+          <!-- 节点卡片底：顶部半透明（画布点阵透出）纵向过渡到底部实心，取代类型色晕染。
+               U162-D：实心过渡点 0.62 → 0.45。透明段更短但**更透**，
+               而节点正文（提示词文本）从 0.45 起就落在完全实心段上——
+               这是硬约束：正文压在透出的点阵上会掉可读性，
+               「像玻璃」不能拿正文清晰度去换。
+               ⚠️ 这条渐变没有任何模糊，本质是「更透的色块」而非亚克力。
+               真亚克力要 ExperimentalAcrylicBorder（见 Ariadne.Acrylic.Menu/Dialog），
+               但它的 BackgroundSource 只有 None 与 Digger 两种，
+               **Digger 是「凿穿所有渲染层去取窗口背景」**——节点后面的画布点阵
+               本身就是渲染层的一部分，会被一起凿掉，所以它连原理上都做不到
+               「模糊节点身后的点阵」。改用它只会让节点透出桌面壁纸。 -->
           <LinearGradientBrush x:Key="Ariadne.NodeGlassFill" StartPoint="0%,0%" EndPoint="0%,100%">
             <GradientStop Offset="0" Color="{StaticResource Ariadne.Color.NodeGlass}" />
-            <GradientStop Offset="0.62" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+            <GradientStop Offset="0.45" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
             <GradientStop Offset="1" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
           </LinearGradientBrush>
           <SolidColorBrush x:Key="Ariadne.NodeBorder" Color="{StaticResource Ariadne.Color.NodeBorder}" />
@@ -221,9 +232,10 @@
           <Color x:Key="Ariadne.Color.CanvasBackground">#17191C</Color>
           <Color x:Key="Ariadne.Color.CanvasGrid">#2B3137</Color>
           <Color x:Key="Ariadne.Color.NodeBackground">#212427</Color>
-          <!-- 磨砂玻璃节点底（暗）：半透明深灰，画布点阵透出 -->
-          <Color x:Key="Ariadne.Color.NodeGlass">#E62A2F33</Color>
-          <Color x:Key="Ariadne.Color.NodeGlassHeader">#26FFFFFF</Color>
+          <!-- 磨砂玻璃节点底（暗）：半透明深灰，画布点阵透出。
+               U162-D：alpha 从 E6(90.2%) 降到 B0(69%)。原值在 #17191C 底与
+               #2B3137 点阵之间只差 2/255，等于纯色；69% 时差 8/255，与亮色同量级。 -->
+          <Color x:Key="Ariadne.Color.NodeGlass">#B02A2F33</Color>
           <!-- 节点底渐变的实心端（暗）：同色相全不透明 -->
           <Color x:Key="Ariadne.Color.NodeGlassSolid">#FF2A2F33</Color>
           <Color x:Key="Ariadne.Color.NodeBorder">#4A5159</Color>
@@ -285,11 +297,16 @@
           <SolidColorBrush x:Key="Ariadne.CanvasGrid" Color="{StaticResource Ariadne.Color.CanvasGrid}" />
           <SolidColorBrush x:Key="Ariadne.NodeBackground" Color="{StaticResource Ariadne.Color.NodeBackground}" />
           <SolidColorBrush x:Key="Ariadne.NodeGlass" Color="{StaticResource Ariadne.Color.NodeGlass}" />
-          <SolidColorBrush x:Key="Ariadne.NodeGlassHeader" Color="{StaticResource Ariadne.Color.NodeGlassHeader}" />
-          <!-- 节点卡片底：顶部毛玻璃（画布点阵透出）纵向过渡到底部实心，取代类型色晕染 -->
+          <!-- 节点卡片底（暗）：与亮色同构，实心过渡点同为 0.45（U162-D）。
+               两套变体的 offset 必须保持一致，否则切主题时节点的「透明段高度」会跳。
+               U162-D 顺带删掉了 Ariadne.NodeGlassHeader（亮 #D6FFFFFF / 暗 #26FFFFFF）：
+               它全项目零引用——节点标题栏样式 Border.node-card-header 明确写着
+               Background="Transparent"，为的是让卡片这道渐变一路透上去。
+               按死代码四分类属「被取代的设计」，故删而不接线：接上去会给标题栏
+               加一层与当前设计冲突的底。 -->
           <LinearGradientBrush x:Key="Ariadne.NodeGlassFill" StartPoint="0%,0%" EndPoint="0%,100%">
             <GradientStop Offset="0" Color="{StaticResource Ariadne.Color.NodeGlass}" />
-            <GradientStop Offset="0.62" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
+            <GradientStop Offset="0.45" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
             <GradientStop Offset="1" Color="{StaticResource Ariadne.Color.NodeGlassSolid}" />
           </LinearGradientBrush>
           <SolidColorBrush x:Key="Ariadne.NodeBorder" Color="{StaticResource Ariadne.Color.NodeBorder}" />
@@ -441,8 +458,14 @@
       <StreamGeometry x:Key="Ariadne.Icon.RunLog">M4,6 L7,6 M10,6 L20,6 M4,12 L7,12 M10,12 L20,12 M4,18 L7,18 M10,18 L20,18</StreamGeometry>
       <!-- 导航：模板市场（方格） -->
       <StreamGeometry x:Key="Ariadne.Icon.Templates">M4,4 L11,4 L11,11 L4,11 Z M13,4 L20,4 L20,11 L13,11 Z M4,13 L11,13 L11,20 L4,20 Z M13,13 L20,13 L20,20 L13,20 Z</StreamGeometry>
-      <!-- 导航：配置（齿轮，简化） -->
-      <StreamGeometry x:Key="Ariadne.Icon.Settings">M12,12 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 M12,3 L12,6 M12,18 L12,21 M3,12 L6,12 M18,12 L21,12 M5.6,5.6 L7.7,7.7 M16.3,16.3 L18.4,18.4 M18.4,5.6 L16.3,7.7 M7.7,16.3 L5.6,18.4</StreamGeometry>
+      <!-- 导航：配置（齿轮）。U162-B：旧数据是「中心圆 + 8 根脱开的放射直线」= 太阳/亮度画法，
+           不是齿轮。齿轮的辨识特征是**齿与轮缘相连的梯形凸起**，齿间要有可见齿根谷。
+           结构 = 6 颗齿的闭合外轮廓（齿顶平台 + A7.2 齿根弧相连）+ 中心 r=3 圆孔；
+           闭合轮廓而非填充，因为 Path.icon 基础样式是 Fill=Transparent、只描边。
+           6 齿是 16–20px 的上限：齿根谷现约 2.7px，齿数再多就窄于 1.6 笔宽而糊成圆环。
+           ⚠️ 与 ViewModels/IconGeometries.cs 的 SettingsData 是同一份数据，两处必须同步
+           （SettingsIconGeometryTests 钉住）——只改一处会让侧栏与 XAML 两个入口图标不一样。 -->
+      <StreamGeometry x:Key="Ariadne.Icon.Settings">M9.89,5.11 L10,1.69 L14,1.69 L14.11,5.11 A7.2,7.2 0 0 1 16.91,6.73 L19.92,5.11 L21.93,8.58 L19.02,10.38 A7.2,7.2 0 0 1 19.02,13.62 L21.93,15.42 L19.92,18.89 L16.91,17.27 A7.2,7.2 0 0 1 14.11,18.89 L14,22.31 L10,22.31 L9.89,18.89 A7.2,7.2 0 0 1 7.09,17.27 L4.08,18.89 L2.07,15.42 L4.98,13.62 A7.2,7.2 0 0 1 4.98,10.38 L2.07,8.58 L4.08,5.11 L7.09,6.73 A7.2,7.2 0 0 1 9.89,5.11 Z M12,12 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0</StreamGeometry>
       <!-- 底部：版本（信息圈） -->
       <StreamGeometry x:Key="Ariadne.Icon.Info">M12,12 m-9,0 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0 M12,11 L12,16 M12,8 L12,8.5</StreamGeometry>
       <!-- 底部：反馈（对话气泡） -->
@@ -1381,19 +1404,25 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
   </Style>
 
-  <!-- 窗口控制：与 54px 顶栏同高并垂直居中内容。 -->
+  <!-- 窗口控制：比 54px 顶栏矮一截并略偏下（U162-C）。 -->
   <Style Selector="Button.window-control">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="(ctl:HoverSpin.Enable)" Value="True" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.AccentPrimary}" />
-    <!-- 40x36 而非 44x54：原先高 54 且 VerticalAlignment=Stretch，把键位拉满整条
-         标题栏高度，上下留白远大于左右，看着是三个瘦长条。 -->
-    <Setter Property="Width" Value="40" />
-    <Setter Property="Height" Value="36" />
-    <Setter Property="MinWidth" Value="40" />
-    <Setter Property="MinHeight" Value="36" />
+    <!-- 尺寸沿革：44x54 → 40x36 → 36x30（U162-C，同一方向的第二次收紧）。
+         44x54 那版高度拉满整条标题栏，上下留白远大于左右，看着是三个瘦长条。
+         36x30 仍高于「32x32 可点区域」的常见建议线，**再往下要慎重**：
+         这三个键里误点关闭的代价是丢失未保存工作，MainWindowCloseGuard 只能拦下
+         「已知有改动」的情形，补不了命中区过小造成的误点。
+         ⚠️ MinWidth/MinHeight 必须与 Width/Height 同步：只改前两个不会缩小
+         （MinHeight=36 会把 Height=30 顶回去），症状是「改了没反应」，
+         极易误判成资源缓存问题。 -->
+    <Setter Property="Width" Value="36" />
+    <Setter Property="Height" Value="30" />
+    <Setter Property="MinWidth" Value="36" />
+    <Setter Property="MinHeight" Value="30" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -1409,8 +1438,8 @@
     </Setter>
   </Style>
   <Style Selector="Button.window-control Path.icon">
-    <Setter Property="Width" Value="15" />
-    <Setter Property="Height" Value="15" />
+    <Setter Property="Width" Value="13" />
+    <Setter Property="Height" Value="13" />
     <Setter Property="StrokeThickness" Value="2.0" />
     <Setter Property="StrokeLineCap" Value="Round" />
     <Setter Property="StrokeJoin" Value="Round" />
@@ -1429,13 +1458,14 @@
     </Setter>
   </Style>
   <!-- 最小化：实心主题色横条（比描边线更易辨认）。
-       宽度与其它窗口键一致（15）；高度必须按横条真实长宽比给（15:2.4 → 2.4），
-       不能沿用 15：Stretch=Uniform 会把横条按自身包围盒缩放，塞进 15 高的方框后
+       宽度与其它窗口键一致（13）；高度必须按横条真实长宽比给（15:2.4 → 13:2.08），
+       不能沿用 13：Stretch=Uniform 会把横条按自身包围盒缩放，塞进 13 高的方框后
        在这种极端长宽比下不落在框心上，看着就是「没对齐中心」。
-       给足真实高度后，VerticalAlignment=Center 才能把它精确居中。 -->
+       给足真实高度后，VerticalAlignment=Center 才能把它精确居中。
+       ⚠️ 改上面那条的 Width 时这里的 Height 要按 15:2.4 的比例一起改，否则横条会变粗/变细。 -->
   <Style Selector="Button.window-control Path.icon.minimize">
-    <Setter Property="Width" Value="15" />
-    <Setter Property="Height" Value="2.4" />
+    <Setter Property="Width" Value="13" />
+    <Setter Property="Height" Value="2.08" />
     <Setter Property="StrokeThickness" Value="0" />
     <Setter Property="Stroke" Value="Transparent" />
     <Setter Property="Fill" Value="{DynamicResource Ariadne.AccentPrimary}" />
