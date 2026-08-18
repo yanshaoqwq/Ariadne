@@ -18,6 +18,7 @@ namespace Ariadne.Desktop.Tests;
 ///   B. 刚建好的干净项目总体状态 = `unavailable`（不可用）
 ///   C. 部分 reason 是裸英文，直达中/日用户界面
 /// </summary>
+[Collection("RealSidecar")]
 public sealed class BackendDiagnosticsUsabilityTests
 {
     private static string? ResolveSidecar()
