@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -34,11 +35,41 @@ public partial class MainWindow : Window
         };
         PropertyChanged += OnWindowPropertyChanged;
         AppIconPainter.IconColorsChanged += OnIconColorsChanged;
+        MotionPreferences.Changed += OnMotionPreferencesChanged;
+        ApplyPageTransition();
         Closed += (_, _) =>
         {
             DetachProjectFolderPicker();
             AppIconPainter.IconColorsChanged -= OnIconColorsChanged;
+            MotionPreferences.Changed -= OnMotionPreferencesChanged;
         };
+    }
+
+    private void OnMotionPreferencesChanged(object? sender, EventArgs e)
+        => Dispatcher.UIThread.Post(ApplyPageTransition);
+
+    /// <summary>
+    /// U178-A：切页过渡随「减少动效」偏好挂/摘。
+    ///
+    /// **为什么在 code-behind 而不是 XAML**：`PageTransition` 是个对象属性，
+    /// 没有主题令牌可以承载它，写死在 XAML 里就等于让 ReduceMotion 在
+    /// 「切页」这条最显眼的路径上失效——而这正是该偏好最该管住的一处。
+    /// 关闭时置 null（不是把 Duration 设 0）：null 让 TransitioningContentControl
+    /// 走同步换内容的快路径，0 时长仍要跑一遍动画调度。
+    ///
+    /// 150ms 是既有尺度的中段（全仓 74 处过渡里 67 处落在 120–180ms），
+    /// 刻意不自创时长——同一个产品里的过渡应当是同一种节奏。
+    /// </summary>
+    private void ApplyPageTransition()
+    {
+        if (PageHost is null)
+        {
+            return;
+        }
+
+        PageHost.PageTransition = MotionPreferences.ReduceMotion
+            ? null
+            : new CrossFade(TimeSpan.FromMilliseconds(150));
     }
 
     private void AttachProjectFolderPicker()

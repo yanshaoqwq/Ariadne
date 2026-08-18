@@ -827,7 +827,45 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
     }
     public bool HasRecoveryText => !string.IsNullOrWhiteSpace(RecoveryText);
-    public bool IsLoading { get => _isLoading; private set => SetProperty(ref _isLoading, value); }
+
+    /// <summary>
+    /// 整页/分区加载在途。
+    ///
+    /// U178-A：这个状态位此前**有实现、有维护、界面上零消费点**
+    /// （`SettingsPageView.axaml` 全文 grep `IsLoading` = 0），
+    /// 是 U111「为不存在的执行路径装开关」的镜像形态——那次是开关能填但后端不消费，
+    /// 这次是状态位在算但显示端不接。它的单元测试会全绿，因为它确实被正确地设了又清。
+    /// 现在由 <see cref="ShowLoadingSkeleton"/> / <see cref="LoadingText"/> 接到界面上。
+    /// </summary>
+    public bool IsLoading
+    {
+        get => _isLoading;
+        private set
+        {
+            if (SetProperty(ref _isLoading, value))
+            {
+                OnPropertyChanged(nameof(ShowLoadingSkeleton));
+            }
+        }
+    }
+
+    /// <summary>
+    /// 骨架态：**只在首次加载**（还没有任何 section 落过值）时铺。
+    ///
+    /// 为什么不直接用 `IsLoading`：「取消改动」走 `ReloadDirtySectionsAsync` 也会
+    /// 把 `IsLoading` 置真，那时页面上已有真实值——铺骨架等于把用户刚看着的内容
+    /// 抽走再放回来，比不做过渡更糟。判据取「有没有值可显示」而不是「是否在加载」。
+    /// </summary>
+    public bool ShowLoadingSkeleton => IsLoading && !HasAnyLoadedSection;
+
+    /// <summary>是否已有任一分区落过值（决定页面是骨架态还是内容态）。</summary>
+    private bool HasAnyLoadedSection =>
+        AllLoadableSections.Any(section => _draftState.IsLoaded(section));
+
+    public string LoadingText => _displayNames.Text("ui.settings.status.loading");
+
+    public string LoadingHintText => _displayNames.Text("ui.settings.loading.hint");
+
     public bool HasUnsavedChanges
     {
         get => _hasUnsavedChanges;
@@ -7456,6 +7494,10 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         OnPropertyChanged(nameof(IsAppRuntimeEditable));
         OnPropertyChanged(nameof(IsRetrievalEditable));
         OnPropertyChanged(nameof(IsGitEditable));
+        // U178-A：骨架态的判据是「有没有分区落过值」，而分区落值正是在这里被通知的。
+        // 漏掉这一条会让骨架一直铺到 IsLoading 清零那一刻，
+        // 于是先到的分区明明有值也看不见——「读到即显示」就成了空话。
+        OnPropertyChanged(nameof(ShowLoadingSkeleton));
         NotifySaveCommands();
     }
 

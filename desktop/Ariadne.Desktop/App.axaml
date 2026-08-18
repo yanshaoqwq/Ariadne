@@ -48,7 +48,7 @@
         <Panel>
           <!-- 展开态：裸图标 + 文字 + badge。
                受光左缘由 rail-nav 自身的 BorderThickness 提供，此处首列仅留 3px 呼吸位。 -->
-          <Grid ColumnDefinitions="3,31,*,Auto" Margin="0,0,10,0"
+          <Grid Classes="rail-face" ColumnDefinitions="3,31,*,Auto" Margin="0,0,10,0"
                 IsVisible="{Binding SidebarExpanded}">
             <!-- 裸图标：无描边盒子，无背景框 -->
             <Path Grid.Column="1" Classes="icon" Width="17" Height="17"
@@ -56,13 +56,23 @@
                   HorizontalAlignment="Center" VerticalAlignment="Center" />
             <TextBlock Grid.Column="2" Text="{Binding Title}" FontSize="13"
                        VerticalAlignment="Center" Margin="8,0,0,0" />
+            <!-- U178-A：该页数据加载在途的指示。
+                 IsSelected 在点击那一刻就翻转（提前 commit），回答「点上了没」；
+                 这个点回答下一个问题「是好了还是还在读」——空页面因为没内容
+                 与空页面因为还没读到，在界面上本来长得一模一样。
+                 用 Ellipse 而不是图标字体：Segoe Fluent Icons 在 Linux 上是豆腐块。
+                 与 badge 同列错开显示（一个页面不会同时既在读又有待办计数）。 -->
+            <Ellipse Grid.Column="3" Width="6" Height="6"
+                     VerticalAlignment="Center"
+                     Fill="{DynamicResource Ariadne.AccentPrimary}"
+                     IsVisible="{Binding IsPending}" />
             <Border Grid.Column="3" Classes="badge" IsVisible="{Binding HasBadge}" VerticalAlignment="Center">
               <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="10"
                          HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
           </Grid>
           <!-- 折叠态：裸图标居中 + badge（受光左缘同样由自身边框提供） -->
-          <Grid ColumnDefinitions="3,*" Width="40" Height="34"
+          <Grid Classes="rail-face" ColumnDefinitions="3,*" Width="40" Height="34"
                 IsVisible="{Binding SidebarCollapsed}">
             <!-- 裸图标 -->
             <Path Grid.Column="1" Classes="icon" Width="18" Height="18"
@@ -74,6 +84,12 @@
               <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="9"
                          HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
+            <!-- 折叠态同样要能看出「在读」：文字不在，只剩图标，指示更不可省 -->
+            <Ellipse Grid.Column="1" Width="6" Height="6"
+                     HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                     Margin="0,0,-2,1"
+                     Fill="{DynamicResource Ariadne.AccentPrimary}"
+                     IsVisible="{Binding IsPending}" />
           </Grid>
         </Panel>
       </Button>

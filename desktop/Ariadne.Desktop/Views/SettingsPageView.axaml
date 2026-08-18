@@ -19,6 +19,20 @@
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
     </Style>
+    <!-- U178-A 骨架占位行。颜色只取主题令牌：BackgroundSubtle 是「比页底稍重一档」
+         的那一级，正好读作「这里将来有东西但还没到」，而不是一个实心控件。
+         选择器带 Border 类型前缀——裸 .settings-skeleton-row 会在编译期报 AVLN2200。
+         **刻意不加脉动/闪光动画**：会一直跑到数据回来，在最慢的那台机器上正好是
+         最抢眼的时候；且全项目当前零 Animation/KeyFrame，为一处骨架引入第一个
+         无限循环动画不划算。静态占位块已经把「在读」这件事说清了。 -->
+    <Style Selector="Border.settings-skeleton-row">
+      <Setter Property="Height" Value="34" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
     <!-- 索引项无底色块无描边：文字悬在空白上，状态全部由左侧导轨段与字色承担。
          U162-F：项距 0,5 → 0,7。TextWrapping=Wrap 下长标题折行后，
          5px 上下内边距让相邻两项在视觉上黏成一团，分不出是两条还是一条折行。
@@ -1533,6 +1547,39 @@
         </Panel>
         </StackPanel>
       </ScrollViewer>
+
+      <!-- U178-A：首次加载骨架态。
+           配置页 LoadAsync 一次并发发 14+ 次 IPC，此前这段等待里页面是空白的
+           （`IsLoading` 有实现、有维护，但本文件全文零引用 ⇒ 界面上没有消费点）。
+           现在铺三条占位行，用户看到的是「在读」而不是「空的」。
+
+           为什么绑 ShowLoadingSkeleton 而不是 IsLoading：「取消改动」也会置真
+           IsLoading，那时页面上已有真实值，抽走再放回来比不做过渡更糟。
+           骨架只在「还没有任何分区落过值」时铺，先到的分区立刻显示。
+
+           形状刻意用等宽递减的三条圆角块（宽度 260/200/320）：它模仿的是下面
+           「标签 + 输入行」的排布节奏，不是通用 loading 图形——骨架要能预告
+           即将出现的东西，否则只是另一种空白。 -->
+      <Border IsVisible="{Binding ShowLoadingSkeleton}"
+              IsHitTestVisible="False"
+              Padding="196,26,36,32"
+              VerticalAlignment="Top"
+              HorizontalAlignment="Stretch">
+        <StackPanel Spacing="18" MaxWidth="1040" HorizontalAlignment="Left">
+          <TextBlock Text="{Binding LoadingText}"
+                     Classes="subtitle"
+                     AutomationProperties.LiveSetting="Polite"
+                     AutomationProperties.Name="{Binding LoadingText}" />
+          <TextBlock Text="{Binding LoadingHintText}"
+                     Classes="caption"
+                     Foreground="{DynamicResource Ariadne.TextSubtle}" />
+          <StackPanel Spacing="12" Margin="0,6,0,0">
+            <Border Classes="settings-skeleton-row" Width="260" />
+            <Border Classes="settings-skeleton-row" Width="200" />
+            <Border Classes="settings-skeleton-row" Width="320" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
 
       <!-- 章节索引：贴左缘垂直居中，无浮层无描边无投影——文字直接悬在空白上，
            靠左侧一条细导轨成列。索引是导览而非控件，给它一个面反而抢走正文的主次。

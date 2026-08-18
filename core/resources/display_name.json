@@ -89,6 +89,8 @@
   "ui.settings.status.unsaved_sections": "有未保存的更改：{sections}",
   "ui.settings.status.saving": "保存中…",
   "ui.settings.status.section_load_failed": "此配置分区加载失败，已禁止保存。",
+  "ui.settings.status.loading": "正在读取配置…",
+  "ui.settings.loading.hint": "各分区正在并发读取，读到即显示。",
   "ui.settings.validation.number": "{field}必须是有效数字。",
   "ui.settings.validation.positive": "{field}必须大于 0。",
   "ui.settings.validation.non_negative": "{field}不能小于 0。",

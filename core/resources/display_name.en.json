@@ -785,6 +785,8 @@
   "ui.settings.show_all_sections": "Show all sections",
   "ui.settings.status.saving": "Saving…",
   "ui.settings.status.section_load_failed": "This section failed to load; saving is disabled.",
+  "ui.settings.status.loading": "Loading settings…",
+  "ui.settings.loading.hint": "Sections load concurrently and appear as they arrive.",
   "ui.settings.status.unsaved": "Unsaved changes",
   "ui.settings.status.unsaved_sections": "Unsaved changes: {sections}",
   "ui.settings.tab.automation": "Automation",

@@ -834,13 +834,43 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         try
         {
             var page = GetOrCreatePage(item.Id);
+
+            // U178-A：**先切页、后填数据**。此前这里是先 await 整套页面加载再 commit，
+            // 于是点侧栏后屏幕在几百毫秒里完全静止——连被按下的那个导航项都不变样
+            // （IsSelected 也在 CommitNavigation 里刷），用户的第一反应是「没点上」于是再点一次。
+            // 配置页最贵：LoadAsync 一次并发发 14+ 次 IPC。
+            //
+            // **为什么 commit 能安全地提前**：CommitNavigation 只做四件**纯 UI 状态**的事——
+            // 刷 IsSelected、设 CurrentPage、记 _lastNavId、持久化导航 id，
+            // 它**不读任何页面数据**。页面 VM 由 GetOrCreatePage 构造完毕即是合法的空态
+            // （各页的空态/骨架态本来就要能显示），所以提前挂上去拿不到半初始化状态。
+            // 等待并没有消失，但用户不再面对静止的屏幕：导航项立刻高亮、页面立刻出现在
+            // 骨架/loading 态（配置页的 ShowLoadingSkeleton），数据回来再填。
+            //
+            // ⚠️ 只有**落盘的**导航 id 仍然等加载成功（persist: false + 下面单独落盘）。
+            // 「记住上次的页」记的是「上次成功进入的页」：若把加载失败的页也存下去，
+            // 下次启动会去恢复一个打不开的页、再弹回开始页，一个坏页就变成粘性状态。
+            CommitNavigation(item, page, persist: false);
+
+
+            // 导航项上的「读取中」指示。它必须在 await 之前置真、且**无论走哪条出口**
+            // 都要清掉（下面的 finally），否则一次失败的导航会留下永久转圈的侧栏项。
+            item.IsPending = true;
+
             await EnsurePageLoadedAsync(item.Id, page).ConfigureAwait(true);
+
+            // **为什么代际校验必须留**：它防的是快速连点两个页面时旧请求的迟到结果。
+            // 提前 commit 之后这道闸的作用**变了但没有变弱**——它不再是「决定要不要切页」，
+            // 而是「决定这条已过期的路径能不能继续往下写可见状态」（下面的标题、
+            // BackendStatus，以及 catch 里的弹回开始页）。
+            // 摘掉它就会出现「点了 B 又点 C，最后停在 B」：B 的迟到完成会把
+            // C 已经提交的可见状态改回去。
             if (!_navigationSession.IsCurrent(request, _projectPageSessionGeneration))
             {
                 return;
             }
 
-            CommitNavigation(item, page, persist: true);
+            _saveLastNavigationId(item.Id);
         }
         catch (Exception ex)
         {
@@ -860,6 +890,13 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
                 nav.IsSelected = false;
             }
             return;
+        }
+        finally
+        {
+            // 无论成功、过期返回还是异常，pending 指示都必须落地。
+            // 放在 finally 而不是各条出口：出口有四个（正常、两处过期 return、catch），
+            // 逐个补一遍就是在等着漏掉一个——漏掉的那条会留下一个永远在读的侧栏项。
+            item.IsPending = false;
         }
 
         // 无项目时标题保持「未打开项目」，状态保持健康/连接文案，不要空白无反应

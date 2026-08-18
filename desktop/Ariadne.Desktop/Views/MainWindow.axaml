@@ -258,6 +258,7 @@
              让凹槽真的看起来是凹的，纸片撬起才有依据。 -->
         <Border
             Grid.Column="0"
+            Classes="app-rail"
             Width="{Binding SidebarWidth}"
             BorderBrush="{DynamicResource Ariadne.BorderMuted}"
             BorderThickness="0,0,1,0"
@@ -294,13 +295,13 @@
                       AutomationProperties.Name="{Binding VersionText}">
                 <Panel>
                   <!-- 展开：首列 3px 空占位，与导航项的左脊网格对齐，图标不错位 -->
-                  <Grid ColumnDefinitions="3,31,*" Margin="0,0,10,0" IsVisible="{Binding SidebarExpanded}">
+                  <Grid Classes="rail-face" ColumnDefinitions="3,31,*" Margin="0,0,10,0" IsVisible="{Binding SidebarExpanded}">
                     <Path Grid.Column="1" Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.Info}" HorizontalAlignment="Center" VerticalAlignment="Center" />
                     <TextBlock Grid.Column="2" Text="{Binding VersionText}" Classes="caption"
                                VerticalAlignment="Center" Margin="8,0,0,0" TextTrimming="CharacterEllipsis" />
                   </Grid>
                   <!-- 折叠 -->
-                  <Grid ColumnDefinitions="3,*" Width="40" IsVisible="{Binding SidebarCollapsed}">
+                  <Grid Classes="rail-face" ColumnDefinitions="3,*" Width="40" IsVisible="{Binding SidebarCollapsed}">
                     <Path Grid.Column="1" Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.Info}"
                           HorizontalAlignment="Center" VerticalAlignment="Center" />
                   </Grid>
@@ -312,11 +313,11 @@
                       ToolTip.Tip="{Binding FeedbackToolTipText}"
                       AutomationProperties.Name="{Binding FeedbackText}">
                 <Panel>
-                  <Grid ColumnDefinitions="3,31,*" Margin="0,0,10,0" IsVisible="{Binding SidebarExpanded}">
+                  <Grid Classes="rail-face" ColumnDefinitions="3,31,*" Margin="0,0,10,0" IsVisible="{Binding SidebarExpanded}">
                     <Path Grid.Column="1" Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.Feedback}" HorizontalAlignment="Center" VerticalAlignment="Center" />
                     <TextBlock Grid.Column="2" Text="{Binding FeedbackText}" Classes="caption" VerticalAlignment="Center" Margin="8,0,0,0" />
                   </Grid>
-                  <Grid ColumnDefinitions="3,*" Width="40" IsVisible="{Binding SidebarCollapsed}">
+                  <Grid Classes="rail-face" ColumnDefinitions="3,*" Width="40" IsVisible="{Binding SidebarCollapsed}">
                     <Path Grid.Column="1" Classes="icon" Width="16" Height="16" Data="{StaticResource Ariadne.Icon.Feedback}"
                           HorizontalAlignment="Center" VerticalAlignment="Center" />
                   </Grid>
@@ -363,17 +364,42 @@
               </RadialGradientBrush>
             </Border.Background>
           </Border>
-          <ContentControl Content="{Binding CurrentPage}" />
+          <!-- U178-A：切页不再硬闪。页面现在**先挂上、后填数据**（MainWindowViewModel
+               把 CommitNavigation 提到了 await 之前），所以这里必须有一层衔接——
+               否则骨架态会以硬切的方式弹出来，反而比原来更跳。
+               150ms 落在既有过渡尺度（74 处里 67 处在 120–180ms）中段，不自创时长。
+               PageTransition 由 code-behind 按 MotionPreferences.ReduceMotion 挂/摘：
+               XAML 里写死会让「减少动效」这个偏好在切页这条最显眼的路径上失效。 -->
+          <TransitioningContentControl x:Name="PageHost" Content="{Binding CurrentPage}" />
+
         </Panel>
       </Grid>
       <!-- ================= 全局弹窗遮罩 ================= -->
+      <!-- U178-E：进场/退场动效。**`IsVisible` 换成 `Opacity` + `IsHitTestVisible`
+           是这条改动的要害**，不是顺手换个写法：
+           `IsVisible=false` 的控件根本不参与渲染，退场过渡永远播不出来
+           （Avalonia 12 的 MeasureCore/ArrangeCore 整个包在 if (IsVisible) 里），
+           所以「关闭走同曲线反向」在保留 IsVisible 绑定的前提下做不到。
+           改用 Opacity 承载可见性、IsHitTestVisible 承载「关闭时点击要能穿透」，
+           两者都由同一个 Dialog.IsOpen 驱动，不引入第二状态源。
+           ⚠️ 代价是遮罩常驻布局树。可接受：关闭态它的 ContentControl 内容为 null，
+           测量成本是一个空 Border，而它换来的是全应用最显廉价那处硬闪被治掉。
+
+           类切换用 `Classes.dialog-open="{Binding}"` 而不是 code-behind：
+           两个方向的时长差（入场 160/140ms、退场取 0.8 倍 = 128/112ms）
+           由主题里两条样式各自声明的 Transitions 自动给出——
+           Avalonia 取「将要进入的那个状态」的时长，天然双向，无需手写调度。 -->
       <Border x:Name="DialogScrim"
               Grid.Row="1"
               Grid.RowSpan="3"
+              Classes="dialog-scrim"
+              Classes.dialog-open="{Binding Dialog.IsOpen}"
               Background="{DynamicResource Ariadne.Scrim}"
-              IsVisible="{Binding Dialog.IsOpen}"
+              IsHitTestVisible="{Binding Dialog.IsOpen}"
               PointerPressed="OnDialogScrimPressed">
-        <ContentControl Content="{Binding Dialog.ActiveDialog}"
+        <ContentControl Classes="dialog-panel"
+                        Classes.dialog-open="{Binding Dialog.IsOpen}"
+                        Content="{Binding Dialog.ActiveDialog}"
                         HorizontalAlignment="Center"
                         VerticalAlignment="Center"
                         Margin="24"
