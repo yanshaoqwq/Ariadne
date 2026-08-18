@@ -71,6 +71,9 @@ fn run_workflow_command(args: &[String]) -> Result<Value, String> {
             let request = RunWorkflowRequest {
                 workflow_id,
                 start_node_id: options.start.clone(),
+                // U165：CLI 是外部入口，按受限来源处理——hidden 变量的语义是
+                // 「由循环或项目 AI 决定」，命令行手填等同于执行页手填。
+                variable_source: crate::workflow::WorkflowVariableSource::ExecutionPage,
                 initial_inputs,
                 variables: std::collections::BTreeMap::new(),
                 origin_conversation_id: None,

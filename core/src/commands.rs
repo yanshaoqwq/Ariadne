@@ -934,6 +934,14 @@ pub struct RunWorkflowRequest {
     /// 变量是整个 run 的可读写状态，端口输入只喂给起始节点。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, Value>,
+    /// `variables` 的来源，决定 `hidden` 变量能否被注入（U165）。
+    ///
+    /// **缺省刻意取 `ProjectAi`（宽松的那一个）**：这个字段是后加的，
+    /// 缺省成 `ExecutionPage` 会让既有的项目 AI 调用方突然开始被拒绝
+    /// hidden 变量——那是静默破坏在用的功能。新增安全字段时，
+    /// 缺省值要保持既有行为不变，收紧只能发生在**显式**声明来源的调用方上。
+    #[serde(default)]
+    pub variable_source: crate::workflow::WorkflowVariableSource,
     /// 发起本次运行的项目空间 AI 对话 id；人工点「运行」时为 None。
     /// 终态回报据此定位目标对话，缺了它 AI 启动完就断线。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2434,6 +2442,25 @@ pub fn set_node_breakpoint(
     })
 }
 
+/// 导出框选的工作流片段，**并真的写一个文件出来**。
+///
+/// # 为什么这里必须落盘
+///
+/// 此前整条链路没有任何 IO：本命令只 load + 组装 + 返回，服务层是纯函数，
+/// 前端 `await` 之后**丢弃返回值**并把状态栏写成「已导出 N 个节点」。
+/// 于是用户点导出、看到成功提示、在磁盘上找不到任何东西——与 U156
+/// 「点运行什么都不会发生」同型：**报告成功的空动作**。
+///
+/// 对照物是 `export_chapters`：它有 artifact 写入与 `storage_uri`，
+/// 工作流导出此前没有对应物。现在补齐，并让返回值带上 `storage_uri`，
+/// 使「导出成功」这句话有可验证的依据。
+///
+/// # 三条都照 U134 的教训来
+///
+/// U134 是「导出的文件不落在导出目录、没有扩展名、每次覆盖上一次」，
+/// 三个后果各有成因，这里逐条避开（详见
+/// `workflow_selection_export_artifact_id` 的注释）：
+/// `exports/` 前缀触发导出目录重定向、带 `.json` 扩展名、时间戳+序号防覆盖。
 pub fn export_workflow_selection(
     state: &AriadneAppState,
     workflow_id: String,
@@ -2441,7 +2468,34 @@ pub fn export_workflow_selection(
 ) -> CommandResult<crate::frontend::WorkflowSelectionExport> {
     let project_root = project_root_from_state(state, None)?;
     let workflow = load_workflow_definition(&project_root, Some(workflow_id))?;
-    export_workflow_selection_from_workflow(&workflow, &selected_node_ids).map_err(error_to_string)
+    let mut export = export_workflow_selection_from_workflow(&workflow, &selected_node_ids)
+        .map_err(error_to_string)?;
+
+    // 序列化整个导出结构（含边界端口）而不只是 workflow：边界信息是「这个片段
+    // 要接什么、吐什么」，重新导入时缺了它就得靠人肉猜接线。
+    let bytes = serde_json::to_vec_pretty(&export).map_err(error_to_string)?;
+    let documents = configured_document_service(&project_root)?;
+    let artifact_id = crate::frontend::workflow_selection_export_artifact_id(
+        workflow.name.as_str(),
+        crate::frontend::now_timestamp_ms(),
+    );
+    let report = documents
+        .write_artifact(crate::documents::ArtifactWriteRequest {
+            artifact_id,
+            kind: crate::contracts::artifacts::ArtifactKind::Export,
+            media_type: "application/json".to_owned(),
+            bytes,
+            // 不传 operation_id：导出是用户主动重复的动作，两次导出应得到两个文件，
+            // 幂等回执反而会把第二次静默折叠成第一次。
+            operation_id: None,
+            metadata: serde_json::json!({
+                "source_workflow_id": workflow.id.as_str(),
+                "selected_node_ids": selected_node_ids,
+            }),
+        })
+        .map_err(error_to_string)?;
+    export.storage_uri = Some(report.descriptor.storage_uri.clone());
+    Ok(export)
 }
 
 pub fn pack_workflow_selection_impl(
@@ -2671,6 +2725,10 @@ pub fn start_workflow(
             workflow_id,
             start_node_id,
             initial_inputs: BTreeMap::new(),
+            // 本入口不带变量（variables 为空），来源取受限值即可：
+            // 空 map 压根不会进 inject_variables，标宽松反而会误导后来人
+            // 以为这条路可以注入 hidden 变量。
+            variable_source: crate::workflow::WorkflowVariableSource::ExecutionPage,
             variables: BTreeMap::new(),
             origin_conversation_id: None,
         },
@@ -6236,7 +6294,11 @@ fn prepare_workflow_run_state(
         runtime
             .inject_variables(
                 &request.variables,
-                crate::workflow::WorkflowVariableSource::ProjectAi,
+                // U165：来源取自请求，不再硬编码。此前这里写死 ProjectAi，
+                // 于是 runtime 里那道「hidden 变量不许从执行页注入」的门
+                // （`inject_variables` 内的 ExecutionPage 判据）**永远走不到**，
+                // 而 ipc.rs 的注释却宣称它在工作。
+                request.variable_source,
             )
             .map_err(error_to_string)?;
     }
@@ -10026,6 +10088,10 @@ fn project_ai_chat_with_runner(
             start_node_id: None,
             initial_inputs: BTreeMap::new(),
             variables: BTreeMap::new(),
+            // 项目空间 AI 启动：可写 hidden 变量（U165）。
+            // hidden 的语义正是「由循环或项目 AI 决定，作者在表单里改不到」，
+            // 所以这条路必须是宽松的那一个。
+            variable_source: crate::workflow::WorkflowVariableSource::ProjectAi,
             // 由项目空间 AI 发起：终态要回报给这个对话，否则 AI 无从得知结果。
             origin_conversation_id: Some(conversation_id.clone()),
         })?)
@@ -10611,6 +10677,10 @@ fn project_ai_execute_tool_call(
         start_node_id: Some(tool.start_node_id.clone()),
         initial_inputs,
         variables,
+        // 项目 AI 以工具形式启动工作流：可写 hidden 变量（U165）。
+        // 这是 hidden 变量的**主要**合法写入路径——AI 据上下文决定「写第几章」，
+        // 而那个值恰恰不该出现在作者的执行页表单里。
+        variable_source: crate::workflow::WorkflowVariableSource::ProjectAi,
         origin_conversation_id: Some(state.origin_conversation_id.to_owned()),
     })?;
     *state.tool_workflow_run = Some(started.clone());

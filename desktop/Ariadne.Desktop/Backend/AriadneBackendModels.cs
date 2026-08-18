@@ -545,6 +545,29 @@ public sealed record WorkflowPackReport(
     [property: JsonPropertyName("boundary_outputs")] IReadOnlyList<WorkflowPortEndpoint> BoundaryOutputs,
     [property: JsonPropertyName("operation_id")] string? OperationId = null);
 
+/// <summary>
+/// 与 Rust `WorkflowSelectionExport` 同构。
+///
+/// ⚠️ **此前这个命令的返回值被反序列化成 <see cref="WorkflowGraphData"/>，形状根本不匹配**：
+/// 后端返的顶层键是 `{workflow, boundary_inputs, boundary_outputs, storage_uri}`，
+/// 里面没有 `nodes`，于是拿到的对象 `Nodes` 恒为 null、一碰就 NRE。
+/// 之所以线上没炸，只是因为调用点把返回值整个丢掉了——**任何想真正使用导出结果的
+/// 改动都会立刻 NRE**。
+///
+/// 隔壁 <see cref="WorkflowPackReport"/> 的注释写着「避免把顶层报告误当成工作流图」
+/// ——同一个坑，pack 那边防住了、export 这边漏了。两个命令的返回形状是同一族，
+/// 加新命令时照 pack 那个形态写。
+/// </summary>
+/// <param name="StorageUri">
+/// 落盘位置。**`null` 意味着这次没有产生文件**，调用方此时不得对用户说「已导出」
+/// ——那正是本条修复前的形态（状态栏报成功、磁盘上什么都没有）。
+/// </param>
+public sealed record WorkflowSelectionExportData(
+    [property: JsonPropertyName("workflow")] WorkflowGraphData Workflow,
+    [property: JsonPropertyName("boundary_inputs")] IReadOnlyList<WorkflowPortEndpoint> BoundaryInputs,
+    [property: JsonPropertyName("boundary_outputs")] IReadOnlyList<WorkflowPortEndpoint> BoundaryOutputs,
+    [property: JsonPropertyName("storage_uri")] string? StorageUri = null);
+
 public sealed record WorkflowSummary(
     [property: JsonPropertyName("workflow_id")] string WorkflowId,
     [property: JsonPropertyName("name")] string Name,

@@ -2338,6 +2338,38 @@ pub struct WorkflowSelectionExport {
     pub boundary_inputs: Vec<PortEndpoint>,
     #[serde(default)]
     pub boundary_outputs: Vec<PortEndpoint>,
+    /// 落盘后的 artifact 存储位置；`None` 表示本次只组装、未写盘。
+    ///
+    /// 加这个字段是为了让「导出」这个动作**可验证**。此前整条链路没有任何写盘：
+    /// 服务层是纯函数、命令层只组装返回、前端 `await` 之后直接丢弃返回值并把状态栏
+    /// 写成「已导出 N 个节点」——于是用户点了导出、看到成功提示、在磁盘上找不到东西，
+    /// 与 U156「点运行什么都不会发生」同型：**报告成功的空动作**。
+    ///
+    /// 判据落在这个字段上而不是「命令没报错」：只要它是 `None`，
+    /// 前端就不该说「已导出」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_uri: Option<String>,
+}
+
+/// 生成工作流片段导出的 artifact id。
+///
+/// ⚠️ **`exports/` 前缀是硬要求**：`DocumentService::artifact_path` 只对该前缀做
+/// 「重定向到用户配置的导出目录」，否则落进 `.runtime/artifacts`——那正是 U134
+/// 那个「用户配的导出目录完全不生效、成功弹窗还叫他去设置里改」的缺陷。
+///
+/// ⚠️ **扩展名也是硬要求**：U134 的第二个后果是导出物没有扩展名、双击打不开。
+/// 工作流片段是 JSON，所以带 `.json`。
+///
+/// ⚠️ **时间戳 + 序号防覆盖**：U134 第三个后果是 artifact_id 写成固定字符串，
+/// 第二次导出静默覆盖第一次。这里照 `combined_export_artifact_id` 的同一套做法。
+pub fn workflow_selection_export_artifact_id(workflow_name: &str, now_ms: u64) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let stem = sanitize_export_file_stem(workflow_name);
+    let timestamp = crate::contracts::format_local_timestamp_for_filename(now_ms);
+    let sequence = EXPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("exports/{stem}-片段-{timestamp}-{sequence:03}.json")
 }
 
 /// 子工作流打包报告。
@@ -2427,6 +2459,10 @@ pub fn export_workflow_selection(
         workflow: exported,
         boundary_inputs,
         boundary_outputs,
+        // 本层是纯函数、拿不到 DocumentService，落盘在命令层做。
+        // 刻意不在这里写盘：`pack_workflow_selection` 也调用本函数，
+        // 打包子流程时不该顺带往导出目录扔一个文件。
+        storage_uri: None,
     })
 }
 

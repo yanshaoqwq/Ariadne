@@ -660,6 +660,16 @@ fn dispatch_request(
             let params: RunWorkflowParams = params(request.params)?;
             // 走 with_request 而非 start_workflow：执行页填的变量要一起带进去。
             // 来源标成 ExecutionPage —— hidden 变量因此拒绝从这条路径注入。
+            //
+            // ⚠️ U165：这行注释曾经**在说谎**。`variable_source` 字段过去不存在，
+            // 注入点硬编码 `ProjectAi`，于是 runtime 里那道 hidden 门永远走不到，
+            // 而注释让所有读代码的人（包括我）以为它在工作。
+            // 现在字段真的传下去了，注释才成立。
+            //
+            // 这道门是「后端不信任前端」：前端 `WorkflowVariableGroupViewModel.Load`
+            // 确实用 `.Where(!Hidden)` 过滤了 hidden 变量，但 IPC 是本地进程边界，
+            // 任何能起进程的东西都能直接发请求；而 hidden 变量常承载
+            // 「当前写到第几章」这类**决定写哪个文件**的值。
             ok(commands::start_workflow_with_request(
                 state,
                 commands::RunWorkflowRequest {
@@ -667,6 +677,7 @@ fn dispatch_request(
                     start_node_id: params.start_node_id,
                     initial_inputs: std::collections::BTreeMap::new(),
                     variables: params.variables,
+                    variable_source: crate::workflow::WorkflowVariableSource::ExecutionPage,
                     origin_conversation_id: None,
                 },
             )?)

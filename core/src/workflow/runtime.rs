@@ -590,6 +590,20 @@ pub enum WorkflowVariableSource {
     ExecutionPage,
 }
 
+impl Default for WorkflowVariableSource {
+    /// 缺省是 `ProjectAi`——**宽松的那一个**，这是刻意的（U165）。
+    ///
+    /// `RunWorkflowRequest.variable_source` 带 `#[serde(default)]`，
+    /// 所以不带该字段的旧请求会落到这里。缺省成 `ExecutionPage` 会让既有的
+    /// 项目 AI 调用方突然开始被拒绝 hidden 变量，属于静默破坏在用的功能。
+    ///
+    /// 安全收紧要发生在**显式声明来源**的调用方上（`ipc.rs` 的执行页分支），
+    /// 不能靠改缺省值来实现——那会把「没声明」和「声明为受限」混为一谈。
+    fn default() -> Self {
+        Self::ProjectAi
+    }
+}
+
 /// 从 workflow 的 `start` 节点收集变量声明。
 ///
 /// 声明只允许挂在 `start` 节点：变量的生命周期是整个 run，若允许任意节点声明，

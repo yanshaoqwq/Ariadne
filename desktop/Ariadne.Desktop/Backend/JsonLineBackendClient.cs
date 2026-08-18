@@ -526,9 +526,9 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeCommandAsync("set_node_breakpoint", new { workflow_id = workflowId, node_id = nodeId, enabled }, cancellationToken);
     }
 
-    public Task<WorkflowGraphData> ExportWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, CancellationToken cancellationToken = default)
+    public Task<WorkflowSelectionExportData> ExportWorkflowSelectionAsync(string workflowId, IReadOnlyList<string> selectedNodeIds, CancellationToken cancellationToken = default)
     {
-        return InvokeRequiredAsync<WorkflowGraphData>("export_workflow_selection", new
+        return InvokeRequiredAsync<WorkflowSelectionExportData>("export_workflow_selection", new
         {
             workflow_id = workflowId,
             selected_node_ids = selectedNodeIds,

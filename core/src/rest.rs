@@ -137,6 +137,8 @@ fn dispatch_rest_route(
             let request = RunWorkflowRequest {
                 workflow_id: workflow_id.clone(),
                 start_node_id: payload.start_node_id,
+                // U165：REST 同 CLI，是外部入口，按受限来源处理。
+                variable_source: crate::workflow::WorkflowVariableSource::ExecutionPage,
                 initial_inputs: payload.inputs,
                 variables: payload.variables,
                 origin_conversation_id: None,
