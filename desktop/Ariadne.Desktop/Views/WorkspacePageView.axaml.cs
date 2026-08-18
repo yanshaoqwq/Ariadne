@@ -288,6 +288,7 @@ public partial class WorkspacePageView : UserControl
             viewModel.PickFolder = PickFolderAsync;
             viewModel.PickFile = PickFileAsync;
             viewModel.RequestFocusRejectReason = FocusRejectReason;
+            viewModel.VariableFill.RequestFocusInstruction = FocusVariableFillInstruction;
             viewModel.Nodes.CollectionChanged += OnNodesCollectionChanged;
             viewModel.Edges.CollectionChanged += OnEdgesCollectionChanged;
             viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -332,6 +333,22 @@ public partial class WorkspacePageView : UserControl
         }, DispatcherPriority.Input);
     }
 
+    /// <summary>
+    /// Ctrl+K 开面板后把光标送进说明框，光标落在末尾（同作品页快捷改写）。
+    ///
+    /// 走 Dispatcher.Post(Input)：此刻面板刚从 IsVisible=false 翻过来，
+    /// 输入框还没进入可聚焦布局，同步 Focus() 会落空。
+    /// </summary>
+    private void FocusVariableFillInstruction()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            VariableFillInstructionBox.Focus();
+            VariableFillInstructionBox.SelectionStart = VariableFillInstructionBox.Text?.Length ?? 0;
+            VariableFillInstructionBox.SelectionEnd = VariableFillInstructionBox.SelectionStart;
+        }, DispatcherPriority.Input);
+    }
+
     private void DetachViewActions()
     {
         if (_attachedViewModel is null)
@@ -344,6 +361,9 @@ public partial class WorkspacePageView : UserControl
         _keyboardEdgeSourceNode = null;
         _keyboardEdgeSourceHandle = null;
         _attachedViewModel.RequestFocusRejectReason = null;
+        // 面板的聚焦委托指向**本视图**的输入框；换 DataContext 时不解开，
+        // 旧视图会被 VM 一直引用着（而它的控件已经不在树上，聚焦是空操作）。
+        _attachedViewModel.VariableFill.RequestFocusInstruction = null;
         _attachedViewModel.RequestFitView = null;
         _attachedViewModel.RequestCanvasZoomStep = null;
         _attachedViewModel.RequestResetCanvasZoom = null;
@@ -1190,6 +1210,21 @@ public partial class WorkspacePageView : UserControl
         if (hasCommandModifier && e.Key == Key.S)
         {
             e.Handled = viewModel.SaveCommand.TryExecute();
+            return;
+        }
+
+        // Ctrl/Cmd+K 开「让 AI 填变量值」（13C 第 5 项）。
+        //
+        // 与 Ctrl+S 并列、刻意放在 IsTextInputFocused() 那道闸**之前**：作者按 Ctrl+K
+        // 的典型时刻正是手停在某个变量输入框上（「这几个我懒得一个个填」），
+        // 闸之后就等于「光标在表单里时快捷键失灵」。
+        // TextBox 不消费 Ctrl+K（它只认 Ctrl+A/C/V/X/Z 那几个编辑手势），无冲突。
+        //
+        // 用 TryExecute 而不是直接 Execute：没有带变量的起始节点时命令不可用，
+        // 此时 e.Handled 保持 false，让按键继续冒泡而不是被静默吞掉。
+        if (hasCommandModifier && e.Key == Key.K)
+        {
+            e.Handled = viewModel.OpenVariableFillCommand.TryExecute();
             return;
         }
 

@@ -187,6 +187,19 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         CutSelectedNodeCommand = new RelayCommand(() => _ = CutSelectedNodeAsync(), () => HasSelectedNode);
         PasteNodeCommand = new RelayCommand(PasteNode, () => _clipboardNode is not null);
         FitViewCommand = new RelayCommand(FitView);
+        // Ctrl+K 的「AI 填变量值」面板：与作品页快捷改写同构，不新增命令通道
+        // （生成走既有 project_ai_chat）。报状态用同一个 StatusText，
+        // 错误翻译沿用 UserFacingError——面板本身不认识后端异常类型。
+        VariableFill = new VariableFillPanelViewModel(
+            _displayNames.Text,
+            _displayNames.Format,
+            message => StatusText = message,
+            ex => UserFacingError.Format(ex, _displayNames));
+        VariableFill.RequestFill = FillVariablesWithProjectAiAsync;
+        OpenVariableFillCommand = new RelayCommand(
+            () => VariableFill.Open(ResolveVariableFillTarget()),
+            // 画布上没有带变量的起始节点时不可用：Ctrl+K 开一个空面板等于摆死按钮。
+            () => ResolveVariableFillTarget() is not null);
         _projectAiAnswer = displayNames.Text("ui.workspace.project_ai.empty");
 
         Nodes = new ObservableCollection<WorkflowNodeViewModel>();
@@ -559,8 +572,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string ZoomInText => _displayNames.Text("ui.workspace.zoom_in");
     public string ZoomOutText => _displayNames.Text("ui.workspace.zoom_out");
     public string ResetZoomText => _displayNames.Text("ui.workspace.zoom_reset");
-    public string ZoomInGlyphText => _displayNames.Text("ui.workspace.zoom_in_glyph");
-    public string ZoomOutGlyphText => _displayNames.Text("ui.workspace.zoom_out_glyph");
+    // 缩放按钮的 `+`/`-` 字形属性已删除（连同 ui.workspace.zoom_*_glyph 两个 key）：
+    // 那两个按钮改用矢量图标 Ariadne.Icon.Add / .Subtract。字形靠字体基线居中，
+    // 连字符在 em 框里偏上、加号居中，两者对不齐——这是它被换掉的原因，别再加回来。
     public string MinimapText => _displayNames.Text("ui.workspace.minimap");
     public string CanvasOverviewFocusText => _displayNames.Text("ui.workspace.canvas_overview_focus");
     public string CanvasFocusText => _displayNames.Text(
@@ -855,6 +869,11 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand CutSelectedNodeCommand { get; }
     public RelayCommand PasteNodeCommand { get; }
     public RelayCommand FitViewCommand { get; }
+
+    /// <summary>执行页 Ctrl+K 的「AI 填变量值」面板（13C 第 5 项）。</summary>
+    public VariableFillPanelViewModel VariableFill { get; }
+    public RelayCommand OpenVariableFillCommand { get; }
+
     public Action? RequestFitView { get; set; }
     public Action<double>? RequestCanvasZoomStep { get; set; }
     public Action? RequestResetCanvasZoom { get; set; }
@@ -1625,6 +1644,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         ExportSelectionCommand.NotifyCanExecuteChanged();
         CopySelectedNodeCommand.NotifyCanExecuteChanged();
         CutSelectedNodeCommand.NotifyCanExecuteChanged();
+        // 选中节点决定 Ctrl+K 填哪一组变量；选中从无变量节点切到有变量节点时
+        // 可用性也随之变化。
+        OpenVariableFillCommand.NotifyCanExecuteChanged();
     }
 
     private void NotifyRunCommandStates()
@@ -2848,10 +2870,26 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             await _backend.ValidateWorkflowGraphAsync(graph).ConfigureAwait(true);
             RememberWorkflowRevision(await _backend.SaveProjectCanvasAsync(graph).ConfigureAwait(true));
             CaptureSnapshot();
-            await _backend.ExportWorkflowSelectionAsync(CurrentWorkflowId, selected).ConfigureAwait(true);
-            var exported = _displayNames.Format("ui.workspace.exported_selection", new Dictionary<string, string>
+            var export = await _backend
+                .ExportWorkflowSelectionAsync(CurrentWorkflowId, selected)
+                .ConfigureAwait(true);
+
+            // 返回值**不能再丢**。此前这里是 `await ...(...)` 后直接写「已导出 N 个节点」，
+            // 而整条链路没有任何写盘 ⇒ 用户看到成功提示、磁盘上找不到文件，
+            // 与 U156「点运行什么都不会发生」同型。现在以 storage_uri 是否存在为准：
+            // 没有落盘位置就明确说没产生文件，不许把空动作报成成功。
+            if (string.IsNullOrWhiteSpace(export.StorageUri))
+            {
+                StatusText = _displayNames.Text("ui.workspace.export_no_file");
+                return;
+            }
+
+            // 报出**路径**而不只是节点数：U134 的教训是「导出成功却不知道文件在哪」，
+            // 那条弹窗甚至把用户指向一个不生效的设置项。
+            var exported = _displayNames.Format("ui.workspace.exported_selection_to", new Dictionary<string, string>
             {
                 ["count"] = selected.Length.ToString(),
+                ["path"] = export.StorageUri!,
             });
             // 导出前静默落盘易让作者以为「没保存」；明确提示
             StatusText = wasDirty
@@ -4172,7 +4210,53 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         OnPropertyChanged(nameof(HasNodes));
         OnPropertyChanged(nameof(EmptyCanvasTitle));
         OnPropertyChanged(nameof(EmptyCanvasHint));
+        // 起始节点集合变了，Ctrl+K 有无可填目标随之变化——不通知的话
+        // 新画上第一个起始节点后按 Ctrl+K 仍然「没反应」。
+        OpenVariableFillCommand.NotifyCanExecuteChanged();
         RefreshPortConnectionStates();
+    }
+
+    /// <summary>
+    /// Ctrl+K 这次要填哪个起始节点的变量。
+    ///
+    /// 优先当前选中的起始节点（作者的注意力就在它上面）；没选中时取第一个
+    /// 带变量的起始节点——单起点画布是常态，让他为了填值先去点一下节点是多余步骤。
+    /// 一个带变量的都没有则返回 null，命令随之禁用。
+    /// </summary>
+    private WorkflowVariableGroupViewModel? ResolveVariableFillTarget()
+    {
+        if (SelectedNode is { IsStartNode: true, Variables: { HasVariables: true } selected })
+        {
+            return selected;
+        }
+
+        return StartNodes
+            .Select(node => node.Variables)
+            .FirstOrDefault(group => group is { HasVariables: true });
+    }
+
+    /// <summary>
+    /// 把「填变量值」的请求发给项目空间 AI。
+    ///
+    /// 走既有 `project_ai_chat`，因此**沿用当前对话上下文**——作者刚在对话里交代过
+    /// 「这一章写雪灾」，填值时它能用上。这是 13C 对本项的明确要求。
+    ///
+    /// 刻意不落进对话气泡、也不推进 conversation revision：这是一次工具性取值，
+    /// 不是一轮对话，塞进历史会污染后续轮次的语义（与句式生成同一取舍）。
+    /// </summary>
+    private async Task<string> FillVariablesWithProjectAiAsync(string message)
+    {
+        var sessionFence = _runSession.CaptureFence();
+        var result = await _backend.ProjectAiChatAsync(
+            message,
+            workflowIdToRun: null,
+            referenceWorkflowId: CurrentWorkflowId,
+            referenceRunId: string.IsNullOrWhiteSpace(CurrentRunId) ? null : CurrentRunId,
+            conversationId: ProjectAiConversationId,
+            conversationRevision: _projectAiConversationRevision)
+            .ConfigureAwait(true);
+        _runSession.ThrowIfStale(sessionFence);
+        return result.Answer;
     }
 
     /// <summary>按边集合刷新各节点引脚「已连接=实心 / 未连接=空心」。</summary>

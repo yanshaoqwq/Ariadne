@@ -401,7 +401,8 @@
                 PointerReleased="OnCanvasBackgroundPointerReleased"
                 PointerCaptureLost="OnCanvasBackgroundCaptureLost"
                 PointerWheelChanged="OnCanvasPointerWheel">
-        <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}" ClipToBounds="False">
+        <ItemsControl x:Name="EdgesItemsControl" ItemsSource="{Binding Edges}" ClipToBounds="False"
+                      RenderTransformOrigin="0%,0%">
           <ItemsControl.RenderTransform>
             <TransformGroup>
               <ScaleTransform ScaleX="{Binding CanvasZoom}" ScaleY="{Binding CanvasZoom}" />
@@ -479,8 +480,20 @@
                 ZIndex="50" />
 
         <!-- U141：内容层不裁剪，负坐标与超屏坐标都要能渲染/命中；
-             屏幕边界的裁剪只在外层 CanvasHost 上做一次。 -->
-        <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}" ClipToBounds="False">
+             屏幕边界的裁剪只在外层 CanvasHost 上做一次。
+
+             ⚠️ U161：`RenderTransformOrigin="0%,0%"` 是**功能必需**，不是样式偏好。
+             Avalonia 默认原点是 `50%,50%`（中心），而全代码库的坐标换算一律是
+             `screen = logical × zoom + offset`（`CanvasViewportSession.ToLogical`、
+             `LogicalToCanvasPoint`、`UpdateMarqueeVisual`、`SyncMiniMapViewportFrame` …
+             共 9 处调用点），**该式只在原点为左上时成立**。
+             原点留在中心时，绘制位置会偏 `-(zoom-1)·层尺寸/2`：
+             实测 zoom=0.5 偏 (980, 649.5)、zoom=2.5 偏 (-1599, -1123.5)。
+             更麻烦的是层尺寸本身随 zoom/offset 变化（实测 2600×1874 → 3920×2598），
+             所以偏移量会随平移漂移 —— 症状是「有时错一点、有时错很多」。
+             删掉这一行，节点、连线、点击命中、框选、橡皮筋会全部错位。 -->
+        <ItemsControl x:Name="NodesItemsControl" ItemsSource="{Binding Nodes}" ClipToBounds="False"
+                      RenderTransformOrigin="0%,0%">
           <ItemsControl.RenderTransform>
             <TransformGroup>
               <ScaleTransform ScaleX="{Binding CanvasZoom}" ScaleY="{Binding CanvasZoom}" />
@@ -913,7 +926,7 @@
               <Border Width="1" Margin="4,5" Background="{DynamicResource Ariadne.BorderMuted}" />
               <StackPanel x:Name="CanvasViewActions" Orientation="Horizontal" Spacing="2">
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomOutText}" AutomationProperties.Name="{Binding ZoomOutText}" Command="{Binding ZoomOutCommand}">
-                  <TextBlock Text="{Binding ZoomOutGlyphText}" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Subtract}" />
                 </Button>
                 <Button x:Name="ZoomReadoutButton" Classes="subtle zoom-readout" MinWidth="58" Padding="8,0" ToolTip.Tip="{Binding ResetZoomText}" AutomationProperties.Name="{Binding ResetZoomText}" Command="{Binding ResetZoomCommand}">
                   <TextBlock Text="{Binding CanvasZoomText}" Classes="caption" VerticalAlignment="Center" />
@@ -931,7 +944,7 @@
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Maximize}" />
                 </Button>
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomInText}" AutomationProperties.Name="{Binding ZoomInText}" Command="{Binding ZoomInCommand}">
-                  <TextBlock Text="{Binding ZoomInGlyphText}" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Add}" />
                 </Button>
               </StackPanel>
             </StackPanel>
@@ -1049,6 +1062,132 @@
                                     AccessibleName="{Binding ToggleRightPanelText}" />
         </Canvas>
       </Grid>
+
+      <!-- ============ 13C 第 5 项：Ctrl+K「让 AI 填变量值」悬浮小窗 ============
+           四段结构与作品页快捷改写**逐段对齐**（标题+关闭 / 说明框+生成 / diff / 撤销+应用），
+           材料语汇也一致（毛玻璃 + glass-dialog），差别只在 diff 区显示的是变量新旧值。
+
+           位置取「画布行的右下角」而不是长在下栏的变量表单里：
+           - 长在表单里会把本就只有 220px 的下栏再挤掉一半，变量行反而看不见了
+             （U130 的教训：AI 输入面板抢走比正文更多的高度）
+           - 悬浮层不参与布局，开合不改变下栏高度，作者的变量表单原地不动
+           它会盖住小地图——小地图是画布导航辅助，念一句「接着写下一章」时用不到；
+           盖住下栏的运行状态则相反（那是此刻该盯的信息），所以不放到下栏那一行。
+
+           ZIndex 高于待审横幅（20）与审阅全屏面（15）：面板一旦打开就必须可见，
+           被别的浮层压住会看起来像「Ctrl+K 没反应」。 -->
+      <Panel Grid.Row="0"
+             IsVisible="{Binding VariableFill.IsOpen}"
+             HorizontalAlignment="Right"
+             VerticalAlignment="Bottom"
+             Margin="0,0,16,16"
+             ZIndex="30">
+        <ExperimentalAcrylicBorder CornerRadius="14" IsHitTestVisible="False">
+          <ExperimentalAcrylicBorder.Material>
+            <ExperimentalAcrylicMaterial
+                BackgroundSource="Digger"
+                TintColor="{DynamicResource Ariadne.Color.GlassTint}"
+                TintOpacity="0.84"
+                MaterialOpacity="0.9" />
+          </ExperimentalAcrylicBorder.Material>
+        </ExperimentalAcrylicBorder>
+        <Border Classes="glass-dialog" Width="392" Padding="18,16">
+          <StackPanel Spacing="11">
+            <!-- 段 1：标题 + 关闭。关闭键在生成中禁用（请求已发出，关窗只会让结果无处落地）。 -->
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+              <TextBlock Grid.Column="0"
+                         Text="{Binding VariableFill.TitleText}"
+                         Classes="subtitle"
+                         VerticalAlignment="Center" />
+              <Button Grid.Column="1"
+                      Classes="subtle"
+                      Padding="6,2"
+                      Command="{Binding VariableFill.CloseCommand}"
+                      IsEnabled="{Binding VariableFill.IsCloseEnabled}"
+                      ToolTip.Tip="{Binding VariableFill.CloseText}"
+                      AutomationProperties.Name="{Binding VariableFill.CloseText}">
+                <PathIcon Width="12" Height="12"
+                          Data="{DynamicResource Ariadne.Icon.Close}"
+                          Foreground="{DynamicResource Ariadne.TextSubtle}" />
+              </Button>
+            </Grid>
+
+            <!-- 填的是**哪一组**变量：目标未必是选中的那个节点
+                 （ResolveVariableFillTarget 没选中时取第一个带变量的起始节点）。
+                 复用折叠句而不是列变量名：那句话就是作者认得的那一组。
+                 应用后它会随取值即时重渲染，等于一条免费的结果反馈。 -->
+            <TextBlock Text="{Binding VariableFill.Target.SummaryText}"
+                       Classes="caption"
+                       FontFamily="{DynamicResource Ariadne.Font.Reading}"
+                       TextWrapping="Wrap" />
+
+            <!-- 段 2：说明框 + 生成。作者写的那句话就是这次填值的提示词。 -->
+            <TextBox x:Name="VariableFillInstructionBox"
+                     AutomationProperties.Name="{Binding VariableFill.TitleText}"
+                     Text="{Binding VariableFill.Instruction, Mode=TwoWay}"
+                     PlaceholderText="{Binding VariableFill.PlaceholderText}" />
+            <Button Classes="secondary" HorizontalAlignment="Stretch"
+                    Content="{Binding VariableFill.GenerateText}"
+                    AutomationProperties.Name="{Binding VariableFill.GenerateText}"
+                    Command="{Binding VariableFill.GenerateCommand}" />
+
+            <!-- 段 3：取值对照。整块随 HasDiff 显隐，没有建议时不留空框（U130）。
+                 行视图复用 QuickEditDiffLineViewModel：BuildDiffText 刻意产出同前缀的
+                 文本，着色规则因此与作品页、确认项审阅同一套。 -->
+            <TextBlock Text="{Binding VariableFill.DiffText}" Classes="caption"
+                       IsVisible="{Binding VariableFill.HasDiff}" />
+            <Border IsVisible="{Binding VariableFill.HasDiff}"
+                    Background="{DynamicResource Ariadne.BackgroundCode}"
+                    CornerRadius="8"
+                    Padding="0,6">
+              <ScrollViewer MaxHeight="240"
+                            HorizontalScrollBarVisibility="Auto"
+                            VerticalScrollBarVisibility="Auto"
+                            AutomationProperties.Name="{Binding VariableFill.DiffText}">
+                <ItemsControl ItemsSource="{Binding VariableFill.DiffLines}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:QuickEditDiffLineViewModel">
+                      <!-- 整行铺底色（含左侧标记列）：只给文字加背景会让短行的色块参差不齐。 -->
+                      <Grid ColumnDefinitions="16,*"
+                            Classes.added="{Binding IsAdded}"
+                            Classes.removed="{Binding IsRemoved}">
+                        <TextBlock Grid.Column="0" Text="{Binding Marker}"
+                                   FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                   Foreground="{DynamicResource Ariadne.TextSubtle}"
+                                   TextAlignment="Center" />
+                        <TextBlock Grid.Column="1" Text="{Binding Text}"
+                                   FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                   TextWrapping="Wrap" />
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                  <ItemsControl.Styles>
+                    <Style Selector="Grid.added">
+                      <Setter Property="Background" Value="{DynamicResource Ariadne.DiffAddBackground}" />
+                    </Style>
+                    <Style Selector="Grid.removed">
+                      <Setter Property="Background" Value="{DynamicResource Ariadne.DiffRemoveBackground}" />
+                    </Style>
+                  </ItemsControl.Styles>
+                </ItemsControl>
+              </ScrollViewer>
+            </Border>
+
+            <!-- 段 4：撤销 + 应用。两个键各自的守卫在 VM 里（取值变过就不许应用 /
+                 应用后又被手改就不许撤销），这里只负责按 CanExecute 灰掉。 -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+              <Button Classes="secondary"
+                      Content="{Binding VariableFill.UndoText}"
+                      AutomationProperties.Name="{Binding VariableFill.UndoText}"
+                      Command="{Binding VariableFill.UndoCommand}" />
+              <Button Classes="primary"
+                      Content="{Binding VariableFill.ApplyText}"
+                      AutomationProperties.Name="{Binding VariableFill.ApplyText}"
+                      Command="{Binding VariableFill.ApplyCommand}" />
+            </StackPanel>
+          </StackPanel>
+        </Border>
+      </Panel>
 
       <!-- 拖杆本体透明：分层信号由下栏自身的顶缘光边承担，不再多画一道灰线。 -->
       <GridSplitter x:Name="LibrarySplitter" Grid.Row="1" Height="5"

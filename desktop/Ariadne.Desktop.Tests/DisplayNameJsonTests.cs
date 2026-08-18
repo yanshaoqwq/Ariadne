@@ -368,8 +368,6 @@ public sealed class DisplayNameJsonTests
             "ui.works.export_format.epub",
             "ui.works.export_format.markdown",
             "ui.works.export_format.pdf",
-            "ui.workspace.zoom_in_glyph",
-            "ui.workspace.zoom_out_glyph",
             "ui.workspace.zoom_percent",
         };
         var fallbacks = map!

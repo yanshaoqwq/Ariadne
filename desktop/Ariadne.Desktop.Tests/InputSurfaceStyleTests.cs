@@ -2,6 +2,7 @@ using System.Reflection;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Diagnostics;
 using Avalonia.Headless;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -467,6 +468,201 @@ public sealed class InputSurfaceStyleTests
     }
 
     /// <summary>
+    /// U160：<c>AutoCompleteBox</c>（U145 那 12 个标识输入框）的内层 <c>PART_TextBox</c>
+    /// 必须与纯 <c>TextBox</c> 长得一样——静息与聚焦两态都一样。
+    ///
+    /// 用户原话：「有些输入框会有不同行为，例如切到其它输入框，原输入框闪白或亮起边框」。
+    /// 三处实测差异逐条对应用户看到的东西：
+    /// - <c>Background = #66ffffff</c>（半透明白底）→ 聚焦时被 BrushTransition 淡出 = **闪白**
+    /// - <c>BorderThickness = 1,1,1,1</c>（四边框）→ 整圈亮 = **亮起边框**（纯 TextBox 只亮底线）
+    /// - <c>CornerRadius = 3</c> → 圆角也不一致
+    ///
+    /// ⚠️ **判据取「与纯 TextBox 的实测值相等」而不是写死期望常量**：
+    /// 这条用例要守的性质是「两种输入面视觉一致」，而不是「底线正好 1px」。
+    /// 写死常量的话，将来有人调整基础输入线（U144 那套）就得同步改两处，
+    /// 漏改一处就退回不一致——而那正是本缺陷的形态。
+    /// 拿同一棵视觉树里的真 TextBox 当基准，不一致必红。
+    /// </summary>
+    [Fact]
+    public async Task AutoCompleteBox_InnerTextBox_MatchesPlainTextBoxInBothStates()
+    {
+        await RunWithSettingsAsync(async view =>
+        {
+            var host = view.GetVisualDescendants().OfType<Panel>().FirstOrDefault();
+            Assert.NotNull(host);
+
+            var picker = new AutoCompleteBox { Text = "probe", Width = 200 };
+            var plain = new TextBox { Text = "probe", Width = 200 };
+            host!.Children.Add(picker);
+            host.Children.Add(plain);
+            await DrainAsync();
+
+            var inner = picker.GetVisualDescendants()
+                .OfType<TextBox>()
+                .FirstOrDefault(candidate => candidate.Name == "PART_TextBox");
+            Assert.NotNull(inner);
+
+            // ── 静息态：四个视觉属性逐条与纯 TextBox 比 ──
+            AssertInputSurfaceMatches(inner!, plain, "静息");
+
+            // ── 聚焦态：焦点落在内层 TextBox 上（宿主只拿到 :focus-within）──
+            Assert.True(inner!.Focus(), "内层 PART_TextBox 应当可获得焦点");
+            await DrainAsync();
+            // 底色有 0.14s 的 BrushTransition，读早了会拿到淡出中间值（正是「闪白」那一帧）。
+            await Task.Delay(350);
+            await DrainAsync();
+
+            var pickerBorder = ResolveBorderElement(inner);
+            Assert.Equal(new CornerRadius(0), pickerBorder.CornerRadius);
+            Assert.Equal(0d, pickerBorder.BorderThickness.Left);
+            Assert.Equal(0d, pickerBorder.BorderThickness.Top);
+            Assert.Equal(0d, pickerBorder.BorderThickness.Right);
+            Assert.True(
+                pickerBorder.BorderThickness.Bottom > 0,
+                "聚焦态仍要有输入线，否则用户不知道焦点在哪");
+            Assert.True(
+                IsVisuallyTransparent(pickerBorder.Background),
+                "聚焦态铺底就是用户看到的「闪白」——"
+                + $"当前 Background = {Describe(pickerBorder.Background)}");
+        });
+    }
+
+    /// <summary>
+    /// U160 的**机制**护栏：内层 <c>PART_TextBox</c> 的三个属性不得停留在
+    /// <c>BindingPriority.Template</c> 且取 Fluent 默认值。
+    ///
+    /// 为什么单独立这一条、而不是靠上面那条行为用例就够：
+    /// 上面那条只说「值不对」，这条说清「**为什么压不动**」，
+    /// 从而拦住下一个人用错误手法去「修」它。
+    ///
+    /// <c>BindingPriority</c> 的数值是
+    /// <c>LocalValue=0 &lt; StyleTrigger=1 &lt; Template=2 &lt; Style=3</c>，**小的胜**。
+    /// AutoCompleteBox 的模板把宿主属性 <c>TemplateBinding</c> 到内层，内层因此拿 <c>Template</c>；
+    /// 而全部 <c>TextBox … /template/ Border#PART_BorderElement</c> 样式是 <c>Style</c>——
+    /// **输给 Template**。所以这里**不是** U154 那种「顺序错」，调位置无用；
+    /// 实测证否过 <c>AutoCompleteBox /template/ TextBox#PART_TextBox</c> 与
+    /// <c>AutoCompleteBox TextBox /template/ Border#PART_BorderElement</c> 两种写法。
+    /// 唯一有效的解法是**把值设在宿主上**，让它顺模板自己的 TemplateBinding 流下去。
+    ///
+    /// 判据落在「宿主上这四个属性有 Style 来源的赋值」——那正是修复的实现方式，
+    /// 摘掉主题里那条 <c>Style Selector="AutoCompleteBox"</c> 即红。
+    /// </summary>
+    [Fact]
+    public async Task AutoCompleteBox_HostCarriesInputSurfaceTokens()
+    {
+        await RunWithSettingsAsync(async view =>
+        {
+            var host = view.GetVisualDescendants().OfType<Panel>().FirstOrDefault();
+            Assert.NotNull(host);
+
+            var picker = new AutoCompleteBox { Text = "probe", Width = 200 };
+            host!.Children.Add(picker);
+            await DrainAsync();
+
+            // 宿主必须被主题接管：否则值到不了内层（内层的 Template 优先级压不动）。
+            foreach (var (property, label) in new (AvaloniaProperty, string)[]
+            {
+                (TemplatedControl.BackgroundProperty, "Background"),
+                (TemplatedControl.BorderThicknessProperty, "BorderThickness"),
+                (TemplatedControl.CornerRadiusProperty, "CornerRadius"),
+                (TemplatedControl.PaddingProperty, "Padding"),
+                (TemplatedControl.ForegroundProperty, "Foreground"),
+            })
+            {
+                var diagnostic = picker.GetDiagnostic(property);
+                Assert.True(
+                    diagnostic.Priority == Avalonia.Data.BindingPriority.Style
+                    || diagnostic.Priority == Avalonia.Data.BindingPriority.StyleTrigger,
+                    $"AutoCompleteBox 宿主的 {label} 必须由主题样式赋值（当前来源 "
+                    + $"{diagnostic.Priority}）。宿主没被接管，值就到不了内层 PART_TextBox——"
+                    + "而内层是 Template 优先级，任何 /template/ 选择器（Style 优先级）都压不动它。");
+            }
+
+            // Fluent 的默认值不得残留在内层：这几个就是用户看到的「闪白 + 整圈边框」。
+            var inner = picker.GetVisualDescendants()
+                .OfType<TextBox>()
+                .FirstOrDefault(candidate => candidate.Name == "PART_TextBox");
+            Assert.NotNull(inner);
+            Assert.True(
+                IsVisuallyTransparent(inner!.Background),
+                $"内层残留 Fluent 半透明底 {Describe(inner.Background)}（= 用户看到的「闪白」）");
+            Assert.Equal(new CornerRadius(0), inner.CornerRadius);
+            Assert.Equal(0d, inner.BorderThickness.Top);
+            Assert.Equal(0d, inner.BorderThickness.Left);
+            Assert.Equal(0d, inner.BorderThickness.Right);
+
+            // Foreground：Fluent 在 Template 层写死 Black/White 两个**平台色**，
+            // 亮色下纯黑、暗色下纯白，都不是本主题 token（硬约束：颜色只能来自主题）。
+            var expected = ResolveTokenColor(view, "Ariadne.TextPrimary");
+            Assert.Equal(expected, Assert.IsAssignableFrom<ISolidColorBrush>(inner.Foreground).Color);
+        });
+    }
+
+    /// <summary>
+    /// U160 顺带核查：<c>ComboBox</c>（可编辑态）与 <c>NumericUpDown</c> 的内层输入框
+    /// 有没有同一类残缺——即 Fluent 默认值卡在 <c>Template</c> 优先级上。
+    ///
+    /// 实测结论（本用例把它钉住）：**两者都没有 AutoCompleteBox 那种残缺**。
+    /// 它们的内层 Background 也来自 <c>Template</c>，但值已是 <c>Transparent</c>
+    /// （ComboBox 的槽由 <c>Border#Background</c> 单独承担、已被主题接管；
+    /// NumericUpDown 的外层 ButtonSpinner 盒子已在上面压平），所以看不出差别。
+    ///
+    /// 为什么仍要立这条用例而不是只在报告里写一句「查过了，没问题」：
+    /// 「当前没残缺」是个**会被改坏的结论**——任何人调 ComboBox/NumericUpDown 那几条样式
+    /// 都可能把 Fluent 默认底放回来，而这种回归在视觉上就是用户报的同一个现象。
+    /// </summary>
+    [Fact]
+    public async Task EditableComboBoxAndNumericUpDown_KeepNoFluentDefaultFill()
+    {
+        await RunWithSettingsAsync(async view =>
+        {
+            var host = view.GetVisualDescendants().OfType<Panel>().FirstOrDefault();
+            Assert.NotNull(host);
+
+            var combo = new ComboBox { Width = 200, IsEditable = true };
+            var numeric = new NumericUpDown { Width = 200 };
+            host!.Children.Add(combo);
+            host.Children.Add(numeric);
+            await DrainAsync();
+
+            var comboInner = combo.GetVisualDescendants()
+                .OfType<TextBox>()
+                .FirstOrDefault(candidate => candidate.Name == "PART_EditableTextBox");
+            Assert.NotNull(comboInner);
+            Assert.True(
+                IsVisuallyTransparent(comboInner!.Background),
+                "可编辑 ComboBox 内层出现填充底（槽应由 Border#Background 单独承担）："
+                + Describe(comboInner.Background));
+
+            var numericInner = numeric.GetVisualDescendants()
+                .OfType<TextBox>()
+                .FirstOrDefault(candidate => candidate.Name == "PART_TextBox");
+            Assert.NotNull(numericInner);
+            Assert.True(
+                IsVisuallyTransparent(numericInner!.Background),
+                "NumericUpDown 内层出现填充底：" + Describe(numericInner.Background));
+            Assert.Equal(new CornerRadius(0), numericInner.CornerRadius);
+        });
+    }
+
+    /// <summary>
+    /// 把「内层输入面与纯 TextBox 一致」这组比较收成一处。
+    ///
+    /// 基准是同一棵视觉树里的真 <c>TextBox</c>（而非写死常量）：
+    /// 要守的性质是**一致性**，基础输入线将来怎么调都不该让这条用例需要同步改。
+    /// </summary>
+    private static void AssertInputSurfaceMatches(TextBox actual, TextBox baseline, string state)
+    {
+        Assert.Equal(baseline.BorderThickness, actual.BorderThickness);
+        Assert.Equal(baseline.CornerRadius, actual.CornerRadius);
+        Assert.Equal(baseline.Padding, actual.Padding);
+        Assert.True(
+            IsVisuallyTransparent(actual.Background) == IsVisuallyTransparent(baseline.Background),
+            $"[{state}] 底色铺法与纯 TextBox 不一致："
+            + $"AutoCompleteBox={Describe(actual.Background)} / TextBox={Describe(baseline.Background)}");
+    }
+
+    /// <summary>
     /// 拿到某个 <c>TextBox</c> 模板内的 <c>PART_BorderElement</c>。
     ///
     /// 走视觉树而不是 <c>GetTemplateChildren</c>：后者要求模板已 apply，
@@ -550,6 +746,10 @@ public sealed class InputSurfaceStyleTests
     {
         null => "null",
         ISolidColorBrush solid => solid.Color.ToString(),
+        // 输入线是渐变（静息实色 + 右端收笔淡出），失败信息里必须看得见每个 stop，
+        // 否则只报一句 "LinearGradientBrush" 等于没给线索。
+        IGradientBrush gradient =>
+            "grad(" + string.Join("|", gradient.GradientStops.Select(stop => $"{stop.Offset:0.##}:{stop.Color}")) + ")",
         _ => brush.GetType().Name,
     };
 

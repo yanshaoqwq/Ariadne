@@ -424,6 +424,11 @@
       <StreamGeometry x:Key="Ariadne.Icon.Restore">M8,9.5 L16.5,9.5 L16.5,18 L8,18 Z M9.5,7 L9.5,5.5 L18.5,5.5 L18.5,14.5 L17,14.5</StreamGeometry>
       <StreamGeometry x:Key="Ariadne.Icon.Close">M6.5,6.5 L17.5,17.5 M17.5,6.5 L6.5,17.5</StreamGeometry>
       <StreamGeometry x:Key="Ariadne.Icon.Add">M12,5 L12,19 M5,12 L19,12</StreamGeometry>
+      <!-- 减号：与 Add 共用同一条横线坐标（y=12，x 5→19），两个按钮并排时笔画等长、
+           视觉重心同高。此前画布缩放用的是文本字形 `+`/`-`，靠字体基线与行高居中——
+           而连字符在 em 框里本就偏上、数学加号居中，两者永远对不齐（还叠了 18/16 两个字号）。
+           图标一律用矢量 Geometry 也是硬约束：图标字体在 Linux 上缺失会渲染成豆腐块。 -->
+      <StreamGeometry x:Key="Ariadne.Icon.Subtract">M5,12 L19,12</StreamGeometry>
       <!-- 侧栏折叠（汉堡） -->
       <StreamGeometry x:Key="Ariadne.Icon.Menu">M3,6 L21,6 M3,12 L21,12 M3,18 L21,18</StreamGeometry>
       <!-- 导航：工作空间（节点/编排——三连点+线） -->
@@ -2164,6 +2169,57 @@
     <Setter Property="CornerRadius" Value="0" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Background" Value="Transparent" />
+  </Style>
+
+  <!-- ================== AutoCompleteBox：必须设在**宿主**，不能走 /template/ ==================
+       U145 那批「可搜索下拉 + 允许自定义输入」的 12 个标识输入框（ModelId / ImportChapterId /
+       QueryAlias / ApprovalId / SummarizerChapterId …）全是 AutoCompleteBox。
+       用户报的现象：「切到其它输入框，原输入框闪白或亮起边框」——它旁边就是普通 TextBox，
+       两者长得不一样，对比之下才显眼。
+
+       实测（headless 实体化 + `GetDiagnostic` 问优先级）：内层 `PART_TextBox` 的
+       Background/BorderThickness/CornerRadius/Padding/Foreground **来源全是 `Template`**，
+       值是 Fluent 默认的 `#66ffffff` 半透明白底 / `1,1,1,1` 四边框 / `radius=3`。
+       「闪白」正是那层半透明白底在聚焦时被 BrushTransition 淡出（实测抓到中间值
+       `#66ffffff → #30ffffff → Transparent`），「亮起边框」是四边框整圈亮
+       ——而旁边的纯 TextBox 只亮一条底线。
+
+       ⚠️ **为什么不能照 U148/U154 的套路写 `/template/`**（这是本节唯一重要的结论）：
+       `BindingPriority` 的数值是 `LocalValue=0 < StyleTrigger=1 < Template=2 < Style=3`，
+       **数值小的胜**。AutoCompleteBox 的模板把宿主的这些属性 `TemplateBinding` 到了
+       内层 `PART_TextBox` 上，于是内层拿到的是 `Template` 优先级；而我们全部
+       `TextBox … /template/ Border#PART_BorderElement` 样式都是 `Style` 优先级——
+       **`Style` 输给 `Template`，压不动**。
+       实测证否过两种写法（都无效，勿再试）：
+         `AutoCompleteBox /template/ TextBox#PART_TextBox`           → 内层仍 Template/#66ffffff
+         `AutoCompleteBox TextBox /template/ Border#PART_BorderElement` → 同上
+       选择器**匹配是成功的**（`Selector.Match` 返回 `AlwaysThisInstance`），
+       败在优先级——这与 U154「匹配成功但被后声明样式盖掉」是**两种不同的失效**，
+       别把这里的顺序当成原因去调位置。
+
+       ✅ 正确解法：把值设在**宿主 AutoCompleteBox** 上，让它顺着模板自己的
+       TemplateBinding 流到内层。宿主上是 `Style` 优先级，内层收到的仍是 `Template`，
+       但值已经是我们的了。实测亮/暗两变体下，四个属性与纯 TextBox **完全一致**，
+       聚焦后模板层 `thickness=0,0,0,2 radius=0 bg=Transparent`（= 纯 TextBox 的焦点态）。
+
+       各 Setter 的理由与基础 `TextBox` 样式逐条对齐：
+       - Background=Transparent：槽在 U144 已拆，这是「闪白」的根
+       - BorderThickness=0,0,0,1：一条底线（left,top,right,bottom；写 0,0,1,0 会得到右竖线）
+       - CornerRadius=0：底线两端带圆角会翘成一对小括号，不再是基线
+       - Padding=0,5,0,6：Fluent 给的是 `10,6,6,5`，左内缩 10px 会让文字比上方标签往右挪，
+         线就不成基线了（与基础 TextBox 同一理由）
+       - Foreground：Fluent 在 Template 层写死 `Black`/`White` 两个**平台色而非本主题 token**，
+         暗色下是纯白、亮色下是纯黑，都不是我们的 TextPrimary。硬约束「颜色只能来自主题」。
+       焦点/悬停/错误/禁用四态**不必在此重复**：内层 TextBox 自己的伪类照常触发
+       （实测内层确实拿到 `:focus`），那些态由上面的通用 `TextBox:*` 样式在
+       `StyleTrigger`（=1，比 Template 更优先）承担，本来就压得住。 -->
+  <Style Selector="AutoCompleteBox">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Padding" Value="0,5,0,6" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+    <Setter Property="MinHeight" Value="32" />
   </Style>
 
   <!-- ================== 复合输入面的模板层压平（位置敏感，勿上移） ==================
