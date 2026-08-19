@@ -41,8 +41,13 @@
           Background="{DynamicResource Ariadne.BackgroundSurface}"
           PointerPressed="OnTitleBarPointerPressed">
 
-        <!-- 品牌轨道与左侧导航共用主题浅色材质。 -->
+        <!-- 品牌轨道与左侧导航共用主题浅色材质。
+             U178-D：这条也绑 SidebarWidth，所以**必须与下方侧栏挂同一个
+             app-rail 过渡**。只给下面那条加动效会更难看——顶部品牌轨一帧跳完、
+             下方导轨 180ms 滑动，两条本该同宽的竖轨在过渡期间宽度不一致，
+             接缝处会看到一条明显的错位台阶。同源绑定必须同源动效。 -->
         <Border Grid.Column="0"
+                Classes="app-rail"
                 Width="{Binding SidebarWidth}"
                 Background="{DynamicResource Ariadne.BackgroundSubtle}"
                 BorderBrush="{DynamicResource Ariadne.BorderMuted}"
@@ -60,7 +65,7 @@
                  Logo 直接落在侧栏底上，笔画就是主题强调色。
                  ⚠️ WelcomeView 那处的 OnAccent="True" 是对的——它确实嵌在一块
                  AccentHover→AccentPressed 的渐变方块里，别一起改。 -->
-            <StackPanel Orientation="Horizontal" Spacing="10" Margin="14,0"
+            <StackPanel Classes="rail-face" Orientation="Horizontal" Spacing="10" Margin="14,0"
                         VerticalAlignment="Center"
                         IsVisible="{Binding SidebarExpanded}">
               <ctl:BrandLogo Width="30" Height="30" OnAccent="False" VerticalAlignment="Center" />
@@ -70,7 +75,7 @@
                          FontWeight="SemiBold"
                          VerticalAlignment="Center" />
             </StackPanel>
-            <ctl:BrandLogo Width="30" Height="30" OnAccent="False"
+            <ctl:BrandLogo Classes="rail-face" Width="30" Height="30" OnAccent="False"
                            HorizontalAlignment="Center" VerticalAlignment="Center"
                            IsVisible="{Binding SidebarCollapsed}" />
           </Panel>

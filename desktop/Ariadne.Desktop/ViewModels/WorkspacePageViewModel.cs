@@ -499,6 +499,15 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     /// <summary>确认项不带正文改动时的说明；空白面会让人以为加载失败。</summary>
     public string ConfirmationDiffEmptyText => _displayNames.Text("ui.workspace.confirmation.diff_empty");
     public string PromptTemplateText => _displayNames.Text("ui.workspace.prompt_template");
+
+    /// <summary>
+    /// U150：Ctrl+左键展开引用的**可发现性**提示。
+    ///
+    /// 手势不写出来等于没做——用户不会去猜「按住 Ctrl 点一下试试」。
+    /// 这一行同时说清了另一半语义（「发给模型时一律展开」），
+    /// 否则看到折叠摘要的人会合理地担心「模型是不是只收到这一行摘要」。
+    /// </summary>
+    public string PromptReferenceHintText => _displayNames.Text("ui.node.prompt.reference_hint");
     public string ModelIdText => _displayNames.Text("ui.workspace.model_id");
     public string ModelSelectorPlaceholder => _displayNames.Text("ui.workspace.model_selector_placeholder");
     public string ModelInheritGlobalText => _displayNames.Text("ui.workspace.model_inherit_global");

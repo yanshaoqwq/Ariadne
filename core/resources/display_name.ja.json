@@ -1314,5 +1314,6 @@
   "ui.run_log.message.workflow.run.succeeded": "実行に成功",
   "ui.run_log.message.workflow.run.stopped": "実行を停止",
   "ui.run_log.message.workflow.run.paused": "実行を一時停止（確認待ち）",
-  "ui.dialog.settings.remove_provider.cross_project": "⚠ アプリ全体のプロバイダー目録から削除されます。他のプロジェクトからも見えなくなります。"
+  "ui.dialog.settings.remove_provider.cross_project": "⚠ アプリ全体のプロバイダー目録から削除されます。他のプロジェクトからも見えなくなります。",
+  "ui.node.prompt.reference_hint": "Ctrl+クリックで ‹引用› の原文を展開／折りたたみできます。モデルへは常に展開して送られます。"
 }

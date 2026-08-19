@@ -174,6 +174,72 @@
           <!-- 微观打磨：深色提示气泡 + 细滚动条滑块（浅色主题下用墨色半透明） -->
           <SolidColorBrush x:Key="Ariadne.TooltipBackground" Color="#F22B3230" />
           <SolidColorBrush x:Key="Ariadne.TooltipText" Color="#F4F7F5" />
+          <!-- U184：FluentTheme 的 CheckBox / Slider 资源键覆盖。
+               **必须放在 ThemeDictionaries 的 Light/Dark 两份里各一套**，
+               不能只在外层 Styles.Resources 放一份 —— 这是截图实测抓出来的：
+               外层那份画刷的 `{DynamicResource Ariadne.Color.*}` 只解析一次、
+               不带主题变体上下文，于是**暗色主题下拿到的是亮色的值**。
+               症状：暗色下已启用复选框的标签文字是深色贴深底、整行看不见
+               （而禁用那几行反而看得见，因为走的是另一个键）。
+               这里用 StaticResource：同一份字典内的引用，随字典整体切换。
+               各键为何取这些 token，见文件下方 Styles.Resources 里的注释块。 -->
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUnchecked" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPointerOver" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedDisabled" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUnchecked" Color="{StaticResource Ariadne.Color.BorderDefault}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPointerOver" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPressed" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPressed" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedDisabled" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundChecked" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedPointerOver" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedPressed" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedDisabled" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillIndeterminate" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillIndeterminatePointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillIndeterminatePressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillIndeterminateDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeIndeterminate" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeIndeterminatePointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeIndeterminatePressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeIndeterminateDisabled" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundIndeterminate" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundIndeterminatePointerOver" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundIndeterminatePressed" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundIndeterminateDisabled" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundUncheckedPointerOver" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundUncheckedPressed" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundUncheckedDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundChecked" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundCheckedPointerOver" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundCheckedPressed" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundCheckedDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundIndeterminate" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundIndeterminatePointerOver" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundIndeterminatePressed" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundIndeterminateDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="SliderTrackFill" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
+          <SolidColorBrush x:Key="SliderTrackFillPointerOver" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="SliderTrackFillPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="SliderTrackFillDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="SliderTrackValueFill" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="SliderTrackValueFillPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="SliderTrackValueFillPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="SliderTrackValueFillDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="SliderThumbBackground" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="SliderThumbBackgroundPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="SliderThumbBackgroundPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="SliderThumbBackgroundDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="SliderTickBarFill" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="SliderTickBarFillDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundUnchecked" Color="{StaticResource Ariadne.Color.TextPrimary}" />
           <SolidColorBrush x:Key="Ariadne.ScrollThumb" Color="#38000000" />
           <SolidColorBrush x:Key="Ariadne.ScrollThumbHover" Color="#66000000" />
         </ResourceDictionary>
@@ -321,6 +387,72 @@
           <!-- 深色主题下气泡反过来用亮底深字；滚动条滑块用白色半透明 -->
           <SolidColorBrush x:Key="Ariadne.TooltipBackground" Color="#F0E9EDEB" />
           <SolidColorBrush x:Key="Ariadne.TooltipText" Color="#181C1E" />
+          <!-- U184：FluentTheme 的 CheckBox / Slider 资源键覆盖。
+               **必须放在 ThemeDictionaries 的 Light/Dark 两份里各一套**，
+               不能只在外层 Styles.Resources 放一份 —— 这是截图实测抓出来的：
+               外层那份画刷的 `{DynamicResource Ariadne.Color.*}` 只解析一次、
+               不带主题变体上下文，于是**暗色主题下拿到的是亮色的值**。
+               症状：暗色下已启用复选框的标签文字是深色贴深底、整行看不见
+               （而禁用那几行反而看得见，因为走的是另一个键）。
+               这里用 StaticResource：同一份字典内的引用，随字典整体切换。
+               各键为何取这些 token，见文件下方 Styles.Resources 里的注释块。 -->
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUnchecked" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPointerOver" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedDisabled" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUnchecked" Color="{StaticResource Ariadne.Color.BorderDefault}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPointerOver" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPressed" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPressed" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedDisabled" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundChecked" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedPointerOver" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedPressed" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedDisabled" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillIndeterminate" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillIndeterminatePointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillIndeterminatePressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillIndeterminateDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeIndeterminate" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeIndeterminatePointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeIndeterminatePressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeIndeterminateDisabled" Color="Transparent" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundIndeterminate" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundIndeterminatePointerOver" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundIndeterminatePressed" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundIndeterminateDisabled" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundUncheckedPointerOver" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundUncheckedPressed" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundUncheckedDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundChecked" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundCheckedPointerOver" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundCheckedPressed" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundCheckedDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundIndeterminate" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundIndeterminatePointerOver" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundIndeterminatePressed" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundIndeterminateDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="SliderTrackFill" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
+          <SolidColorBrush x:Key="SliderTrackFillPointerOver" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="SliderTrackFillPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="SliderTrackFillDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="SliderTrackValueFill" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="SliderTrackValueFillPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="SliderTrackValueFillPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="SliderTrackValueFillDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="SliderThumbBackground" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="SliderThumbBackgroundPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="SliderThumbBackgroundPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="SliderThumbBackgroundDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="SliderTickBarFill" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="SliderTickBarFillDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="CheckBoxForegroundUnchecked" Color="{StaticResource Ariadne.Color.TextPrimary}" />
           <SolidColorBrush x:Key="Ariadne.ScrollThumb" Color="#3DFFFFFF" />
           <SolidColorBrush x:Key="Ariadne.ScrollThumbHover" Color="#70FFFFFF" />
         </ResourceDictionary>
@@ -496,10 +628,198 @@
            通行手势，比「魔杖」「机器人」更少歧义，也不会被读成「收藏」。
            大星在左上、小星在右下，避免两颗一样大而失去主次。 -->
       <StreamGeometry x:Key="Ariadne.Icon.Sparkle">M10,3 L11.6,7.9 L16.5,9.5 L11.6,11.1 L10,16 L8.4,11.1 L3.5,9.5 L8.4,7.9 Z M17.5,14 L18.4,16.6 L21,17.5 L18.4,18.4 L17.5,21 L16.6,18.4 L14,17.5 L16.6,16.6 Z</StreamGeometry>
+
+      <!-- ========================================================
+           U178-F / U164-B：FluentTheme 的 Expander 资源键覆盖。
+           **为什么覆盖资源键而不是写 /template/ 选择器**，见文件末尾
+           Expander 样式块开头那段实测记录（BindingPriority 之争）。
+
+           ⚠️ 必须放在**这个** Styles.Resources 里，不能在文件末尾再开一个：
+           `Styles.Resources` 是同一个属性，第二次赋值会让先声明的整份
+           ResourceDictionary（上面 485 行的全部 Ariadne.* token）失效 ——
+           实测症状是 headless 测试直接挂死而不是报错，极难定位。
+           ======================================================== -->
+      <!-- 头部：与 detail-row 同族——淡底、无描边、hover 加深。
+           不用 settings-section 的描边语汇：Expander 常成组堆叠（设置页 8 个），
+           每个都带一圈边会立刻堆成田字格，正是 dock-rail 那一节拆掉的东西。 -->
+      <SolidColorBrush x:Key="ExpanderHeaderBackground" Color="{DynamicResource Ariadne.Color.BackgroundSubtle}" />
+      <SolidColorBrush x:Key="ExpanderHeaderBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="ExpanderHeaderBackgroundPointerOver" Color="{DynamicResource Ariadne.Color.BackgroundElevated}" />
+      <SolidColorBrush x:Key="ExpanderHeaderBackgroundPressed" Color="{DynamicResource Ariadne.Color.BackgroundElevated}" />
+      <SolidColorBrush x:Key="ExpanderHeaderForeground" Color="{DynamicResource Ariadne.Color.TextPrimary}" />
+      <!-- hover/pressed 的**前景**也必须覆盖：Fluent 那两个键的默认值实测是硬编码
+           `Black`（不是「跟随 Foreground」）——不覆盖的话暗色主题下一悬停，
+           标题文字就从浅色跳成纯黑，直接消失在暗底上。 -->
+      <SolidColorBrush x:Key="ExpanderHeaderForegroundPointerOver" Color="{DynamicResource Ariadne.Color.TextPrimary}" />
+      <SolidColorBrush x:Key="ExpanderHeaderForegroundPressed" Color="{DynamicResource Ariadne.Color.TextPrimary}" />
+      <Thickness x:Key="ExpanderHeaderBorderThickness">0</Thickness>
+      <!-- Fluent 默认 16,0,0,0 + MinHeight 48：对「分组标题」偏高偏空。
+           14,10 与 detail-row 的内距同族，36 高度与 rail-nav（42）同一密度带。 -->
+      <Thickness x:Key="ExpanderHeaderPadding">14,10</Thickness>
+      <x:Double x:Key="ExpanderMinHeight">36</x:Double>
+      <!-- 内容区：与 settings-section 对齐（同为「一块分区」），底色不再比头部深，
+           Fluent 默认的 #fff2f2f2 是硬编码灰、暗色主题下直接错。 -->
+      <SolidColorBrush x:Key="ExpanderContentBackground" Color="Transparent" />
+      <SolidColorBrush x:Key="ExpanderContentBorderBrush" Color="Transparent" />
+      <Thickness x:Key="ExpanderContentPadding">14,10,14,12</Thickness>
+      <Thickness x:Key="ExpanderContentDownBorderThickness">0</Thickness>
+      <!-- 箭头：描边色跟随次级文字（它是辅助元素，不该和标题同重）。
+           Fluent 默认 32px 的箭头按钮在 36px 头部里几乎占满，收到 26。 -->
+      <SolidColorBrush x:Key="ExpanderChevronForeground" Color="{DynamicResource Ariadne.Color.TextSecondary}" />
+      <!-- 同上：默认值实测是硬编码 Black，暗色下悬停即黑箭头贴黑底。 -->
+      <SolidColorBrush x:Key="ExpanderChevronForegroundPointerOver" Color="{DynamicResource Ariadne.Color.TextPrimary}" />
+      <SolidColorBrush x:Key="ExpanderChevronForegroundPressed" Color="{DynamicResource Ariadne.Color.TextPrimary}" />
+      <SolidColorBrush x:Key="ExpanderChevronBackground" Color="Transparent" />
+      <SolidColorBrush x:Key="ExpanderChevronBorderBrush" Color="Transparent" />
+      <x:Double x:Key="ExpanderChevronButtonSize">26</x:Double>
+
+      <!-- ========================================================
+           U184：FluentTheme 的 CheckBox 资源键覆盖。
+
+           **原缺陷**：全仓 39 个 CheckBox 的视觉是 **Fluent 默认蓝**。
+           主题里关于 CheckBox 的唯一一条样式（本文件 `Button, ToggleButton,
+           CheckBox, …` 合并选择器）只设了 `FontFamily` / `FontSize` ——
+           勾选框本体的配色从未被碰过。`UI组件状态表.md:54` 明写
+           「checkbox / radio 的 accent 取品牌主色 brand-primary」，
+           而实测选中态底色是 `#ff0078d7`（Fluent 蓝）：**规范从未落地**。
+
+           **为什么走资源键而不是 `/template/` 选择器**（探针实测，
+           Avalonia 12.0.5 + FluentTheme headless）：
+
+             CheckBox
+               Grid   Name=RootGrid
+                 Border Name=PART_Border
+                   Grid
+                     Border Name=NormalRectangle   ← 勾选框那个方框
+                     Viewbox → Panel → Path Name=CheckGlyph  ← 勾号
+                     ContentPresenter Name=PART_ContentPresenter
+
+           `NormalRectangle` 的 **Background / BorderBrush 优先级是
+           `StyleTrigger`（=1）**，`CheckGlyph` 的 **Fill / Data / Width 也是
+           `StyleTrigger`** —— Fluent 用 `:checked` / `:unchecked` 这类伪类样式
+           直接写在这两个部件上。**BindingPriority 数值小者胜**
+           （LocalValue=0 < StyleTrigger=1 < Template=2 < Style=3），
+           而 `/template/` 选择器是 Style=3 ⇒ **它比 StyleTrigger 弱两档，
+           压根改不动**。这与 Expander 那边「输给 Template」的成因不同
+           （那边=2，这边=1），但结论一致：**改资源键**。
+           资源键是那些 StyleTrigger setter 里 `{DynamicResource …}` 的来源，
+           改源头就绕过了优先级之争。
+
+           ⚠️ 必须写在**这个** `Styles.Resources` 里（同 Expander 那段的警告）：
+           `Styles.Resources` 是同一个属性，第二次赋值会让先声明的整份
+           ResourceDictionary 失效，症状是 headless 挂死而非报错。
+
+           **键名全部经探针 `TryFindResource` 逐个证实存在**（不猜名字：
+           写一个不存在的键 = 死键，静默无效果）。唯一一个**不存在**的是
+           `CheckBoxCheckBackgroundStrokeChecked` —— Fluent 选中态**没有**
+           这个键（选中态方框靠 Fill 铺满，描边由 `…StrokeCheckedPointerOver`
+           等变体给），所以下面**刻意不写它**。
+           ======================================================== -->
+      <!-- 未选中态：这是 39 个复选框里最常见的形态（权限清单、追踪开关等
+           多数默认关）。Fluent 默认描边 `#99000000` 是**硬编码半透明黑** ——
+           暗色主题下等于「黑框贴黑底」，几乎看不见框在哪。
+           改为跟随 `BorderDefault`（与 TextBox 静息底线同一档），
+           hover 加深到 `BorderStrong`（与 `TextBox:pointerover` 同一手势：
+           只加深一档、不铺底）。 -->
+      <!-- 按下态：Fluent 默认给未选中框铺 `#66000000` 实色黑底。
+           这里改用 `BackgroundPressed`（本主题的按下语义色，亮/暗各自定义），
+           「按下」由淡底表达，不是把框涂黑。 -->
+
+      <!-- 选中态：**这是「Fluent 默认蓝」真正露出来的地方**。
+           实测默认 `CheckBoxCheckBackgroundFillChecked` = `#ff0078d7`，
+           而勾选框在选中时是整块铺满的实色 —— 39 个复选框一旦勾上，
+           屏幕上就出现一块与青绿主题无关的微软蓝。这正是用户说
+           「体现设计语言的通用控件样式没配齐」的最直接证据。
+           改为 `AccentPrimary`（青绿），hover / pressed 走
+           `AccentHover` / `AccentPressed` —— 与 `Button.primary` 三态同一组色阶，
+           所以复选框与主按钮的「被按下」手感是同一种，而不是各说各话。 -->
+      <!-- 禁用且选中：**不保留强调色**，退成中性描边色。
+           理由与 `Button.primary:disabled` 那条完全一致（见按钮禁用态注释）：
+           半透明的青绿会变成一块浑浊的灰绿，比中性灰更难看，
+           而且「看着像能点但点不动」反而误导。
+           这里用 `BorderStrong` 而非 Fluent 默认的 `#33000000`：
+           后者是硬编码半透明黑，暗色主题下等于框整个消失。 -->
+      <!-- ⚠️ 这里**没有** `CheckBoxCheckBackgroundStrokeChecked` ——
+           探针实测该键在 Fluent 12.0.5 里**不存在**（`TryFindResource`=False）。
+           选中态方框靠 Fill 铺满，无需描边。写一个不存在的键是死键：
+           不报错、不生效，纯粹增加「看着配齐了」的错觉。
+           但 hover / pressed / disabled 三个变体**确实存在**且默认值是硬编码蓝，
+           必须覆盖，否则悬停选中的复选框会露出一圈 `#ff269fff` 蓝边。 -->
+      <!-- 勾号：走 `TextOnAccent` 而不是硬编码 `White`（Fluent 默认就是 `White`）。
+           `TextOnAccent` 在纸墨 / 高对比等主题下已按对比度调过，
+           `UI组件状态表.md:46` 也明确要求「主按钮多用 text-white；应改读 text-on-accent」——
+           同一条规定，复选框的勾号是同一类「压在强调色上的前景」。
+           禁用态的勾号也一并给：它此时压在 BorderStrong 上，仍需反白才看得见。 -->
+
+      <!-- 三态（Indeterminate）：本仓库当前**没有**用到三态复选框
+           （全部 39 处都是二态 `IsChecked` 双向绑定）。
+           ⚠️ 但这批键**不是死样式**，理由与「不给零使用的控件写样式」不冲突：
+           它们不是我新造的选择器，而是**Fluent 已经在用的键**——
+           Fluent 的 `:indeterminate` 样式无条件引用它们，默认值就是那块蓝
+           （实测 `…FillIndeterminate` = `#ff0078d7`）。
+           任何一处将来把 `IsChecked` 换成 `bool?`（权限清单的「部分继承」是
+           最可能的场景），蓝色会**立刻**冒出来而没有任何东西会报错。
+           覆盖它们的成本是三行、收益是关掉一条静默回归通道。
+           走 `AccentPrimary` 同色：三态与选中态在本产品里是同一语义家族。 -->
+
+      <!-- 标签文字：Fluent 三态九个 Foreground 键的默认值实测**全是硬编码
+           `Black`**（不是「跟随继承的 Foreground」）——这与 Expander 那边
+           踩到的完全同一个坑。后果：**暗色主题下所有复选框的文案是纯黑贴深底**，
+           整行文字消失。全仓 39 处、其中约 30 处在配置页（权限、追踪、检索开关），
+           也就是暗色主题下配置页几乎所有开关的文案都读不出来。
+           ⚠️ 这条与「选中态蓝色」是**两个独立缺陷**，修一个不会连带修另一个。
+           禁用态用 `TextSubtle` 而非默认 `#66000000`（同样是硬编码黑）：
+           `opacity-50` 那一档由下方 `CheckBox:disabled` 的 Opacity 统一承担，
+           这里只保证「即使不降透明度，字色本身也是主题内的弱色」。 -->
+      <!-- Fluent 默认 32：与 `TextBox` 的 MinHeight 同值，但复选框没有输入框那样的
+           内距需求，32 会让成组排列的权限清单之间出现明显空档。
+           28 与 `ContextMenu MenuItem` 的 30 同一密度带，仍满足触控最小命中高度。 -->
+      <x:Double x:Key="CheckBoxMinHeight">28</x:Double>
+
+      <!-- ========================================================
+           U184：Slider 资源键覆盖。
+
+           **原缺陷**：3 处 Slider（`SpectrumColorPicker` 的 RGB 三条）
+           主题里唯一一条样式是 `<Setter Property="Minimum" Value="0" />`——
+           一个**布尔式的取值下限**，不是视觉。实测三个部件全是 Fluent 蓝：
+             PART_DecreaseButton（已走过的轨） = `#ff0078d7`
+             thumb（滑块）                     = `#ff0078d7`
+             TrackBackground（未走的轨）       = `#66000000` 硬编码半透明黑
+           `UI组件状态表.md:56` 规定「slider → track `bg-hover`，
+           thumb `brand-primary`」——**track 与 thumb 分别配色，规范从未落地**。
+
+           ⚠️ 讽刺的是这 3 处正是**取色器**：用户在这里挑主题强调色，
+           而滑条本身是微软蓝，改完主题色它也不跟着变。
+
+           覆盖路线同 CheckBox / Expander：探针实测 `thumb.Background`、
+           `PART_DecreaseButton.Background`、`TrackBackground.Background`
+           **全部是 `Template` 优先级（=2）**，`/template/` 选择器（=3）改不动
+           ⇒ 走资源键。下列键名均经 `TryFindResource` 证实存在。
+           ======================================================== -->
+      <!-- 未走过的轨：规范要求 `bg-hover`。本主题的 `BackgroundHover` 就是
+           半透明中性色（亮色 `#14000000` / 暗色各自定义），语义与规范一致，
+           且**天然适配双主题**——Fluent 默认那个 `#66000000` 是硬编码黑，
+           暗色主题下轨道会比背景更黑，看起来像一道凹痕而不是轨道。 -->
+      <!-- 禁用态的轨：Fluent 默认 `#ffcccccc` 是**不透明**硬编码浅灰，
+           暗色主题下会变成一条亮灰杠、比启用时更显眼（正好反了）。
+           改用 `BorderMuted`（本主题最淡的边线色，双主题各自定义）。 -->
+      <!-- 已走过的轨（值段）：规范把 thumb 定为 brand-primary，值段与 thumb
+           同属「当前值」这一语义，取同色 —— 于是「已选到哪」是一条连续的青绿，
+           而不是「蓝轨 + 蓝球」。三态跟随 AccentPrimary/Hover/Pressed 色阶，
+           与 Button.primary、CheckBox 选中态同一组，全产品一个答案。 -->
+      <!-- 滑块本体：规范明写 thumb `brand-primary`。 -->
+      <!-- 禁用滑块：同 CheckBox 禁用态的取舍——不留强调色，退中性。 -->
+      <!-- 刻度条：本仓库 3 处 Slider 都没开 TickBar（实测两个 TickBar
+           `IsVisible=False`）。**仍覆盖**的理由与 CheckBox 三态键相同：
+           这是 Fluent 已在引用的键、默认值是硬编码黑，
+           任何一处将来加上 `TickFrequency` 就会冒出黑刻度而无人报错。
+           ⚠️ 探针实测**没有** `SliderTickBarFillPointerOver` / `…Pressed`
+           这两个键（TryFindResource=False），所以此处刻意只写存在的两个。 -->
     </ResourceDictionary>
   </Styles.Resources>
 
   <!-- ============================ 全局排版（字体统一） ============================ -->
+
   <Style Selector="Window">
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Ui}" />
     <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Body}" />
@@ -792,6 +1112,55 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
     <Setter Property="BorderThickness" Value="0" />
   </Style>
+
+  <!-- ============================================================
+       U178-D：左侧栏折叠是 160px 宽度硬跳（224 ⇄ 64 一帧跳完，图标瞬移）。
+       右栏/底栏早有滑入淡入（上面 dock-rail 那套），侧栏只是没用上——
+       所以这里**复用同一种语汇**（位移/淡入 + CubicEaseOut），不另造一套曲线。
+
+       与 dock-rail 的差别只有一处、且是必须的：侧栏是**常驻**控件，
+       它的开合不是「从无到有进场」而是「宽度就地变化」，
+       所以载体是 `Width` 的 DoubleTransition，而不是 RenderTransform。
+       位移做不到这件事——RenderTransform 不参与布局，右侧内容区不会跟着让位，
+       侧栏会**压在内容上滑动**而不是把内容推开。
+
+       180ms：既有 74 处过渡中 67 处落在 120–180ms，本条取该区间上限。
+       取上限而非中段是因为这是全应用位移距离最长的一次过渡（160px）——
+       同样时长下位移越长速度越快，140ms 的 160px 观感上仍接近瞬移。
+       ============================================================ -->
+  <Style Selector="Border.app-rail">
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Width" Duration="0:0:0.18" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- 侧栏内两套内容（展开态的「图标+文字」与折叠态的「纯图标」）原先靠
+       IsVisible 互斥硬切：宽度即便平滑了，文字仍在某一帧凭空出现/消失。
+       改为 Opacity 淡入淡出后，文字是「随宽度长出来」而不是「弹出来」。
+
+       ⚠️ 这里刻意**只做淡出、不做布局折叠**（保持 IsVisible 由绑定控制、
+       只在其上叠一层 opacity 过渡）——两套内容若同时参与布局会互相顶宽，
+       折叠态 64px 装不下展开态的文字，会在过渡期间把侧栏顶宽再缩回，
+       比硬切更难看。120ms 取区间下限：文案淡出该比宽度收拢先完成，
+       否则文字会被裁在导轨边缘上。
+
+       ⚠️ 选择器必须逐类型列全（`Grid` / `StackPanel` / `BrandLogo`）：
+       AGENTS.md 记着裸 `.rail-face` 会编译期报 AVLN2200，
+       而漏掉一个类型的症状是「侧栏里有的面淡入、有的瞬现」——
+       比全都硬切更像缺陷。当前 8 个互斥面的类型就是这三种，
+       用例 `SidebarFaces_AllCarryFadeClass` 钉住了「8 个都挂上」。 -->
+  <Style Selector="Border.app-rail Grid.rail-face,
+                   Border.app-rail StackPanel.rail-face,
+                   Border.app-rail ctl|BrandLogo.rail-face">
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.12" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
   <!-- U152：这里曾有一条 `Border.rail-lightline`（GlassBorder 底 + 不吃点击）。
        「迎光高光」这个手势最后是**在视图里内联** 1px Border + Ariadne.GlassBorder 落地的
        （见 WorkspacePageView.axaml 的节点卡顶缘光边），这个类全仓零挂载。
@@ -2084,13 +2453,72 @@
   <!-- U151/U152：这里曾有一条 `TextBox.document-editor`（衬线 + 16px + LineHeight 30）。
        正文编辑早就换成 ae:TextEditor 了，该类全仓零挂载——留着的唯一作用是
        **冒充「行高已经统一过了」**，正文两态行高差 33% 就是这么被漏掉的。
-       行高现由 Ariadne.Reading.LineHeight 单一定义，勿再按 TextBox 补一份。 -->
-  <Style Selector="TextBox.detail-editor">
+       行高现由 Ariadne.Reading.LineHeight 单一定义，勿再按 TextBox 补一份。
+
+       U150/U115：`TextBox.detail-editor` 曾在这里（槽色 + BorderMuted + Mono 12 + LineHeight 18）。
+       提示词编辑器已换成 `ctl:PromptTemplateEditor`（AvaloniaEdit 子类，因为
+       TextBox 办不到给 `{{}}` 挂颜色与命中区），该类随之全仓零挂载 ⇒ **同批删掉**。
+       ⚠️ **不要在这里按 TextBox 补一份**——`PromptTemplateEditor` 不是 TextBox，
+       选择器根本命不中它，那只会造出第二条死样式（正是 U152 的形态）。
+
+       ⚠️ **这里不要写 LineHeight**（旧样式有一条 `LineHeight=18`，已随之删掉）。
+       AvaloniaEdit 自己排版、**不读 TextBlock.LineHeight**，写了是静默无效——
+       U151 就是这么以为「行高已统一」的。提示词是模板不是长篇正文，
+       按 AvaloniaEdit 默认的 1.16 倍读就够紧凑，不需要 Ariadne.Reading.LineHeight 那档松行距。
+
+       ⚠️ 字体走 `Ariadne.Font.Mono`：它的 fallback 链里有 Sarasa Mono SC /
+       WenQuanYi Zen Hei Mono——Cascadia Code 不含中文，没有 fallback 会渲染成豆腐块。
+       AvaloniaEdit 不继承 TextBox 样式，这条必须显式给。 -->
+  <Style Selector="ctl|PromptTemplateEditor">
     <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundElevated}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
     <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Mono}" />
-    <Setter Property="FontSize" Value="12" />
-    <Setter Property="LineHeight" Value="18" />
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Caption}" />
+  </Style>
+
+  <!-- ============================================================
+       U184：CheckBox 的样式层（配色部分在文件上方的资源键覆盖里，
+       这里只放**资源键表达不了**的两件事）。
+
+       为什么分两处而不是都写在这里：勾选框本体的 Background / BorderBrush /
+       勾号 Fill 在 Fluent 里是 `StyleTrigger`（=1）优先级，
+       `/template/` 选择器（Style=3）比它弱两档、**改不动**（探针实测）。
+       ⇒ 配色只能走资源键。而下面这两条改的是 **CheckBox 宿主自身**的属性
+       （`Opacity` / `Transitions` 都不在模板部件上），宿主级 Style 打得到。
+       ============================================================ -->
+  <!-- 禁用：`UI组件状态表.md:54` 对 checkbox 的规定是 `opacity-50`。
+       与 `TextBox:disabled`（同样 0.5）取同一档，而不是按钮那档 0.45——
+       输入控件与按钮的禁用观感在规范里本来就是两个值（§1.3 按钮是 opacity-60/50，
+       §1.4 输入控件 checkbox 是 opacity-50），这里跟输入控件。
+
+       ⚠️ 为什么**还是需要**这条，尽管上面已给了 `…Disabled` 系列色键：
+       那些键只管勾选框那 20×20 的方框和文字色，管不到**整行**。
+       实测有 5 处 CheckBox 用 `IsEnabled="{Binding AllowNetwork}"` 级联禁用
+       （网络关掉后 WebSearch / HttpSkill / WasmNetwork 三项随之不可用），
+       没有整体降透明的话，「这一行现在不可用」这个信息只体现在框和字的色差上，
+       太弱。降透明是让整行一眼看出「这组暂时不参与」。 -->
+  <Style Selector="CheckBox:disabled">
+    <Setter Property="Opacity" Value="0.5" />
+  </Style>
+  <!-- 勾选/取消的颜色补间。140ms 是全仓最高频的过渡时长（既有 74 条里 25 条用它），
+       hover 与状态切换一律取它，保持全局节奏一致。
+
+       ⚠️ 过渡挂在**宿主**上而不是 `Border#NormalRectangle`：
+       那个部件的 Background 是 StyleTrigger 优先级，`/template/` 选择器
+       连 Setter 都递不进去（这也是配色走资源键的同一个原因）。
+       挂宿主的 Foreground 过渡能让**标签文字**的色变平滑；
+       方框本体的补间由 Fluent 自己模板里的过渡承担（它有，实测切换不是硬跳）。
+       ⚠️ 刻意**不给 Opacity 加过渡**：禁用态多由绑定瞬时翻转，
+       补间会让「不可用」这个信息延迟 140ms 才完全呈现，
+       而这类级联禁用往往紧跟用户刚点的那一下，延迟会被读成卡顿。 -->
+  <Style Selector="CheckBox">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Foreground" Duration="0:0:0.14" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
   </Style>
 
   <!-- ComboBox：与 TextBox **同一套输入线**。
@@ -2552,4 +2980,251 @@
     <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.Dialog}" />
     <Setter Property="ClipToBounds" Value="True" />
   </Style>
+
+  <!-- ============================================================
+       U178-E：全局弹窗原先零进场动效——遮罩靠 IsVisible 直接翻，
+       面板（含一层 ExperimentalAcrylicBorder）从无到有硬闪。
+       毛玻璃硬闪比不做毛玻璃更廉价，这是全应用观感最差的一处。
+
+       ⚠️ 本条**只做淡入与缩放，不碰 acrylic 实现**：
+       `BackgroundSource` 只有 None/Digger 两个值，而 Digger 会挖穿所有渲染层
+       （画布点阵网格本身就是渲染层，结果会露出桌面壁纸）——
+       「真毛玻璃」在本项目已定论为不可能，别再往那个方向试。
+       ============================================================ -->
+
+  <!-- 遮罩静息态 = **关闭态**（透明 + 关闭时长）。
+       这个方向的选择是本条的关键设计：把「关」放在基础样式、「开」放在带类的样式，
+       于是 Avalonia 自动给出两个方向不同的时长——
+       过渡时长取自**将要进入的那个状态**的样式，
+       进入 .dialog-open 用 160/140ms，退回基础态用 128/112ms。
+       不必写任何 code-behind，也不会出现「开有动效、关是硬切」的半成品。
+
+       **为什么关闭取入场的 0.8 倍**（160→128、140→112）：
+       打开时用户在等界面把新内容交代清楚，稍慢一点读作「郑重」；
+       关闭时决定已经做完，用户想立刻回到原来的任务，多余的等待一律读作「卡了一下」。
+       0.8 是桌面惯例里最常见的比值——快到不拖沓，又没快到让人看不出
+       这是同一个动作在反向播放（那就退化成硬切了）。 -->
+  <Style Selector="Border.dialog-scrim">
+    <Setter Property="Opacity" Value="0" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.112" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.dialog-scrim.dialog-open">
+    <Setter Property="Opacity" Value="1" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.14" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- 面板：160ms 淡入 + 0.96→1.0 缩放，锚在中心（弹窗本身居中，
+       所以它是「从中间长出来」而不是从某个角飞入）。
+       语汇（CubicEaseOut）与既有 dock-rail / rail-nav 一致，**刻意不用过冲曲线**——
+       确认弹窗常承载破坏性操作（删除、放弃修改），过冲会让它显得轻浮。
+       过冲（BackEaseOut）留给滑块那类连续手势。
+
+       ⚠️ 类挂在**常驻**的 ContentControl 上，不挂 ConfirmDialogView 里的
+       `Border.glass-dialog`：后者随 ActiveDialog 创建/销毁，控件都没了，
+       退场动效无处可播。挂在常驻宿主上，一并把它内部那层
+       ExperimentalAcrylicBorder 的不透明度也带着走（子级渲染继承父级 Opacity），
+       正好治掉「毛玻璃从无到有硬闪」这个观感最差的点。 -->
+  <Style Selector="ContentControl.dialog-panel">
+    <Setter Property="Opacity" Value="0" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="scale(0.96)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.128" Easing="CubicEaseOut" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.128" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ContentControl.dialog-panel.dialog-open">
+    <Setter Property="Opacity" Value="1" />
+    <Setter Property="RenderTransform" Value="scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.16" Easing="CubicEaseOut" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <!-- ============================================================
+       U178-F / U164-B：Expander 全项目 14 处（SettingsPageView 8、
+       WorksPageView 5、GitPageView 1），**此前零个自定义样式**——
+       全部走 FluentTheme 默认外观，与项目其余控件（节点卡、settings-section、
+       chip、detail-row）完全不同的语汇，所以显得突兀；且展开是瞬变。
+
+       ⚠️⚠️ **本块的写法由一次实测决定，不要照直觉改。**
+       探针（Avalonia 12.0.5 + FluentTheme，headless 实跑）给出的部件树与优先级：
+
+         DockPanel
+           ToggleButton  Name=ExpanderHeader        ← 宿主级，Style 打得到
+             Border      Name=ToggleButtonBackground  ← Background/Border* = Template
+             Grid        Name=ToggleButtonGrid
+               ContentPresenter Name=PART_ContentPresenter
+               Border    Name=ExpandCollapseChevronBorder ← 全属性 = Template
+                 Path    Name=ExpandCollapseChevron      ← Data=Style, Stroke=Template
+           Border        Name=ExpanderContent        ← Background/Padding = Template
+                                                       BorderThickness/CornerRadius = StyleTrigger
+
+       **BindingPriority 数值小者胜：LocalValue=0 < StyleTrigger=1 < Template=2 < Style=3。**
+       ⇒ 凡上面标 `Template` 的属性，`/template/` 选择器（Style 优先级 3）**改不动**。
+       实测印证：`ExpanderHeader` 自己的 Background 是 `Style`（可改），
+       而它内部 `Border#ToggleButtonBackground` 的同名属性是 `Template`（改不动）——
+       同一个视觉效果，打宿主行、打内部部件不行。
+
+       **所以覆盖走「改 Fluent 的资源键」这条路**，不是 /template/ 选择器。
+       探针确认下列键在 12.0.5 里存在（TryFindResource=True）：
+         ExpanderHeaderBackground / ...BorderBrush / ...Foreground / ...BorderThickness
+         / ...Padding / ExpanderContentBackground / ...BorderBrush / ...Padding
+         / ExpanderChevronForeground / ...Background / ...BorderBrush
+         / ExpanderMinHeight / ExpanderChevronButtonSize / ExpanderContentDownBorderThickness
+       不存在（别写，写了是死键）：ExpanderChevron*Glyph、ExpanderHeaderCornerRadius。
+       资源键是 Template 里 TemplateBinding 的**来源**，改源头就绕过了优先级之争。
+
+       图标：Fluent 的 chevron 实测是 `Path.Data` = StreamGeometry（矢量几何，
+       **不是图标字体**）⇒「禁用图标字体」这条硬约束本来就满足，无须替换。
+       为什么不替换、以及替换的具体风险，见下方那条 Style 的注释。
+       ============================================================ -->
+  <!-- 头部圆角：Fluent 靠 StyleTrigger 在展开/收起间切 3,3,0,0 ⇄ 3,3,3,3
+       （优先级 1，Style 打不过）。但 CornerRadius 在 ToggleButton **宿主**上是
+       StyleTrigger、在内部 Border#ToggleButtonBackground 上是 Template——
+       两条路都比 Style 强。⇒ 圆角这一项**放弃统一**，保留 Fluent 的 3px。
+       写在注释里是为了让下一个人别再试一遍：这不是漏做，是打不过。
+       （真要改只剩「整份替换 ControlTheme」一条路，代价远大于 3px 圆角的收益。） -->
+
+  <!-- 头部：hover 时整行底色淡入加深、文字与箭头同步转深，
+       让「这行可以点」成为手感而非猜测。
+       140ms 是全仓最高频的过渡时长（25 处），hover 一律用它，保持节奏一致。 -->
+  <Style Selector="Expander /template/ ToggleButton#ExpanderHeader">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.14" Easing="CubicEaseOut" />
+        <BrushTransition Property="Foreground" Duration="0:0:0.14" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- 箭头换成项目自己的矢量 Geometry。
+       ⚠️ **选择器必须穿两层 `/template/`**，这是实测踩出来的：
+       chevron 不在 Expander 的模板里，而在 `ToggleButton#ExpanderHeader`
+       **自己的**模板里（Fluent 给那个 ToggleButton 挂了独立 ControlTheme）。
+       单层 `Expander /template/ Path#ExpandCollapseChevron` 编译通过、
+       运行时**静默不匹配**（实测 Width 停在 NaN、Transitions 为空）——
+       `/template/` 只下降一层模板边界，不会穿透嵌套模板。
+       同理可推：以后要改任何 Fluent 复合控件的深层部件，先数模板层数。 -->
+  <!-- 箭头：**刻意不替换 Data**，这与 U164-B 的原始建议相反，理由是实测推翻了它的前提。
+       U164-B 说「FluentTheme 默认用它自己的图标资源，按『图标用矢量 Geometry、
+       禁用图标字体』该换掉，默认那个在 Linux 上有风险」。
+       探针实测：Fluent 的 chevron 是 `Path` + `Data`=StreamGeometry（**矢量几何**），
+       不是 Segoe Fluent Icons 那类图标字体 ⇒ **硬约束本来就已满足**，
+       Linux 豆腐块风险不存在，替换的收益是零。
+
+       而替换的**代价是真实的**：模板给 chevron 挂了一个 RotateTransform，
+       实测 `Angle` 的 BindingPriority 是 `Animation`（Avalonia 的 Transition
+       就写在这个优先级上）——Style/Template 都盖不住，且两态读数恒为 180。
+       换成本项目的 ChevronDown（apex 在下）后，它与那个 180° 复合出的朝向
+       在 headless 里**无法判定**（两态同值，像素探针也没能给出可读结果）。
+       ⇒ 拿零收益去换一个「可能整个箭头反了、且本机测不出来」的风险，不做。
+
+       **只改颜色与尺寸**（这两项探针已验证生效）：
+       Stroke 由 ExpanderChevronForeground 资源键给到（实测 = TextSecondary），
+       hover 转主色的过渡挂在这里，140ms 与头部同步。 -->
+  <Style Selector="Expander /template/ ToggleButton#ExpanderHeader /template/ Path#ExpandCollapseChevron">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Stroke" Duration="0:0:0.14" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- ⚠️ **这里刻意没有内容区淡入**，别再加回来。
+       我先挂过 `Border#ExpanderContent` 的 Opacity 过渡，探针证明它是死的：
+       Fluent 用 `IsVisible`（Template 优先级）切内容区，
+       `Opacity` 两态恒为 1 —— 没有任何东西驱动它，过渡永远不触发。
+       而 IsVisible=false 的控件在 Avalonia 12 里根本不参与渲染
+       （MeasureCore/ArrangeCore 整个包在 if (IsVisible) 里），
+       所以也不能靠它做淡出。
+
+       ⇒ 展开动效的实际承载是「箭头旋转（Fluent 自带关键帧）+ 头部 hover 反馈」。
+       想做真正的高度展开动画只剩「整份替换 Expander 的 ControlTheme」一条路
+       （Height 从 Auto 到具体值不可插值，得自己量内容高度再动画），
+       代价远超收益，本轮不做。 -->
+  <!-- ============================================================
+       U178-D/E/F 的「减少动态效果」门控。
+
+       **背景：这是一条既有缺口，不是本轮引入的。** 主题文件里 `reduce-motion`
+       原本出现 0 次 ⇒ 全部 74 条既有过渡都不受该偏好管；唯一在用的
+       `UserControl.reduce-motion` 那 5 条只作用在 `WorkspacePageView` 内部。
+       本轮只补**自己新加的这 5 条**（侧栏宽度 / rail-face 淡入 / 遮罩 /
+       弹窗面板 / Expander 头部），刻意不动那 74 条——同一份文件此刻有别的
+       施工在进行，大面积改动只会制造冲突。剩余缺口已记入 U178 文档。
+
+       **做法可行性是实测过的，不是照猜**（headless 探针，跑完已删）：
+         无 class          → Transitions = COUNT=1 [DoubleTransition]
+         加 reduce-motion  → Transitions = EMPTY(0)
+         再摘掉            → Transitions = COUNT=1 [DoubleTransition]
+       即：这组覆盖**能**清掉基础样式里的 `Transitions`，且可逆。
+
+       ⚠️ **胜负不是靠「声明在后面」——我先前的这个判断被变异测试推翻了。**
+       变异形态：把这一整块搬到文件**最前面**（远早于 `Border.app-rail` 基础样式），
+       预期它该失效、用例该红——**实际仍然绿、门控照样生效**。
+       ⇒ 真正的原因是**选择器更具体**（`Window.reduce-motion Border.app-rail`
+       比 `Border.app-rail` 多一层带类祖先），Avalonia 会让更具体的那条赢，
+       与文档顺序无关。「同优先级按文档顺序后者胜」（U154）只适用于
+       **选择器特异性相同**的两条规则，例如 `TextBox` 与 `TextBox.search-input`
+       各自被通用规则覆盖那种情形——别把那条经验推广成普适规则。
+       所以本块留在末尾只是为了可读性（门控集中一处），不是正确性所必需。
+
+       置空 `<Transitions />` 而不是把 Duration 设 0：空集合让属性变化走
+       直接赋值的快路径，0 时长仍要走一遍动画调度（同 MainWindow
+       `ApplyPageTransition` 里「置 null 而非 0」的取舍，保持一致）。
+
+       类由 `MainWindow.ApplyMotionPreferenceClass()` 挂在 Window 上，
+       所以这些选择器一律以 `Window.reduce-motion` 起头。
+       ============================================================ -->
+  <Style Selector="Window.reduce-motion Border.app-rail">
+    <Setter Property="Transitions">
+      <Transitions />
+    </Setter>
+  </Style>
+  <Style Selector="Window.reduce-motion Border.app-rail Grid.rail-face,
+                   Window.reduce-motion Border.app-rail StackPanel.rail-face,
+                   Window.reduce-motion Border.app-rail ctl|BrandLogo.rail-face">
+    <Setter Property="Transitions">
+      <Transitions />
+    </Setter>
+  </Style>
+  <!-- 遮罩与面板：两态各自的样式都要置空，否则「开」那一侧仍会跑动画
+       （过渡时长取自将要进入的那个状态的样式，见上文 dialog-scrim 一节）。 -->
+  <Style Selector="Window.reduce-motion Border.dialog-scrim,
+                   Window.reduce-motion Border.dialog-scrim.dialog-open,
+                   Window.reduce-motion ContentControl.dialog-panel,
+                   Window.reduce-motion ContentControl.dialog-panel.dialog-open">
+    <Setter Property="Transitions">
+      <Transitions />
+    </Setter>
+  </Style>
+  <!-- 弹窗面板还要把缩放归位：只摘过渡的话，面板会**停在 scale(0.96)**
+       ——静止的缩小态是可见的视觉缺陷（面板比该有的小一圈），
+       比"没有动效"更糟。减少动效意味着直接呈现终态，不是呈现动画的起始帧。 -->
+  <Style Selector="Window.reduce-motion ContentControl.dialog-panel">
+    <Setter Property="RenderTransform" Value="scale(1)" />
+  </Style>
+  <Style Selector="Window.reduce-motion Expander /template/ ToggleButton#ExpanderHeader">
+    <Setter Property="Transitions">
+      <Transitions />
+    </Setter>
+  </Style>
+  <Style Selector="Window.reduce-motion Expander /template/ ToggleButton#ExpanderHeader /template/ Path#ExpandCollapseChevron">
+    <Setter Property="Transitions">
+      <Transitions />
+    </Setter>
+  </Style>
+
 </Styles>

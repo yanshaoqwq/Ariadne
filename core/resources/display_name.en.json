@@ -1321,5 +1321,6 @@
   "ui.run_log.message.workflow.run.succeeded": "Run succeeded",
   "ui.run_log.message.workflow.run.stopped": "Run stopped",
   "ui.run_log.message.workflow.run.paused": "Run paused, awaiting confirmation",
-  "ui.dialog.settings.remove_provider.cross_project": "⚠ This removes it from the app-level provider catalog; other projects will no longer see this provider."
+  "ui.dialog.settings.remove_provider.cross_project": "⚠ This removes it from the app-level provider catalog; other projects will no longer see this provider.",
+  "ui.node.prompt.reference_hint": "Ctrl+click a ‹reference› to expand or collapse the source text; the model always receives it expanded."
 }

@@ -37,6 +37,7 @@ public partial class MainWindow : Window
         AppIconPainter.IconColorsChanged += OnIconColorsChanged;
         MotionPreferences.Changed += OnMotionPreferencesChanged;
         ApplyPageTransition();
+        ApplyMotionPreferenceClass();
         Closed += (_, _) =>
         {
             DetachProjectFolderPicker();
@@ -46,7 +47,32 @@ public partial class MainWindow : Window
     }
 
     private void OnMotionPreferencesChanged(object? sender, EventArgs e)
-        => Dispatcher.UIThread.Post(ApplyPageTransition);
+        => Dispatcher.UIThread.Post(() =>
+        {
+            ApplyPageTransition();
+            ApplyMotionPreferenceClass();
+        });
+
+    /// <summary>
+    /// U178-D/E/F：把「减少动态效果」偏好投射成 Window 上的一个 class，
+    /// 供主题里 `Window.reduce-motion …` 那组样式把 `Transitions` 置空。
+    ///
+    /// **为什么用 class 而不是像 <see cref="ApplyPageTransition"/> 那样直接赋值**：
+    /// 这轮的 5 条过渡分散在主题文件的 5 个选择器上（侧栏宽度 / rail-face /
+    /// 遮罩 / 弹窗面板 / Expander 头部），其中两条还落在 Fluent 的模板内部
+    /// （`/template/` 层），code-behind 根本拿不到那些控件实例。
+    /// 而 class 是声明式的，能一次覆盖到模板内部——这是唯一可行的路径。
+    ///
+    /// 反过来 `PageTransition` 必须走 code-behind：它是对象属性、没有样式承载。
+    /// 两种做法并存不是不一致，是各自唯一可行的那条。
+    ///
+    /// ⚠️ 覆盖能赢是因为**选择器更具体**（`Window.reduce-motion Border.app-rail`
+    /// 比 `Border.app-rail` 多一层带类祖先），不是因为声明在后面——
+    /// 后者那个说法被变异测试推翻了（把门控块搬到文件最前面，门控照样生效）。
+    /// 已实测可逆：加类 ⇒ Transitions 变空集，摘类 ⇒ 恢复原过渡。
+    /// </summary>
+    private void ApplyMotionPreferenceClass()
+        => Classes.Set("reduce-motion", MotionPreferences.ReduceMotion);
 
     /// <summary>
     /// U178-A：切页过渡随「减少动效」偏好挂/摘。

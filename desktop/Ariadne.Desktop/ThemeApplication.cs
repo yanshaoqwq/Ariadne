@@ -87,6 +87,47 @@ public static class ThemeApplication
         "Ariadne.LogErrorBg",
         "Ariadne.LogWarningBg",
         "Ariadne.LogInfoBg",
+        // U184：FluentTheme 自己的资源键（**不带 Ariadne. 前缀**）。
+        //
+        // 为什么必须由个性化覆盖层一起改写：CheckBox 的勾选框、Slider 的滑块与
+        // 值段，视觉全部来自 Fluent 那套键（它们在模板里是 StyleTrigger/Template
+        // 优先级，`/template/` 选择器改不动，只能改键本身）。
+        // 而主题字典里那份定义只能用 `StaticResource` —— 实测 `DynamicResource`
+        // 写在 `ThemeDictionaries` 内部时**不带变体上下文**，暗色主题下会取到
+        // 亮色的值（复选框标签在暗底上变深色、整行看不见）。
+        // `StaticResource` 修好了明暗，代价是**加载后就锁定**：
+        // 实测用户把强调色换成橙色 `#ffb45309` 后，`Ariadne.Color.AccentPrimary`
+        // 确实变了，而勾选框与滑块仍是青绿 `#ff2e726b` 纹丝不动 ——
+        // 与本文件上面那条注释记的「渐变面纹丝不动」是**同一个缺陷的另一处犯案**。
+        //
+        // ⇒ 两难的解法是分工：明暗由字典里的 StaticResource 负责，
+        // 个性化换色由这里的运行时覆盖负责。两条路各管一件事，都不越界。
+        //
+        // ⚠️ 只列**跟随强调色**的那些键。CheckBox 的 Foreground 系列跟随文字色、
+        // 未选中描边跟随边线色，它们在个性化里不由强调色决定，
+        // 由字典的明暗两份各自给对 —— 列进来只会在 Reset 时误删。
+        "CheckBoxCheckBackgroundFillChecked",
+        "CheckBoxCheckBackgroundFillCheckedPointerOver",
+        "CheckBoxCheckBackgroundFillCheckedPressed",
+        "CheckBoxCheckBackgroundStrokeCheckedPointerOver",
+        "CheckBoxCheckBackgroundFillIndeterminate",
+        "CheckBoxCheckBackgroundFillIndeterminatePointerOver",
+        "CheckBoxCheckBackgroundFillIndeterminatePressed",
+        "CheckBoxCheckBackgroundStrokeIndeterminate",
+        "CheckBoxCheckBackgroundStrokeIndeterminatePointerOver",
+        "CheckBoxCheckBackgroundStrokeIndeterminatePressed",
+        "CheckBoxCheckGlyphForegroundChecked",
+        "CheckBoxCheckGlyphForegroundCheckedPointerOver",
+        "CheckBoxCheckGlyphForegroundCheckedPressed",
+        "CheckBoxCheckGlyphForegroundIndeterminate",
+        "CheckBoxCheckGlyphForegroundIndeterminatePointerOver",
+        "CheckBoxCheckGlyphForegroundIndeterminatePressed",
+        "SliderTrackValueFill",
+        "SliderTrackValueFillPointerOver",
+        "SliderTrackValueFillPressed",
+        "SliderThumbBackground",
+        "SliderThumbBackgroundPointerOver",
+        "SliderThumbBackgroundPressed",
     };
 
     private static string? _lastTheme;
@@ -254,6 +295,35 @@ public static class ThemeApplication
         SetBrush(resources, "Ariadne.LogErrorBg", WithAlpha(tokens.StatusError, 0x28));
         SetBrush(resources, "Ariadne.LogWarningBg", WithAlpha(tokens.StatusWarning, 0x28));
         SetBrush(resources, "Ariadne.LogInfoBg", WithAlpha(tokens.StatusInfo, 0x28));
+
+        // U184：FluentTheme 的复选框 / 滑块键。理由见 OverlayBrushKeys 里那段注释 ——
+        // 主题字典只能用 StaticResource（否则暗色取到亮色值），于是个性化换色
+        // 必须在这里补一刀，否则勾选框与滑块永远停在预设青绿。
+        // 三态与选中态同属「当前值」语义家族，取同一组色阶；
+        // 勾号压在强调色上，跟随 TextOnAccent（它已按对比度算过）。
+        var accentLightHover = tokens.AccentHover;
+        SetBrush(resources, "CheckBoxCheckBackgroundFillChecked", tokens.AccentPrimary);
+        SetBrush(resources, "CheckBoxCheckBackgroundFillCheckedPointerOver", accentLightHover);
+        SetBrush(resources, "CheckBoxCheckBackgroundFillCheckedPressed", tokens.AccentPressed);
+        SetBrush(resources, "CheckBoxCheckBackgroundStrokeCheckedPointerOver", accentLightHover);
+        SetBrush(resources, "CheckBoxCheckBackgroundFillIndeterminate", tokens.AccentPrimary);
+        SetBrush(resources, "CheckBoxCheckBackgroundFillIndeterminatePointerOver", accentLightHover);
+        SetBrush(resources, "CheckBoxCheckBackgroundFillIndeterminatePressed", tokens.AccentPressed);
+        SetBrush(resources, "CheckBoxCheckBackgroundStrokeIndeterminate", tokens.AccentPrimary);
+        SetBrush(resources, "CheckBoxCheckBackgroundStrokeIndeterminatePointerOver", accentLightHover);
+        SetBrush(resources, "CheckBoxCheckBackgroundStrokeIndeterminatePressed", tokens.AccentPressed);
+        SetBrush(resources, "CheckBoxCheckGlyphForegroundChecked", tokens.TextOnAccent);
+        SetBrush(resources, "CheckBoxCheckGlyphForegroundCheckedPointerOver", tokens.TextOnAccent);
+        SetBrush(resources, "CheckBoxCheckGlyphForegroundCheckedPressed", tokens.TextOnAccent);
+        SetBrush(resources, "CheckBoxCheckGlyphForegroundIndeterminate", tokens.TextOnAccent);
+        SetBrush(resources, "CheckBoxCheckGlyphForegroundIndeterminatePointerOver", tokens.TextOnAccent);
+        SetBrush(resources, "CheckBoxCheckGlyphForegroundIndeterminatePressed", tokens.TextOnAccent);
+        SetBrush(resources, "SliderTrackValueFill", tokens.AccentPrimary);
+        SetBrush(resources, "SliderTrackValueFillPointerOver", accentLightHover);
+        SetBrush(resources, "SliderTrackValueFillPressed", tokens.AccentPressed);
+        SetBrush(resources, "SliderThumbBackground", tokens.AccentPrimary);
+        SetBrush(resources, "SliderThumbBackgroundPointerOver", accentLightHover);
+        SetBrush(resources, "SliderThumbBackgroundPressed", tokens.AccentPressed);
 
         // 颜色键（Ariadne.Color.*）：渐变笔刷（主操作按钮、欢迎页卡、空态插画）绑的是 Color
         // 而非 Brush，只覆盖上面那批 Brush 时它们仍读字典里写死的预设色，于是个性化换色后

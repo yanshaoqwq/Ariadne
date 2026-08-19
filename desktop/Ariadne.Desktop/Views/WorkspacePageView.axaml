@@ -2138,11 +2138,22 @@
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.ShowPromptEditor}">
                     <StackPanel Spacing="10">
                       <TextBlock Text="{Binding PromptTemplateText}" Classes="subtitle" />
-                      <TextBox Text="{Binding SelectedNode.PromptTemplate, Mode=TwoWay}" AutomationProperties.Name="{Binding PromptTemplateText}"
-                               AcceptsReturn="True"
-                               TextWrapping="Wrap"
-                               MinHeight="128"
-                               Classes="detail-editor" />
+                      <!-- U150/U115：从纯 TextBox 换成 AvaloniaEdit 子类。
+                           TextBox **办不到**给子串挂颜色与命中区（没有富文本呈现层），
+                           所以 `{{}}` 在里面就是普通文本——写错要跑一次工作流、
+                           花一次 LLM 钱才知道。
+                           ⚠️ 字体/字号/行高必须在控件里显式设：AvaloniaEdit 自己排版，
+                           不继承 TextBox 主题样式，也**不吃 TextBlock.LineHeight**
+                           （内联写了静默无效，U151 就是这么漏的）。
+                           ⚠️ `Text` 在 12.0.0 里不是 AvaloniaProperty，绑不上；
+                           走控件自带的 `BoundText`。 -->
+                      <ctl:PromptTemplateEditor BoundText="{Binding SelectedNode.PromptTemplate, Mode=TwoWay}"
+                                                AutomationProperties.Name="{Binding PromptTemplateText}"
+                                                MinHeight="128"
+                                                HorizontalScrollBarVisibility="Disabled"
+                                                VerticalScrollBarVisibility="Auto" />
+                      <TextBlock Text="{Binding PromptReferenceHintText}" Classes="caption"
+                                 TextWrapping="Wrap" />
                       <!-- 模型/预算/超时/断点：拆掉两列挤压网格，改行内属性表（与其余检查器分区同一语汇），
                            每项独占一行、键左值右，不再挤在一起。 -->
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
