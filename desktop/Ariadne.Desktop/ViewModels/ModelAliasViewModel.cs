@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+
 namespace Ariadne.Desktop.ViewModels;
 
 public sealed class ModelAliasViewModel : ViewModelBase
@@ -7,6 +9,7 @@ public sealed class ModelAliasViewModel : ViewModelBase
     private string _targetProviderId;
     private string _targetModelId;
     private WorkflowModelOption? _selectedTargetOption;
+    private ObservableCollection<WorkflowModelOption>? _availableLlmModelTargetOptions;
 
     public ModelAliasViewModel(
         string aliasId,
@@ -27,6 +30,20 @@ public sealed class ModelAliasViewModel : ViewModelBase
     public string AliasId { get; }
     public string DisplayNameKey { get; }
     public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
+
+    /// <summary>
+    /// U178-B：可选目标列表在本条别名上的投影。
+    ///
+    /// **共享同一个集合实例**（页面 VM 的 AvailableLlmModelTargetOptions），
+    /// 不是每条别名复制一份：复制会让 RebuildAvailableLlmModelOptions 之后各行选项不同步。
+    /// 换成投影是为了脱掉 per-item 的 `$parent[UserControl]` 祖先绑定（U178-B）。
+    /// </summary>
+    public ObservableCollection<WorkflowModelOption>? AvailableLlmModelTargetOptions
+    {
+        get => _availableLlmModelTargetOptions;
+        internal set => SetProperty(ref _availableLlmModelTargetOptions, value);
+    }
+
     public string TargetProviderId => _targetProviderId;
     public string TargetModelId => _targetModelId;
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_targetProviderId)

@@ -147,12 +147,21 @@
                     Margin="0,0,8,0"
                     VerticalAlignment="Center">
           <TextBlock Text="{Binding BudgetLabel}" Classes="caption" VerticalAlignment="Center" />
+          <!-- U194-E：余量分档驱动填充色与金额文字色。
+               条件类而非样式选择器比枚举：Avalonia 没有「按 DataContext 属性值匹配」的
+               选择器，`Classes.x="{Binding bool}"` 是唯一不需要 code-behind 的路子。
+               三档只挂两个类，normal 档不挂 —— 基础样式本来就是强调青绿。 -->
           <ProgressBar Width="64" Height="5" Minimum="0" Maximum="100"
-                       Value="{Binding BudgetUsagePercent}" VerticalAlignment="Center" />
+                       Classes.budget-warning="{Binding IsBudgetWarning}"
+                       Classes.budget-error="{Binding IsBudgetError}"
+                       Value="{Binding BudgetUsagePercent}" VerticalAlignment="Center"
+                       ToolTip.Tip="{Binding BudgetSeverityToolTipText}" />
           <TextBlock Text="{Binding BudgetStatusText}" Classes="caption"
+                     Classes.budget-warning="{Binding IsBudgetWarning}"
+                     Classes.budget-error="{Binding IsBudgetError}"
                      VerticalAlignment="Center" MaxWidth="90"
                      TextTrimming="CharacterEllipsis"
-                     ToolTip.Tip="{Binding BudgetStatusText}" />
+                     ToolTip.Tip="{Binding BudgetSeverityToolTipText}" />
         </StackPanel>
 
         <!-- 窗口控制。U162-C：整组「再小一点、再低一点」。

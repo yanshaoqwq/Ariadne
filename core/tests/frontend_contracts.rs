@@ -812,7 +812,6 @@ fn project_reference_resolver_handles_confirmation_document_chapter_artifact_and
             node_id: NodeId::from("writer"),
             status: ariadne::contracts::RunStatus::Succeeded,
             outputs,
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,

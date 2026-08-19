@@ -310,6 +310,33 @@
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusError}" />
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
     </Style>
+    <!-- 审批历史行（U187-A）：与检查器对象行同族的淡底块，**无描边、无 hover 撬动**。
+         刻意不做成可点行：已决议项不可再处置，任何「像是能点」的外形都是假入口。
+         左缘一道语义色脊标结果（通过/拒绝），与 Border.notice 同一套语汇——
+         色 + 位置 + 文字三通道，不只靠颜色（UI视觉规范 §8）。
+         默认脊色取中性边框：`auto_audited` 等既非通过也非拒绝的档位落在这里，
+         不能让它借用其中任一语义色。 -->
+    <Style Selector="Border.confirmation-history-row">
+      <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderStrong}" />
+      <Setter Property="BorderThickness" Value="3,0,0,0" />
+      <Setter Property="CornerRadius" Value="0,5,5,0" />
+    </Style>
+    <Style Selector="Border.confirmation-history-row.approved">
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusSuccess}" />
+    </Style>
+    <Style Selector="Border.confirmation-history-row.rejected">
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.StatusError}" />
+    </Style>
+    <!-- 结果词着色：与左缘竖脊同色，读到哪一侧都是同一个信号。
+         专用样式声明在通用 `.caption` 之后（AGENTS：Avalonia 同优先级按文档顺序、
+         后者胜，`.result` 不因为更具体而获得优先权）。 -->
+    <Style Selector="Border.confirmation-history-row.approved TextBlock.result">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusSuccess}" />
+    </Style>
+    <Style Selector="Border.confirmation-history-row.rejected TextBlock.result">
+      <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+    </Style>
     <!-- U145：标识/别名选择器。AutoCompleteBox 内层就是一个 TextBox，
          所以字体/槽色/焦点描边全部沿用主题的 TextBox 基础样式，这里只补两件事：
          (1) 等宽字体——这些值是标识符，等宽下更容易看出 data-in-1 与 data-in-l 的差别；
@@ -950,6 +977,22 @@
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Add}" />
                 </Button>
               </StackPanel>
+              <Border Width="1" Margin="4,5" Background="{DynamicResource Ariadne.BorderMuted}" />
+              <!-- 审批历史入口（U187-A）。为什么必须在工具条上再开一个口子：
+                   历史的呈现体在审阅面板里，而那个面板只在**有待审项**时渲染
+                   ⇒ 全部审完后历史就够不着了，而「昨天全审完、今天想回看批过什么」
+                   恰恰是最需要它的时刻。命令在无历史时自动禁用（CanExecute），
+                   禁用原因由 ToolTip 讲明，不做成一个点了没反应的键。
+                   自成一组：它既不是编辑、也不是文件或视图操作，是审计通道。 -->
+              <StackPanel x:Name="CanvasAuditActions" Orientation="Horizontal" Spacing="2">
+                <Button Classes="icon-btn"
+                        ToolTip.Tip="{Binding OpenConfirmationHistoryText}"
+                        AutomationProperties.Name="{Binding OpenConfirmationHistoryText}"
+                        Command="{Binding ShowConfirmationHistoryCommand}">
+                  <!-- 图标：一份带勾的清单（矢量 Geometry；图标字体在 Linux 上是豆腐块） -->
+                  <Path Classes="icon" Data="M5,4 L5,20 L19,20 L19,4 Z M8.5,11 L11,13.5 L15.5,9" />
+                </Button>
+              </StackPanel>
             </StackPanel>
           </Border>
         </Grid>
@@ -1491,17 +1534,39 @@
                       </ComboBox.ItemTemplate>
                     </ComboBox>
                     <TextBlock Text="{Binding SelectedInDoubtOperationSummary}" Classes="caption" TextWrapping="Wrap" />
-                    <TextBlock Text="{Binding InDoubtResponseText}" Classes="caption" />
-                    <TextBox Text="{Binding InDoubtResponseJson, Mode=TwoWay}" AutomationProperties.Name="{Binding InDoubtResponseText}"
-                             PlaceholderText="{Binding InDoubtResponsePlaceholder}"
-                             AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72" />
+                    <!-- U182-F：三条出路的权重原先是反的 —— 普通作者唯一该点的「安全重试」
+                         是 secondary 且排在最后，而需要服务端日志才能用的「使用已有响应」
+                         是 primary，上面还压着一个 72px 高的 JSON 大框。
+                         结果是把注意力钉在最难的那条路上，普通作者到这里就卡住。
+
+                         现在：重试提为 primary 并置顶；JSON 那条收进 Expander 作高级选项。
+                         ⚠️ 只是重排，三个命令与后端 decision 语义一个都没动
+                         （retry / use_response / stop 早已全部接线）。
+                         ⚠️ JSON 框刻意**不做**结构化表单：后端 `response` 是
+                         `Option<serde_json::Value>`（无 schema），装的是服务商 API 的
+                         原始响应体，字段既不有限也不已知，语义是「粘贴」不是「填写」。 -->
+                    <Button Classes="primary" HorizontalAlignment="Stretch"
+                            Content="{Binding RetryInDoubtText}" Command="{Binding RetryInDoubtOperationCommand}" />
+                    <Expander Header="{Binding InDoubtResponseText}" HorizontalAlignment="Stretch">
+                      <StackPanel Spacing="8">
+                        <TextBox Text="{Binding InDoubtResponseJson, Mode=TwoWay}" AutomationProperties.Name="{Binding InDoubtResponseText}"
+                                 PlaceholderText="{Binding InDoubtResponsePlaceholder}"
+                                 AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72" />
+                        <Button Classes="secondary" HorizontalAlignment="Stretch"
+                                Content="{Binding UseInDoubtResponseText}" Command="{Binding UseInDoubtResponseCommand}" />
+                      </StackPanel>
+                    </Expander>
+                    <!-- U195-J：危险键与提交键的误触距离原先最短（三键满宽竖排、
+                         统一 Spacing=8，danger 紧贴 primary 下沿 8px）。
+                         U182-F 的重排已让「停止原因」标签+输入框插在中间，
+                         这里再加一道发丝线 + 上下额外留白，把「停止」显式划到另一区：
+                         破坏性动作要有可见的分区边界，而不是仅靠间距差。
+                         ⚠️ 分隔线与留白都取主题令牌/既有尺度，不引入魔法数字。 -->
+                    <Border Height="1" Margin="0,6"
+                            Background="{DynamicResource Ariadne.BorderMuted}" />
                     <TextBlock Text="{Binding InDoubtReasonText}" Classes="caption" />
                     <TextBox Text="{Binding InDoubtStopReason, Mode=TwoWay}"  AutomationProperties.Name="{Binding InDoubtReasonText}" />
-                    <Button Classes="secondary" HorizontalAlignment="Stretch"
-                            Content="{Binding RetryInDoubtText}" Command="{Binding RetryInDoubtOperationCommand}" />
-                    <Button Classes="primary" HorizontalAlignment="Stretch"
-                            Content="{Binding UseInDoubtResponseText}" Command="{Binding UseInDoubtResponseCommand}" />
-                    <Button Classes="danger" HorizontalAlignment="Stretch"
+                    <Button Classes="danger" HorizontalAlignment="Stretch" Margin="0,4,0,0"
                             Content="{Binding StopInDoubtText}" Command="{Binding StopInDoubtOperationCommand}" />
                   </StackPanel>
                 </StackPanel>
@@ -1592,6 +1657,82 @@
                       </DataTemplate>
                     </ItemsControl.ItemTemplate>
                   </ItemsControl>
+
+                  <!-- 审批历史（U187-A）：后端 `list_confirmations` 一直在返回已决议项，
+                       前端此前一行 `.Where(IsPendingConfirmation)` 把它们全丢了 ⇒
+                       「我昨天到底批准过什么」查无可查。
+                       放在待审列表**下方的折叠区**而不是新页面：作者要对照的正是
+                       「刚审的这条」与「上次同类批过什么」，两者同屏才有意义；
+                       另开页面还要动导航，成本远高于收益。
+                       整块绑 HasResolvedConfirmations——没历史时不留空盒子。 -->
+                  <StackPanel Spacing="8"
+                              Margin="0,10,0,0"
+                              IsVisible="{Binding HasResolvedConfirmations}">
+                    <Border Height="1" Background="{DynamicResource Ariadne.BorderMuted}" Opacity="0.7" />
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                      <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding ConfirmationHistoryTitleText}" Classes="caption" />
+                        <TextBlock Text="{Binding ConfirmationHistoryCountText}"
+                                   Classes="caption"
+                                   Opacity="0.85"
+                                   TextWrapping="Wrap" />
+                      </StackPanel>
+                      <Button Grid.Column="1"
+                              Classes="subtle"
+                              Padding="8,3"
+                              VerticalAlignment="Center"
+                              Content="{Binding ConfirmationHistoryToggleText}"
+                              AutomationProperties.Name="{Binding ConfirmationHistoryToggleText}"
+                              Command="{Binding ToggleConfirmationHistoryCommand}" />
+                    </Grid>
+
+                    <StackPanel x:Name="ConfirmationHistoryList"
+                                Spacing="6"
+                                IsVisible="{Binding IsConfirmationHistoryExpanded}">
+                      <TextBlock Text="{Binding ConfirmationHistoryHintText}"
+                                 Classes="caption"
+                                 Opacity="0.8"
+                                 TextWrapping="Wrap" />
+                      <!-- 历史行**不是按钮**：已决议项无法再处置，给它一个可点的外形
+                           只会让人点了没反应（AGENTS「可编辑→有槽，只读→无槽」）。
+                           用 Border + SelectableTextBlock，理由可以被复制出去引用。 -->
+                      <ItemsControl ItemsSource="{Binding ResolvedConfirmations}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate DataType="{x:Type vm:ResolvedConfirmationItemViewModel}">
+                            <Border Classes="confirmation-history-row"
+                                    Classes.approved="{Binding IsApproved}"
+                                    Classes.rejected="{Binding IsRejected}"
+                                    Margin="0,0,0,4"
+                                    Padding="10,8">
+                              <StackPanel Spacing="3">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                  <TextBlock Grid.Column="0"
+                                             Text="{Binding Summary}"
+                                             FontWeight="SemiBold"
+                                             TextWrapping="Wrap" />
+                                  <!-- 结果着色只走语义状态位；色值全部来自主题令牌。 -->
+                                  <TextBlock Grid.Column="1"
+                                             Classes="caption result"
+                                             Text="{Binding ResultText}"
+                                             VerticalAlignment="Top" />
+                                </Grid>
+                                <TextBlock Text="{Binding KindText}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
+                                <TextBlock Text="{Binding DecidedAtText}" Classes="caption mono" Opacity="0.8" />
+                                <SelectableTextBlock Text="{Binding ReasonText}"
+                                                     Classes="caption"
+                                                     TextWrapping="Wrap"
+                                                     IsVisible="{Binding HasReason}" />
+                                <SelectableTextBlock Text="{Binding ConfirmationId}"
+                                                     Classes="caption mono"
+                                                     Opacity="0.7"
+                                                     TextWrapping="Wrap" />
+                              </StackPanel>
+                            </Border>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </StackPanel>
                 </StackPanel>
               </ScrollViewer>
             </DockPanel>

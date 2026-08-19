@@ -596,7 +596,6 @@ fn f9_scheduler_lease_and_atomic_claim_respect_retry_deadline() {
             node_id: NodeId::from("start"),
             status: RunStatus::Queued,
             outputs: PortMap::new(),
-            communication_output: None,
             communication_control: CommunicationControl::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -667,7 +666,6 @@ fn f9_v11_migration_promotes_legacy_node_retry_deadline() {
             node_id: NodeId::from("retry-node"),
             status: RunStatus::Queued,
             outputs: PortMap::new(),
-            communication_output: None,
             communication_control: CommunicationControl::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -1982,7 +1980,6 @@ fn in_doubt_retry_atomically_aborts_old_operation_and_claims_run() {
             node_id: node_id.clone(),
             status: RunStatus::Paused,
             outputs: PortMap::new(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -2072,7 +2069,6 @@ fn receipt_only_in_doubt_operation_rejects_external_response_without_mutation() 
             node_id: node_id.clone(),
             status: RunStatus::Paused,
             outputs: PortMap::new(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -4199,17 +4195,26 @@ fn inline_output(port: &str, value: &str) -> WorkflowNodeExecutionOutput {
 }
 
 /// 构造一次 communication 文本输出。
+///
+/// U147-a 后轮转判据改读**节点主输出的 `"text"` 键**
+/// （`runtime.rs::communication_text_from_outputs`），死字段 `communication_output`
+/// 已随之删除。这两个 helper 当时漏改，于是本文件整体编译不过——
+/// 而编译不过的测试文件**不报失败、直接消失**，看起来和全绿一样。
 fn communication_output(value: &str) -> WorkflowNodeExecutionOutput {
+    let mut outputs = PortMap::new();
+    outputs.insert("text".to_owned(), PortValue::inline(json!(value)));
     WorkflowNodeExecutionOutput {
-        communication_output: Some(value.to_owned()),
+        outputs,
         ..WorkflowNodeExecutionOutput::default()
     }
 }
 
 /// 构造声明 communication 结束的节点输出。
 fn ending_communication_output(value: &str) -> WorkflowNodeExecutionOutput {
+    let mut outputs = PortMap::new();
+    outputs.insert("text".to_owned(), PortValue::inline(json!(value)));
     WorkflowNodeExecutionOutput {
-        communication_output: Some(value.to_owned()),
+        outputs,
         communication_control: CommunicationControl {
             continue_communication: false,
             approved: false,
@@ -6409,7 +6414,6 @@ mod prudent_rejection_contracts {
                     m.insert("text".to_owned(), PortValue::inline("原始正文".to_owned()));
                     m
                 },
-                communication_output: None,
                 communication_control: Default::default(),
                 prompt_trace_hash: None,
                 patch_session_commit_id: None,
@@ -6434,7 +6438,6 @@ mod prudent_rejection_contracts {
                     );
                     m
                 },
-                communication_output: None,
                 communication_control: Default::default(),
                 prompt_trace_hash: None,
                 patch_session_commit_id: None,
@@ -6506,7 +6509,6 @@ mod prudent_rejection_contracts {
                 node_id: NodeId::from("summarizer"),
                 status: RunStatus::Succeeded,
                 outputs: PortMap::new(),
-                communication_output: None,
                 communication_control: Default::default(),
                 prompt_trace_hash: None,
                 patch_session_commit_id: None,

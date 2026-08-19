@@ -192,6 +192,25 @@ public interface IAriadneBackendClient
 
     Task<WorksTreeNode> GetWorksTreeAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// U184-A：项目正文全文检索（Tantivy，走 <c>search_project_documents</c>）。
+    ///
+    /// <para>此前作品页搜索只比 <c>Title.Contains</c>，而全文检索后端（<c>commands.rs</c>
+    /// 的 <c>search_project_documents_impl</c>）与 IPC 分发（<c>ipc.rs</c>）**早就就绪**，
+    /// 缺的只是这一根线——百万字项目靠标题找内容是不可能的。</para>
+    ///
+    /// <para>⚠️ 这条路会因「索引还没追上刚才的保存」而**正常失败**：后端
+    /// <c>ensure_search_not_blocked_by_pending_index</c> 在 outbox 有未完成失效项时
+    /// 直接返回 <c>validation</c> + 诊断含 <c>indexing_not_ready</c>。
+    /// 调用方必须把它当**可重试的暂态**而不是错误（见
+    /// <see cref="ViewModels.WorksPageViewModel"/> 的 body-search 分支）——
+    /// 弹红色报错会让作者以为搜索功能坏了。</para>
+    ///
+    /// <para>不做凭据前置校验：后端 <c>embedder</c> 是 <c>Option</c>，没配 Provider 时
+    /// 退化为纯 Tantivy 全文，「没配模型也能搜正文」是成立的。</para>
+    /// </summary>
+    Task<IReadOnlyList<RetrievalHit>> SearchProjectDocumentsAsync(string query, int limit = 20, CancellationToken cancellationToken = default);
+
     Task<ChapterSummaryView> GetChapterSummaryViewAsync(string chapterId, CancellationToken cancellationToken = default);
 
     Task<DocumentTreeNode> GetDocumentTreeAsync(string? projectId = null, CancellationToken cancellationToken = default);

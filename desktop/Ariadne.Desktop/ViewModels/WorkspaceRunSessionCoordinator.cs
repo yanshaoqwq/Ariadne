@@ -312,5 +312,17 @@ internal sealed class WorkspaceRunSessionCoordinator : IDisposable
         var previous = _state;
         _state = next;
         StateChanged?.Invoke(previous, next);
+        // U194-E：终态广播接在这里，因为这是**所有**状态跃迁的唯一收口——
+        // 轮询回包、Pause/Stop/Resume 的控制结果、确认项解析后的 Attach 都经过它。
+        // 接在轮询循环里会漏掉「点停止后立刻拿到 stopped」那条（控制结果直接 Attach，
+        // 轮询已被 CancelPolling 掐掉，不会再有下一轮回包）。
+        //
+        // ⚠️ **必须是跃迁边沿**：`_state == next` 那个短路保证了同一终态不会连发
+        //（轮询在终态那一轮 return 之前也只会走到这里一次），
+        // 所以下游拿到的是「每次运行结束一次」，而不是每 750ms 一次。
+        if (IsTerminal(next.Status) && !IsTerminal(previous.Status))
+        {
+            RunTerminalStateNotifier.NotifyTerminal(next.WorkflowId, next.RunId, next.Status);
+        }
     }
 }

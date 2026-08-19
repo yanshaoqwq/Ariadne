@@ -788,6 +788,15 @@
                                AutomationProperties.Name="{Binding WorksTreeSearchName}" />
                     </Grid>
                   </Border>
+                  <!-- U184-A：搜索态下两组结果必须自带标题。
+                       「标题含关键词」与「正文含关键词」是不同语义，不打标签的话
+                       作者无法判断某章为什么出现在结果里。非搜索态时这行不出现
+                       （那时树就是完整目录，加个标题只是噪声）。 -->
+                  <TextBlock Text="{Binding WorksTreeTitleGroupText}"
+                             Classes="subtle"
+                             FontWeight="SemiBold"
+                             Margin="2,4,0,0"
+                             IsVisible="{Binding ShowWorksTreeTitleGroup}" />
                   <TreeView ItemsSource="{Binding VisibleWorksTreeRoots}"
                             SelectedItem="{Binding SelectedWorksTreeNode, Mode=TwoWay}"
                             SelectionMode="Single"
@@ -839,6 +848,76 @@
                              Classes="caption"
                              TextWrapping="Wrap"
                              IsVisible="{Binding ShowWorksTreeSearchEmpty}" />
+
+                  <!-- U184-A：正文命中组（后端 Tantivy 全文检索）。
+                       整组只在搜索态出现；组内四种态互斥：搜索中 / 有命中 / 无命中 /
+                       索引追赶中。⚠️ 索引态**不是错误态**，所以它用普通 caption 文字 +
+                       重试按钮，不用 StatusError 描边——那道门在「刚保存完就搜」时
+                       必然命中，红框会让作者以为搜索坏了。 -->
+                  <StackPanel Spacing="6" Margin="0,4,0,0"
+                              IsVisible="{Binding ShowBodySearchGroup}">
+                    <TextBlock Text="{Binding BodySearchGroupText}"
+                               Classes="subtle"
+                               FontWeight="SemiBold"
+                               Margin="2,0,0,0" />
+                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                IsVisible="{Binding IsBodySearching}">
+                      <ctl:BusyDots IsActive="{Binding IsBodySearching}"
+                                    DotDiameter="4" VerticalAlignment="Top" Margin="0,5,0,0" />
+                      <TextBlock Text="{Binding BodySearchSearchingText}"
+                                 Classes="caption" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <ItemsControl ItemsSource="{Binding BodySearchHits}"
+                                  IsVisible="{Binding HasBodySearchHits}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type vm:WorksBodySearchHitViewModel}">
+                          <Button Classes="nav"
+                                  Command="{Binding OpenCommand}"
+                                  ToolTip.Tip="{Binding Snippet}"
+                                  AutomationProperties.Name="{Binding AccessibleName}"
+                                  HorizontalAlignment="Stretch"
+                                  HorizontalContentAlignment="Stretch"
+                                  Margin="0,0,0,4">
+                            <StackPanel Spacing="3">
+                              <TextBlock Text="{Binding Title}"
+                                         Classes="caption"
+                                         FontWeight="SemiBold"
+                                         TextTrimming="CharacterEllipsis" />
+                              <!-- 片段是这一组存在的理由：不给片段作者还得逐章打开找。 -->
+                              <TextBlock Text="{Binding Snippet}"
+                                         Classes="subtle"
+                                         TextWrapping="Wrap"
+                                         MaxLines="3"
+                                         TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                          </Button>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding BodySearchEmptyText}"
+                               Classes="caption"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding ShowBodySearchEmpty}" />
+                    <StackPanel Spacing="6" IsVisible="{Binding ShowBodySearchIndexing}">
+                      <TextBlock Text="{Binding BodySearchErrorText}"
+                                 Classes="caption" TextWrapping="Wrap" />
+                      <Button Classes="secondary"
+                              Content="{Binding BodySearchRetryText}"
+                              Command="{Binding RetryBodySearchCommand}"
+                              HorizontalAlignment="Left" />
+                    </StackPanel>
+                    <Border Classes="soft-panel" Padding="10"
+                            IsVisible="{Binding ShowBodySearchError}">
+                      <StackPanel Spacing="8">
+                        <TextBlock Text="{Binding BodySearchErrorText}"
+                                   Classes="caption" TextWrapping="Wrap" />
+                        <Button Classes="secondary"
+                                Content="{Binding BodySearchRetryText}"
+                                Command="{Binding RetryBodySearchCommand}"
+                                HorizontalAlignment="Left" />
+                      </StackPanel>
+                    </Border>
+                  </StackPanel>
                 </StackPanel>
                 <!-- U185-A：树栏内的加载行。⚠️ 保留 `TextWrapping="Wrap"`——
                      侧栏窄，这行文案会折行；并排的呼吸点因此挂

@@ -665,6 +665,54 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             relative => string.IsNullOrWhiteSpace(ProjectRoot)
                 ? string.Empty
                 : Path.Combine(ProjectRoot, relative));
+
+        // U178-B：新增 item 的文案/选项继承挂在集合的 CollectionChanged 上，
+        // **不是**逐个改造 `new` 的调用点。
+        // 理由与画布页那轮一致：增项路径有好几条（后端投影 Apply*、用户点「新增模型行」、
+        // 保存冲突后的回填重建、语言切换里的 RebuildAvailableLlmModelOptions…），
+        // 漏一条就是「只在特定路径下这一行文案为空」——最难复现的那种缺陷。
+        HookSharedProjectionInheritance();
+    }
+
+    /// <summary>
+    /// U178-B：让每个 per-item 集合的新成员自动拿到当前的页面级文案与共享选项。
+    ///
+    /// 只在 Add/Replace 时下推；Remove 不需要（被移走的 item 不再显示）。
+    /// Reset（Clear）后紧跟的必然是一批 Add，所以不必单独处理。
+    /// </summary>
+    private void HookSharedProjectionInheritance()
+    {
+        ProviderModels.CollectionChanged += (_, args) => InheritSharedProjections<ProviderModelEditorRow>(
+            args, ApplySharedProjectionsTo);
+        ModelAliases.CollectionChanged += (_, args) => InheritSharedProjections<ModelAliasViewModel>(
+            args, ApplySharedProjectionsTo);
+        ConfirmationPolicies.CollectionChanged += (_, args) => InheritSharedProjections<ConfirmationPolicyViewModel>(
+            args, ApplySharedProjectionsTo);
+        ScopedPermissionProfiles.CollectionChanged += (_, args) =>
+            InheritSharedProjections<PermissionScopeProfileViewModel>(args, ApplySharedProjectionsTo);
+        ToolControlGroups.CollectionChanged += (_, args) => InheritSharedProjections<ToolControlGroupViewModel>(
+            args, ApplySharedProjectionsTo);
+        NodePresets.CollectionChanged += (_, args) => InheritSharedProjections<NodeTypePresetViewModel>(
+            args, ApplySharedProjectionsTo);
+    }
+
+    private static void InheritSharedProjections<T>(
+        System.Collections.Specialized.NotifyCollectionChangedEventArgs args,
+        Action<T> apply)
+        where T : class
+    {
+        if (args.NewItems is null)
+        {
+            return;
+        }
+
+        foreach (var item in args.NewItems)
+        {
+            if (item is T typed)
+            {
+                apply(typed);
+            }
+        }
     }
 
     /// <summary>U146：全局可读根的 chip 投影。</summary>
@@ -6907,12 +6955,131 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         _ => displayNames.Text("ui.settings.personalization.theme.group.base"),
     };
 
+    /// <summary>
+    /// U178-B：把页面级文案与共享选项列表下推到每个 item VM。
+    ///
+    /// 这是「脱掉 per-item 祖先绑定」的另一半。设置页 6 个 DataTemplate 里原有 40 处
+    /// <c>{Binding $parent[UserControl].DataContext.Xxx}</c>，每处在每个 item 上建一个
+    /// ControlTracker、订阅 attach/detach、并跑 10 层 LINQ 祖先遍历——成本正落在
+    /// 「切回设置页」的重挂载路径上（U159 认定的同一条路径）。
+    ///
+    /// ⚠️ 刻意**不用** <c>{loc:Text}</c>（画布页那轮的做法）：它只在
+    /// 「页面不订阅 LanguageChanged、没有 RefreshLocalizedText」时安全，
+    /// 而设置页正是语言切换的现场。用它会让「切成英文后设置页文案仍是中文」，
+    /// 等于拿一个静默缺陷换性能。所以走下推，并在 <see cref="RefreshLocalizedText"/>
+    /// 里再调一次本方法——**漏掉那一次，缺陷就换了个形式做进来了**。
+    ///
+    /// ⚠️ 选项列表下推的是**集合引用本身**，不是拷贝：这几个集合都是原地
+    /// Clear/Add 重建（<see cref="RebuildAvailableLlmModelOptions"/>、
+    /// <c>IdentifierCandidates.Sync</c>），共享引用才能让所有 item 同步看到新选项，
+    /// 逐 item 复制既白吃内存又会漂移。
+    ///
+    /// <see cref="ViewModelBase.SetProperty"/> 同值不发通知，所以重复下推
+    /// （每次集合重建、每次语言切换）在绝大多数 item 上是纯比较、零通知。
+    /// </summary>
+    private void BroadcastSharedItemProjections()
+    {
+        foreach (var row in ProviderModels)
+        {
+            ApplySharedProjectionsTo(row);
+        }
+        foreach (var alias in ModelAliases)
+        {
+            ApplySharedProjectionsTo(alias);
+        }
+        foreach (var policy in ConfirmationPolicies)
+        {
+            ApplySharedProjectionsTo(policy);
+        }
+        foreach (var profile in ScopedPermissionProfiles)
+        {
+            ApplySharedProjectionsTo(profile);
+        }
+        foreach (var group in ToolControlGroups)
+        {
+            ApplySharedProjectionsTo(group);
+        }
+        foreach (var preset in NodePresets)
+        {
+            ApplySharedProjectionsTo(preset);
+        }
+    }
+
+    private void ApplySharedProjectionsTo(ProviderModelEditorRow row)
+    {
+        row.ModelIdColumnLabel = ModelIdColumnLabel;
+        row.ModelCapabilityColumnLabel = ModelCapabilityColumnLabel;
+        row.ModelContextColumnLabel = ModelContextColumnLabel;
+        row.ModelInputCostColumnLabel = ModelInputCostColumnLabel;
+        row.ModelOutputCostColumnLabel = ModelOutputCostColumnLabel;
+        row.RemoveModelText = RemoveModelText;
+        row.FetchedModelIdCandidates = FetchedModelIdCandidates;
+        row.ProviderCapabilityOptions = ProviderCapabilityOptions;
+    }
+
+    private void ApplySharedProjectionsTo(ModelAliasViewModel alias)
+    {
+        alias.AvailableLlmModelTargetOptions = AvailableLlmModelTargetOptions;
+    }
+
+    private void ApplySharedProjectionsTo(ConfirmationPolicyViewModel policy)
+    {
+        policy.NormalModeLabel = NormalModeLabel;
+        policy.AutoModePolicyLabel = AutoModePolicyLabel;
+        policy.ApprovalPromptLabel = ApprovalPromptLabel;
+        policy.ApprovalPromptPlaceholder = ApprovalPromptPlaceholder;
+        policy.ConfirmationNormalPolicyOptions = ConfirmationNormalPolicyOptions;
+        policy.ConfirmationAutoModePolicyOptions = ConfirmationAutoModePolicyOptions;
+    }
+
+    /// <summary>
+    /// 权限档的文案下推。<paramref name="forNodePreset"/> 区分两处模板：
+    /// 作用域权限档那句勾选项是「继承全局」，节点预设里是「继承节点权限」——
+    /// 同一个 VM 类型、不同文案键，所以两个属性都下推，由模板各取所需。
+    /// </summary>
+    private void ApplySharedProjectionsTo(PermissionScopeProfileViewModel profile)
+    {
+        profile.InheritGlobalText = InheritGlobalText;
+        profile.InheritNodePermissionsText = InheritNodePermissionsText;
+        profile.AllowNetworkText = AllowNetworkText;
+        profile.AllowWebSearchText = AllowWebSearchText;
+        profile.AllowHttpSkillText = AllowHttpSkillText;
+        profile.AllowWasmNetworkText = AllowWasmNetworkText;
+        profile.AllowSecretReadText = AllowSecretReadText;
+        profile.ReadableRootsLabel = ReadableRootsLabel;
+        profile.WritableRootsLabel = WritableRootsLabel;
+    }
+
+    private void ApplySharedProjectionsTo(ToolControlGroupViewModel group)
+    {
+        group.SafeToolsTitle = SafeToolsTitle;
+        group.DangerToolsTitle = DangerToolsTitle;
+        group.DangerToolsHelp = DangerToolsHelp;
+    }
+
+    private void ApplySharedProjectionsTo(NodeTypePresetViewModel preset)
+    {
+        preset.PresetNodeModelLabel = PresetNodeModelLabel;
+        preset.PresetNodeTimeoutLabel = PresetNodeTimeoutLabel;
+        preset.PresetNodeBudgetLabel = PresetNodeBudgetLabel;
+        preset.PresetAccessTitle = PresetAccessTitle;
+        preset.PresetToolsTitle = PresetToolsTitle;
+        preset.AvailableLlmModelOptions = AvailableLlmModelOptions;
+        // 预设内嵌的权限覆盖也是 per-item 模板，同批下推。
+        ApplySharedProjectionsTo(preset.Permissions);
+    }
+
     private void RefreshLocalizedText()
     {
         foreach (var propertyName in LocalizedPropertyNames)
         {
             OnPropertyChanged(propertyName);
         }
+
+        // U178-B：per-item 模板的文案是**投影**而非祖先绑定，页面级属性刷新
+        // 不会自动传到 item 上——切语言时必须在这里重新下推一次。
+        // 漏掉这一句的表现与用 {loc:Text} 完全一样：「切成英文后这些文案还是中文」。
+        BroadcastSharedItemProjections();
 
         // U146：chip 的失效说明、占位符、按钮文案都走 display_name，切语言要跟着刷。
         // 漏掉这一处的表现是「切成英文后只有 chip 区还是中文」。
@@ -7632,6 +7799,9 @@ public sealed class ThemeOption : ViewModelBase
 public sealed class ToolControlGroupViewModel : ViewModelBase
 {
     private string _displayName;
+    private string _safeToolsTitle = string.Empty;
+    private string _dangerToolsTitle = string.Empty;
+    private string _dangerToolsHelp = string.Empty;
 
     public ToolControlGroupViewModel(string scope, string displayName)
     {
@@ -7644,6 +7814,26 @@ public sealed class ToolControlGroupViewModel : ViewModelBase
 
     public string Scope { get; }
     public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
+
+    // U178-B：三项分区标题在本组上的投影，替掉 per-item 的 $parent[UserControl] 祖先绑定。
+    public string SafeToolsTitle
+    {
+        get => _safeToolsTitle;
+        internal set => SetProperty(ref _safeToolsTitle, value);
+    }
+
+    public string DangerToolsTitle
+    {
+        get => _dangerToolsTitle;
+        internal set => SetProperty(ref _dangerToolsTitle, value);
+    }
+
+    public string DangerToolsHelp
+    {
+        get => _dangerToolsHelp;
+        internal set => SetProperty(ref _dangerToolsHelp, value);
+    }
+
     public ObservableCollection<ToolControlItemViewModel> Controls { get; }
     public ObservableCollection<ToolControlItemViewModel> SafeControls { get; }
     public ObservableCollection<ToolControlItemViewModel> DangerControls { get; }
@@ -7781,6 +7971,15 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
     private bool _allowSecretRead;
     private string _readableRootsText;
     private string _writableRootsText;
+    private string _inheritGlobalText = string.Empty;
+    private string _inheritNodePermissionsText = string.Empty;
+    private string _allowNetworkText = string.Empty;
+    private string _allowWebSearchText = string.Empty;
+    private string _allowHttpSkillText = string.Empty;
+    private string _allowWasmNetworkText = string.Empty;
+    private string _allowSecretReadText = string.Empty;
+    private string _readableRootsLabel = string.Empty;
+    private string _writableRootsLabel = string.Empty;
 
     public PermissionScopeProfileViewModel(
         string scope,
@@ -7843,6 +8042,68 @@ public sealed class PermissionScopeProfileViewModel : ViewModelBase
 
     /// <summary>U146：可写根的 chip 投影。</summary>
     public PathChipListViewModel WritableRootChips { get; }
+
+    // U178-B：9 项页面级文案在本档上的投影。这个 VM 在两处 per-item 模板里当 DataContext：
+    // 作用域权限档（ScopedPermissionProfiles）和节点预设的权限覆盖（NodeTypePresetViewModel.Permissions），
+    // 两处原先各自绑 $parent[UserControl]，加起来占 40 处里的 14 处。
+    //
+    // InheritGlobalText 与 InheritNodePermissionsText 是**两个不同的键**
+    // （前者「继承全局」、后者「继承节点权限」）：同一个 VM 在两处模板里那句勾选项文案不同，
+    // 所以并存两个属性而不是合成一个，由页面 VM 按用途分别下推。
+    public string InheritGlobalText
+    {
+        get => _inheritGlobalText;
+        internal set => SetProperty(ref _inheritGlobalText, value);
+    }
+
+    public string InheritNodePermissionsText
+    {
+        get => _inheritNodePermissionsText;
+        internal set => SetProperty(ref _inheritNodePermissionsText, value);
+    }
+
+    public string AllowNetworkText
+    {
+        get => _allowNetworkText;
+        internal set => SetProperty(ref _allowNetworkText, value);
+    }
+
+    public string AllowWebSearchText
+    {
+        get => _allowWebSearchText;
+        internal set => SetProperty(ref _allowWebSearchText, value);
+    }
+
+    public string AllowHttpSkillText
+    {
+        get => _allowHttpSkillText;
+        internal set => SetProperty(ref _allowHttpSkillText, value);
+    }
+
+    public string AllowWasmNetworkText
+    {
+        get => _allowWasmNetworkText;
+        internal set => SetProperty(ref _allowWasmNetworkText, value);
+    }
+
+    public string AllowSecretReadText
+    {
+        get => _allowSecretReadText;
+        internal set => SetProperty(ref _allowSecretReadText, value);
+    }
+
+    public string ReadableRootsLabel
+    {
+        get => _readableRootsLabel;
+        internal set => SetProperty(ref _readableRootsLabel, value);
+    }
+
+    public string WritableRootsLabel
+    {
+        get => _writableRootsLabel;
+        internal set => SetProperty(ref _writableRootsLabel, value);
+    }
+
     public bool IsOverrideEnabled => !InheritGlobal;
     public bool InheritGlobal
     {
@@ -8018,6 +8279,12 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
     private string _approvalPrompt;
     private string _approvalPromptError = string.Empty;
     private bool _isApprovalPromptExpanded;
+    private string _normalModeLabel = string.Empty;
+    private string _autoModePolicyLabel = string.Empty;
+    private string _approvalPromptLabel = string.Empty;
+    private string _approvalPromptPlaceholder = string.Empty;
+    private ObservableCollection<SettingsValueOption>? _confirmationNormalPolicyOptions;
+    private ObservableCollection<SettingsValueOption>? _confirmationAutoModePolicyOptions;
 
     private readonly Action _markDirty;
 
@@ -8033,6 +8300,48 @@ public sealed class ConfirmationPolicyViewModel : ViewModelBase
 
     public string Kind { get; }
     public string Label { get => _label; set => SetProperty(ref _label, value); }
+
+    // U178-B：四项页面级文案 + 两个共享选项列表在本条策略上的投影。
+    // 模板原先绑 $parent[UserControl]，每条策略都要付一次 ControlTracker + 祖先遍历。
+    // 文案不用 {loc:Text}：设置页会切语言，静态取值不会刷新（见 TextExtension.cs 注释）。
+    public string NormalModeLabel
+    {
+        get => _normalModeLabel;
+        internal set => SetProperty(ref _normalModeLabel, value);
+    }
+
+    public string AutoModePolicyLabel
+    {
+        get => _autoModePolicyLabel;
+        internal set => SetProperty(ref _autoModePolicyLabel, value);
+    }
+
+    public string ApprovalPromptLabel
+    {
+        get => _approvalPromptLabel;
+        internal set => SetProperty(ref _approvalPromptLabel, value);
+    }
+
+    public string ApprovalPromptPlaceholder
+    {
+        get => _approvalPromptPlaceholder;
+        internal set => SetProperty(ref _approvalPromptPlaceholder, value);
+    }
+
+    /// <summary>共享集合引用（页面 VM 的 ConfirmationNormalPolicyOptions），不逐条复制。</summary>
+    public ObservableCollection<SettingsValueOption>? ConfirmationNormalPolicyOptions
+    {
+        get => _confirmationNormalPolicyOptions;
+        internal set => SetProperty(ref _confirmationNormalPolicyOptions, value);
+    }
+
+    /// <summary>共享集合引用（页面 VM 的 ConfirmationAutoModePolicyOptions），不逐条复制。</summary>
+    public ObservableCollection<SettingsValueOption>? ConfirmationAutoModePolicyOptions
+    {
+        get => _confirmationAutoModePolicyOptions;
+        internal set => SetProperty(ref _confirmationAutoModePolicyOptions, value);
+    }
+
     public string NormalPolicy => NormalAllowByDefault ? "allow_by_default" : "manual_review";
     public string AutoModePolicy => AutoModeAutoApproval ? "auto_approval" : "allow_by_default";
     public string NormalPolicySelection

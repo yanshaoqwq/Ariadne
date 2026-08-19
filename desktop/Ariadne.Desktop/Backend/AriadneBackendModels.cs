@@ -407,6 +407,29 @@ public sealed record WorksTreeNode(
     [property: JsonPropertyName("document_id")] string? DocumentId = null,
     [property: JsonPropertyName("stage_id")] string? StageId = null);
 
+/// <summary>
+/// U184-A：全文检索命中，对应后端 <c>RetrievalResult</c>（<c>core/src/retrieval/models.rs</c>）。
+///
+/// <para><see cref="DocumentId"/> 是索引时 <c>path.canonicalize()</c> 的产物，
+/// 即**绝对路径**（<c>retrieval/runtime.rs</c>）；知识层命中则是
+/// <c>ariadne-knowledge://{layer}/{entity_id}</c> 这样的伪 URI。
+/// 想把命中映射回作品树节点必须容忍这两种形态——按后缀匹配，不要假设它与
+/// 树里的 <c>path</c> 字面相等。</para>
+///
+/// <para><see cref="Snippet"/> 就是上下文片段（chunk 正文），不需要前端另外去取正文再切。</para>
+///
+/// <para><see cref="Source"/> 取值 <c>vector</c> / <c>full_text</c> / <c>hybrid</c>；
+/// 前端不做 enum，后端加来源时未知值应落到「未知」而不是整条反序列化崩掉。</para>
+/// </summary>
+public sealed record RetrievalHit(
+    [property: JsonPropertyName("chunk_id")] string ChunkId,
+    [property: JsonPropertyName("document_id")] string DocumentId,
+    [property: JsonPropertyName("snippet")] string Snippet,
+    [property: JsonPropertyName("score")] double Score,
+    [property: JsonPropertyName("source")] string Source,
+    [property: JsonPropertyName("spans")] IReadOnlyList<WritingSourceSpan>? Spans = null,
+    [property: JsonPropertyName("metadata")] JsonElement Metadata = default);
+
 public sealed record ChapterSummaryView(
     [property: JsonPropertyName("chapter_id")] string ChapterId,
     [property: JsonPropertyName("chapter_summary")] string? ChapterSummary,

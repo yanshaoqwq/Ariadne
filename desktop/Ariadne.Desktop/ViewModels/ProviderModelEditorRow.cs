@@ -1,8 +1,18 @@
+using System.Collections.ObjectModel;
+
 namespace Ariadne.Desktop.ViewModels;
 
 public sealed class ProviderModelEditorRow : ViewModelBase
 {
     private readonly Action _changed;
+    private string _modelIdColumnLabel = string.Empty;
+    private string _modelCapabilityColumnLabel = string.Empty;
+    private string _modelContextColumnLabel = string.Empty;
+    private string _modelInputCostColumnLabel = string.Empty;
+    private string _modelOutputCostColumnLabel = string.Empty;
+    private string _removeModelText = string.Empty;
+    private ObservableCollection<string>? _fetchedModelIdCandidates;
+    private ObservableCollection<SettingsValueOption>? _providerCapabilityOptions;
     private string _modelId;
     private string _capability;
     private string _maxContextTokens;
@@ -48,6 +58,65 @@ public sealed class ProviderModelEditorRow : ViewModelBase
     public bool HasInputCostError => !string.IsNullOrWhiteSpace(InputCostError);
     public bool HasOutputCostError => !string.IsNullOrWhiteSpace(OutputCostError);
     public RelayCommand RemoveCommand { get; }
+
+    // U178-B：以下 8 项是**页面级共享值在本行上的投影**。
+    // 原先模板里写 {Binding $parent[UserControl].DataContext.Xxx}，
+    // 每处祖先绑定都会给这一行建一个 ControlTracker、订阅 attach/detach、
+    // 并在解析时跑 10 层 LINQ 祖先遍历——成本落在「切回设置页」的重挂载路径上（U159/U178-B）。
+    //
+    // 刻意**不用** {loc:Text}：设置页是语言切换的现场（SettingsPageViewModel
+    // 有 RefreshLocalizedText），markup extension 取的是一次性静态值，切语言后不会刷新。
+    // 所以走「页面 VM 下推 + RefreshLocalizedText 里重新下推」这条路。
+    // setter 是 internal：只允许页面 VM 写，避免别处写出与页面不一致的文案。
+    public string ModelIdColumnLabel
+    {
+        get => _modelIdColumnLabel;
+        internal set => SetProperty(ref _modelIdColumnLabel, value);
+    }
+
+    public string ModelCapabilityColumnLabel
+    {
+        get => _modelCapabilityColumnLabel;
+        internal set => SetProperty(ref _modelCapabilityColumnLabel, value);
+    }
+
+    public string ModelContextColumnLabel
+    {
+        get => _modelContextColumnLabel;
+        internal set => SetProperty(ref _modelContextColumnLabel, value);
+    }
+
+    public string ModelInputCostColumnLabel
+    {
+        get => _modelInputCostColumnLabel;
+        internal set => SetProperty(ref _modelInputCostColumnLabel, value);
+    }
+
+    public string ModelOutputCostColumnLabel
+    {
+        get => _modelOutputCostColumnLabel;
+        internal set => SetProperty(ref _modelOutputCostColumnLabel, value);
+    }
+
+    public string RemoveModelText
+    {
+        get => _removeModelText;
+        internal set => SetProperty(ref _removeModelText, value);
+    }
+
+    // ⚠️ 这两个是**共享集合引用**，不是每行一份拷贝：候选目录与能力枚举全页面同一份，
+    // 拷贝会白吃内存，且「刷新模型」更新候选时各行不同步。
+    public ObservableCollection<string>? FetchedModelIdCandidates
+    {
+        get => _fetchedModelIdCandidates;
+        internal set => SetProperty(ref _fetchedModelIdCandidates, value);
+    }
+
+    public ObservableCollection<SettingsValueOption>? ProviderCapabilityOptions
+    {
+        get => _providerCapabilityOptions;
+        internal set => SetProperty(ref _providerCapabilityOptions, value);
+    }
 
     public string Snapshot => string.Join("|", ModelId, Capability, MaxContextTokens, InputCost, OutputCost);
 

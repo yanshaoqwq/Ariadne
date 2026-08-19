@@ -13,6 +13,12 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
     private WorkflowModelOption? _selectedModelOption;
     private string _timeoutMs;
     private string _budgetUsd;
+    private string _presetNodeModelLabel = string.Empty;
+    private string _presetNodeTimeoutLabel = string.Empty;
+    private string _presetNodeBudgetLabel = string.Empty;
+    private string _presetAccessTitle = string.Empty;
+    private string _presetToolsTitle = string.Empty;
+    private ObservableCollection<WorkflowModelOption>? _availableLlmModelOptions;
 
     public NodeTypePresetViewModel(
         string nodeType,
@@ -65,6 +71,50 @@ public sealed class NodeTypePresetViewModel : ViewModelBase
     public string DisplayName { get => _displayName; set => SetProperty(ref _displayName, value); }
     public PermissionScopeProfileViewModel Permissions { get; }
     public ObservableCollection<ToolControlItemViewModel> ToolControls { get; }
+
+    // U178-B：5 项页面级文案 + 1 个共享选项列表在本条预设上的投影。
+    // 预设行数 = 节点类型数（十余条），每条原先付 6 次祖先绑定。
+    // 文案不走 {loc:Text}，理由同 ProviderModelEditorRow：设置页会切语言。
+    public string PresetNodeModelLabel
+    {
+        get => _presetNodeModelLabel;
+        internal set => SetProperty(ref _presetNodeModelLabel, value);
+    }
+
+    public string PresetNodeTimeoutLabel
+    {
+        get => _presetNodeTimeoutLabel;
+        internal set => SetProperty(ref _presetNodeTimeoutLabel, value);
+    }
+
+    public string PresetNodeBudgetLabel
+    {
+        get => _presetNodeBudgetLabel;
+        internal set => SetProperty(ref _presetNodeBudgetLabel, value);
+    }
+
+    public string PresetAccessTitle
+    {
+        get => _presetAccessTitle;
+        internal set => SetProperty(ref _presetAccessTitle, value);
+    }
+
+    public string PresetToolsTitle
+    {
+        get => _presetToolsTitle;
+        internal set => SetProperty(ref _presetToolsTitle, value);
+    }
+
+    /// <summary>
+    /// U178-B：可选模型列表在本条预设上的投影。
+    /// **共享页面 VM 的 AvailableLlmModelOptions 实例**——RebuildAvailableLlmModelOptions
+    /// 是原地 Clear/Add，共享引用才能让所有预设行同步看到新选项。
+    /// </summary>
+    public ObservableCollection<WorkflowModelOption>? AvailableLlmModelOptions
+    {
+        get => _availableLlmModelOptions;
+        internal set => SetProperty(ref _availableLlmModelOptions, value);
+    }
 
     public string ProviderId => _providerId;
     public string? ModelAlias => _modelAlias;

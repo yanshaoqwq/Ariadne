@@ -586,31 +586,31 @@
                                仍可手打列表外的值——新模型常常还没进 /models 接口。 -->
                           <AutoCompleteBox Classes="identifier-picker"
                                            Text="{Binding ModelId, Mode=TwoWay}"
-                                           ItemsSource="{Binding $parent[UserControl].DataContext.FetchedModelIdCandidates}"
+                                           ItemsSource="{Binding FetchedModelIdCandidates}"
                                            FilterMode="ContainsOrdinal"
                                            MinimumPrefixLength="0"
                                            IsTextCompletionEnabled="False"
-                                           AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelIdColumnLabel}"
+                                           AutomationProperties.Name="{Binding ModelIdColumnLabel}"
                                            AutomationProperties.HelpText="{Binding ModelIdError}" />
                           <TextBlock Text="{Binding ModelIdError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasModelIdError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="3">
-                          <ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.ProviderCapabilityOptions}" SelectedValue="{Binding Capability, Mode=TwoWay}" SelectedValueBinding="{Binding Value}" DisplayMemberBinding="{Binding Label}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelCapabilityColumnLabel}" AutomationProperties.HelpText="{Binding CapabilityError}" />
+                          <ComboBox ItemsSource="{Binding ProviderCapabilityOptions}" SelectedValue="{Binding Capability, Mode=TwoWay}" SelectedValueBinding="{Binding Value}" DisplayMemberBinding="{Binding Label}" AutomationProperties.Name="{Binding ModelCapabilityColumnLabel}" AutomationProperties.HelpText="{Binding CapabilityError}" />
                           <TextBlock Text="{Binding CapabilityError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasCapabilityError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="2" Spacing="3">
-                          <TextBox Text="{Binding MaxContextTokens, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelContextColumnLabel}" AutomationProperties.HelpText="{Binding MaxContextTokensError}" />
+                          <TextBox Text="{Binding MaxContextTokens, Mode=TwoWay}" AutomationProperties.Name="{Binding ModelContextColumnLabel}" AutomationProperties.HelpText="{Binding MaxContextTokensError}" />
                           <TextBlock Text="{Binding MaxContextTokensError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasMaxContextTokensError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="3" Spacing="3">
-                          <TextBox Text="{Binding InputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelInputCostColumnLabel}" AutomationProperties.HelpText="{Binding InputCostError}" />
+                          <TextBox Text="{Binding InputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding ModelInputCostColumnLabel}" AutomationProperties.HelpText="{Binding InputCostError}" />
                           <TextBlock Text="{Binding InputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasInputCostError}" TextWrapping="Wrap" />
                         </StackPanel>
                         <StackPanel Grid.Column="4" Spacing="3">
-                          <TextBox Text="{Binding OutputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ModelOutputCostColumnLabel}" AutomationProperties.HelpText="{Binding OutputCostError}" />
+                          <TextBox Text="{Binding OutputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding ModelOutputCostColumnLabel}" AutomationProperties.HelpText="{Binding OutputCostError}" />
                           <TextBlock Text="{Binding OutputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasOutputCostError}" TextWrapping="Wrap" />
                         </StackPanel>
-                        <Button Grid.Column="5" Classes="subtle" Content="{Binding $parent[UserControl].DataContext.RemoveModelText}" Command="{Binding RemoveCommand}" />
+                        <Button Grid.Column="5" Classes="subtle" Content="{Binding RemoveModelText}" Command="{Binding RemoveCommand}" />
                       </Grid>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
@@ -654,7 +654,7 @@
                       <Grid ColumnDefinitions="1.2*,2*" ColumnSpacing="12" Margin="0,4,0,4">
                         <TextBlock Grid.Column="0" Text="{Binding DisplayName}" VerticalAlignment="Center" />
                         <ComboBox Grid.Column="1"
-                                  ItemsSource="{Binding $parent[UserControl].DataContext.AvailableLlmModelTargetOptions}"
+                                  ItemsSource="{Binding AvailableLlmModelTargetOptions}"
                                   SelectedItem="{Binding SelectedTargetOption, Mode=TwoWay}"
                                   AutomationProperties.Name="{Binding DisplayName}"
                                   HorizontalAlignment="Stretch">
@@ -794,31 +794,31 @@
                                 <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,180,180" ColumnSpacing="12" RowSpacing="8" Margin="0,3,0,10">
                                   <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Label}" VerticalAlignment="Center" TextWrapping="Wrap" />
                                   <ComboBox Grid.Row="0" Grid.Column="1"
-                                            ItemsSource="{Binding $parent[UserControl].DataContext.ConfirmationNormalPolicyOptions}"
+                                            ItemsSource="{Binding ConfirmationNormalPolicyOptions}"
                                             SelectedValue="{Binding NormalPolicySelection, Mode=TwoWay}"
                                             SelectedValueBinding="{Binding Value}"
                                             DisplayMemberBinding="{Binding Label}"
                                             AutomationProperties.Name="{Binding Label}"
-                                            AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.NormalModeLabel}" />
+                                            AutomationProperties.HelpText="{Binding NormalModeLabel}" />
                                   <ComboBox Grid.Row="0" Grid.Column="2"
-                                            ItemsSource="{Binding $parent[UserControl].DataContext.ConfirmationAutoModePolicyOptions}"
+                                            ItemsSource="{Binding ConfirmationAutoModePolicyOptions}"
                                             SelectedValue="{Binding AutoModePolicySelection, Mode=TwoWay}"
                                             SelectedValueBinding="{Binding Value}"
                                             DisplayMemberBinding="{Binding Label}"
                                             AutomationProperties.Name="{Binding Label}"
-                                            AutomationProperties.HelpText="{Binding $parent[UserControl].DataContext.AutoModePolicyLabel}" />
+                                            AutomationProperties.HelpText="{Binding AutoModePolicyLabel}" />
                                   <Expander Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
                                             IsVisible="{Binding AutoModeAutoApproval}"
                                             IsEnabled="{Binding AutoModeAutoApproval}"
                                             IsExpanded="{Binding IsApprovalPromptExpanded, Mode=TwoWay}"
-                                            Header="{Binding $parent[UserControl].DataContext.ApprovalPromptLabel}">
+                                            Header="{Binding ApprovalPromptLabel}">
                                     <StackPanel Margin="0,6,0,0" Spacing="4">
                                       <TextBox Text="{Binding ApprovalPrompt, Mode=TwoWay}"
-                                               PlaceholderText="{Binding $parent[UserControl].DataContext.ApprovalPromptPlaceholder}"
+                                               PlaceholderText="{Binding ApprovalPromptPlaceholder}"
                                                AcceptsReturn="True"
                                                TextWrapping="Wrap"
                                                MinHeight="68"
-                                               AutomationProperties.Name="{Binding $parent[UserControl].DataContext.ApprovalPromptLabel}"
+                                               AutomationProperties.Name="{Binding ApprovalPromptLabel}"
                                                AutomationProperties.HelpText="{Binding ApprovalPromptError}" />
                                       <TextBlock Text="{Binding ApprovalPromptError}"
                                                  Classes="caption"
@@ -924,24 +924,24 @@
                         <TextBlock Grid.Column="0" Text="{Binding DisplayName}" Classes="subtitle" />
                         <CheckBox Grid.Column="1"
                                   IsChecked="{Binding InheritGlobal, Mode=TwoWay}"
-                                  Content="{Binding $parent[UserControl].DataContext.InheritGlobalText}" />
+                                  Content="{Binding InheritGlobalText}" />
                       </Grid>
                       <StackPanel IsEnabled="{Binding IsOverrideEnabled}" Spacing="12">
                         <WrapPanel>
-                          <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowNetworkText}" />
-                          <CheckBox Margin="0,0,18,8" IsEnabled="{Binding AllowNetwork}" IsChecked="{Binding AllowWebSearch, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWebSearchText}" />
-                          <CheckBox Margin="0,0,18,8" IsEnabled="{Binding AllowNetwork}" IsChecked="{Binding AllowHttpSkill, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowHttpSkillText}" />
-                          <CheckBox Margin="0,0,18,8" IsEnabled="{Binding AllowNetwork}" IsChecked="{Binding AllowWasmNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWasmNetworkText}" />
-                          <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowSecretRead, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowSecretReadText}" />
+                          <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowNetwork, Mode=TwoWay}" Content="{Binding AllowNetworkText}" />
+                          <CheckBox Margin="0,0,18,8" IsEnabled="{Binding AllowNetwork}" IsChecked="{Binding AllowWebSearch, Mode=TwoWay}" Content="{Binding AllowWebSearchText}" />
+                          <CheckBox Margin="0,0,18,8" IsEnabled="{Binding AllowNetwork}" IsChecked="{Binding AllowHttpSkill, Mode=TwoWay}" Content="{Binding AllowHttpSkillText}" />
+                          <CheckBox Margin="0,0,18,8" IsEnabled="{Binding AllowNetwork}" IsChecked="{Binding AllowWasmNetwork, Mode=TwoWay}" Content="{Binding AllowWasmNetworkText}" />
+                          <CheckBox Margin="0,0,18,8" IsChecked="{Binding AllowSecretRead, Mode=TwoWay}" Content="{Binding AllowSecretReadText}" />
                         </WrapPanel>
                         <!-- U146 站点 3/4（作用域权限覆盖）：文本框 + 外挂「浏览」按钮 → chip 列表。
                              「浏览」按钮收进模板内部了（chip 列表自带 BrowseCommand），
                              所以这里不再需要外层那个 Grid 分两列。 -->
-                        <TextBlock Text="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}"
+                        <TextBlock Text="{Binding ReadableRootsLabel}"
                                    Classes="caption" />
                         <ContentControl Content="{Binding ReadableRootChips}"
                                         ContentTemplate="{StaticResource PathChipListTemplate}" />
-                        <TextBlock Text="{Binding $parent[UserControl].DataContext.WritableRootsLabel}"
+                        <TextBlock Text="{Binding WritableRootsLabel}"
                                    Classes="caption" />
                         <ContentControl Content="{Binding WritableRootChips}"
                                         ContentTemplate="{StaticResource PathChipListTemplate}" />
@@ -959,7 +959,7 @@
                     <DataTemplate DataType="{x:Type vm:ToolControlGroupViewModel}">
                       <StackPanel Spacing="10" Margin="0,0,0,18">
                         <TextBlock Text="{Binding DisplayName}" Classes="secondary" FontWeight="SemiBold" />
-                        <TextBlock Text="{Binding $parent[UserControl].DataContext.SafeToolsTitle}"
+                        <TextBlock Text="{Binding SafeToolsTitle}"
                                    Classes="caption"
                                    IsVisible="{Binding HasSafeControls}" />
                         <ItemsControl ItemsSource="{Binding SafeControls}" IsVisible="{Binding HasSafeControls}">
@@ -981,10 +981,10 @@
                         </ItemsControl>
                         <Border Classes="notice warning" IsVisible="{Binding HasDangerControls}" Margin="0,6,0,0">
                           <StackPanel Spacing="8">
-                            <TextBlock Text="{Binding $parent[UserControl].DataContext.DangerToolsTitle}"
+                            <TextBlock Text="{Binding DangerToolsTitle}"
                                        Foreground="{DynamicResource Ariadne.StatusWarning}"
                                        FontWeight="SemiBold" />
-                            <TextBlock Text="{Binding $parent[UserControl].DataContext.DangerToolsHelp}"
+                            <TextBlock Text="{Binding DangerToolsHelp}"
                                        Classes="caption"
                                        TextWrapping="Wrap" />
                             <ItemsControl ItemsSource="{Binding DangerControls}">
@@ -1037,9 +1037,9 @@
                         <Grid ColumnDefinitions="1.2*,2*,130,120" ColumnSpacing="12">
                           <TextBlock Grid.Column="0" Text="{Binding DisplayName}" VerticalAlignment="Center" TextWrapping="Wrap" />
                           <ComboBox Grid.Column="1"
-                                    ItemsSource="{Binding $parent[UserControl].DataContext.AvailableLlmModelOptions}"
+                                    ItemsSource="{Binding AvailableLlmModelOptions}"
                                     SelectedItem="{Binding SelectedModelOption, Mode=TwoWay}"
-                                    AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeModelLabel}"
+                                    AutomationProperties.Name="{Binding PresetNodeModelLabel}"
                                     HorizontalAlignment="Stretch">
                             <ComboBox.ItemTemplate>
                               <DataTemplate DataType="{x:Type vm:WorkflowModelOption}">
@@ -1049,37 +1049,37 @@
                           </ComboBox>
                           <TextBox Grid.Column="2"
                                    Text="{Binding TimeoutMs, Mode=TwoWay}"
-                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeTimeoutLabel}" />
+                                   AutomationProperties.Name="{Binding PresetNodeTimeoutLabel}" />
                           <TextBox Grid.Column="3"
                                    Text="{Binding BudgetUsd, Mode=TwoWay}"
-                                   AutomationProperties.Name="{Binding $parent[UserControl].DataContext.PresetNodeBudgetLabel}" />
+                                   AutomationProperties.Name="{Binding PresetNodeBudgetLabel}" />
                         </Grid>
-                        <Expander Header="{Binding $parent[UserControl].DataContext.PresetAccessTitle}">
+                        <Expander Header="{Binding PresetAccessTitle}">
                           <Border Classes="detail-row accent" Margin="0,8,0,2" Padding="14,3,0,3">
                             <StackPanel Spacing="10">
                               <CheckBox IsChecked="{Binding Permissions.InheritGlobal, Mode=TwoWay}"
-                                        Content="{Binding $parent[UserControl].DataContext.InheritNodePermissionsText}" />
+                                        Content="{Binding Permissions.InheritNodePermissionsText}" />
                               <StackPanel IsEnabled="{Binding Permissions.IsOverrideEnabled}" Spacing="8">
                                 <WrapPanel>
-                                  <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowNetworkText}" />
-                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWebSearch, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWebSearchText}" />
-                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowHttpSkill, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowHttpSkillText}" />
-                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWasmNetwork, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowWasmNetworkText}" />
-                                  <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowSecretRead, Mode=TwoWay}" Content="{Binding $parent[UserControl].DataContext.AllowSecretReadText}" />
+                                  <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowNetwork, Mode=TwoWay}" Content="{Binding Permissions.AllowNetworkText}" />
+                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWebSearch, Mode=TwoWay}" Content="{Binding Permissions.AllowWebSearchText}" />
+                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowHttpSkill, Mode=TwoWay}" Content="{Binding Permissions.AllowHttpSkillText}" />
+                                  <CheckBox Margin="0,0,18,8" IsEnabled="{Binding Permissions.AllowNetwork}" IsChecked="{Binding Permissions.AllowWasmNetwork, Mode=TwoWay}" Content="{Binding Permissions.AllowWasmNetworkText}" />
+                                  <CheckBox Margin="0,0,18,8" IsChecked="{Binding Permissions.AllowSecretRead, Mode=TwoWay}" Content="{Binding Permissions.AllowSecretReadText}" />
                                 </WrapPanel>
                                 <!-- U146 站点 1/2（节点预设的权限覆盖）：换行分隔文本框 → chip 列表。
                                      标签是必须的：原先只有 AutomationProperties.Name，
                                      视力正常的用户靠 PlaceholderText 猜这框是「可读」还是「可写」。 -->
-                                <TextBlock Text="{Binding $parent[UserControl].DataContext.ReadableRootsLabel}"
+                                <TextBlock Text="{Binding Permissions.ReadableRootsLabel}"
                                            Classes="caption" />
                                 <ContentControl Content="{Binding Permissions.ReadableRootChips}"
                                                 ContentTemplate="{StaticResource PathChipListTemplate}" />
-                                <TextBlock Text="{Binding $parent[UserControl].DataContext.WritableRootsLabel}"
+                                <TextBlock Text="{Binding Permissions.WritableRootsLabel}"
                                            Classes="caption" />
                                 <ContentControl Content="{Binding Permissions.WritableRootChips}"
                                                 ContentTemplate="{StaticResource PathChipListTemplate}" />
                               </StackPanel>
-                              <TextBlock Text="{Binding $parent[UserControl].DataContext.PresetToolsTitle}" Classes="caption" FontWeight="SemiBold" />
+                              <TextBlock Text="{Binding PresetToolsTitle}" Classes="caption" FontWeight="SemiBold" />
                               <ItemsControl ItemsSource="{Binding ToolControls}">
                                 <ItemsControl.ItemsPanel>
                                   <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>

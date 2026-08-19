@@ -52,14 +52,37 @@
         </Border>
 
       <!-- 去 card：存档流铺满内容区（ui设计方案「Git 页树图同样去 card」），
-           不再套一层圆角描边盒子；行与行之间靠发丝分隔线分层。 -->
+           不再套一层圆角描边盒子；行与行之间靠发丝分隔线分层。
+           U182-K：四个态互斥叠放在同一格里，各自绑**不同**的属性——
+           原缺陷正是「空态与错误态共用一个判据」（`Commits.Count == 0`），
+           于是后端报错时有 200 个存档点的项目被告知「你没有存档」。 -->
       <Grid Grid.Row="2">
-        <ListBox ItemsSource="{Binding Commits}"
+        <Grid IsVisible="{Binding ShowContent}" RowDefinitions="Auto,*">
+          <!-- U182-K：已有存档时出错走这条内容内错误条（ContentError），
+               不把列表清掉换成整页错误页——那份列表是用户手上唯一的诊断材料。 -->
+          <Border Grid.Row="0"
+                  Classes="layer"
+                  BorderBrush="{DynamicResource Ariadne.StatusError}"
+                  BorderThickness="1"
+                  Padding="12,8"
+                  Margin="24,0,20,8"
+                  IsVisible="{Binding IsContentError}">
+            <StackPanel Orientation="Horizontal" Spacing="10">
+              <TextBlock Text="{Binding ErrorText}"
+                         Classes="secondary"
+                         TextWrapping="Wrap"
+                         VerticalAlignment="Center" />
+              <Button Classes="secondary"
+                      Content="{Binding RefreshText}"
+                      Command="{Binding RefreshCommand}" />
+            </StackPanel>
+          </Border>
+          <ListBox Grid.Row="1"
+                 ItemsSource="{Binding Commits}"
                  SelectedItem="{Binding SelectedCommit, Mode=TwoWay}"
                  SelectionMode="Single"
                  Background="Transparent"
                  BorderThickness="0"
-                 IsVisible="{Binding HasCommits}"
                  AutomationProperties.Name="{Binding BranchGraphText}">
           <ListBox.ItemsPanel>
             <ItemsPanelTemplate>
@@ -176,12 +199,50 @@
             </DataTemplate>
           </ListBox.ItemTemplate>
         </ListBox>
+        </Grid>
 
-        <Border Classes="empty-state" IsVisible="{Binding IsCommitListEmpty}" VerticalAlignment="Center">
+        <!-- U182-K：加载态。原先刷新期间与「真的没有存档」是同一画面，
+             用现成的 BusyDots 基元（chip 内距只有 10,3，点直径收到 4px）。 -->
+        <Border Classes="empty-state" IsVisible="{Binding IsLoading}" VerticalAlignment="Center">
+          <StackPanel Spacing="10" HorizontalAlignment="Center">
+            <ctl:BusyDots IsActive="{Binding IsLoading}" HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding LoadingText}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" />
+          </StackPanel>
+        </Border>
+
+        <!-- U182-K：整页错误态（Error）——手上一条存档都没有时才走这里。
+             必须带重试：「错误必须配文字」之外还得给出路，否则用户只能重启。 -->
+        <Border Classes="empty-state" IsVisible="{Binding IsStandaloneError}" VerticalAlignment="Center">
+          <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="420">
+            <TextBlock Text="{Binding ErrorTitle}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
+            <TextBlock Text="{Binding ErrorText}"
+                       Classes="secondary"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap" />
+            <Button Classes="secondary"
+                    Content="{Binding RefreshText}"
+                    Command="{Binding RefreshCommand}"
+                    HorizontalAlignment="Center" />
+          </StackPanel>
+        </Border>
+
+        <!-- 空态绑 ShowEmpty（Empty / IdleNeedProject 两种，且不在加载或出错中）。
+             ⚠️ 与上面两个态**绑的不是同一个属性**——共用一个判据就是 U182-K 的原缺陷。 -->
+        <Border Classes="empty-state" IsVisible="{Binding ShowEmpty}" VerticalAlignment="Center">
           <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="420">
             <ctl:EmptyStateArt Kind="GitRag" Width="210" Height="168" HorizontalAlignment="Center" />
             <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
             <TextBlock Text="{Binding EmptyHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
+            <!-- U182-M：把「点左上角项目名」这句位置描述换成真能点的动作。
+                 只在 IdleNeedProject 且宿主注入了打开链路时出现——
+                 没有链路时宁可不显示，也不要一颗点了没反应的按钮（那正是原缺陷形态）。 -->
+            <Button Classes="primary"
+                    Content="{Binding OpenProjectText}"
+                    Command="{Binding OpenProjectCommand}"
+                    IsVisible="{Binding ShowOpenProjectAction}"
+                    HorizontalAlignment="Center"
+                    Margin="0,4,0,0" />
           </StackPanel>
         </Border>
       </Grid>

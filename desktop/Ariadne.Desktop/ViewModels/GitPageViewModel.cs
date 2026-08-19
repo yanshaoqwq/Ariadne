@@ -21,6 +21,16 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     private readonly Func<Task<bool>> _confirmProjectReload;
     private readonly Func<Task> _reloadProjectData;
     private readonly Func<string, bool, Task>? _persistPanelState;
+    /// <summary>
+    /// U182-M：无项目时空态里那颗「打开项目」按钮的动作。
+    ///
+    /// 宿主（MainWindowViewModel）注入的是**它自己那条打开项目链路**，
+    /// 不是另写一套后端调用——离开守卫、目录预检、EnterProject 都在那条链上，
+    /// 绕过去等于少一半流程。为 null 时按钮**不显示**（见
+    /// <see cref="ShowOpenProjectAction"/>）：宁可没有按钮，也不要一颗点了没反应的，
+    /// 那正是 U182-M 报的缺陷形态。
+    /// </summary>
+    private readonly Func<Task>? _requestOpenProject;
     private string _gitAutoColor = "#8a8f98";
     private string _gitManualColor = "#f59e0b";
     private bool _isRightPanelOpen = true;
@@ -36,6 +46,8 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     private string _diffPreviewText = string.Empty;
     private GitHistoryItemViewModel? _selectedCommit;
     private GitOperationState _operationState;
+    private PageLoadState _loadState = PageLoadState.Loading;
+    private string _errorText = string.Empty;
     private long _loadGeneration;
 
     public GitPageViewModel(
@@ -43,13 +55,15 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         IAriadneBackendClient backend,
         Func<Task<bool>>? confirmProjectReload = null,
         Func<Task>? reloadProjectData = null,
-        Func<string, bool, Task>? persistPanelState = null)
+        Func<string, bool, Task>? persistPanelState = null,
+        Func<Task>? requestOpenProject = null)
     {
         _displayNames = displayNames;
         _backend = backend;
         _confirmProjectReload = confirmProjectReload ?? (() => Task.FromResult(true));
         _reloadProjectData = reloadProjectData ?? (() => Task.CompletedTask);
         _persistPanelState = persistPanelState;
+        _requestOpenProject = requestOpenProject;
         Commits = new ObservableCollection<GitHistoryItemViewModel>();
         ToggleRightPanelCommand = new RelayCommand(() => _ = ToggleRightPanelAsync());
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync(), CanStartOperation);
@@ -59,6 +73,10 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             () => _ = RestoreSelectedAsync(),
             () => HasSelection && CanStartOperation());
         CopyIdCommand = new RelayCommand(() => _ = CopyCommitIdAsync(SelectedCommit), () => HasSelection);
+        // U182-M：错误态的重试不能复用 RefreshCommand——后者的 CanExecute 里有
+        // `_backend.HasProjectRoot`，而「无项目」正是这颗按钮要走的那条分支。
+        // 这里是「打开项目」，与重试是两件事，各自一个命令。
+        OpenProjectCommand = new RelayCommand(() => _ = RequestOpenProjectAsync(), () => _requestOpenProject is not null);
     }
 
     public string ToggleRightPanelText => _displayNames.Text("ui.action.toggle_right_panel");
@@ -74,6 +92,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     public RelayCommand ViewDetailsCommand { get; }
     public RelayCommand RestoreCommand { get; }
     public RelayCommand CopyIdCommand { get; }
+    public RelayCommand OpenProjectCommand { get; }
     public ObservableCollection<GitHistoryItemViewModel> Commits { get; }
     public Func<string, Task>? RequestCopyText { get; set; }
 
@@ -253,13 +272,69 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
 
     public bool HasSelection => SelectedCommit is not null;
     public bool HasCommits => Commits.Count > 0;
-    public bool IsCommitListEmpty => Commits.Count == 0;
-    public string EmptyTitle => _backend.HasProjectRoot
-        ? _displayNames.Text("ui.empty.git.title")
-        : _displayNames.Text("ui.empty.need_project.title");
-    public string EmptyHint => _backend.HasProjectRoot
-        ? _displayNames.Text("ui.empty.git.hint")
-        : _displayNames.Text("ui.empty.need_project.hint");
+
+    /// <summary>
+    /// U182-K：页面加载态。**照搬 <see cref="RunLogPageViewModel"/> 的
+    /// <see cref="PageLoadState"/>，不新造一套**——本项目已有这套机制（日志页、作品页），
+    /// Git 页此前从未接入。
+    /// </summary>
+    public PageLoadState LoadState
+    {
+        get => _loadState;
+        private set
+        {
+            if (SetProperty(ref _loadState, value))
+            {
+                NotifyLoadStateDerived();
+            }
+        }
+    }
+
+    public string ErrorText
+    {
+        get => _errorText;
+        private set => SetProperty(ref _errorText, value);
+    }
+
+    /// <summary>
+    /// U182-K：空态判据由 <c>Commits.Count == 0</c> 改成**看状态**。
+    ///
+    /// 原缺陷：`Commits.Count == 0` 是唯一判据 ⇒ 后端报错时列表为空，
+    /// 于是有 200 个存档点的项目被告知「你没有存档」；刷新期间也是同一画面。
+    /// 「空」是一个**结论**（问过后端、确实没有），不是「手上暂时没数据」。
+    /// </summary>
+    public bool IsCommitListEmpty => _loadState is PageLoadState.Empty or PageLoadState.IdleNeedProject;
+    public bool IsLoading => _loadState == PageLoadState.Loading;
+    public bool IsError => _loadState is PageLoadState.Error or PageLoadState.ContentError;
+
+    /// <summary>整页错误页：手上一条存档都没有，只能给「出错了 + 重试」。</summary>
+    public bool IsStandaloneError => _loadState == PageLoadState.Error;
+
+    /// <summary>
+    /// 内容内错误条：**已有存档时出错不清内容**，列表留着 + 顶部一条错误提示。
+    /// 照抄 RunLog 的 `Logs.Count > 0 ? ContentError : Error` 区分——
+    /// 把 200 行历史换成一张整页错误页，是拿用户手上唯一的诊断材料去换一句道歉。
+    /// </summary>
+    public bool IsContentError => _loadState == PageLoadState.ContentError;
+    public bool ShowEmpty => IsCommitListEmpty && !IsLoading && !IsError;
+    public bool ShowContent => HasCommits && _loadState is PageLoadState.Content or PageLoadState.ContentError;
+
+    /// <summary>
+    /// U182-M：只有「没打开项目」这一种空态给可点动作。
+    /// 「项目里还没有存档」时该点的是右栏的「创建存档」，不是打开项目。
+    /// </summary>
+    public bool ShowOpenProjectAction =>
+        _loadState == PageLoadState.IdleNeedProject && _requestOpenProject is not null;
+
+    public string EmptyTitle => _loadState == PageLoadState.IdleNeedProject
+        ? _displayNames.Text("ui.empty.need_project.title")
+        : _displayNames.Text("ui.empty.git.title");
+    public string EmptyHint => _loadState == PageLoadState.IdleNeedProject
+        ? _displayNames.Text("ui.empty.need_project.hint")
+        : _displayNames.Text("ui.empty.git.hint");
+    public string ErrorTitle => _displayNames.Text("ui.git.error.title");
+    public string LoadingText => _displayNames.Text("ui.git.loading");
+    public string OpenProjectText => _displayNames.Text("ui.layout.open_project");
     public string SelectedSummary => SelectedCommit?.Summary ?? NoSelectionText;
     public string SelectedCommitId => SelectedCommit?.CommitId ?? _displayNames.Text("ui.common.none");
     public string SelectedKind => SelectedCommit?.KindText ?? _displayNames.Text("ui.common.none");
@@ -308,6 +383,15 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
 
     private async Task RefreshAsync(CancellationToken cancellationToken = default)
     {
+        // U182-K：无项目这条路必须**走在 TryBeginOperation 之前**。
+        // `CanStartOperation()` 自带 `_backend.HasProjectRoot` 判定，无项目时它返回 false ⇒
+        // 整个方法早返回、ClearProjectState 永远不执行，页面会一直停在初始的 Loading 态。
+        // （原实现靠 `Commits.Count == 0` 兜住，所以看不出这一点；改成看状态后必须显式处理。）
+        if (!_backend.HasProjectRoot)
+        {
+            ClearProjectState();
+            return;
+        }
         if (!TryBeginOperation(GitOperationState.Refreshing))
         {
             return;
@@ -331,6 +415,9 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             return;
         }
 
+        // U182-K：进入加载态**在发起后端调用之前**。放到 await 之后就等于没有加载态——
+        // 加载态要覆盖的正是「请求在路上」这段时间。
+        LoadState = PageLoadState.Loading;
         await RefreshRepositoryStatusAsync(cancellationToken).ConfigureAwait(true);
         cancellationToken.ThrowIfCancellationRequested();
         try
@@ -367,6 +454,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         Commits.Clear();
         SelectedCommit = null;
         StatusText = string.Empty;
+        ErrorText = string.Empty;
         RepositoryStatusText = string.Empty;
         CurrentBranchText = _displayNames.Text("ui.common.none");
         HeadText = _displayNames.Text("ui.common.none");
@@ -374,6 +462,9 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         RepositoryReasonText = string.Empty;
         DiffSummaryText = _displayNames.Text("ui.common.none");
         DiffPreviewText = string.Empty;
+        // U182-K/M：没打开项目不是「空」也不是「错」，是第三种状态——
+        // 它的下一步是「打开项目」，而 Empty 的下一步是「创建存档」。
+        LoadState = PageLoadState.IdleNeedProject;
         NotifyHistoryState();
     }
 
@@ -434,7 +525,13 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            // U182-K 的原缺陷正在这里：此前只写 StatusText、**不标记状态**，
+            // 于是 Commits 仍为空 ⇒ 空态照常渲染，用户读到的是「你没有存档」。
+            // 现在按「手上还有没有内容」分两种呈现，与 RunLog 同一区分。
+            ErrorText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ErrorText;
+            LoadState = Commits.Count > 0 ? PageLoadState.ContentError : PageLoadState.Error;
+            // 刻意不 Commits.Clear()：上一次成功的快照是用户手上唯一的诊断材料。
             NotifyHistoryState();
         }
     }
@@ -527,6 +624,9 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         SelectedCommit = previousId is null
             ? Commits.FirstOrDefault()
             : Commits.FirstOrDefault(item => item.CommitId == previousId) ?? Commits.FirstOrDefault();
+        // U182-K：加载成功了才有资格说「空」——此时确实问过后端且它说没有。
+        ErrorText = string.Empty;
+        LoadState = Commits.Count == 0 ? PageLoadState.Empty : PageLoadState.Content;
         StatusText = Commits.Count == 0
             ? EmptyText
             : _displayNames.Format("ui.git.count", new Dictionary<string, string>
@@ -767,9 +867,55 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     {
         OnPropertyChanged(nameof(HasCommits));
         OnPropertyChanged(nameof(IsCommitListEmpty));
+        OnPropertyChanged(nameof(ShowEmpty));
+        OnPropertyChanged(nameof(ShowContent));
         OnPropertyChanged(nameof(EmptyTitle));
         OnPropertyChanged(nameof(EmptyHint));
         NotifySelectionCommands();
+    }
+
+    /// <summary>
+    /// U182-K：状态跃迁要通知的全部派生属性。
+    ///
+    /// 单独收成一个方法而不是在 setter 里逐条列：这些属性有 9 个，
+    /// 漏通知一条的表现是「状态已经对了但界面还停在上一屏」——
+    /// 与「状态没跃迁」在屏幕上完全同形，极难归因。
+    /// </summary>
+    private void NotifyLoadStateDerived()
+    {
+        OnPropertyChanged(nameof(IsCommitListEmpty));
+        OnPropertyChanged(nameof(IsLoading));
+        OnPropertyChanged(nameof(IsError));
+        OnPropertyChanged(nameof(IsStandaloneError));
+        OnPropertyChanged(nameof(IsContentError));
+        OnPropertyChanged(nameof(ShowEmpty));
+        OnPropertyChanged(nameof(ShowContent));
+        OnPropertyChanged(nameof(ShowOpenProjectAction));
+        OnPropertyChanged(nameof(EmptyTitle));
+        OnPropertyChanged(nameof(EmptyHint));
+    }
+
+    /// <summary>
+    /// U182-M：把「点左上角项目名」这句死文案换成一颗真能点的按钮。
+    ///
+    /// 走宿主注入的委托（MainWindowViewModel 的 OpenProjectCommand 同一条链路），
+    /// 而不是自己 `_backend.OpenProjectAsync`：那条链上还有离开守卫、目录预检、
+    /// EnterProject 与最近项目登记，跳过任意一项都会留下半开的项目状态。
+    /// </summary>
+    private async Task RequestOpenProjectAsync()
+    {
+        if (_requestOpenProject is null)
+        {
+            return;
+        }
+        try
+        {
+            await _requestOpenProject().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+        }
     }
 
     private async Task<bool> ConfirmRestoreAsync(GitHistoryItemViewModel commit, string branch)

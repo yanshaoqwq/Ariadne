@@ -5598,6 +5598,33 @@ pub fn search_project_documents_impl(
             crate::providers::ProviderCallContext::new("project_retrieval"),
         )
         .map_err(error_to_string)
+        .map_err(tag_indexing_not_ready)
+}
+
+/// U184-A：把「索引还没追上刚才的保存」这个**暂态**升级成可辨识的 message_key。
+///
+/// 门禁本身在 `retrieval/lifecycle.rs::ensure_search_not_blocked_by_pending_index`，
+/// 它返回的是 `CoreError::validation`，落到 IPC 上与「查询串非法」共用
+/// `error_code = validation` + `error_key = ui.error.validation`
+/// ⇒ 前端只能靠嗅探英文诊断串来区分，而 U1 明确禁止在前端建英文关键字表。
+///
+/// 于是这里在**边界**上贴一个稳定 key：作者刚改完一章正文立刻搜索必然撞上这道门，
+/// 它是「等一下再搜就好」，不是错误。前端凭 key 给出等待文案 + 重试入口
+/// （`WorksPageViewModel` 的 body-search 分支）。
+///
+/// ⚠️ 判据取诊断串前缀而非全等：门禁文案后半截是给日志看的解释，可能被改写。
+/// 这层匹配留在 Rust 一侧（错误的产生方与识别方同语言、同仓库、同一次编译），
+/// 与「前端不认英文串」并不矛盾。
+fn tag_indexing_not_ready(error: CommandError) -> CommandError {
+    use crate::command_error::CommandErrorCode;
+    if error.code != CommandErrorCode::Validation || !error.contains("indexing_not_ready") {
+        return error;
+    }
+    CommandError::with_key(
+        CommandErrorCode::Validation,
+        "ui.error.indexing_not_ready",
+        error.diagnostic_text().to_owned(),
+    )
 }
 
 /// 产品 IPC 搜索入口；复用 AriadneAppState 持有的项目级运行时与真实凭据。
@@ -5628,6 +5655,9 @@ pub fn search_project_documents_with_cancellation(
         .retrieval_runtime()?
         .search(query, limit, context)
         .map_err(error_to_string)
+        // U184-A：这条才是产品 IPC 走的路（`ipc.rs` 的 "search_project_documents"）。
+        // 只给 `_impl` 贴 key 会重演「实现完整但生产路径没接线」那一族缺陷。
+        .map_err(tag_indexing_not_ready)
 }
 
 /// 同步消费当前项目的索引 outbox，供后台线程、诊断恢复和契约测试复用。

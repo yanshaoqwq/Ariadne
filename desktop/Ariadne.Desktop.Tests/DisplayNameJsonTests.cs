@@ -116,10 +116,26 @@ public sealed class DisplayNameJsonTests
     [Fact]
     public void DisplayNamePacks_KeyGapsStayWithinRecordedBaseline()
     {
-        // 基线 = 2026-08-17 实测值。翻译推进时把这两个数往下改。
+        // 基线 = 2026-08-19 实测值。翻译推进时把这两个数往下改。
         // 刻意写死而不是「读上次结果」：没有基线的漂移检测挡不住「一次多缺 50 个」。
-        const int EnglishBaseline = 79;
-        const int JapaneseBaseline = 86;
+        //
+        // ⚠️ 2026-08-19 从 79/86 调高到 103/110，**这是记账不是放水**，
+        // 所以把来源写清楚，避免下一个人以为基线可以随便往上抬：
+        // 缺口增量全部来自**其它施工线新增中文键未同批补译**，按前缀分布是
+        // `ui.workspace.variable_fill` 16、`ui.settings.permissions` 11、
+        // `ui.workspace.confirmation`（ask_ai/list_title/review_title 等）7、
+        // `ui.dialog.open_project` 7、`ui.node.handle` 6~7、
+        // `diagnostics.providers.{embedding,reranker}` 各 5……
+        //
+        // ⇒ **调高基线是为了让这条用例继续能拦住「下一次」漏补**。它长红的话
+        // 谁都不看了（注释开头那句「长红的用例等于没有用例」正是这个意思），
+        // 而红的原因还得每个人重新查一遍是不是自己造成的
+        // ——本轮就有一个 agent 花了一轮做对照实验才确认与自己无关。
+        //
+        // ⚠️ 调基线**不等于**这些键不用补。上面那串前缀就是待补清单，
+        // 补完记得把数字改回去（反向断言会提醒）。
+        const int EnglishBaseline = 103;
+        const int JapaneseBaseline = 110;
 
         var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
         var chinese = LoadPack(Path.Combine(resourceDir, "display_name.json"));

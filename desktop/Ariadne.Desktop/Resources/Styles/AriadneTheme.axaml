@@ -618,8 +618,18 @@
       <StreamGeometry x:Key="Ariadne.Icon.Redo">M15,7 L20,12 L15,17 M19,12 L9,12 C6,12 4,14 4,17</StreamGeometry>
       <!-- 导入（向下入托盘） -->
       <StreamGeometry x:Key="Ariadne.Icon.Import">M12,3 L12,13 M8,9 L12,13 L16,9 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
-      <!-- 导出（向上出托盘） -->
-      <StreamGeometry x:Key="Ariadne.Icon.Export">M12,13 L12,3 M8,7 L12,3 L16,7 M4,16 L4,20 L20,20 L20,16</StreamGeometry>
+      <!-- 导出（U195-G：文档 + 独立斜向飞出的箭头，刻意**不与 Import 共用托盘底**）
+           原先两枚只差箭头朝向：托盘底 `M4,16 L4,20 L20,20 L20,16` 与竖线完全相同，
+           16px 下相邻并列几乎不可分辨 —— 而这两个动作后果相反（读入 vs 写出），
+           在作品页顶栏正好紧挨着。
+           所以换隐喻而不是只翻箭头：Import 保留「箭头入托盘」（向下、有容器），
+           Export 改成「文档在左下 + 箭头独立飞向右上」（斜向、无容器），
+           方向与轮廓**双重**不同。
+           ⚠️ 箭头刻意与文档**不交叠**：交叠版在 16px 下会糊成一团
+           （试过「箭头穿出文档右缘」，ASCII 网格渲染即可见交叠处辨不清）。
+           ⚠️ 别为了对称把托盘底加回来——那正是本条要消除的同形来源。
+           回归见 IconDistinguishabilityTests（判据：不共用子路径 + 坐标点重合率 < 50%）。 -->
+      <StreamGeometry x:Key="Ariadne.Icon.Export">M4,10 L4,20 L13,20 L13,13 M4,10 L9,10 L9,14 L13,14 M11,11 L19,4 M19,4 L14,4 M19,4 L19,9</StreamGeometry>
       <!-- 打包为子工作流（等轴立方体 = 把所选收进一个包） -->
       <StreamGeometry x:Key="Ariadne.Icon.Pack">M12,3 L20,7.5 L20,16.5 L12,21 L4,16.5 L4,7.5 Z M4,7.5 L12,12 L20,7.5 M12,12 L12,21</StreamGeometry>
       <!-- 搜索（放大镜） -->
@@ -3225,6 +3235,40 @@
     <Setter Property="Transitions">
       <Transitions />
     </Setter>
+  </Style>
+
+  <!-- ============================================================
+       预算余量分档（U194-E）
+
+       缺陷版本：预算条**一路青绿到 100%**。余量剩 $0.50 与剩 $50 长得完全一样
+       （同一 Ariadne.AccentPrimary），金额文字同一灰，作者只能在「点运行被后端拒绝」
+       那一刻才知道额度到头——界面从「一切正常」直接跳到「被拒」。
+
+       error 档是 `指导性文件/UI组件状态表.md:34` 的硬要求
+       （「余量<$2 → bg-status-error + 文字 text-error font-medium」），
+       判据是**绝对余量**而不是百分比，见 `MainWindowViewModel.ResolveBudgetSeverity`。
+
+       ⚠️ **这几条必须留在文件末尾**：`TextBlock.caption` 的 Foreground
+       （:1003，Ariadne.TextSecondary）与这里冲突，而 Avalonia **同优先级按文档顺序、
+       后者胜，没有 CSS 那种选择器特异性权重**——`.caption.budget-error` 比
+       `.caption` 具体得多，但这不给它任何优先权。搬到 caption 之前就会被整条盖掉
+       （U154 正是这么失效的）。
+       ============================================================ -->
+  <Style Selector="ProgressBar.budget-warning">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusWarning}" />
+  </Style>
+  <Style Selector="ProgressBar.budget-error">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+  </Style>
+  <!-- 文字色跟着变，且 error 档加粗（规范的 `text-error font-medium`）：
+       只换颜色的话，色弱用户与低对比度屏上这一档与正常档几乎无差别，
+       而这是「跑不动了」的最后一次预告。 -->
+  <Style Selector="TextBlock.budget-warning">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusWarning}" />
+  </Style>
+  <Style Selector="TextBlock.budget-error">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
   </Style>
 
 </Styles>

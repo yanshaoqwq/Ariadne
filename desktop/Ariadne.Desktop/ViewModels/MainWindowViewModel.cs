@@ -6,7 +6,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
+public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, IRunTerminalStateObserver
 {
     private static readonly string AppVersion =
         typeof(MainWindowViewModel).Assembly
@@ -21,6 +21,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         "templates",
     };
     private static readonly string[] PreloadedProjectPageIds = { "workspace", "works", "git" };
+    /// <summary>
+    /// error 档阈值：余量低于 $2 即报错色。
+    /// 来自 `指导性文件/UI组件状态表.md:34`，**是绝对金额而不是百分比**——
+    /// 它衡量的是「还够不够跑一次调用」，与总额大小无关。改这个数要同步改那份规范。
+    /// </summary>
+    private const double BudgetErrorRemainingUsd = 2.0;
+    /// <summary>
+    /// warning 档阈值：已花达 80% 起预告。规范没定这一档，是本轮补的。
+    /// 取 80% 而非更早，是为了不让预告变成常态噪点——一条整天黄着的进度条
+    /// 和一条整天绿着的进度条一样没有信息量。
+    /// </summary>
+    private const double BudgetWarningSpentRatio = 0.8;
     /// <summary>无项目时也可进入的页面（侧栏跳过开始页）。</summary>
     private static readonly HashSet<string> AlwaysAvailablePageIds = new(StringComparer.Ordinal)
     {
@@ -41,6 +53,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
     private string _notificationText = string.Empty;
     private string _budgetStatusText;
     private double _budgetUsagePercent;
+    private BudgetSeverity _budgetSeverity = BudgetSeverity.Normal;
+    private double? _budgetRemainingUsd;
+    /// <summary>已因终态刷新过预算的运行身份，避免同一次运行重复发 IPC。</summary>
+    private string? _lastRefreshedTerminalRun;
     private bool _sidebarExpanded = true;
     private bool _hasOpenProject;
     private string _currentProjectRoot = string.Empty;
@@ -95,6 +111,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             CanStartProjectTransition);
         LeaveProjectCommand = new RelayCommand(() => _ = LeaveProjectAsync());
         UserFacingError.RegisterObserver(this);
+        // U194-E：运行跑完后顶栏预算数字必须跟着动。
+        // 注册在构造期而不是「进项目时」：运行会话属于画布页，其生命周期与项目会话
+        // 不同步（切页会重建页面 VM，但顶栏这一个实例活到窗口关闭）。
+        RunTerminalStateNotifier.Register(this);
         // 上组：创作主流程
         PrimaryNavigationItems = new ObservableCollection<NavigationItemViewModel>
         {
@@ -304,13 +324,87 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
     public string BudgetStatusText
     {
         get => _budgetStatusText;
-        set => SetProperty(ref _budgetStatusText, value);
+        set
+        {
+            if (SetProperty(ref _budgetStatusText, value))
+            {
+                OnPropertyChanged(nameof(BudgetSeverityToolTipText));
+            }
+        }
     }
 
     public double BudgetUsagePercent
     {
         get => _budgetUsagePercent;
         set => SetProperty(ref _budgetUsagePercent, value);
+    }
+
+    /// <summary>
+    /// 预算余量分档，驱动顶栏进度条填充色与金额文字色（U194-E）。
+    ///
+    /// 三个布尔投影是给 XAML 用的：`Classes.budget-error="{Binding IsBudgetError}"`
+    /// 比在样式选择器里比较枚举值可靠——Avalonia 没有「按 DataContext 属性值匹配」的
+    /// 选择器，条件类是唯一不需要 code-behind 的路子。
+    /// </summary>
+    public BudgetSeverity BudgetSeverity
+    {
+        get => _budgetSeverity;
+        private set
+        {
+            if (SetProperty(ref _budgetSeverity, value))
+            {
+                OnPropertyChanged(nameof(IsBudgetNormal));
+                OnPropertyChanged(nameof(IsBudgetWarning));
+                OnPropertyChanged(nameof(IsBudgetError));
+                OnPropertyChanged(nameof(BudgetSeverityToolTipText));
+            }
+        }
+    }
+
+    public bool IsBudgetNormal => BudgetSeverity == BudgetSeverity.Normal;
+
+    public bool IsBudgetWarning => BudgetSeverity == BudgetSeverity.Warning;
+
+    public bool IsBudgetError => BudgetSeverity == BudgetSeverity.Error;
+
+    /// <summary>
+    /// 余量美元数；未设限额时为 null（无「余量」这个概念）。
+    /// 顶栏不直接显示它——显示的仍是既有的「已花/总额」——它的用途是
+    /// 悬停提示与分档判据的可测面。
+    /// </summary>
+    public double? BudgetRemainingUsd
+    {
+        get => _budgetRemainingUsd;
+        private set
+        {
+            if (SetProperty(ref _budgetRemainingUsd, value))
+            {
+                OnPropertyChanged(nameof(BudgetSeverityToolTipText));
+            }
+        }
+    }
+
+    /// <summary>
+    /// 悬停时说明「为什么这条变红了」。
+    /// 颜色本身不解释原因，而「余量不足会被拒」这件事必须配文字
+    /// （AGENTS.md：错误必须配文字，不能只靠一个颜色）。
+    /// </summary>
+    public string BudgetSeverityToolTipText
+    {
+        get
+        {
+            if (BudgetSeverity == BudgetSeverity.Normal || BudgetRemainingUsd is not { } remaining)
+            {
+                return BudgetStatusText;
+            }
+            var key = BudgetSeverity == BudgetSeverity.Error
+                ? "ui.layout.budget_remaining_critical"
+                : "ui.layout.budget_remaining_low";
+            return _displayNames.Format(key, new Dictionary<string, string>
+            {
+                ["remaining"] = Math.Max(remaining, 0).ToString("0.##"),
+            });
+        }
     }
 
     public bool SidebarExpanded
@@ -380,6 +474,41 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         DiagnosticSummaryText = string.Empty;
         DiagnosticDetailText = string.Empty;
         _diagnosticFailure = null;
+    }
+
+    /// <summary>
+    /// 运行到达终态（succeeded / failed / stopped）后静默刷新顶栏预算（U194-E 后半）。
+    ///
+    /// 缺陷版本：`RefreshBudgetStatusAsync` 只在「进项目」与「Git 回档后」被调，
+    /// 于是作者跑一整天工作流，顶栏那两个数字**一动不动**——花的钱全在后端账上，
+    /// 界面上却看不出任何变化，直到下一次重开项目。
+    ///
+    /// **只刷新、不弹窗**：作者可能正在作品页打字，抢焦点是倒退
+    /// （U194-D 已留档「后台事件不弹窗」是健康的，不要破坏它）。
+    /// toast 组件是另一条线的活，这里刻意不碰。
+    ///
+    /// **无项目时直接返回**：离开项目后仍可能收到迟到的终态（页面 VM 尚未被回收），
+    /// 那时预算查询无意义，还会把刚归位的顶栏重新填上上个项目的数字。
+    /// </summary>
+    void IRunTerminalStateObserver.OnRunReachedTerminalState(
+        string workflowId,
+        string runId,
+        string status)
+    {
+        if (!HasOpenProject)
+        {
+            return;
+        }
+        // 同一次运行（workflow+run 二元组）只刷一次。跃迁边沿判据已在协调器一侧，
+        // 这里再加一道是因为**画布页可以被重建**：新协调器从空状态挂接到同一个 runId
+        // 时会再走一次「非终态 → 终态」，那属于同一次运行，不该再发一次 IPC。
+        var identity = $"{workflowId}{runId}{status}";
+        if (string.Equals(_lastRefreshedTerminalRun, identity, StringComparison.Ordinal))
+        {
+            return;
+        }
+        _lastRefreshedTerminalRun = identity;
+        _ = RefreshBudgetStatusAsync();
     }
 
     public bool HasOpenProject
@@ -511,6 +640,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         ResetProjectPageSession();
         BudgetStatusText = _displayNames.Text("ui.common.none");
         BudgetUsagePercent = 0;
+        // 离开项目后预算不再属于任何项目，分档必须一并归位——
+        // 否则上个项目的告急红会留在顶栏，看起来像是新的（空的）会话在超支。
+        BudgetSeverity = BudgetSeverity.Normal;
+        BudgetRemainingUsd = null;
         // 离开项目回到开始页；侧栏暂存的 nav 仍保留，便于再次点侧栏进入
         CurrentPage = Welcome;
         await Welcome.LoadAsync().ConfigureAwait(true);
@@ -648,7 +781,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
                 _backend,
                 ConfirmCachedProjectPagesLeaveAsync,
                 ReloadCachedProjectPagesAsync,
-                PersistPanelStateAsync),
+                PersistPanelStateAsync,
+                // U182-M：Git 页「没打开项目」空态里那颗按钮走的是**这条链**
+                // （与标题栏的 OpenProjectCommand 同一个），不是另写一套后端调用：
+                // 离开守卫、目录预检、EnterProject、最近项目登记全在这条链上。
+                () => RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectAsync)),
             "run_logs" => new RunLogPageViewModel(_displayNames, _backend),
             "templates" => new TemplateMarketPageViewModel(_displayNames, _backend),
             "settings" => new SettingsPageViewModel(
@@ -1223,6 +1360,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
 
     internal Task PreloadProjectPagesForTestsAsync() => LoadProjectDataPagesAsync();
 
+    /// <summary>测试用：走真实的预算查询 + 分档路径（不是构造一个假的分档值）。</summary>
+    internal Task RefreshBudgetStatusForTestsAsync() => RefreshBudgetStatusAsync();
+
+    /// <summary>
+    /// 测试用：把「有打开的项目」置真，使迟到终态不会被 `HasOpenProject` 闸挡掉。
+    /// 直接设属性而不是跑整套 EnterProject：后者要真后端起项目，
+    /// 而本用例要测的是终态 → 刷新这一段接线。
+    /// </summary>
+    internal void MarkProjectOpenForTests() => HasOpenProject = true;
+
     /// <summary>
     /// 测试用：暴露预载清单本身。
     ///
@@ -1314,6 +1461,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         {
             BudgetStatusText = UserFacingError.Short(ex, _displayNames, "ui.error.budget");
             BudgetUsagePercent = 0;
+            // 读不到预算 ≠ 余量告急。留在 Normal 档，否则一次 IPC 抖动会把顶栏染红，
+            // 而红色在这里的语义是「快没钱了」，不是「查询失败了」——
+            // 后者已由 BudgetStatusText 那行错误文案承担。
+            BudgetSeverity = BudgetSeverity.Normal;
+            BudgetRemainingUsd = null;
         }
     }
 
@@ -1323,6 +1475,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
         {
             BudgetUsagePercent = 0;
             BudgetStatusText = _displayNames.Text("ui.layout.budget_unlimited");
+            // 日预算 0 = **不设上限**（U112），不是「余量为负」。
+            // 若按 budget - spent 算，这里会得到 -spent 从而永久报红——
+            // 顶栏一直红着等于没有分级，反而把真正的临界态淹掉。
+            BudgetSeverity = BudgetSeverity.Normal;
+            BudgetRemainingUsd = null;
             return;
         }
         var total = status.BudgetUsd <= 0 ? 0 : Math.Clamp(status.SpentUsd / status.BudgetUsd, 0, 1);
@@ -1332,6 +1489,42 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver
             ["spent"] = status.SpentUsd.ToString("0.##"),
             ["budget"] = status.BudgetUsd.ToString("0.##"),
         });
+        // U194-E：判据是**绝对余量**，不是百分比。
+        // `BudgetUsagePercent` 算不出规范要的那条线——90% 在 $10 预算下只剩 $1（该报红），
+        // 在 $1000 预算下还剩 $100（完全正常）。所以这里必须另算 budget - spent。
+        var remaining = status.BudgetUsd - status.SpentUsd;
+        BudgetRemainingUsd = remaining;
+        BudgetSeverity = ResolveBudgetSeverity(status.BudgetUsd, remaining);
+    }
+
+    /// <summary>
+    /// 预算余量分档。error 档是 `指导性文件/UI组件状态表.md:34` 的硬要求
+    /// （「余量&lt;$2 → bg-status-error + 文字 text-error font-medium」）。
+    ///
+    /// **边界取严格小于**：余量正好 $2 仍是 warning 档而非 error——
+    /// 规范写的是 `<$2`，把等于也算进去会让「刚好卡在阈值上」这一刻的呈现
+    /// 与文档不一致，后人复核时无从判断哪个是有意的。
+    ///
+    /// warning 档取**百分比**而非又一个美元常数，理由是它与量纲无关：
+    /// $5 的日预算和 $500 的日预算都能用同一条「已花 80%」判出「快到头了」，
+    /// 而任何绝对金额的警戒线都必然在其中一端失真（对 $5 预算 $10 警戒线恒真，
+    /// 对 $500 预算 $10 警戒线等于没有）。error 那条之所以能用绝对值，
+    /// 是因为它衡量的是「还够不够跑一次调用」——那本身就是绝对量。
+    ///
+    /// ⚠️ 两档的顺序不能反：小额预算（如 $2.5/日）花掉一点就同时满足两档，
+    /// error 必须先判，否则临界状态会被 warning 盖住。
+    /// </summary>
+    private static BudgetSeverity ResolveBudgetSeverity(double budgetUsd, double remainingUsd)
+    {
+        if (remainingUsd < BudgetErrorRemainingUsd)
+        {
+            return BudgetSeverity.Error;
+        }
+        if (budgetUsd > 0 && remainingUsd / budgetUsd <= 1 - BudgetWarningSpentRatio)
+        {
+            return BudgetSeverity.Warning;
+        }
+        return BudgetSeverity.Normal;
     }
 
     private IEnumerable<NavigationItemViewModel> AllNavigationItems()

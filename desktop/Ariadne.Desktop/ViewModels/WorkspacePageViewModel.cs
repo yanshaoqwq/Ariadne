@@ -45,6 +45,12 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
     private bool _isConfirmationPanelExpanded = true;
+    // 审批历史默认收起：进入审阅态第一眼该落在待审那一项上，历史是「想查才查」。
+    private bool _isConfirmationHistoryExpanded;
+    // 「没有待审项时也要能查历史」的钉开哨兵（U187-A）。
+    // 若不要这个哨兵，历史入口就只在「恰好还有待审项」时才够得着——
+    // 而作者最需要查历史的时刻恰恰是「昨天全审完了、今天想回看批过什么」。
+    private bool _isConfirmationHistoryPinnedOpen;
     private readonly RequestGenerationSession _canvasLoading = new();
     private string _projectCanvasName = "Project Canvas";
     private Dictionary<string, object?> _canvasMetadata = new(StringComparer.Ordinal);
@@ -143,7 +149,29 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         PackSelectionCommand = new RelayCommand(() => _ = PackSelectionAsync());
         RefreshConfirmationsCommand = new RelayCommand(() => _ = LoadConfirmationsAsync());
         ToggleConfirmationPanelCommand = new RelayCommand(() =>
-            IsConfirmationPanelExpanded = !IsConfirmationPanelExpanded);
+        {
+            IsConfirmationPanelExpanded = !IsConfirmationPanelExpanded;
+            // 「收起看画布」必须同时解除历史钉开，否则点了收起画布仍被盖住——
+            // 按钮说了话没做到，比没这个按钮更糟（U187-A）。
+            if (!IsConfirmationPanelExpanded)
+            {
+                SetConfirmationHistoryPinned(false);
+            }
+        });
+        // 审批历史折叠区（U187-A）：只翻自己的开合，**不碰** IsConfirmationPanelExpanded——
+        // 那个是「审阅面板 vs 画布」的开关，两者混在一起会让查历史顺手把画布盖掉。
+        ToggleConfirmationHistoryCommand = new RelayCommand(() =>
+            IsConfirmationHistoryExpanded = !IsConfirmationHistoryExpanded);
+        // 无待审项时进入审批历史的入口（画布工具条）。
+        // 钉开面板 + 展开折叠区一次做完：点「审批历史」就该直接看见历史，
+        // 而不是打开一个还要再点一次才出内容的面板。
+        ShowConfirmationHistoryCommand = new RelayCommand(
+            () =>
+            {
+                SetConfirmationHistoryPinned(true);
+                IsConfirmationHistoryExpanded = true;
+            },
+            () => HasResolvedConfirmations);
         ApproveConfirmationCommand = new RelayCommand(() => _ = ResolveSelectedConfirmationAsync("approve"), CanResolveConfirmation);
         // 第一次点击只展开理由输入线；第二次才真正提交拒绝。
         RejectConfirmationCommand = new RelayCommand(
@@ -498,6 +526,29 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public string AskAiAboutConfirmationHintText => _displayNames.Text("ui.workspace.confirmation.ask_ai.hint");
     /// <summary>确认项不带正文改动时的说明；空白面会让人以为加载失败。</summary>
     public string ConfirmationDiffEmptyText => _displayNames.Text("ui.workspace.confirmation.diff_empty");
+
+    /// <summary>审批历史折叠区标题（U187-A）：这一段回答「我到底批准过什么」。</summary>
+    public string ConfirmationHistoryTitleText => _displayNames.Text("ui.workspace.confirmation.history");
+
+    /// <summary>画布工具条上的历史入口文案：无待审项时唯一够得着的路。</summary>
+    public string OpenConfirmationHistoryText =>
+        _displayNames.Text("ui.workspace.confirmation.history.open");
+
+    /// <summary>折叠区里的一句说明：讲清这里的条目已决议、不需要也不能再处置。</summary>
+    public string ConfirmationHistoryHintText => _displayNames.Text("ui.workspace.confirmation.history.hint");
+
+    /// <summary>折叠区开合按钮文案，随状态换词——按钮要说它会做什么，而不是它现在是什么。</summary>
+    public string ConfirmationHistoryToggleText => IsConfirmationHistoryExpanded
+        ? _displayNames.Text("ui.workspace.confirmation.history.collapse")
+        : _displayNames.Text("ui.workspace.confirmation.history.expand");
+
+    /// <summary>历史条数。与待审计数分开两句文案：混在一起读者分不清哪个数字要他动手。</summary>
+    public string ConfirmationHistoryCountText => _displayNames.Format(
+        "ui.workspace.confirmation.history.count",
+        new Dictionary<string, string>
+        {
+            ["count"] = ResolvedConfirmations.Count.ToString(),
+        });
     public string PromptTemplateText => _displayNames.Text("ui.workspace.prompt_template");
 
     /// <summary>
@@ -1051,6 +1102,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public ObservableCollection<ConfirmationItemViewModel> Confirmations { get; }
 
     /// <summary>
+    /// 审批历史：已决议（approved / rejected / auto_audited）的确认项（U187-A）。
+    ///
+    /// **刻意与 <see cref="Confirmations"/> 分开，不是重复造集合**：
+    /// <see cref="HasPendingConfirmations"/> 只看 <see cref="Confirmations"/>，
+    /// 而它驱动审阅面板强制展开并替换整个画布。历史项一旦混进待审集合，
+    /// 「有 N 件事等你确认」就恒真，作者再也回不到画布。
+    /// 所以这一份只用于呈现审计链，**不参与**面板展开、badge 计数与逐项审批。
+    /// </summary>
+    public ObservableCollection<ResolvedConfirmationItemViewModel> ResolvedConfirmations { get; } = new();
+
+    /// <summary>
     /// 当前确认项 diff 的分行投影（U139②）。
     ///
     /// 复用作品页快速编辑的 <see cref="QuickEditDiffLineViewModel"/>：两处消费的是**同一份**
@@ -1197,7 +1259,55 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     }
 
     public bool HasSelectedConfirmation => SelectedConfirmation is not null;
+    /// <summary>
+    /// 「有事等你拍板」——只数 <see cref="Confirmations"/>（U187-A）。
+    ///
+    /// ⚠️ 不要把 <see cref="ResolvedConfirmations"/> 加进来。这个属性驱动
+    /// 审阅面板强制展开、面板/横幅二选一以及右栏自动切页；含进历史项后它恒为真，
+    /// 结果是审阅面板永久盖住画布。历史只在面板内的「审批历史」折叠区里出现。
+    /// </summary>
     public bool HasPendingConfirmations => Confirmations.Count > 0;
+
+    /// <summary>有无审批历史可查；无历史时整个折叠区不渲染，不留空盒子。</summary>
+    public bool HasResolvedConfirmations => ResolvedConfirmations.Count > 0;
+
+    /// <summary>审批历史折叠区的开合。默认收起：进入审阅态第一眼要看的是待审那一项。</summary>
+    public bool IsConfirmationHistoryExpanded
+    {
+        get => _isConfirmationHistoryExpanded;
+        set
+        {
+            if (SetProperty(ref _isConfirmationHistoryExpanded, value))
+            {
+                // 按钮文案随状态换词，必须跟着通知：否则点了「展开」列表出来了、
+                // 按钮还写着「展开」，用户不知道再点一次是收起（U186 同类形态）。
+                OnPropertyChanged(nameof(ConfirmationHistoryToggleText));
+            }
+        }
+    }
+
+    public RelayCommand ToggleConfirmationHistoryCommand { get; }
+
+    /// <summary>无待审项时打开审批历史（画布工具条入口，U187-A）。</summary>
+    public RelayCommand ShowConfirmationHistoryCommand { get; }
+
+    /// <summary>
+    /// 钉开/解除钉开审阅面板以查看历史。
+    ///
+    /// 单独抽出来是因为它必须**同时**通知面板显隐——`_isConfirmationHistoryPinnedOpen`
+    /// 是 `ShowConfirmationFullPanel` 的输入之一，光改字段界面不会动
+    /// （Avalonia 缺通知与缺绑定同样静默）。
+    /// </summary>
+    private void SetConfirmationHistoryPinned(bool pinned)
+    {
+        if (_isConfirmationHistoryPinnedOpen == pinned)
+        {
+            return;
+        }
+
+        _isConfirmationHistoryPinnedOpen = pinned;
+        NotifyConfirmationPanelVisibility();
+    }
     public bool HasInDoubtOperations => InDoubtOperations.Count > 0;
     public WorkflowOperation? SelectedInDoubtOperation
     {
@@ -1231,8 +1341,24 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             }
         }
     }
-    public bool ShowConfirmationFullPanel => HasPendingConfirmations && IsConfirmationPanelExpanded;
-    public bool ShowConfirmationBanner => HasPendingConfirmations && !IsConfirmationPanelExpanded;
+    /// <summary>
+    /// 审阅面板是否展开。两个来源：**有待审项**（原语义，一个字没动），
+    /// 或作者主动点了「审批历史」把它钉开（U187-A）。
+    ///
+    /// ⚠️ 这里刻意**不写** `HasResolvedConfirmations`：历史一旦存在就永远存在，
+    /// 把它并进条件等于让审阅面板从此永久盖住画布——那正是这轮修复要避免的事。
+    /// 钉开只能由 <see cref="ShowConfirmationHistoryCommand"/> 显式发起，
+    /// 由「收起看画布」解除。
+    /// </summary>
+    public bool ShowConfirmationFullPanel =>
+        (HasPendingConfirmations && IsConfirmationPanelExpanded)
+        || (_isConfirmationHistoryPinnedOpen && HasResolvedConfirmations);
+
+    /// <summary>
+    /// 收起态的顶栏横幅。判据取 `!ShowConfirmationFullPanel` 而非 `!IsConfirmationPanelExpanded`：
+    /// 历史被钉开时面板已占满画布，此时再叠一条横幅就是两层东西讲同一件事。
+    /// </summary>
+    public bool ShowConfirmationBanner => HasPendingConfirmations && !ShowConfirmationFullPanel;
 
     /// <summary>
     /// 审阅面板显隐的统一出口：通知两个可见性属性，并在**进入**审阅态时把右栏切到项目 AI（U139⑤）。
@@ -1765,6 +1891,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         RejectConfirmationCommand.NotifyCanExecuteChanged();
         ApproveOrCancelCommand.NotifyCanExecuteChanged();
         AskAiAboutConfirmationCommand.NotifyCanExecuteChanged();
+        // 历史入口的可用性随「有没有历史」变，也在这里一并刷新：
+        // 它和上面四个一样只在确认项重载后才可能改变。
+        ShowConfirmationHistoryCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>
@@ -3536,9 +3665,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         if (!_backend.HasProjectRoot)
         {
             Confirmations.Clear();
+            ResolvedConfirmations.Clear();
             SelectedConfirmation = null;
+            // 换项目/无项目时解除钉开：上一个项目的历史面板不该盖着新项目的画布。
+            _isConfirmationHistoryPinnedOpen = false;
             OnPropertyChanged(nameof(HasPendingConfirmations));
+            OnPropertyChanged(nameof(HasResolvedConfirmations));
             OnPropertyChanged(nameof(ConfirmationCountText));
+            OnPropertyChanged(nameof(ConfirmationHistoryCountText));
             OnPropertyChanged(nameof(ConfirmationsBannerText));
             NotifyConfirmationPanelVisibility();
             OnPropertyChanged(nameof(EmptyStartTitle));
@@ -3552,18 +3686,40 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             var entries = await _backend.ListConfirmationsAsync(cancellationToken).ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
             Confirmations.Clear();
+            ResolvedConfirmations.Clear();
             SelectedConfirmation = null;
-            // 后端已只返回 pending；前端再保险过滤，避免历史态挡住画布。
-            foreach (var entry in entries.Where(IsPendingConfirmation))
+            // U187-A：后端 `list_confirmations` 从 7378ddc 起就合并了运行态 pending
+            // **与 `confirmation_logs` 里的已决议历史**——这里必须按状态**分流**，
+            // 不能过滤掉已决议项（此前那句「后端已只返回 pending」的注释在 7378ddc
+            // 之后就过期了，而它正是缺陷的掩护：照它读，过滤看起来是安全的）。
+            //
+            // 为什么必须分两个集合、而不是「删掉过滤了事」：
+            // `HasPendingConfirmations => Confirmations.Count > 0` 驱动审阅面板
+            // **强制展开并替换整个画布**（见下方 IsConfirmationPanelExpanded 与
+            // NotifyConfirmationPanelVisibility）。把 30 条历史混进同一个集合，
+            // 那个条件就恒真，作者每次打开项目都被一个盖住画布的面板拦住、再也回不到画布
+            // ——比「查不到历史」严重得多。
+            // ⇒ Confirmations 只放 pending（面板展开 / badge 计数 / 逐项审批全部沿用它，
+            //    语义一个字没变），已决议项进 ResolvedConfirmations，只作审计呈现。
+            foreach (var entry in entries)
             {
-                Confirmations.Add(new ConfirmationItemViewModel(entry, _displayNames, SelectConfirmation));
+                if (IsPendingConfirmation(entry))
+                {
+                    Confirmations.Add(new ConfirmationItemViewModel(entry, _displayNames, SelectConfirmation));
+                }
+                else
+                {
+                    ResolvedConfirmations.Add(new ResolvedConfirmationItemViewModel(entry, _displayNames));
+                }
             }
             if (Confirmations.Count > 0 && SelectedConfirmation is null)
             {
                 SelectConfirmation(Confirmations[0]);
             }
             OnPropertyChanged(nameof(HasPendingConfirmations));
+            OnPropertyChanged(nameof(HasResolvedConfirmations));
             OnPropertyChanged(nameof(ConfirmationCountText));
+            OnPropertyChanged(nameof(ConfirmationHistoryCountText));
             OnPropertyChanged(nameof(ConfirmationsBannerText));
             if (Confirmations.Count > 0)
             {
@@ -5812,6 +5968,95 @@ public sealed class ConfirmationItemViewModel : ViewModelBase
     public string RunId { get; }
     public RelayCommand SelectCommand { get; }
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
+}
+
+/// <summary>
+/// 审批历史里的一条已决议确认项（U187-A）。
+///
+/// **刻意不带 SelectCommand / IsSelected / Diff**：它不是可审阅对象。
+/// 后端 `resolve_confirmation` 对已决议项不再受理，给历史行配一个「同意/拒绝」入口
+/// 只会让人点了没反应；这一份是**审计读物**，回答的是「我到底批准过什么、为什么」。
+///
+/// 全部字段在构造时定死（无 setter）：条目一旦决议就不再变，
+/// 可变属性只会让人以为这里能改。
+/// </summary>
+public sealed class ResolvedConfirmationItemViewModel : ViewModelBase
+{
+    public ResolvedConfirmationItemViewModel(ConfirmationLogEntry entry, DisplayNameService displayNames)
+    {
+        ConfirmationId = entry.ConfirmationId;
+        Summary = string.IsNullOrWhiteSpace(entry.Summary) ? entry.ConfirmationId : entry.Summary;
+        State = entry.State;
+        IsApproved = string.Equals(entry.State, "approved", StringComparison.OrdinalIgnoreCase);
+        IsRejected = string.Equals(entry.State, "rejected", StringComparison.OrdinalIgnoreCase);
+        // 决议结果走三个独立文案键而不是把后端状态串直接印出来：
+        // `auto_audited` 这种 snake_case 内部值对作者没有意义。
+        // 未知状态（后端将来加档位）回落到原值——比显示 `[key]` 或空白有用。
+        ResultText = entry.State.ToLowerInvariant() switch
+        {
+            "approved" => displayNames.Text("ui.workspace.confirmation.history.result.approved"),
+            "rejected" => displayNames.Text("ui.workspace.confirmation.history.result.rejected"),
+            "auto_audited" => displayNames.Text("ui.workspace.confirmation.history.result.auto_audited"),
+            _ => entry.State,
+        };
+        // Kind 是后端一直在发、前端从来没用的字段（U187-D 也记了这条）。
+        // 历史里必须显示：不然 summarizer 一次批量产出的四类确认项在列表里长得一模一样。
+        KindText = displayNames.Format(
+            "ui.workspace.confirmation.history.kind",
+            new Dictionary<string, string> { ["kind"] = entry.Kind });
+        // `handling_method` 有理由时装的是 review_reason，没理由时装的是状态词本身
+        // （见 commands.rs `confirmation_log_entry_from_runtime`）。
+        // 因此必须把「等于状态词」的情形判成「没写理由」，否则历史里会出现
+        // 「理由：rejected」这种把内部值当人话印出来的行。
+        var reason = entry.HandlingMethod?.Trim() ?? string.Empty;
+        HasReason = reason.Length > 0
+            && !string.Equals(reason, entry.State, StringComparison.OrdinalIgnoreCase)
+            && !IsStateSentinel(reason);
+        ReasonText = HasReason
+            ? displayNames.Format(
+                "ui.workspace.confirmation.history.reason",
+                new Dictionary<string, string> { ["reason"] = reason })
+            : string.Empty;
+        DecidedAtText = entry.TimestampMs > 0
+            ? displayNames.Format(
+                "ui.workspace.confirmation.history.decided_at",
+                new Dictionary<string, string> { ["time"] = FormatTimestamp(entry.TimestampMs) })
+            : string.Empty;
+    }
+
+    public string ConfirmationId { get; }
+    public string Summary { get; }
+    public string State { get; }
+    public string ResultText { get; }
+    public string KindText { get; }
+    public string ReasonText { get; }
+    public bool HasReason { get; }
+    public string DecidedAtText { get; }
+    /// <summary>结果着色只用语义状态位，色值全部来自主题（视图侧绑 Classes）。</summary>
+    public bool IsApproved { get; }
+    public bool IsRejected { get; }
+
+    /// <summary>后端在「无理由」时塞进 handling_method 的四个哨兵词。</summary>
+    private static bool IsStateSentinel(string value) =>
+        value is "pending" or "approved" or "rejected" or "auto_audited";
+
+    private static string FormatTimestamp(long ms)
+    {
+        try
+        {
+            // 固定格式走 InvariantCulture：这里的 `yyyy-MM-dd HH:mm` 是**格式串**而非
+            // 本地化偏好，跟 CurrentCulture 会在非公历日历下把年份印成别的纪元。
+            // 时区仍取本地（LocalDateTime）——作者关心的是「我当时几点批的」。
+            return DateTimeOffset.FromUnixTimeMilliseconds(ms).LocalDateTime.ToString(
+                "yyyy-MM-dd HH:mm",
+                System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // 越界时间戳（旧日志或时钟异常）不该让整个历史面板打不开。
+            return ms.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
 }
 
 public sealed class WorkflowEdgeViewModel : ViewModelBase

@@ -561,6 +561,22 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeRequiredAsync<WorksTreeNode>("get_works_tree", null, cancellationToken);
     }
 
+    /// <summary>
+    /// U184-A：正文全文检索。参数名与 <c>ipc.rs</c> 的 <c>SearchProjectDocumentsParams</c>
+    /// 对齐（<c>query</c> / <c>limit</c>，后者 <c>Option&lt;usize&gt;</c> 缺省 20）。
+    ///
+    /// <para><c>limit</c> 这里总是显式发出：后端做过上界校验
+    /// （<c>validate_product_search_limit</c>），发一个明确的值比依赖两边各有一份缺省更稳。</para>
+    /// </summary>
+    public Task<IReadOnlyList<RetrievalHit>> SearchProjectDocumentsAsync(string query, int limit = 20, CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredListAsync<RetrievalHit>("search_project_documents", new
+        {
+            query,
+            limit,
+        }, cancellationToken);
+    }
+
     public Task<ChapterSummaryView> GetChapterSummaryViewAsync(string chapterId, CancellationToken cancellationToken = default)
     {
         return InvokeRequiredAsync<ChapterSummaryView>("get_chapter_summary_view", new { chapter_id = chapterId }, cancellationToken);

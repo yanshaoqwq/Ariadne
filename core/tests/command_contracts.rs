@@ -577,7 +577,6 @@ fn f9_open_project_scheduler_wakes_future_retry_without_reopen() {
             node_id: NodeId::from("start"),
             status: RunStatus::Queued,
             outputs: BTreeMap::new(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -710,6 +709,46 @@ fn f2b_search_rejects_stale_chunks_after_save_before_reindex() {
             .all(|r| !r.snippet.contains("旧版本剧情线索甲")),
         "reindexed search must not still surface old body"
     );
+}
+
+/// U184-A：索引门禁必须带一个**可辨识的稳定 key**，而不是与「查询串非法」共用
+/// `ui.error.validation`。
+///
+/// 桌面端要把这一态渲染成「稍等几秒再搜」+ 重试按钮，而不是红色报错——
+/// 作者改完一章正文立刻搜索必然撞上它。判据取 `message_key`：
+/// 前端只认 key（U1 禁止在前端建英文关键字表），若这里回落成通用 validation，
+/// 前端就再也分不清「等一下」与「真错了」，只能把暂态显示成故障。
+#[test]
+fn u184_indexing_gate_carries_a_retryable_message_key() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let path = temp.path().join("documents").join("chapter.md");
+    fs::write(&path, "她把伞留在了车站").unwrap();
+    let document_id = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let version = test_content_version("她把伞留在了车站".as_bytes());
+    let outbox =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    // 只 prepare、不 activate、不跑 worker：outbox 留着一条未完成失效项，
+    // 这正是「刚保存完还没索引」的状态。
+    let event_id = outbox
+        .prepare(&document_id, "document_saved", &version, false)
+        .unwrap();
+    outbox.activate(&event_id).unwrap();
+
+    let error = search_project_documents_impl(temp.path(), "车站".to_owned(), 10).unwrap_err();
+    assert!(
+        error.contains("indexing_not_ready"),
+        "expected the pending-index gate, got: {error}"
+    );
+    assert_eq!(
+        error.message_key, "ui.error.indexing_not_ready",
+        "索引追赶是可重试暂态，必须与普通 validation 区分开，否则前端只能把它显示成故障"
+    );
+
+    // 对照：真正的输入错误仍走通用 validation，不能被这层标记误伤。
+    process_index_outbox_impl(temp.path()).unwrap();
+    let invalid = search_project_documents_impl(temp.path(), "   ".to_owned(), 10).unwrap_err();
+    assert_eq!(invalid.message_key, "ui.error.validation");
 }
 
 fn test_content_version(bytes: &[u8]) -> String {
@@ -4347,7 +4386,6 @@ fn paused_node_with_outputs(outputs: ariadne::contracts::PortMap) -> WorkflowNod
         node_id: NodeId::from("writer"),
         status: RunStatus::Paused,
         outputs,
-        communication_output: None,
         communication_control: Default::default(),
         prompt_trace_hash: None,
         patch_session_commit_id: None,
@@ -7584,7 +7622,6 @@ fn project_ai_chat_assembles_document_knowledge_artifact_and_node_references() {
             node_id: NodeId::from("writer"),
             status: RunStatus::Succeeded,
             outputs,
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -8098,7 +8135,6 @@ fn busy_special_resume_fixture() -> BusySpecialResumeFixture {
                 "chapter_text".to_owned(),
                 PortValue::inline("original chapter"),
             )]),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -8312,7 +8348,6 @@ fn resolve_confirmation_log_failure_uses_recoverable_projection_outbox() {
             node_id: NodeId::from("approval"),
             status: RunStatus::Paused,
             outputs: Default::default(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -8438,7 +8473,6 @@ fn f14_open_recovers_knowledge_receipt_crash_and_blocks_racing_resume() {
             node_id: NodeId::from("summarizer"),
             status: RunStatus::Paused,
             outputs: Default::default(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -8590,7 +8624,6 @@ fn resolve_confirmation_command_updates_runtime_and_log_badges() {
             node_id: NodeId::from("approval"),
             status: RunStatus::Paused,
             outputs: Default::default(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -8809,7 +8842,6 @@ fn resolve_confirmation_materializes_summary_knowledge_on_approve() {
             node_id: NodeId::from("summarizer"),
             status: RunStatus::Paused,
             outputs: Default::default(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -8939,7 +8971,6 @@ fn resolve_confirmation_knowledge_failure_leaves_runtime_pending() {
             node_id: NodeId::from("summarizer"),
             status: RunStatus::Paused,
             outputs: Default::default(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -9116,7 +9147,6 @@ fn resolve_confirmation_runtime_not_found_preserves_receipt_and_ignores_project_
             node_id: NodeId::from("summarizer"),
             status: RunStatus::Paused,
             outputs: Default::default(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,
@@ -9583,7 +9613,6 @@ fn seed_command_in_doubt_search_run(
             node_id: node_id.clone(),
             status: RunStatus::Paused,
             outputs: Default::default(),
-            communication_output: None,
             communication_control: Default::default(),
             prompt_trace_hash: None,
             patch_session_commit_id: None,

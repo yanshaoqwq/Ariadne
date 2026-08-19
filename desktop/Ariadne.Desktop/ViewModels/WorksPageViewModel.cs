@@ -15,6 +15,14 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private const double MaxRightPanelWidth = 520;
     private const int TargetDocumentBlockSize = 4_000;
     private const int HardDocumentBlockSize = 6_000;
+    /// U184-A：正文搜索防抖。标题那路本地即时，正文这路每次请求都要抢项目互斥锁并跑
+    /// 知识同步，逐字符发请求会让后端排队；280ms 落在「打完一个词的停顿」量级。
+    private const int BodySearchDebounceMs = 280;
+    /// 上限取后端 `MAX_PRODUCT_SEARCH_LIMIT`（50）以内的一个稳妥值：
+    /// 侧栏列表读不完更多，而后端还有整体字节预算校验（`validate_product_search_result_budget`）。
+    private const int BodySearchLimit = 20;
+    /// 片段裁剪长度。chunk 默认上千字，整段渲染会把命中列表冲掉。
+    private const int BodySearchSnippetChars = 160;
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
@@ -95,6 +103,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private readonly HashSet<string> _expandedWorksTreeNodeIds = new(StringComparer.Ordinal);
     private bool _worksTreeExpansionInitialized;
     private string _worksTreeSearchText = string.Empty;
+    // U184-A：正文搜索（后端 Tantivy）与标题搜索并行的那一路状态。
+    // 标题那路是本地即时的；这一路走 IPC，所以要有防抖、代际、取消与暂态三件套。
+    private CancellationTokenSource? _bodySearchCts;
+    private long _bodySearchGeneration;
+    private BodySearchState _bodySearchState = BodySearchState.Idle;
+    private string _bodySearchQuery = string.Empty;
+    private string _bodySearchErrorText = string.Empty;
     private WorksTreeItemViewModel? _selectedWorksTreeNode;
     private WorksTreeItemViewModel? _currentWorksTreeNode;
     private bool _suppressWorksTreeSelectionNavigation;
@@ -113,6 +128,28 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         Error,
     }
 
+    /// <summary>
+    /// U184-A：正文搜索这一路的状态。
+    ///
+    /// <para><see cref="Indexing"/> **刻意不是 Error 的一个子类**：它是「索引还没追上
+    /// 刚才的保存」这个可重试暂态（后端 <c>ensure_search_not_blocked_by_pending_index</c>），
+    /// 作者改完一章立刻搜必然撞上。把它渲染成红色报错，作者会得出
+    /// 「搜索坏了」的结论，效果与缺陷版本的「永远 0 结果」一样糟。</para>
+    /// </summary>
+    private enum BodySearchState
+    {
+        /// 没在搜（查询为空，或已清空）。
+        Idle,
+        /// 正在等后端。
+        Searching,
+        /// 搜完了（可能 0 命中）。
+        Done,
+        /// 索引正在追赶，等几秒可重试。
+        Indexing,
+        /// 真的失败了。
+        Failed,
+    }
+
     public WorksPageViewModel(
         DisplayNameService displayNames,
         IAriadneBackendClient backend,
@@ -128,6 +165,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         _documentTitle = displayNames.Text("ui.works.no_document_selected");
         WorksTreeRoots = new ObservableCollection<WorksTreeItemViewModel>();
         VisibleWorksTreeRoots = new ObservableCollection<WorksTreeItemViewModel>();
+        // U184-A：正文命中单独一组。刻意**不**混进 VisibleWorksTreeRoots——
+        // 「标题含关键词」与「正文含关键词」是不同语义，混在一棵树里作者
+        // 无法判断某章为什么出现在结果里。
+        BodySearchHits = new ObservableCollection<WorksBodySearchHitViewModel>();
         // U145：导入表单的章节 ID 候选。取值集合就是作品树里已有的章节
         // （后端 ChapterDocumentIndex），此前是自由文本框——打错一个字符不会报错，
         // 只是导入进一个谁也不会去读的孤儿章节 id。
@@ -153,6 +194,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         ExportCommand = new RelayCommand(() => _ = ExportAsync(), () => WorksTreeRoots.Count > 0);
         SaveCommand = new RelayCommand(() => _ = SaveAsync(), () => HasCurrentDocument && !IsDocumentSaving);
         RetryWorksTreeCommand = new RelayCommand(() => _ = LoadWorksTreeAsync(), () => IsWorksTreeError && !IsWorksTreeLoading);
+        // U184-A：正文搜索重试。撞上索引门禁时作者需要一个「现在再试一次」的动作——
+        // 只给一句「稍后再试」而不给按钮，等于让他重新打一遍关键词。
+        RetryBodySearchCommand = new RelayCommand(
+            () => StartBodySearch(WorksTreeSearchText, immediate: true),
+            () => _bodySearchState is BodySearchState.Indexing or BodySearchState.Failed);
         ReadModeCommand = new RelayCommand(() => IsEditMode = false);
         EditModeCommand = new RelayCommand(() => IsEditMode = true);
         CopyCommand = new RelayCommand(() => RequestEditorCopy?.Invoke());
@@ -430,6 +476,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     public RelayCommand SaveCommand { get; }
 
     public RelayCommand RetryWorksTreeCommand { get; }
+    public RelayCommand RetryBodySearchCommand { get; }
 
     public RelayCommand ReadModeCommand { get; }
 
@@ -524,14 +571,55 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             if (SetProperty(ref _worksTreeSearchText, value ?? string.Empty))
             {
                 ApplyWorksTreeSearch();
+                // U184-A：双路。标题那路在 ApplyWorksTreeSearch 里本地即时算完，
+                // 正文这路走 IPC，因此带防抖（见 StartBodySearch）。
+                StartBodySearch(_worksTreeSearchText, immediate: false);
             }
         }
     }
 
     public bool IsWorksTreeSearchActive => !string.IsNullOrWhiteSpace(WorksTreeSearchText);
+
+    /// <summary>
+    /// 「标题含关键词」分组标题；只在搜索态且有标题命中时出现。
+    ///
+    /// 搜索前树是完整目录、不需要标题；一旦进入搜索态就必须点明这一组的语义，
+    /// 否则它与下面的正文命中组无法区分。
+    /// </summary>
+    public string WorksTreeTitleGroupText => _displayNames.Text("ui.works.body_search.title_group_title");
+    public bool ShowWorksTreeTitleGroup => IsWorksTreeSearchActive && VisibleWorksTreeRoots.Count > 0;
+
+    public ObservableCollection<WorksBodySearchHitViewModel> BodySearchHits { get; }
+    public string BodySearchGroupText => _displayNames.Text("ui.works.body_search.group_title");
+    public string BodySearchSearchingText => _displayNames.Text("ui.works.body_search.searching");
+    public string BodySearchEmptyText => _displayNames.Text("ui.works.body_search.empty");
+    public string BodySearchRetryText => _displayNames.Text("ui.works.body_search.retry");
+    public string BodySearchErrorText => _bodySearchErrorText;
+    public bool HasBodySearchHits => BodySearchHits.Count > 0;
+    public bool IsBodySearching => _bodySearchState == BodySearchState.Searching;
+
+    /// <summary>
+    /// 「正文里没有匹配」的空态。要求 <see cref="BodySearchState.Done"/> ——
+    /// 搜索**还在路上**时说「没有匹配」是在报告一个尚未成立的结论。
+    /// </summary>
+    public bool ShowBodySearchEmpty => _bodySearchState == BodySearchState.Done && BodySearchHits.Count == 0;
+
+    /// <summary>
+    /// 索引追赶中的提示（可重试，非错误）。见 <see cref="BodySearchState.Indexing"/>。
+    /// </summary>
+    public bool ShowBodySearchIndexing => _bodySearchState == BodySearchState.Indexing;
+    public bool ShowBodySearchError => _bodySearchState == BodySearchState.Failed;
+    public bool ShowBodySearchGroup => IsWorksTreeSearchActive
+                                       && _bodySearchState != BodySearchState.Idle;
+
     public bool ShowWorksTreeSearchEmpty => _worksTreeState == WorksTreeLoadState.Content
                                             && IsWorksTreeSearchActive
-                                            && VisibleWorksTreeRoots.Count == 0;
+                                            && VisibleWorksTreeRoots.Count == 0
+                                            // U184-A：正文有命中时不再说「没有匹配的作品条目」。
+                                            // 那句话在有正文命中的情况下是错的，而且会把作者的注意力
+                                            // 从下面真实存在的命中上引开。
+                                            && BodySearchHits.Count == 0
+                                            && _bodySearchState is BodySearchState.Idle or BodySearchState.Done;
 
     public ObservableCollection<DocumentBlockViewModel> DocumentBlocks { get; }
     public bool HasDocumentBlocks => DocumentBlocks.Count > 0;
@@ -560,7 +648,11 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 
     public string RetryWorksTreeText => _displayNames.Text("ui.works.retry_tree");
 
-    public string WorksTreeSearchPlaceholder => _displayNames.Text("ui.works.tree_search_placeholder");
+    // U184-A：换 key 而不是改旧 key 的值。旧文案「按标题搜索大纲或章节…」在功能
+    // 变成双路后是**劝退式的错误说明**——作者读完就不会去搜正文了（放宽约束必须同批改文案）。
+    // 旧 key 保持原值不动：别处可能还在引用它。
+    public string WorksTreeSearchPlaceholder => _displayNames.Text("ui.works.tree_search_placeholder_body");
+
     public string WorksTreeSearchName => _displayNames.Text("ui.works.tree_search_name");
     public string WorksTreeSearchEmptyText => _displayNames.Text("ui.works.tree_search_empty");
 
@@ -3324,6 +3416,225 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
         OnPropertyChanged(nameof(IsWorksTreeSearchActive));
         OnPropertyChanged(nameof(ShowWorksTreeSearchEmpty));
+        OnPropertyChanged(nameof(ShowWorksTreeTitleGroup));
+        OnPropertyChanged(nameof(ShowBodySearchGroup));
+    }
+
+    /// <summary>
+    /// U184-A：正文搜索这一路的入口（防抖 + 代际 + 取消）。
+    ///
+    /// <para><paramref name="immediate"/> 为 false 时等 <see cref="BodySearchDebounceMs"/>
+    /// 再发请求：这个框是**边打边搜**的（标题那路即时），不防抖会让每敲一个字都打一次
+    /// IPC，而后端每次搜索要抢项目互斥锁 + 跑知识同步。重试按钮走 immediate=true。</para>
+    ///
+    /// <para>本方法是同步的、故意不返回 Task：调用点在属性 setter 里，
+    /// 让 setter 去 await 一个网络往返会把打字卡住。</para>
+    /// </summary>
+    private void StartBodySearch(string rawQuery, bool immediate)
+    {
+        var query = (rawQuery ?? string.Empty).Trim();
+        var generation = Interlocked.Increment(ref _bodySearchGeneration);
+        _bodySearchCts?.Cancel();
+        _bodySearchCts?.Dispose();
+        _bodySearchCts = null;
+
+        if (query.Length == 0)
+        {
+            _bodySearchQuery = string.Empty;
+            SetBodySearchState(BodySearchState.Idle, clearHits: true);
+            return;
+        }
+
+        _bodySearchQuery = query;
+        var cts = new CancellationTokenSource();
+        _bodySearchCts = cts;
+        SetBodySearchState(BodySearchState.Searching, clearHits: false);
+        _ = RunBodySearchAsync(query, generation, immediate, cts);
+    }
+
+    private async Task RunBodySearchAsync(
+        string query,
+        long generation,
+        bool immediate,
+        CancellationTokenSource cts)
+    {
+        try
+        {
+            if (!immediate)
+            {
+                await Task.Delay(BodySearchDebounceMs, cts.Token).ConfigureAwait(true);
+            }
+            if (generation != _bodySearchGeneration)
+            {
+                return;
+            }
+            var hits = await _backend
+                .SearchProjectDocumentsAsync(query, BodySearchLimit, cts.Token)
+                .ConfigureAwait(true);
+            if (generation != _bodySearchGeneration)
+            {
+                return;
+            }
+            ReplaceBodySearchHits(hits);
+            SetBodySearchState(BodySearchState.Done, clearHits: false);
+        }
+        catch (OperationCanceledException)
+        {
+            // 打字太快或换了关键词：不是失败，什么都不要显示。
+        }
+        catch (Exception ex)
+        {
+            if (generation != _bodySearchGeneration)
+            {
+                return;
+            }
+            // ⚠️ 这道分叉是本条的验收重点之一。索引门禁
+            // （`retrieval/lifecycle.rs::ensure_search_not_blocked_by_pending_index`）
+            // 在作者「刚保存完就搜」时必然命中，它是暂态而非故障；
+            // 渲染成红色报错会让作者判定「搜索功能坏了」，与缺陷版本的
+            // 「永远 0 结果」一样糟。识别凭后端贴的稳定 key（U1：不嗅探英文诊断串）。
+            if (IsIndexingNotReady(ex))
+            {
+                _bodySearchErrorText = _displayNames.Text("ui.works.body_search.indexing");
+                SetBodySearchState(BodySearchState.Indexing, clearHits: true);
+                return;
+            }
+            _bodySearchErrorText = UserFacingError.Format(ex, _displayNames);
+            SetBodySearchState(BodySearchState.Failed, clearHits: true);
+        }
+        finally
+        {
+            if (ReferenceEquals(_bodySearchCts, cts))
+            {
+                _bodySearchCts = null;
+            }
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// 后端把索引门禁标成了 <c>ui.error.indexing_not_ready</c>
+    /// （<c>commands.rs::tag_indexing_not_ready</c>）。这里只认那个 key。
+    /// </summary>
+    private static bool IsIndexingNotReady(Exception ex)
+    {
+        var backend = ex as BackendException ?? ex.InnerException as BackendException;
+        return string.Equals(backend?.MessageKey, "ui.error.indexing_not_ready", StringComparison.Ordinal);
+    }
+
+    private void ReplaceBodySearchHits(IReadOnlyList<RetrievalHit> hits)
+    {
+        BodySearchHits.Clear();
+        // 按 document_id 去重：一章正文被切成多个 chunk，命中两个 chunk 时
+        // 作者看到同一章出现两次只会困惑。留分数最高的那条（后端已按分排序）。
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var hit in hits)
+        {
+            if (!seen.Add(hit.DocumentId))
+            {
+                continue;
+            }
+            var node = ResolveBodySearchNode(hit.DocumentId);
+            BodySearchHits.Add(new WorksBodySearchHitViewModel(
+                BodySearchHitTitle(hit.DocumentId, node),
+                CondenseSnippet(hit.Snippet),
+                _displayNames.Format(
+                    "ui.works.body_search.hit_accessible",
+                    new Dictionary<string, string> { ["title"] = BodySearchHitTitle(hit.DocumentId, node) }),
+                node is null ? null : () => ActivateWorksTreeNode(node)));
+        }
+    }
+
+    /// <summary>
+    /// 把命中的 <c>document_id</c> 映射回作品树节点。
+    ///
+    /// <para>⚠️ 两侧路径形态**不同**，不能直接比字面：索引侧是
+    /// <c>path.canonicalize()</c> 的绝对路径（<c>retrieval/runtime.rs</c>），
+    /// 树侧是后端 <c>WorksTreeNode.path</c>。统一归一到项目相对路径再比。</para>
+    ///
+    /// <para>知识库命中（<c>ariadne-knowledge://…</c>）没有对应树节点，返回 null——
+    /// 它照样值得显示（片段本身有用），只是点不开。</para>
+    /// </summary>
+    private WorksTreeItemViewModel? ResolveBodySearchNode(string documentId)
+    {
+        if (string.IsNullOrWhiteSpace(documentId)
+            || documentId.StartsWith("ariadne-knowledge://", StringComparison.Ordinal))
+        {
+            return null;
+        }
+        var target = ProjectRelativePath(documentId);
+        if (target.Length == 0)
+        {
+            return null;
+        }
+        foreach (var node in EnumerateWorksTreeNodes())
+        {
+            if (!node.HasPath)
+            {
+                continue;
+            }
+            if (string.Equals(ProjectRelativePath(node.Path), target, StringComparison.OrdinalIgnoreCase))
+            {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    private string BodySearchHitTitle(string documentId, WorksTreeItemViewModel? node)
+    {
+        if (node is not null)
+        {
+            return node.Title;
+        }
+        if (documentId.StartsWith("ariadne-knowledge://", StringComparison.Ordinal))
+        {
+            return _displayNames.Text("ui.works.body_search.knowledge_document");
+        }
+        var relative = ProjectRelativePath(documentId);
+        return relative.Length > 0
+            ? relative
+            : _displayNames.Text("ui.works.body_search.unknown_document");
+    }
+
+    /// <summary>
+    /// 片段折行压缩。chunk 默认上千字，整段塞进窄侧栏会把命中列表冲掉；
+    /// 换行也要压掉，否则一条命中在树栏里能占十几行。
+    /// </summary>
+    private static string CondenseSnippet(string? snippet)
+    {
+        if (string.IsNullOrWhiteSpace(snippet))
+        {
+            return string.Empty;
+        }
+        var text = snippet.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        while (text.Contains("  ", StringComparison.Ordinal))
+        {
+            text = text.Replace("  ", " ", StringComparison.Ordinal);
+        }
+        return text.Length <= BodySearchSnippetChars ? text : text[..BodySearchSnippetChars] + "…";
+    }
+
+    private void SetBodySearchState(BodySearchState state, bool clearHits)
+    {
+        _bodySearchState = state;
+        if (clearHits)
+        {
+            BodySearchHits.Clear();
+        }
+        if (state is not (BodySearchState.Indexing or BodySearchState.Failed))
+        {
+            _bodySearchErrorText = string.Empty;
+        }
+        OnPropertyChanged(nameof(IsBodySearching));
+        OnPropertyChanged(nameof(HasBodySearchHits));
+        OnPropertyChanged(nameof(ShowBodySearchEmpty));
+        OnPropertyChanged(nameof(ShowBodySearchIndexing));
+        OnPropertyChanged(nameof(ShowBodySearchError));
+        OnPropertyChanged(nameof(ShowBodySearchGroup));
+        OnPropertyChanged(nameof(BodySearchErrorText));
+        OnPropertyChanged(nameof(ShowWorksTreeSearchEmpty));
+        RetryBodySearchCommand.NotifyCanExecuteChanged();
     }
 
     private IEnumerable<WorksTreeItemViewModel> EnumerateWorksTreeNodes()
@@ -3422,6 +3733,35 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
 }
 
 public sealed record ExportFormatOption(string Value, string Label);
+
+/// <summary>
+/// U184-A：一条正文命中。
+///
+/// <para>刻意**不是** <see cref="WorksTreeItemViewModel"/>：那个类型承载展开状态、
+/// 父子链、当前文档高亮等树语义，正文命中一个都不需要，且复用它就等于把两组结果
+/// 混成同一种东西——而「为什么这一章出现在结果里」正是本条要回答的问题。</para>
+///
+/// <para><see cref="Snippet"/> 直接来自后端 <c>RetrievalResult.snippet</c>（已裁剪压行），
+/// 前端不重新去读正文再切——那会为了显示一条命中而读一整章。</para>
+///
+/// <para><see cref="OpenCommand"/> 在命中落在作品树之外（知识库条目、已移动的文件）时
+/// 不可执行；那种命中仍然显示，因为片段本身就有信息量。</para>
+/// </summary>
+public sealed class WorksBodySearchHitViewModel
+{
+    public WorksBodySearchHitViewModel(string title, string snippet, string accessibleName, Action? open)
+    {
+        Title = title;
+        Snippet = snippet;
+        AccessibleName = accessibleName;
+        OpenCommand = new RelayCommand(() => open?.Invoke(), () => open is not null);
+    }
+
+    public string Title { get; }
+    public string Snippet { get; }
+    public string AccessibleName { get; }
+    public RelayCommand OpenCommand { get; }
+}
 
 /// <summary>
 /// 快速编辑 diff 的一行。
