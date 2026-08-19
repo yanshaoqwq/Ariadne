@@ -235,6 +235,114 @@ public sealed class ReadingEditingParityTests
     }
 
     /// <summary>
+    /// U200：两态**实际渲染出来的字号**必须相等。
+    ///
+    /// # 判据为什么不是「主题里有 Ariadne.Size.Reading 这个键」
+    ///
+    /// 那种断言在「键存在、但只有一处引用它」时照样全绿 ——
+    /// 而那**正是修复前的状态**（注释 `:506` 引用了 `Size.Reading`，
+    /// 却从没人建过这个键，三处字号各写一遍字面量 16）。
+    /// 键的存在性证明不了两态同源，只有比对两态实际值才行。
+    ///
+    /// # 为什么这条缺口能在既有用例全绿的情况下存在
+    ///
+    /// 本文件那条 `EditorLineHeight_IsDerivedFromCurrentFontMetrics_NotAHardcodedFactor`
+    /// 写得很扎实（连字号翻倍反解都验了），但它守的是**行高**。
+    /// 而 `SyncEditorLineHeightToReadingMode` 是按**当前字体度量反解**行高的
+    /// ⇒ 字号改了、行高仍被拉回 30 ⇒ 两态「字号不同、行高相同」，
+    /// 所有既有用例照样全绿。**守住了 A 看起来像守住了 A 和 B**，
+    /// 是本项目反复吃到的形态（U151 同型）。
+    /// </summary>
+    [Fact]
+    public async Task ReadingAndEditingFontSize_ComeFromTheSameToken()
+    {
+        await RunHeadlessAsync(async () =>
+        {
+            var (readingWindow, readingView) = await OpenAsync(BuildProbeText(3), editMode: false);
+            double readingFontSize;
+            try
+            {
+                // 取实际挂上去的呈现体，而不是读样式声明：缺陷完全可以是
+                // 「声明了但被后声明的通用样式盖掉」（U154 那一类）。
+                var block = FindReadingBlocks(readingView).FirstOrDefault();
+                Assert.True(block is not null, "阅读态没有找到正文块，用例前提不成立");
+                readingFontSize = block!.FontSize;
+            }
+            finally
+            {
+                await CloseAsync(readingWindow);
+            }
+
+            var (editWindow, editView) = await OpenAsync(BuildProbeText(3), editMode: true);
+            try
+            {
+                var editor = FindEditor(editView);
+                Assert.True(readingFontSize > 0, "阅读态字号为 0，用例本身失效");
+                Assert.True(
+                    Math.Abs(editor.FontSize - readingFontSize) < 0.01,
+                    $"阅读态字号 {readingFontSize:F2}px 与修改态 {editor.FontSize:F2}px 不一致 ⇒ "
+                        + "点一下「修改」正文字会变大小。两处必须引用同一个 "
+                        + "Ariadne.Size.Reading token，不能各写一遍字面量");
+            }
+            finally
+            {
+                await CloseAsync(editWindow);
+            }
+        });
+    }
+
+    /// <summary>
+    /// U200 源码守卫：正文字号不得回退成字面量。
+    ///
+    /// 上面那条行为用例**拦不住「三处一起改成 18」** —— 两态仍然相等，照样全绿。
+    /// 而那恰恰是本条要防的事故形态：字号是 `Ariadne.Reading.*` 整条推导链的根
+    /// （MeasureMaxWidth = 字号 × 每行字数），三处各写一遍字面量时，
+    /// 改字号的人**没有任何提示**要连带改版心宽度。
+    ///
+    /// ⚠️ 断言 `Size.Reading` 至少被引用 3 次（三处消费点），而不是「存在」：
+    /// 存在性在「建了键但没人用」时全绿，那是比字面量更糟的状态
+    /// （看起来已经治理过了）。
+    /// </summary>
+    [Fact]
+    public void ReadingFontSize_IsNeverAHardcodedLiteral()
+    {
+        var theme = File.ReadAllText(ResolveDesktopFile("Resources", "Styles", "AriadneTheme.axaml"));
+        var works = File.ReadAllText(ResolveDesktopFile("Views", "WorksPageView.axaml"));
+
+        Assert.Contains("x:Key=\"Ariadne.Size.Reading\"", theme, StringComparison.Ordinal);
+
+        // 三处消费点：TextBlock.reading / SelectableTextBlock.reading / ae:TextEditor。
+        var consumers =
+            CountOccurrences(theme, "{DynamicResource Ariadne.Size.Reading}")
+            + CountOccurrences(works, "{DynamicResource Ariadne.Size.Reading}");
+        Assert.True(
+            consumers >= 3,
+            $"Ariadne.Size.Reading 只有 {consumers} 处引用，少于三个消费点 ⇒ "
+                + "有人把某一态的字号改回了字面量，两态会再次分头漂移");
+
+        // 反向：两处 reading 样式块里不得再出现字面量字号。
+        foreach (var block in ExtractLineHeightStyleBlocks(theme, ".reading"))
+        {
+            Assert.DoesNotContain(
+                "Property=\"FontSize\" Value=\"1",
+                block,
+                StringComparison.Ordinal);
+        }
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+        return count;
+    }
+
+    /// <summary>
     /// 阅读态每行实际占多高：量**两段不同行数的正文的高度差**。
     ///
     /// `(H(20 行) − H(10 行)) / 10` 天然消掉了块的 padding / margin / 首末行额外留白，

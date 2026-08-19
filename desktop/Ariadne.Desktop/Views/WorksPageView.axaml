@@ -286,7 +286,7 @@
                              Background="Transparent"
                              Foreground="{DynamicResource Ariadne.TextPrimary}"
                              FontFamily="{DynamicResource Ariadne.Font.Reading}"
-                             FontSize="16" />
+                             FontSize="{DynamicResource Ariadne.Size.Reading}" />
               <!-- U131：章节大纲对照栏。只读——原实现把 "@planning/outline.md"
                    追加进正文，用户 Ctrl+S 就把垃圾持久化进小说了。
                    这里读 planning/chapters/{id}.md 并列显示，绝不碰正文。 -->
