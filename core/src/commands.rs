@@ -13699,7 +13699,24 @@ fn preload_referenced_documents(
         serde_json::from_value::<crate::workflow::WorkflowLlmNodeConfig>(request.config.clone())
     {
         if let Some(template) = config.prompt_template {
-            sources.push(template);
+            // U201-C：**先把默认提示词占位符展开再扫**。
+            //
+            // 预读这一步必须看到**渲染器将要看到的那段文本**，否则两处会漂移。
+            // 具体的漂移形态：节点里只存 `{{planner 默认提示词}}` 一行，而
+            // `agent_prompt.planner` 正文里写着 `{{ref:文档ID#L起始-L结束}}`
+            // （教模型引用语法的示例）。只扫占位符那一行 ⇒ 扫不到任何引用 ⇒
+            // `reference_documents` 为 `None` ⇒ 渲染时第 1 步展开出引用、第 2 步
+            // 发现没挂来源 ⇒ **每个 planner 节点都跑不起来**（fail-loud 报
+            // 「上游节点需要重跑」，而作者根本没写过任何引用）。
+            //
+            // 展开失败不在这里报错：预读只是「尽力收集可能用到的文档」，
+            // 真正的 fail-loud 归渲染链那一步（它的报错信息更完整、也更靠近现场）。
+            match crate::rag::resources::load_prompt_resources().and_then(|prompts| {
+                crate::rag::default_prompt::expand_default_prompt_placeholders(&template, &prompts)
+            }) {
+                Ok(expanded) => sources.push(expanded),
+                Err(_) => sources.push(template),
+            }
         }
     }
     // 上游文本走 `PortValue::Inline`（引用式数据流下大文本用 DocumentRef，

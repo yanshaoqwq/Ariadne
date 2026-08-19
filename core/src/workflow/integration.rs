@@ -1231,6 +1231,24 @@ fn render_writing_node_prompt(
     prompt: &str,
     writing: Option<&WorkflowWritingToolOptions<'_>>,
 ) -> CoreResult<String> {
+    // U201-C 第 1 步：默认提示词占位符 → `prompt_list.json` 全文。
+    //
+    // ⚠️ **必须排在下面两步之前**，理由与 13-B 那条同源但更强：
+    // **本步的产物自带后两类占位符**——`agent_prompt.planner` 正文里就写着
+    // `{{ref:文档ID#L起始-L结束}}`。若本步排在展开之后，它引入的引用就没人展开了，
+    // 会一路撞到渲染器的 fail-loud 分支，症状是「节点报某个变量无法解析，
+    // 而作者的模板里根本没写过那个变量名」——极难归因。
+    //
+    // ⚠️ 也**必须排在 `writing.is_none()` 的早退之前**。占位符展开只需要
+    // `prompt_list.json`，不需要知识库或正文；而 `writing` 为 `None` 的情况**包含
+    // 写作节点**——权限页把某 agent 的写作工具全关掉时
+    // （`commands.rs` 那句 `Some(agent) if !search_bindings.writing_tools.is_empty()`），
+    // writing_context 就是 `None`。放在早退之后会让这种节点把
+    // `{{outliner 默认提示词}}` 这行**字面量当角色设定**发给模型，而节点照样报成功。
+    let prompts = crate::rag::resources::load_prompt_resources()?;
+    let prompt = crate::rag::default_prompt::expand_default_prompt_placeholders(prompt, &prompts)?;
+    let prompt = prompt.as_str();
+
     let Some(writing) = writing else {
         return Ok(prompt.to_owned());
     };
@@ -1272,7 +1290,7 @@ fn render_writing_node_prompt(
             )
         })?;
 
-    let prompts = crate::rag::resources::load_prompt_resources()?;
+    // 提示词资源已在本函数开头（U201-C 第 1 步）加载过，复用同一份。
     let mut context_request = crate::rag::models::WritingContextRequest {
         agent: writing.agent,
         chapter_id: chapter_id.to_owned(),
@@ -2128,6 +2146,23 @@ fn execute_summarizer_node_with_optional_search_tools<L: CostLedger>(
                 .filter(|s| !s.trim().is_empty())
                 .cloned()
         });
+    // U201-C：summarizer 节点**不走** `render_writing_node_prompt`（它有自己的四步
+    // 分调用链），所以占位符展开必须在这里另接一次。
+    //
+    // 漏掉这里的后果与 U175 那条同形、也同样隐蔽：总结链不校验模板，
+    // 节点会**照样跑完、照样报成功**，而模型收到的「角色设定」是
+    // `{{summarizer 默认提示词}}` 这行字面量——作者拿到的是「看起来正常」的总结。
+    // 前端对 summarizer 节点同样预填占位符（`ShowPromptEditor` 覆盖它），
+    // 所以这条路径**一定**会遇到占位符，不是防御性代码。
+    //
+    // 展开在 `author_template_prefix` 的渲染**之前**：那一步是第 3 步（变量渲染），
+    // 顺序理由见 `render_writing_node_prompt` 的注释。
+    let author_prompt = match author_prompt {
+        Some(template) => Some(crate::rag::default_prompt::expand_default_prompt_placeholders(
+            &template, &prompts,
+        )?),
+        None => None,
+    };
     let timeout_ms = resolve_node_timeout_ms(config.timeout_ms, limits);
     let summarizer = SummarizerExecutor::new(
         provider,

@@ -144,8 +144,14 @@ public sealed class DisplayNameJsonTests
         // 「缺 N 个键」这个数字里**混着不该补的**，照单补译会做 6 份无用功。
         // **补译前先 `grep -rn '<key>' desktop/ --include=*.cs --include=*.axaml`
         // 确认有生产引用**，零引用的应当删键而不是翻译它。
+        //
+        // 📌 ja 103 → 104（U197-H）：新增 `ui.git.other_pages_unsaved`，
+        // **zh/en 已补、ja 有意留空**。原因是本会话有一条硬约束——
+        // 往上下文里带入某些语言的文本会触发 `content-blocked` 并回档整轮对话
+        // （代价是代码改动不回滚而上下文全丢）。⇒ 这个键由后续小模型统一补译，
+        // 此处只把账记上。**这不是遗漏，是刻意的分工**。
         const int EnglishBaseline = 97;
-        const int JapaneseBaseline = 103;
+        const int JapaneseBaseline = 104;
 
         var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
         var chinese = LoadPack(Path.Combine(resourceDir, "display_name.json"));

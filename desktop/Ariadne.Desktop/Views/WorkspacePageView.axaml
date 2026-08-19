@@ -2292,7 +2292,8 @@
                                                 AutomationProperties.Name="{Binding PromptTemplateText}"
                                                 MinHeight="128"
                                                 HorizontalScrollBarVisibility="Disabled"
-                                                VerticalScrollBarVisibility="Auto" />
+                                                VerticalScrollBarVisibility="Auto"
+                                                DocumentTextProvider="{Binding ReferenceTextProvider}" />
                       <TextBlock Text="{Binding PromptReferenceHintText}" Classes="caption"
                                  TextWrapping="Wrap" />
                       <!-- 模型/预算/超时/断点：拆掉两列挤压网格，改行内属性表（与其余检查器分区同一语汇），

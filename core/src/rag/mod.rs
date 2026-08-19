@@ -1,4 +1,5 @@
 pub mod context;
+pub mod default_prompt;
 pub mod line_patch;
 pub mod memory;
 pub mod models;
@@ -12,6 +13,7 @@ pub mod summarizer;
 pub mod tools;
 
 pub use context::*;
+pub use default_prompt::*;
 pub use line_patch::*;
 pub use memory::*;
 pub use models::*;

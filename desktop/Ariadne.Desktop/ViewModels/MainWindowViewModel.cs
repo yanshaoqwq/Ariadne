@@ -785,7 +785,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
                 // U182-M：Git 页「没打开项目」空态里那颗按钮走的是**这条链**
                 // （与标题栏的 OpenProjectCommand 同一个），不是另写一套后端调用：
                 // 离开守卫、目录预检、EnterProject、最近项目登记全在这条链上。
-                () => RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectAsync)),
+                () => RunWelcomeCommandAfterLeaveGuardAsync(Welcome.OpenProjectAsync),
+                // U197-H：Git 页要能说出「另有页面存在未保存改动」。
+                // `HasCachedUnsavedChanges` 此前**只被关窗守卫消费**
+                // （`MainWindow.axaml.cs:275`），界面上从不显示 ——
+                // 而它正是为「磁盘干净≠东西已入库」这件事而生的。
+                () => HasCachedUnsavedChanges),
             "run_logs" => new RunLogPageViewModel(_displayNames, _backend),
             "templates" => new TemplateMarketPageViewModel(_displayNames, _backend),
             "settings" => new SettingsPageViewModel(

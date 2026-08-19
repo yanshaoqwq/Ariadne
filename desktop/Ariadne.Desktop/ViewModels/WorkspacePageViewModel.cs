@@ -559,6 +559,38 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     /// 否则看到折叠摘要的人会合理地担心「模型是不是只收到这一行摘要」。
     /// </summary>
     public string PromptReferenceHintText => _displayNames.Text("ui.node.prompt.reference_hint");
+
+    /// <summary>
+    /// U201-B：提示词编辑器 Ctrl+左键预览引用正文时，用它去取那份文档。
+    ///
+    /// # 为什么在 VM 上而不是让控件自己拿客户端
+    ///
+    /// 控件是纯呈现层，不该知道 IPC 的存在；而后端客户端只有页面 VM 持有。
+    /// 暴露成一个委托属性，XAML 一行绑定即可，控件仍然可以在单测里被注入假实现。
+    ///
+    /// ⚠️ **这是「真预览」的最后一环**。缺了它，Ctrl+左键会走
+    /// `PromptTemplateEditor` 的「预览暂不可用」分支 —— 而所有单测（直接给控件
+    /// 赋委托）照样全绿。U150 那一版就是在这一环上停住的：能力做好了、
+    /// 没接到用户看得见处。
+    ///
+    /// 每次调用现问后端、不缓存：正文会被别处改（作者自己编辑、工作流写回），
+    /// 缓存一份就会让预览显示旧内容，而「预览」这个动作的全部意义是看当下是什么。
+    /// </summary>
+    public Func<string, Task<string?>> ReferenceTextProvider => async documentId =>
+    {
+        try
+        {
+            return await _backend.GetDocumentContentAsync(documentId).ConfigureAwait(true);
+        }
+        catch
+        {
+            // 吞掉异常并返回 null：控件那边把 null 当「取不到」处理，
+            // 会显示可读的「预览不可用」而不是让异常冒到 UI 线程上。
+            // 具体是文档不存在、越权还是后端没起来，对「我只想看一眼引用」
+            // 这个动作没有分辨价值 —— 三者的下一步都是「检查这条引用写对了没」。
+            return null;
+        }
+    };
     public string ModelIdText => _displayNames.Text("ui.workspace.model_id");
     public string ModelSelectorPlaceholder => _displayNames.Text("ui.workspace.model_selector_placeholder");
     public string ModelInheritGlobalText => _displayNames.Text("ui.workspace.model_inherit_global");
@@ -2013,9 +2045,15 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             RefreshDirtyState,
             canRun: CanPersistWorkflow);
         // agent 才填提示词；通用节点用角色配置默认值
+        //
+        // U201-C：填的是**默认提示词占位符**（一行 `{{outliner 默认提示词}}`），
+        // 不是 300~470 字的全文。全文副本存进工作流文件会让官方后续调整默认提示词
+        // 对已建节点无效，而且编辑框一进节点就被占满。
         if (node.ShowPromptEditor)
         {
-            node.PromptTemplate = Localization.PromptCatalog.ResolveNodePrompt(nodeType);
+            node.PromptTemplate = Localization.PromptCatalog.ResolveNodePromptPlaceholder(
+                nodeType,
+                _displayNames.Text);
         }
 
         SeedUtilityDefaults(node);
@@ -2116,10 +2154,17 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             SummarizerAutoMode = ReadBool(data, "auto_mode", false),
         };
         LoadStopCondition(node, data);
-        // 画布已有节点若未存提示词，用 prompt_list 默认补全（不覆盖用户已写内容）；通用/导入节点不填 agent 模板
+        // 画布已有节点若未存提示词，用默认占位符补全（不覆盖用户已写内容）；通用/导入节点不填 agent 模板
+        //
+        // U201-C：这里补的是占位符而不是全文，理由同 `AddNode`。
+        // ⚠️ **只在为空时补**这条不能松：非空说明作者写过东西（可能是他改的全文、
+        // 也可能是存量文件里的全文副本），覆盖它等于删掉作者的稿子。
+        // 存量的全文副本因此原样保留，也照样能跑——它就是一段普通 prompt_template。
         if (string.IsNullOrWhiteSpace(node.PromptTemplate) && node.ShowPromptEditor)
         {
-            node.PromptTemplate = Localization.PromptCatalog.ResolveNodePrompt(graphNode.Type);
+            node.PromptTemplate = Localization.PromptCatalog.ResolveNodePromptPlaceholder(
+                graphNode.Type,
+                _displayNames.Text);
         }
         node.RestoreDataInPins(ReadStringList(data, "data_in_handles"));
         // 起始节点才有变量：变量的生命周期是整个 run，挂在其它节点上无从确定归属层。

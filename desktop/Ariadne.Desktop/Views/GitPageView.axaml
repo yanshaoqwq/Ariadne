@@ -280,7 +280,15 @@
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding HeadLabel}" Classes="subtle" />
                 <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding HeadText}" Classes="mono" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding DirtyStateLabel}" Classes="subtle" />
-                <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding DirtyStateText}" TextWrapping="Wrap" />
+                <StackPanel Grid.Row="3" Grid.Column="1" Spacing="2">
+                  <TextBlock Text="{Binding DirtyStateText}" TextWrapping="Wrap" />
+                  <!-- U197-H：「干净」会让作者以为正文已进版本控制，而它可能连磁盘都没到。
+                       只在磁盘干净且别页内存脏时出现（磁盘也脏时上一行已经说了，再说是噪音）。 -->
+                  <TextBlock Text="{Binding OtherPagesUnsavedText}" Classes="caption"
+                             Foreground="{DynamicResource Ariadne.StatusWarning}"
+                             TextWrapping="Wrap"
+                             IsVisible="{Binding HasOtherPagesUnsaved}" />
+                </StackPanel>
                 <TextBlock Grid.Row="4" Grid.Column="0" Text="{Binding DiffSummaryLabel}" Classes="subtle" />
                 <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding DiffSummaryText}" TextWrapping="Wrap" />
               </Grid>

@@ -149,6 +149,54 @@ public sealed class DisplayNameService
         }
     }
 
+    /// <summary>
+    /// U201-C：取同一个 key 在**全部语言包**里的值（去重、非空）。
+    ///
+    /// 用途是默认提示词占位符的「解析宽容」那一半：判断作者是否改过占位符时，
+    /// 必须容纳任意一种语言的写法——节点可能在中文界面建的、现在切到了英文界面
+    /// （占位符存在工作流文件里，不随界面语言改写）。只比当前语言会把「没改过」
+    /// 误判成「改成了别的」，于是每次切语言都多出一份假改动。
+    ///
+    /// 与后端 `all_display_name_packs()` 是同一个并集，只是一边读磁盘、
+    /// 一边读 `include_str!` 的编译期副本。
+    ///
+    /// 每次调用都读盘：调用点只在「新建节点 / 判断是否默认」这类低频路径上，
+    /// 缓存起来反而要处理 `SwitchLanguage` 之后的失效问题。
+    /// </summary>
+    public IReadOnlyList<string> AllLanguageValues(string key)
+    {
+        var values = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void Add(string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value) && seen.Add(value))
+            {
+                values.Add(value);
+            }
+        }
+
+        if (_base.TryGetValue(key, out var baseValue))
+        {
+            Add(baseValue);
+        }
+
+        foreach (var lang in AvailableLanguages)
+        {
+            if (string.Equals(lang, "zh", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (LoadOverlay(_resourceDir, lang).TryGetValue(key, out var overlayValue))
+            {
+                Add(overlayValue);
+            }
+        }
+
+        return values;
+    }
+
     public string Format(string key, IReadOnlyDictionary<string, string> variables)
     {
         var value = Text(key);

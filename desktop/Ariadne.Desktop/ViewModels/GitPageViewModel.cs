@@ -31,6 +31,9 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     /// 那正是 U182-M 报的缺陷形态。
     /// </summary>
     private readonly Func<Task>? _requestOpenProject;
+
+    /// <summary>U197-H：宿主查「别的页面有没有未保存改动」。每次现问，不缓存。</summary>
+    private readonly Func<bool> _hasOtherUnsavedChanges;
     private string _gitAutoColor = "#8a8f98";
     private string _gitManualColor = "#f59e0b";
     private bool _isRightPanelOpen = true;
@@ -41,6 +44,10 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     private string _currentBranchText = string.Empty;
     private string _headText = string.Empty;
     private string _dirtyStateText = string.Empty;
+
+    private string _otherPagesUnsavedText = string.Empty;
+
+    private bool _hasOtherPagesUnsaved;
     private string _repositoryReasonText = string.Empty;
     private string _diffSummaryText = string.Empty;
     private string _diffPreviewText = string.Empty;
@@ -56,7 +63,15 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         Func<Task<bool>>? confirmProjectReload = null,
         Func<Task>? reloadProjectData = null,
         Func<string, bool, Task>? persistPanelState = null,
-        Func<Task>? requestOpenProject = null)
+        Func<Task>? requestOpenProject = null,
+        // U197-H：宿主提供「别的页面有没有未保存改动」。
+        //
+        // 为什么要注入而不是自己查：这是**内存态**，只有各页 VM 自己知道，
+        // 而它们的持有者是 MainWindowViewModel（`HasCachedUnsavedChanges`）。
+        // Git 页自己无从得知，而不告诉作者的后果见 `RefreshOtherPagesUnsavedHint`。
+        //
+        // 默认返回 false：单测直接 new 这个 VM 时不该凭空出现该提示。
+        Func<bool>? hasOtherUnsavedChanges = null)
     {
         _displayNames = displayNames;
         _backend = backend;
@@ -64,6 +79,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         _reloadProjectData = reloadProjectData ?? (() => Task.CompletedTask);
         _persistPanelState = persistPanelState;
         _requestOpenProject = requestOpenProject;
+        _hasOtherUnsavedChanges = hasOtherUnsavedChanges ?? (() => false);
         Commits = new ObservableCollection<GitHistoryItemViewModel>();
         ToggleRightPanelCommand = new RelayCommand(() => _ = ToggleRightPanelAsync());
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync(), CanStartOperation);
@@ -192,6 +208,35 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         get => _dirtyStateText;
         private set => SetProperty(ref _dirtyStateText, value);
     }
+
+    /// <summary>
+    /// U197-H：「另有页面存在未保存改动」这句提示。
+    ///
+    /// # 这条要解决的误读
+    ///
+    /// `DirtyStateText` 说的是**磁盘上**有没有未提交改动，而作品页的
+    /// `HasUnsavedChanges` 说的是**内存里**有没有未保存改动 ——
+    /// 两个 dirty 都正确，但并列呈现时误导：
+    /// 作者在作品页写了 3000 字没按 Ctrl+S，切到 Git 页看到「无未提交变更」，
+    /// 会理解成「干净 = 我的东西都在版本控制里了」。而那 3000 字连磁盘都没到。
+    ///
+    /// 与 U183（正文在 Ctrl+S 之前只存在于内存）叠加时后果最重。
+    /// </summary>
+    public string OtherPagesUnsavedText
+    {
+        get => _otherPagesUnsavedText;
+        private set => SetProperty(ref _otherPagesUnsavedText, value);
+    }
+
+    /// <summary>
+    /// 提示是否可见。
+    ///
+    /// ⚠️ **只在「磁盘干净 + 内存脏」时出现**，这是本条的关键：
+    /// 磁盘也脏时 `DirtyStateText` 已经在说「有未提交变更」，
+    /// 再补一句「另有未保存改动」只是噪音 —— 而作者此时**不会**误以为东西已入库。
+    /// 误读只发生在屏上写着「干净」的那一刻，提示也就只该出现在那一刻。
+    /// </summary>
+    public bool HasOtherPagesUnsaved => _hasOtherPagesUnsaved;
 
     public string RepositoryReasonText
     {
@@ -462,6 +507,9 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         RepositoryReasonText = string.Empty;
         DiffSummaryText = _displayNames.Text("ui.common.none");
         DiffPreviewText = string.Empty;
+        // U197-H：没打开项目时**不显示**「另有页面未保存」——
+        // 那句话的前提是「本项目磁盘干净」，而此刻压根没有本项目。
+        ClearOtherPagesUnsavedHint();
         // U182-K/M：没打开项目不是「空」也不是「错」，是第三种状态——
         // 它的下一步是「打开项目」，而 Empty 的下一步是「创建存档」。
         LoadState = PageLoadState.IdleNeedProject;
@@ -488,6 +536,10 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             RepositoryReasonText = string.Empty;
             DiffSummaryText = _displayNames.Text("ui.common.none");
             DiffPreviewText = string.Empty;
+            // U197-H：读仓库状态失败时不显示这句 ——
+            // 「磁盘干净」这个前提没拿到，凭空说「另有未保存」会让作者
+            // 以为提示指的是刚才那个错误。
+            ClearOtherPagesUnsavedHint();
             NotifyRepositoryVisibility();
         }
     }
@@ -750,6 +802,9 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         DirtyStateText = status.Dirty
             ? _displayNames.Text("ui.git.dirty")
             : _displayNames.Text("ui.git.clean");
+        // U197-H：磁盘 dirty 判完才能决定要不要补「另有页面未保存」那句
+        // （只在磁盘干净时补，理由见 HasOtherPagesUnsaved 的注释）。
+        RefreshOtherPagesUnsavedHint(status.Dirty);
         RepositoryReasonText = status.Status switch
         {
             "degraded" => _displayNames.Text("ui.git.reason.no_commits"),
@@ -769,6 +824,52 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         OnPropertyChanged(nameof(HasRepositoryReason));
         OnPropertyChanged(nameof(HasDiffPreview));
         OnPropertyChanged(nameof(HasRepositoryInfo));
+    }
+
+    /// <summary>
+    /// U197-H：按「磁盘是否脏」决定要不要显示「另有页面存在未保存改动」。
+    ///
+    /// # 为什么每次现问宿主，而不订阅变化
+    ///
+    /// 内存 dirty 会随作者每一次敲键改变，订阅它等于把 Git 页挂到作品页的
+    /// 每次按键上。而这句提示只在**刷新仓库状态时**才需要正确——
+    /// 那是作者切到 Git 页、或点刷新的时刻，正是他会读这行字的时刻。
+    ///
+    /// ⚠️ 代价说清：作者停在 Git 页不动、同时别的页面变脏（例如自动化流程
+    /// 在后台改了正文），这句提示不会自己冒出来。取舍理由是本项目
+    /// **全应用无 DispatcherTimer**（U194-C 已复核），
+    /// 为一句提示引入轮询与它的价值不相称；而 U197-A 那条事件驱动的刷新
+    /// 落地后，决议/运行结束等时机会顺带带上这里。
+    /// </summary>
+    private void RefreshOtherPagesUnsavedHint(bool diskDirty)
+    {
+        // 磁盘脏时不显示：DirtyStateText 已经在说「有未提交变更」，
+        // 此刻作者不会误以为东西已入库 ⇒ 再补一句只是噪音。
+        var show = !diskDirty && _hasOtherUnsavedChanges();
+        if (!show)
+        {
+            ClearOtherPagesUnsavedHint();
+            return;
+        }
+
+        OtherPagesUnsavedText = _displayNames.Text("ui.git.other_pages_unsaved");
+        SetOtherPagesUnsavedVisible(true);
+    }
+
+    private void ClearOtherPagesUnsavedHint()
+    {
+        OtherPagesUnsavedText = string.Empty;
+        SetOtherPagesUnsavedVisible(false);
+    }
+
+    private void SetOtherPagesUnsavedVisible(bool value)
+    {
+        if (_hasOtherPagesUnsaved == value)
+        {
+            return;
+        }
+        _hasOtherPagesUnsaved = value;
+        OnPropertyChanged(nameof(HasOtherPagesUnsaved));
     }
 
     private static string ShortHash(string value)

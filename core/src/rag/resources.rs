@@ -17,6 +17,18 @@ pub type DisplayNameResources = BTreeMap<String, String>;
 
 const PROMPT_LIST_JSON: &str = include_str!("../../resources/prompt_list.json");
 const DISPLAY_NAME_JSON: &str = include_str!("../../resources/display_name.json");
+/// U201-C：en/ja 叠加层也要内联进来。
+///
+/// 此前只内联了 zh 一份，因为后端只用 display_name 做**校验**（键存在性），
+/// 而校验中文基底就够。现在多了一项职责：默认提示词占位符的**接受集合**要覆盖
+/// 三种语言写法的并集（理由见 `rag/default_prompt.rs` 模块头——作者照抄的是屏幕
+/// 上那一行，英文界面抄英文写法，只认一种等于不认他抄的东西），而并集必须从语言
+/// 包现算、不能硬编码，否则 en/ja 补译之后表会漏。
+///
+/// 这两份是**叠加层**（缺 key 时前端回落中文），所以它们的键集合是 zh 的子集，
+/// 不参与 `validate_display_name_resources` 的必需键校验。
+const DISPLAY_NAME_EN_JSON: &str = include_str!("../../resources/display_name.en.json");
+const DISPLAY_NAME_JA_JSON: &str = include_str!("../../resources/display_name.ja.json");
 
 /// 加载内置提示词资源。
 pub fn load_prompt_resources() -> crate::contracts::CoreResult<PromptResources> {
@@ -30,6 +42,41 @@ pub fn load_display_name_resources() -> crate::contracts::CoreResult<DisplayName
     let resources = serde_json::from_str::<DisplayNameResources>(DISPLAY_NAME_JSON)?;
     validate_display_name_resources(&resources)?;
     Ok(resources)
+}
+
+/// U201-C：加载全部语言的显示名资源（zh 基底 + en/ja 叠加层）。
+///
+/// 供「解析宽容、生成唯一」的接受集合建表用（`rag/default_prompt.rs`）。
+///
+/// # 为什么是 fail-loud（而不是跳过坏掉的那一份）
+///
+/// 首版用的是 `filter_map(...ok())`，那是错的：某份语言包 JSON 坏掉时并集会
+/// **静默少一种写法**，症状回到「那门语言界面里手打的写法认不出」——
+/// 而这正是整条功能最怕、也最难查的那一类失败（界面不报错，只是节点跑不起来，
+/// 且错误信息指向作者没写过的一行）。
+///
+/// 改成 fail-loud 在这里**不花任何生产代价**：三份都是 `include_str!` 的
+/// 编译期常量，内容对每个用户、每次运行完全相同 ⇒ 坏掉是「我们发了个坏二进制」，
+/// 不是用户环境的偶发状况，测试套件在发版前就会红。相比之下静默降级的代价是
+/// 真实的（上面那类失败）。
+///
+/// 口径因此与同模块的 `load_display_name_resources` 一致（都 `?` + 校验），
+/// 不再是一宽一严两套。
+pub fn all_display_name_packs() -> crate::contracts::CoreResult<Vec<DisplayNameResources>> {
+    [
+        ("display_name.json", DISPLAY_NAME_JSON),
+        ("display_name.en.json", DISPLAY_NAME_EN_JSON),
+        ("display_name.ja.json", DISPLAY_NAME_JA_JSON),
+    ]
+    .into_iter()
+    .map(|(name, raw)| {
+        serde_json::from_str::<DisplayNameResources>(raw).map_err(|error| {
+            crate::contracts::CoreError::validation(format!(
+                "bundled display name pack {name} is not a flat string map: {error}"
+            ))
+        })
+    })
+    .collect()
 }
 
 /// 校验提示词资源的必需 key 和字段。
@@ -211,6 +258,18 @@ pub fn validate_display_name_resources(
         "confirmation.summarizer.stage",
         "confirmation.writer.correction_patch",
         "confirmation.polisher.correction_patch",
+        // U201-C：节点默认提示词占位符的字面量。缺一个 = 那个 agent 的占位符
+        // 在**所有**语言里都认不出（并集里没有它），而症状是「节点报未展开占位符」
+        // 而非「少一行文案」——所以按必需键校验，让缺失在启动时就暴露。
+        "ui.prompt.default_placeholder.outliner",
+        "ui.prompt.default_placeholder.designer",
+        "ui.prompt.default_placeholder.planner",
+        "ui.prompt.default_placeholder.detail",
+        "ui.prompt.default_placeholder.writer",
+        "ui.prompt.default_placeholder.critic",
+        "ui.prompt.default_placeholder.prudent",
+        "ui.prompt.default_placeholder.polisher",
+        "ui.prompt.default_placeholder.summarizer",
     ] {
         let Some(value) = resources.get(key) else {
             return Err(crate::contracts::CoreError::validation(format!(
