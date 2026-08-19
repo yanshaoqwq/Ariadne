@@ -143,7 +143,13 @@
                   IsVisible="{Binding IsWorksTreeLoading}"
                   VerticalAlignment="Center" HorizontalAlignment="Center"
                   Padding="40,48">
-            <TextBlock Text="{Binding WorksTreeLoadingText}" Classes="subtitle" TextAlignment="Center" />
+            <!-- U185-A：整块区域空着等待，是全应用等待感最强的形态之一
+                 （左右两栏都还没有内容）。呼吸点竖排在文字下方而非并排：
+                 这里文字是 subtitle 居中大字，并排会把整块重心推偏。 -->
+            <StackPanel Spacing="10" HorizontalAlignment="Center">
+              <TextBlock Text="{Binding WorksTreeLoadingText}" Classes="subtitle" TextAlignment="Center" />
+              <ctl:BusyDots IsActive="{Binding IsWorksTreeLoading}" HorizontalAlignment="Center" />
+            </StackPanel>
           </Border>
 
           <Border Grid.Row="0" Grid.RowSpan="2" Classes="empty-state"
@@ -161,7 +167,12 @@
                   IsVisible="{Binding IsDocumentLoading}"
                   VerticalAlignment="Center" HorizontalAlignment="Center"
                   Padding="40,48">
-            <TextBlock Text="{Binding DocumentLoadingTargetText}" Classes="subtitle" TextWrapping="Wrap" TextAlignment="Center" />
+            <!-- U185-A：同上。这一处等的是**单篇正文**，百万字项目里
+                 一章可能几万字，等待窗口比索引加载更长，更需要「还在动」的证据。 -->
+            <StackPanel Spacing="10" HorizontalAlignment="Center">
+              <TextBlock Text="{Binding DocumentLoadingTargetText}" Classes="subtitle" TextWrapping="Wrap" TextAlignment="Center" />
+              <ctl:BusyDots IsActive="{Binding IsDocumentLoading}" HorizontalAlignment="Center" />
+            </StackPanel>
           </Border>
 
           <!-- 有索引但未选文档：单一空态，不重复「未选择」与文档壳（U72） -->
@@ -601,9 +612,20 @@
                       <TextBlock Grid.Column="1" Text="{Binding SummaryChapterHeading}" Classes="subtle" VerticalAlignment="Center" />
                     </Grid>
 
-                    <TextBlock Text="{Binding SummaryLoadingText}"
-                               Classes="caption"
-                               IsVisible="{Binding IsSummaryLoading}" />
+                    <!-- U178-F：加载态从「一行静态文字」升级为「文字 + 呼吸点」。
+                         原先整个应用没有任何 loading 指示（全仓 ProgressRing /
+                         IsIndeterminate / Skeleton / Shimmer 命中数为 0），
+                         耗时期间唯一的变化是这行文案换了内容——静态文字看不出
+                         「系统还在动」，用户读作卡住。BusyDots 是通用基元，
+                         见 Controls/BusyDots.cs（走主题 token、受 ReduceMotion 门控）。 -->
+                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                IsVisible="{Binding IsSummaryLoading}">
+                      <TextBlock Text="{Binding SummaryLoadingText}"
+                                 Classes="caption"
+                                 VerticalAlignment="Center" />
+                      <ctl:BusyDots IsActive="{Binding IsSummaryLoading}"
+                                    VerticalAlignment="Center" />
+                    </StackPanel>
                     <!-- 错误：竖脊转错误色（色 + 位置双通道，不只靠颜色） -->
                     <Border Classes="detail-row"
                             BorderBrush="{DynamicResource Ariadne.StatusError}"
@@ -818,8 +840,17 @@
                              TextWrapping="Wrap"
                              IsVisible="{Binding ShowWorksTreeSearchEmpty}" />
                 </StackPanel>
-                <TextBlock Text="{Binding WorksTreeLoadingText}" Classes="caption"
-                           IsVisible="{Binding IsWorksTreeLoading}" TextWrapping="Wrap" />
+                <!-- U185-A：树栏内的加载行。⚠️ 保留 `TextWrapping="Wrap"`——
+                     侧栏窄，这行文案会折行；并排的呼吸点因此挂
+                     `VerticalAlignment="Top"` 而非 Center：折成两行时
+                     居中会让点浮在两行之间，读起来像跟文字无关的装饰。 -->
+                <StackPanel Orientation="Horizontal" Spacing="8"
+                            IsVisible="{Binding IsWorksTreeLoading}">
+                  <ctl:BusyDots IsActive="{Binding IsWorksTreeLoading}"
+                                DotDiameter="4" VerticalAlignment="Top" Margin="0,5,0,0" />
+                  <TextBlock Text="{Binding WorksTreeLoadingText}" Classes="caption"
+                             TextWrapping="Wrap" />
+                </StackPanel>
                 <Border Classes="soft-panel" Padding="10" IsVisible="{Binding IsWorksTreeError}">
                   <StackPanel Spacing="8">
                     <TextBlock Text="{Binding WorksTreeErrorText}" Classes="caption" TextWrapping="Wrap" />

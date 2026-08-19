@@ -14,8 +14,13 @@
         <Border Grid.Column="0" Classes="page-header-mark" />
         <TextBlock Grid.Column="1" Text="{Binding Title}" Classes="title" VerticalAlignment="Center" />
         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <!-- U185-A：顶栏状态 chip。点直径收到 4px：chip 内距只有 10,3，
+               默认 5px 会顶到胶囊上下边缘、读作「挤出来了」。 -->
           <Border Classes="chip" IsVisible="{Binding IsLoading}">
-            <TextBlock Text="{Binding LoadingText}" Classes="caption" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <TextBlock Text="{Binding LoadingText}" Classes="caption" VerticalAlignment="Center" />
+              <ctl:BusyDots IsActive="{Binding IsLoading}" DotDiameter="4" VerticalAlignment="Center" />
+            </StackPanel>
           </Border>
           <Button Classes="secondary btn-compact"
                   Content="{Binding CopySelectedText}"
@@ -139,11 +144,18 @@
 
     <!-- 外层不再统一内缩：日志流要铺满，只有文字类元素自己带页边距 -->
     <Grid Grid.Row="2" Margin="0,14,0,0" RowDefinitions="Auto,*,Auto">
-      <TextBlock Grid.Row="0"
-                 Text="{Binding LoadingText}"
-                 Classes="caption"
-                 Margin="24,0,20,0"
-                 IsVisible="{Binding IsLoading}" />
+      <!-- U185-A：日志流顶部的加载行。⚠️ 这里**必须保留外层 StackPanel 的
+           Grid.Row 与 Margin**——原先 Margin="24,0,20,0" 是这一行独有的页边距
+           （外层刻意不统一内缩，见上方注释），挪到内层文字上会让呼吸点贴到左边缘。 -->
+      <StackPanel Grid.Row="0"
+                  Orientation="Horizontal" Spacing="8"
+                  Margin="24,0,20,0"
+                  IsVisible="{Binding IsLoading}">
+        <TextBlock Text="{Binding LoadingText}"
+                   Classes="caption"
+                   VerticalAlignment="Center" />
+        <ctl:BusyDots IsActive="{Binding IsLoading}" VerticalAlignment="Center" />
+      </StackPanel>
 
       <Border Grid.Row="1"
               Classes="empty-state"
@@ -302,10 +314,16 @@
                 Content="{Binding LoadMoreText}"
                 Command="{Binding LoadMoreCommand}"
                 IsVisible="{Binding HasMore}" />
-        <TextBlock Text="{Binding LoadingMoreText}"
-                   Classes="caption"
-                   VerticalAlignment="Center"
-                   IsVisible="{Binding IsLoadingMore}" />
+        <!-- U185-A：「加载更多」的等待。这一处点击后按钮会消失、文字出现，
+             若没有动效，用户无法区分「正在取下一页」与「取完了但没有更多」。 -->
+        <StackPanel Orientation="Horizontal" Spacing="8"
+                    VerticalAlignment="Center"
+                    IsVisible="{Binding IsLoadingMore}">
+          <TextBlock Text="{Binding LoadingMoreText}"
+                     Classes="caption"
+                     VerticalAlignment="Center" />
+          <ctl:BusyDots IsActive="{Binding IsLoadingMore}" VerticalAlignment="Center" />
+        </StackPanel>
       </StackPanel>
     </Grid>
   </Grid>

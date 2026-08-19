@@ -128,10 +128,19 @@
                 IsVisible="{Binding IsLoading}"
                 Margin="8,24"
                 HorizontalAlignment="Stretch">
-          <TextBlock Text="{Binding LoadingText}"
-                     Classes="secondary"
-                     HorizontalAlignment="Center"
-                     AutomationProperties.LiveSetting="Polite" />
+          <!-- U185-A：加载态从「一行静态文字」补上呼吸点。
+               ⚠️ `LiveSetting` 留在 TextBlock 上、**不要挪到外层 StackPanel**：
+               屏幕阅读器播报的是文本内容，而 BusyDots 是纯视觉、
+               自身 IsHitTestVisible=false 也无可读文本，
+               把 live region 扩到容器只会让播报多带一段空节点。 -->
+          <StackPanel Orientation="Horizontal" Spacing="8"
+                      HorizontalAlignment="Center">
+            <TextBlock Text="{Binding LoadingText}"
+                       Classes="secondary"
+                       VerticalAlignment="Center"
+                       AutomationProperties.LiveSetting="Polite" />
+            <ctl:BusyDots IsActive="{Binding IsLoading}" VerticalAlignment="Center" />
+          </StackPanel>
         </Border>
 
         <Border Classes="empty-state"

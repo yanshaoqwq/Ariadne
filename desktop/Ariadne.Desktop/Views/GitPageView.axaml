@@ -18,8 +18,15 @@
               <TextBlock Text="{Binding Description}" Classes="caption" TextWrapping="Wrap" />
             </StackPanel>
             <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+              <!-- U185-A：Git 操作进行中的状态 chip。这一处尤其需要——
+                   提交/拉取的耗时不可预测（取决于仓库大小与网络），
+                   而这条 chip 是唯一的进行中反馈。
+                   点直径 4px：与 RunLog 顶栏同一形态，chip 内距只有 10,3。 -->
               <Border Classes="chip" IsVisible="{Binding IsBusy}">
-                <TextBlock Text="{Binding OperationStatusText}" Classes="caption" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Text="{Binding OperationStatusText}" Classes="caption" VerticalAlignment="Center" />
+                  <ctl:BusyDots IsActive="{Binding IsBusy}" DotDiameter="4" VerticalAlignment="Center" />
+                </StackPanel>
               </Border>
               <Button Classes="secondary btn-compact"
                       Content="{Binding RefreshText}"

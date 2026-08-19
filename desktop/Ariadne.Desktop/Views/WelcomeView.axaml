@@ -319,8 +319,13 @@
               </ScrollViewer>
 
               <Border Classes="empty-state" IsVisible="{Binding IsRecentLoading}" Padding="28,48">
-                <TextBlock Text="{Binding RecentLoadingText}" Classes="secondary"
-                           HorizontalAlignment="Center" TextAlignment="Center" />
+                <!-- U185-A：欢迎页是**首启第一眼**，这一处的等待观感权重最高——
+                     它决定用户对「这软件反应快不快」的第一判断。 -->
+                <StackPanel Spacing="10" HorizontalAlignment="Center">
+                  <TextBlock Text="{Binding RecentLoadingText}" Classes="secondary"
+                             HorizontalAlignment="Center" TextAlignment="Center" />
+                  <ctl:BusyDots IsActive="{Binding IsRecentLoading}" HorizontalAlignment="Center" />
+                </StackPanel>
               </Border>
 
               <Border Classes="empty-state" IsVisible="{Binding IsRecentError}" Padding="28,40">
