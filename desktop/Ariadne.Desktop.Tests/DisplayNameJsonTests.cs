@@ -124,7 +124,7 @@ public sealed class DisplayNameJsonTests
         // 缺口增量全部来自**其它施工线新增中文键未同批补译**，按前缀分布是
         // `ui.workspace.variable_fill` 16、`ui.settings.permissions` 11、
         // `ui.workspace.confirmation`（ask_ai/list_title/review_title 等）7、
-        // `ui.dialog.open_project` 7、`ui.node.handle` 6~7、
+        // `ui.dialog.open_project` 7、
         // `diagnostics.providers.{embedding,reranker}` 各 5……
         //
         // ⇒ **调高基线是为了让这条用例继续能拦住「下一次」漏补**。它长红的话
@@ -134,8 +134,18 @@ public sealed class DisplayNameJsonTests
         //
         // ⚠️ 调基线**不等于**这些键不用补。上面那串前缀就是待补清单，
         // 补完记得把数字改回去（反向断言会提醒）。
-        const int EnglishBaseline = 103;
-        const int JapaneseBaseline = 110;
+        //
+        // 🔴 **同日下调到 97/103（U199-E）：这次是真的减少了缺口，但一行译文都没补。**
+        // 原先清单里还有一条 `ui.node.handle` 6~7 —— 它**整组是死键**
+        // （React 原型遗留，U179-B 已判定；生产零引用，唯一命中是本注释自己），
+        // 已按「删键不补译」处置，连 en 那一个遗留翻译也删了。
+        //
+        // ⇒ **这条清单本身混进过死键**，是本轮最该记住的一点：
+        // 「缺 N 个键」这个数字里**混着不该补的**，照单补译会做 6 份无用功。
+        // **补译前先 `grep -rn '<key>' desktop/ --include=*.cs --include=*.axaml`
+        // 确认有生产引用**，零引用的应当删键而不是翻译它。
+        const int EnglishBaseline = 97;
+        const int JapaneseBaseline = 103;
 
         var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
         var chinese = LoadPack(Path.Combine(resourceDir, "display_name.json"));
@@ -157,11 +167,69 @@ public sealed class DisplayNameJsonTests
                 + string.Join("\n  ", missing.Take(40)));
 
             // 反向：补完了就要把基线调下来，否则基线虚高会遮住后续新缺的键。
+            //
+            // ⚠️ **容差必须紧**（U199-E 变异测试发现）：原先写的是 `baseline - 20`，
+            // 而「补了几个键忘了调基线」这个**最常见的形态**恰好落在容差内
+            // ⇒ 这条断言声称防虚高，却对 1~20 的虚高完全无感。
+            // 实测：删掉 6 个死键后基线不调（103 vs 实际 97），照样全绿。
+            //
+            // 现在收到 **3**：一次施工顺手补三五个键属正常波动，
+            // 超过就说明账没记 —— 而账目本身就是这条用例的全部价值。
+            // 若将来批量补译导致它频繁红，正确做法是**补译时同批调基线**，
+            // 而不是把容差放回去（那等于把这条断言重新变成装饰）。
             Assert.True(
-                missing.Length >= baseline - 20 || baseline == 0,
-                $"{language} 语言包只缺 {missing.Length} 个键，已明显低于基线 {baseline}。"
+                missing.Length >= baseline - 3 || baseline == 0,
+                $"{language} 语言包只缺 {missing.Length} 个键，低于基线 {baseline}。"
                 + $"这是好事，但请把本用例里的基线常量改成 {missing.Length}"
                 + "——基线虚高会让它挡不住下一次漏补。");
+        }
+    }
+
+    /// <summary>
+    /// U199-E：已判定的死键不得被补回来。
+    ///
+    /// # 为什么需要一条独立守卫
+    ///
+    /// `ui.node.handle.*` 是 React 原型遗留（U179-B 判定），生产零引用。
+    /// 它已被删除，但**上面那条基线用例会主动引诱下一个人把它加回来**：
+    /// 基线用例的失败信息**逐条列出缺哪些键**，谁看到 en/ja 缺某个键，
+    /// 第一反应就是去补译 —— 而对死键来说，「补译」和「把键重新加进 zh」
+    /// 是同一个动作的两半。
+    ///
+    /// ⇒ 少了这条，`ui.node.handle` 会以「补齐三语言」的名义原地复活，
+    /// 而且**那次复活会让基线用例变绿**（三语言都有了、缺口反而下降），
+    /// 看起来完全像是在做正确的事。
+    ///
+    /// # 判据为什么落在「三份语言包都没有」而不是「没有生产引用」
+    ///
+    /// 断言「零生产引用」拦不住复活：键被加回语言包时**本来就还是没人引用**，
+    /// 那种断言在死键复活后照样全绿。要拦的是**键本身的存在**。
+    /// </summary>
+    [Fact]
+    public void RetiredPrototypeKeys_StayDeleted()
+    {
+        // U179-B 判定的 React 原型遗留前缀。删除依据：生产零引用
+        // （`grep -rn 'ui.node.handle' desktop/ --include=*.cs --include=*.axaml`
+        // 唯一命中是本文件的注释），后端亦零引用，且无 `ui.node.{...}` 动态拼接。
+        const string retiredPrefix = "ui.node.handle";
+
+        var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
+        foreach (var file in new[] { "display_name.json", "display_name.en.json", "display_name.ja.json" })
+        {
+            var pack = LoadPack(Path.Combine(resourceDir, file));
+            var revived = pack.Keys
+                .Where(key => key.StartsWith(retiredPrefix, StringComparison.Ordinal))
+                .OrderBy(key => key, StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.True(
+                revived.Length == 0,
+                $"{file} 里又出现了已退役的 {retiredPrefix}.* 键（{revived.Length} 个）："
+                + $"\n  {string.Join("\n  ", revived)}"
+                + "\n这组键是 React 原型遗留、生产零引用（U179-B / U199-E 已判定）。"
+                + "\n若你是因为基线用例列出了它才来补译的——那份清单混进过死键，"
+                + "补译前请先 grep 生产引用。"
+                + "\n若这些界面**真的要做**了，请连同实际引用一起加回来，并改掉本用例。");
         }
     }
 
