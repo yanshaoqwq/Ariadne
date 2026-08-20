@@ -176,6 +176,11 @@ public readonly record struct UserFailure(
             "network" => "ui.error.network",
             "permission" => "ui.error.permission",
             "not_found" => "ui.error.not_found",
+            // U208-A：后端新增的码在这张表里没有条目时，会被 `_ =>` 兜到
+            // `ui.error.unknown`「未知错误」——比归错变体更糟。
+            // ⇒ 后端每加一个 CommandErrorCode，这里必须同批加一行。
+            // 守卫在 `ErrorCodeCopyCoverageTests`（逐一对应，不是存在性判据）。
+            "not_configured" => "ui.error.not_configured",
             "validation" => "ui.error.validation",
             "budget" => "ui.error.budget",
             "conflict" => "ui.error.conflict",

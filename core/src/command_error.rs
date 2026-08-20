@@ -15,6 +15,13 @@ pub enum CommandErrorCode {
     Validation,
     Conflict,
     NotFound,
+    /// 前置配置缺失：能力本身没坏，是**作者还没配**（U208-A）。
+    ///
+    /// 与 `NotFound` 刻意分开：`NotFound` 的文案是「找不到所需内容，可能已被移动或删除」，
+    /// 它把作者指向「去翻版本页找回删掉的东西」——而正确动作是「去配置页配一个模型」。
+    /// 首次使用的人必然撞上这条（没配过模型就提问），那句话会让他以为自己的内容丢了。
+    /// ⇒ 归错变体不是文案瑕疵，是**把人指向相反方向**。
+    NotConfigured,
     Permission,
     Budget,
     ResourceLimit,
@@ -33,10 +40,11 @@ pub enum CommandErrorCode {
 }
 
 impl CommandErrorCode {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Validation,
         Self::Conflict,
         Self::NotFound,
+        Self::NotConfigured,
         Self::Permission,
         Self::Budget,
         Self::ResourceLimit,
@@ -59,6 +67,7 @@ impl CommandErrorCode {
             Self::Validation => "validation",
             Self::Conflict => "conflict",
             Self::NotFound => "not_found",
+            Self::NotConfigured => "not_configured",
             Self::Permission => "permission",
             Self::Budget => "budget",
             Self::ResourceLimit => "resource_limit",
@@ -161,6 +170,12 @@ impl CommandError {
 
     pub fn not_found(diagnostic: impl Into<String>) -> Self {
         Self::new(CommandErrorCode::NotFound, diagnostic)
+    }
+
+    /// 前置配置缺失（U208-A）。用在「能力没坏、只是作者还没配」的地方，
+    /// 别用 `not_found` —— 那句文案会让作者去找他并没有丢的内容。
+    pub fn not_configured(diagnostic: impl Into<String>) -> Self {
+        Self::new(CommandErrorCode::NotConfigured, diagnostic)
     }
 
     pub fn permission(diagnostic: impl Into<String>) -> Self {

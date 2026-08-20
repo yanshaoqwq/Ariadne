@@ -785,6 +785,7 @@
   "ui.settings.show_all_sections": "すべてのセクションを表示",
   "ui.settings.status.saving": "保存中…",
   "ui.settings.status.section_load_failed": "このセクションを読み込めなかったため、保存は無効です。",
+  "ui.settings.status.sections_load_failed_partial": "「{sections}」を読み込めませんでした。上部から再試行できます。他のセクションはこれまでどおり保存できます。",
   "ui.settings.status.loading": "設定を読み込み中…",
   "ui.settings.loading.hint": "各セクションは並行して読み込まれ、届いた順に表示されます。",
   "ui.settings.status.unsaved": "未保存の変更があります",

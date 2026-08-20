@@ -2539,9 +2539,33 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             await secretProtectionTask.ConfigureAwait(true);
 
             EnsureDefaultConfirmationPoliciesIfEmpty();
-            StatusText = failed
-                ? _displayNames.Text("ui.settings.status.section_load_failed")
-                : _displayNames.Text("ui.common.configured");
+            // U207-B：页面级状态行**不再**由「任一分区失败」的按位或决定。
+            //
+            // 旧写法是 `failed ? 「此配置分区加载失败，已禁止保存。」: 「已保存」`，
+            // 而 `failed` 是 14 个分区按位或的结果 ⇒ 只要「模型」读失败，
+            // 停在完好的「通用」页也会看到「已禁止保存」。**那句话是假的**：
+            // 保存门禁本来就是按分区放行的（`CanSave` 用 `_draftState.IsLoaded(section)`），
+            // 通用页此刻改一个字保存钮就会亮。功能是通的、文案在劝退。
+            //
+            // 为什么不改成「只反映当前 tab」：作者可能永远不切到失败那一页，
+            // 于是永远不知道有个分区没加载上——把劝退缺陷换成信息丢失缺陷。
+            // 现在的口径是**点名失败分区 + 明说其余分区可保存**：告知保留，阻断措辞去掉。
+            // 阻断措辞留在真正被阻断的那一刻（`RunSectionSaveAsync` 里那句同名文案，
+            // 由 `_draftState.IsLoaded(section)` 判定，粒度本来就是对的）。
+            //
+            // U176 那条「凭据保护状态不并入 failed」的推理（用户来配置页正是为了修凭据）
+            // 对「模型」分区同样成立——当时只想到凭据这一例，没推广成规则，这里补上。
+            if (SectionLoadFailures.Count > 0)
+            {
+                StatusText = ComposeSectionLoadFailureStatus();
+            }
+            else if (!failed)
+            {
+                StatusText = _displayNames.Text("ui.common.configured");
+            }
+            // else：只有诊断读取失败（它**不注册**分区失败项，见 RefreshDiagnosticsAsync）。
+            // 此时它的 catch 已把真实错误写进状态行，覆盖成「已保存」会把错误抹掉，
+            // 覆盖成「已禁止保存」更糟——后端诊断读不到与能不能保存配置毫无关系。
         }
         finally
         {
@@ -2680,7 +2704,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         return section switch
         {
             GeneralSection => Deferred(
-                (
+                () => (
                     _backend.GetAppSettingsAsync(cancellationToken),
                     _backend.ReadProjectMemoryAsync(cancellationToken)),
                 GeneralSection,
@@ -2701,7 +2725,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 generation,
                 cancellationToken),
             ModelsSection => Deferred(
-                _backend.GetProviderConfigAsync(cancellationToken),
+                () => _backend.GetProviderConfigAsync(cancellationToken),
                 ModelsSection,
                 static task => task,
                 value =>
@@ -2717,14 +2741,14 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             PermissionsSection or PresetsSection =>
                 () => LoadPermissionPresetSectionsAsync(generation, cancellationToken),
             TemplateRepositorySection => Deferred(
-                _backend.GetTemplateRepositorySettingsAsync(cancellationToken),
+                () => _backend.GetTemplateRepositorySettingsAsync(cancellationToken),
                 TemplateRepositorySection,
                 static task => task,
                 value => TemplateRepositoryBaseUrl = value.BaseUrl,
                 generation,
                 cancellationToken),
             AutomationSection => Deferred(
-                (
+                () => (
                     _backend.GetAutomationSettingsAsync(cancellationToken),
                     _backend.GetWorkflowSettingsAsync(cancellationToken)),
                 AutomationSection,
@@ -2744,28 +2768,28 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                 generation,
                 cancellationToken),
             PersonalizationSection => Deferred(
-                _backend.GetUiPreferencesAsync(cancellationToken),
+                () => _backend.GetUiPreferencesAsync(cancellationToken),
                 PersonalizationSection,
                 static task => task,
                 ApplyLoadedUiPreferences,
                 generation,
                 cancellationToken),
             AppRuntimeSection => Deferred(
-                _backend.GetAppRuntimeSettingsAsync(cancellationToken),
+                () => _backend.GetAppRuntimeSettingsAsync(cancellationToken),
                 AppRuntimeSection,
                 static task => task,
                 ApplyAppRuntime,
                 generation,
                 cancellationToken),
             RetrievalSection => Deferred(
-                _backend.GetRagSettingsAsync(cancellationToken),
+                () => _backend.GetRagSettingsAsync(cancellationToken),
                 RetrievalSection,
                 static task => task,
                 ApplyRag,
                 generation,
                 cancellationToken),
             GitSection => Deferred(
-                _backend.GetGitSettingsAsync(cancellationToken),
+                () => _backend.GetGitSettingsAsync(cancellationToken),
                 GitSection,
                 static task => task,
                 ApplyGit,
@@ -2778,22 +2802,53 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
         // 把「已发出的读取」包成延后应用的续作：读取此刻已在飞行中，
         // apply 要等调用方按顺序 await 时才执行。
+        //
+        // ⚠️ 第一个参数刻意是**工厂** `Func<TRaw>` 而不是已在飞行中的 `TRaw`（U207-B 附带修复）。
+        // 旧签名收 `TRaw inflight`，于是 `read` 闭包永久捕获那一个 Task；分区读失败后
+        // `LoadSectionAsync` 的 catch 用同一个 `read` 登记重试 ⇒ 重试只是把那个
+        // **已 faulted 的 Task 再 await 一遍**，必然抛同样的异常。
+        // 也就是说「重试」按钮对所有走 Deferred 的分区（general/models/automation/
+        // personalization/app_runtime/retrieval/git/templates，共 8 个）**永远不可能成功**，
+        // 哪怕后端此刻已经恢复。permissions/presets 侥幸没中招，只因为它俩走
+        // `LoadPermissionPresetSectionsAsync`，那条路每次进去都重新发请求。
+        // 现在首帧仍立刻 `start()`（保住整页加载的 IPC 往返重叠），重试走 `start()` 再发一次。
         Func<Task<bool>> Deferred<TRaw, TValue>(
-            TRaw inflight,
+            Func<TRaw> start,
             string sectionName,
             Func<TRaw, Task<TValue>> await_,
             Action<TValue> apply,
             long gen,
             CancellationToken token)
-            => () => LoadSectionAsync(gen, sectionName, () => await_(inflight), apply, token);
+        {
+            var inflight = start();
+            return () => LoadSectionAsync(
+                gen,
+                sectionName,
+                () => await_(inflight),
+                apply,
+                token,
+                // 重试用的读取：重新调 start()，拿一个全新的请求。
+                // token 刻意不传进来——重试是用户在整页加载结束后手动点的，
+                // 那时原 token 可能已被后续导航取消（见 catch 里传 CancellationToken.None）。
+                retryRead: () => await_(start()));
+        }
     }
 
+    /// <param name="retryRead">
+    /// 失败后「重试」按钮要用的读取。为 null 时沿用 <paramref name="read"/>。
+    ///
+    /// 存在的理由：<c>BeginLoadSection</c> 的 <c>Deferred</c> 会把整页加载时**已在飞行中**的
+    /// Task 捕获进 <paramref name="read"/>，那个闭包重试时只会把同一个 faulted Task 再 await
+    /// 一遍（U207-B 附带修复）。调用方若传的 <paramref name="read"/> 本来就每次新发请求
+    /// （如 <c>LoadSingleSectionAsync</c> 那批），留 null 即可。
+    /// </param>
     private async Task<bool> LoadSectionAsync<T>(
         long generation,
         string section,
         Func<Task<T>> read,
         Action<T> apply,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<Task<T>>? retryRead = null)
     {
         try
         {
@@ -2840,9 +2895,13 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     () => LoadSectionAsync(
                         _draftState.CurrentLoadGeneration,
                         section,
-                        read,
+                        // 关键：重试要用 retryRead（重新发请求）。用 read 会把整页加载时
+                        // 那个已 faulted 的 Task 再 await 一遍，重试注定失败（U207-B）。
+                        retryRead ?? read,
                         apply,
-                        CancellationToken.None));
+                        CancellationToken.None,
+                        // 沿着链条传下去：重试再失败时，下一次重试仍要能重新发请求。
+                        retryRead));
             }
             return false;
         }
@@ -2875,6 +2934,31 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         OnPropertyChanged(nameof(HasSectionLoadFailures));
     }
 
+    /// <summary>
+    /// U207-B：页面级「有分区没加载上」的状态行文案。
+    ///
+    /// 三条硬性质，改这里前先读完：
+    ///
+    /// 1. **点名**。文案带 `{sections}`，填的是失败分区的标题。泛泛一句
+    ///    「部分配置未能加载」等于把「告知」退化成噪声：作者不知道该去哪一页重试。
+    /// 2. **不阻断**。不能出现「已禁止保存」这类措辞。保存是按分区放行的
+    ///    （`CanSave` → `_draftState.IsLoaded(section)`），别的分区失败不影响当前分区落盘。
+    /// 3. **名单取自 <see cref="SectionLoadFailures"/> 而不是重算 `IsLoaded`**。
+    ///    状态行与页内那排失败横幅必须同源，否则两处会各自漂移——
+    ///    横幅说「模型」、状态行说「模型、权限」这种矛盾比不显示更糟。
+    ///    同源还顺带保证了重试成功后（`ClearSectionLoadFailure` 把项摘掉）
+    ///    重算出的文案立刻不再点名它。
+    /// </summary>
+    private string ComposeSectionLoadFailureStatus() =>
+        _displayNames.Format(
+            "ui.settings.status.sections_load_failed_partial",
+            new Dictionary<string, string>
+            {
+                // 分隔符与 `ui.settings.status.unsaved_sections` 那处保持一致（顿号），
+                // 免得同一条状态行里两种列举风格。
+                ["sections"] = string.Join("、", SectionLoadFailures.Select(item => item.Title)),
+            });
+
     private void ClearSectionLoadFailure(string section)
     {
         _failedSectionRetries.Remove(section);
@@ -2897,7 +2981,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
         await retry().ConfigureAwait(true);
         NotifySectionStateChanged();
-        UpdateDirtyState(updateStatus: false);
+        // U207-B：改成 `updateStatus: true`。状态行现在**点名**失败分区，
+        // 不刷新就会在重试成功后继续点名一个已经加载好的分区——
+        // 越具体的文案，过期时越显得系统在胡说。
+        // `UpdateDirtyState` 的空闲分支已走同一个 composer，剩余失败项照样保留。
+        UpdateDirtyState();
     }
 
     private bool CanRestoreSelectedTab()
@@ -7467,7 +7555,12 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             return;
         }
 
-        StatusText = _displayNames.Text("ui.common.configured");
+        // U207-B：没有未提交改动时，若还有分区没加载上，状态行要继续**点名**它们，
+        // 而不是报「已保存」。此前这里无条件写「已保存」——作者随手改一下再撤回，
+        // 「有个分区没加载上」这条信息就被无声抹掉，而它恰恰需要用户去重试。
+        StatusText = SectionLoadFailures.Count > 0
+            ? ComposeSectionLoadFailureStatus()
+            : _displayNames.Text("ui.common.configured");
     }
 
     private List<string> DirtySectionTitles()

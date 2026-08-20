@@ -361,6 +361,10 @@ impl GitService {
 
     /// 暂存所有当前变更。
     fn stage_all(&self, policy: &GitStagePolicy) -> CoreResult<()> {
+        // 先处理存量：排除 pathspec 只影响本次 add/status，**不会**让历史上已被
+        // 跟踪的文件变成未跟踪（U207-A）。不先摘掉它，每个新 commit 都会继续
+        // 携带索引里那份旧 blob，排除清单形同虚设。
+        self.untrack_internal_state_files()?;
         let mut args = vec![
             "add".to_owned(),
             "--all".to_owned(),
@@ -369,6 +373,67 @@ impl GitService {
         ];
         args.extend(policy.exclude_pathspecs()?);
         self.run_git(args)?;
+        Ok(())
+    }
+
+    /// 把历史上已被跟踪的 Ariadne 内部状态文件从**索引**中摘掉（U207-A 存量迁移）。
+    ///
+    /// ⚠️ **`git rm --cached` 只动索引，磁盘上的文件原样保留**。
+    /// 也就是说这里不会删掉作者的写作知识库（`metadata.db`，18 张关系表），
+    /// 只是让它今后不再被提交。谁把 `--cached` 去掉，就会在下一次存档时
+    /// 真的删掉作者的全部写作知识——这不是笔误能挽回的那类改动。
+    ///
+    /// **幂等**：先 `git ls-files` 探一次，只有真的还在索引里才执行 `git rm`。
+    /// 稳定态（绝大多数存档）下的代价是一次索引读取，不会反复改索引。
+    /// 探测**不是**可省的优化：`git rm` 遇到匹配不到任何文件的 pathspec 会以
+    /// `fatal: pathspec ... did not match any files` 退出 128（实测确认），
+    /// 无条件执行会让第二次以后的每一次存档直接失败。
+    ///
+    /// **刻意不用一次性哨兵**（例如在 `.runtime` 下写个「已迁移」标记）：
+    /// `restore_to_new_branch` 会 checkout 到修复之前的历史 commit，那棵树里
+    /// `metadata.db` 仍是被跟踪的，checkout 之后它又回到索引里。哨兵在那之后
+    /// 永不再触发，回档一次就把缺陷带回来了——探测式判断才是回档后依然正确的做法。
+    ///
+    /// **作用域刻意是固定清单 `INTERNAL_STATE_FILES`，不是 `policy.ignored_paths`**：
+    /// 后者会随配置带上作者内容（`track_documents = false` 时整个 documents 目录都在里面），
+    /// 照它摘索引会让下一个 commit 看起来像「作者的正文被全部删除」。
+    fn untrack_internal_state_files(&self) -> CoreResult<()> {
+        let mut list_args = vec!["ls-files".to_owned(), "-z".to_owned(), "--".to_owned()];
+        list_args.extend(
+            INTERNAL_STATE_FILES
+                .iter()
+                .map(|name| format!(":(top,literal){name}")),
+        );
+        let listed = self.run_git(list_args)?;
+        // `-z` 输出以 NUL 分隔（且末尾带一个 NUL），空段直接丢掉。
+        // 用 `-z` 而非按行读：避免 git 对非 ASCII 路径加引号转义那套规则。
+        let tracked: Vec<String> = listed
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if tracked.is_empty() {
+            return Ok(());
+        }
+
+        // `--force` 只是免掉「索引内容与 HEAD 和工作区都不同」那道拦阻。
+        // 对这些文件我们本来就想丢掉那份暂存内容；而 `--cached` 保证工作区文件不受影响，
+        // 所以这里的 force 不可能毁掉任何用户数据。不加它的话，一个处于奇怪暂存态的
+        // metadata.db 会让 `git rm` 报错，进而让用户点「创建存档」直接失败——
+        // 清理动作绝不该把主功能拖下水。
+        let mut remove_args = vec![
+            "rm".to_owned(),
+            "--cached".to_owned(),
+            "--force".to_owned(),
+            "--quiet".to_owned(),
+            "--".to_owned(),
+        ];
+        remove_args.extend(
+            tracked
+                .into_iter()
+                .map(|path| format!(":(top,literal){path}")),
+        );
+        self.run_git(remove_args)?;
         Ok(())
     }
 
@@ -708,19 +773,39 @@ impl GitStagePolicy {
     }
 }
 
+/// 项目根下由 Ariadne 自己生成、**永远不该进版本控制**的 SQLite 状态文件。
+///
+/// 三个库都开了 `PRAGMA journal_mode = WAL`（见 `rag/store.rs`、`costs`、`retrieval/runtime`），
+/// 所以每个库都要连 `-wal`/`-shm` 两个附属文件一起排：只排主库会让存档在 WAL
+/// 未 checkpoint 的时刻照样带上二进制增量。
+///
+/// U207-A：`metadata.db` 此前**一个变体都没排**（另两个库连附属文件都排全了），
+/// 于是写作知识库每次总结都给存档塞一个 160KB+ 的二进制 diff，
+/// 且 SQLite 页面重排让「改一条记录」产生大范围字节变化。
+///
+/// ⚠️ 这个清单同时是**存量迁移**（`untrack_internal_state_files`）的作用域，
+/// 因此只允许放「机器生成的项目内部状态」——绝不能放任何作者产出的路径。
+const INTERNAL_STATE_FILES: &[&str] = &[
+    "metadata.db",
+    "metadata.db-wal",
+    "metadata.db-shm",
+    "costs.db",
+    "costs.db-wal",
+    "costs.db-shm",
+    "runtime.db",
+    "runtime.db-wal",
+    "runtime.db-shm",
+];
+
 fn default_ignored_paths() -> Vec<String> {
-    vec![
+    let mut paths = vec![
         ".cache".to_owned(),
         ".runtime".to_owned(),
         ".indexes".to_owned(),
         ".knowledge".to_owned(),
-        "costs.db".to_owned(),
-        "costs.db-wal".to_owned(),
-        "costs.db-shm".to_owned(),
-        "runtime.db".to_owned(),
-        "runtime.db-wal".to_owned(),
-        "runtime.db-shm".to_owned(),
-    ]
+    ];
+    paths.extend(INTERNAL_STATE_FILES.iter().map(|name| (*name).to_owned()));
+    paths
 }
 
 fn checkpoint_kind_from_summary(summary: &str) -> Option<CheckpointKind> {

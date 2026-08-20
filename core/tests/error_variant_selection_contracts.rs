@@ -130,3 +130,101 @@ fn conflict_diagnostic_carries_both_versions() {
         "诊断里没有磁盘上的当前版本，排查时无从判断被谁改过：{error:?}"
     );
 }
+
+/// U208-A 回归：「没配模型」不能报成「内容可能已被移动或删除」。
+///
+/// # 为什么判据必须是 `code` 而不是「返回了 Err」
+///
+/// 缺陷版本里它**本来就返回 Err**（`CommandError::not_found(...)`），
+/// 只是变体选错。断言 `is_err()` 在缺陷下照样全绿——这与本文件另两条同理。
+///
+/// # 为什么这条是 P0 而不是文案瑕疵
+///
+/// `ui.error.not_found`「找不到所需内容，可能已被移动或删除」会让作者去
+/// **翻版本页找回并没有丢的内容**，而正确动作是「去配置页配一个模型」。
+/// 第一次用的人必然撞上（没配过模型就提问）⇒ 首次使用路径上的错误归因，
+/// 代价是作者认为软件坏了。
+#[test]
+fn missing_provider_reports_not_configured_not_not_found() {
+    let temp = tempfile::tempdir().unwrap();
+    ariadne::frontend::initialize_project(temp.path()).unwrap();
+    let secrets = MemorySecretStore::default();
+
+    // 全新项目：没有任何 provider 配置，正是新用户第一次提问时的处境。
+    let error = ariadne::commands::project_ai_chat_impl(
+        temp.path(),
+        &secrets,
+        ariadne::commands::ProjectAiRequest {
+            message: "hello".to_owned(),
+            ..Default::default()
+        },
+    )
+    .expect_err("没有启用的 LLM provider 时必须失败");
+
+    assert_eq!(
+        error.code,
+        CommandErrorCode::NotConfigured,
+        "没配模型被分派成 {:?}。若是 NotFound，界面显示「找不到所需内容，\
+         可能已被移动或删除」——作者会去翻版本页找回没丢的东西，\
+         而他要做的是去配置页配模型。这是把人指向相反方向。诊断：{error}",
+        error.code
+    );
+
+    // 文案键必须存在：code 对了但键缺失的话界面显示 [ui.error.not_configured]。
+    assert_eq!(error.code.message_key(), "ui.error.not_configured");
+}
+
+/// U208-A 的「同类兄弟」守卫：不让同一模式在别处再来一遍。
+///
+/// # 为什么单靠上面那条行为用例不够
+///
+/// U196-A 修完 `Validation` 当垃圾桶那两个实例之后，**同一模式在别处照旧**——
+/// 本轮就在 `commands.rs` 里找出 3 处漏网的 `not_found("... is not configured")`
+/// （`:3642` provider id 查不到、`:9392` 同上另一路、`:10756` Web Search 未配）。
+/// 行为用例只钉住它走到的那一条路；模式守卫钉住的是**类**。
+///
+/// # 判据形态刻意是源码扫描
+///
+/// 这类缺陷的共同特征是「构造点选错变体」，而构造点分散在几十处、
+/// 大多没有便于构造的入口。逐个写行为用例的成本远高于收益，
+/// 而扫描能一次覆盖全部现存与将来新增的构造点。
+#[test]
+fn no_provider_configuration_failure_uses_not_found() {
+    let source = include_str!("../src/commands.rs");
+    let mut offenders = Vec::new();
+
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        // 注释行不算：注释里成段引用示例写法是正常的，
+        // 而那恰好会被当成真构造点（同类坑见 half-wired 那条记忆）。
+        if trimmed.starts_with("//") || trimmed.starts_with("///") {
+            continue;
+        }
+        if !line.contains("not_found") {
+            continue;
+        }
+        // 「未配置」这件事的两种说法都盖上。
+        if line.contains("is not configured") || line.contains("is configured") {
+            offenders.push(format!("  commands.rs:{}: {}", index + 1, line.trim()));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "这些构造点用 `not_found` 报「未配置」，界面会显示「找不到所需内容，\
+         可能已被移动或删除」，把作者指向找回没丢的内容。应改用 `not_configured`：\n{}",
+        offenders.join("\n")
+    );
+
+    // 自检下限：正则/关键词失配时循环空跑也会绿。
+    // 确认扫描确实看到了这一类构造点（改用正确变体之后它们仍在源码里）。
+    let configured_sites = source
+        .lines()
+        .filter(|line| line.contains("not_configured"))
+        .count();
+    assert!(
+        configured_sites >= 4,
+        "只在 commands.rs 找到 {configured_sites} 处 not_configured 构造点，\
+         少于修复时确认的 4 处 ⇒ 扫描口径失配，上面的检查可能是空跑"
+    );
+}

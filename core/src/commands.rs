@@ -3639,7 +3639,7 @@ fn select_provider_for_model_fetch(
             .providers
             .iter()
             .find(|provider| provider.provider_id == id)
-            .ok_or_else(|| CommandError::not_found(format!("provider is not configured: {id}")));
+            .ok_or_else(|| CommandError::not_configured(format!("provider is not configured: {id}")));
     }
     providers
         .default_llm_provider_id
@@ -9389,7 +9389,7 @@ fn provider_removal_preview_from_config(
         .iter()
         .find(|configured| configured.provider_id == provider_id)
         .ok_or_else(|| {
-            CommandError::not_found(format!("provider is not configured: {provider_id}"))
+            CommandError::not_configured(format!("provider is not configured: {provider_id}"))
         })?;
     let credentials =
         ProjectCredentialScope::new(project_root, secrets).map_err(error_to_string)?;
@@ -10753,7 +10753,7 @@ fn project_ai_execute_tool_call(
     }
     if name == PROJECT_AI_WEB_SEARCH_TOOL && context.web_search_enabled {
         let provider = context.web_search_provider.ok_or_else(|| {
-            CommandError::not_found("Project AI Web Search provider is not configured")
+            CommandError::not_configured("Project AI Web Search provider is not configured")
         })?;
         let mut provider_context =
             crate::providers::ProviderCallContext::new(provider.definition().provider_id);
@@ -13198,7 +13198,12 @@ fn select_llm_provider(
             .filter(|provider| provider.enabled)
             .cloned()
             .ok_or_else(|| {
-                CommandError::not_found(format!(
+                // U208-A：同样是 `not_configured` 而非 `not_found`。
+                // 这条的处境与「从没配过」不同——作者**配过**，只是配置指向的
+                // provider 被删了或被停用了。但两者的**正确动作相同**：
+                // 去配置页看模型设置。而 `not_found` 那句「内容可能已被移动或删除」
+                // 会把两者都指向「去找回丢失的正文」，那是彻底的误导。
+                CommandError::not_configured(format!(
                     "default LLM provider is missing or disabled: {default_id}"
                 ))
             });
@@ -13214,7 +13219,14 @@ fn select_llm_provider(
                 }) || provider.models.is_empty())
         })
         .cloned()
-        .ok_or_else(|| CommandError::not_found("no enabled LLM provider is configured"))
+        .ok_or_else(|| {
+            // U208-A：这里**必须**是 `not_configured` 而不是 `not_found`。
+            // `not_found` 的文案是「找不到所需内容，可能已被移动或删除」，
+            // 而真实原因是作者还没配模型服务 —— 那句话会让他去翻版本页找回
+            // 并没有丢的内容，甚至以为项目坏了。第一次用的人**必然**撞上这条
+            // （没配过模型就提问），所以它是首次使用路径上的错误归因。
+            CommandError::not_configured("no enabled LLM provider is configured")
+        })
 }
 
 /// 默认模型 id 只对项目默认 LLM Provider 生效；换成别的 Provider 时应回退到它自己的首个 LLM 模型。

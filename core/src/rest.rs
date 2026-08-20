@@ -407,6 +407,13 @@ fn command_error(error: crate::command_error::CommandError) -> RestRouteError {
         CommandErrorCode::Validation | CommandErrorCode::Serialization => 400,
         CommandErrorCode::Permission => 403,
         CommandErrorCode::NotFound | CommandErrorCode::LegacyRun => 404,
+        // U208-A：`NotConfigured` 是 412 而不是 404。
+        // 404 说「这东西不存在」，而模型服务这个能力是存在的，只是作者没配；
+        // 412 Precondition Failed 才是「你得先满足一个前置条件」的语义。
+        // ⚠️ 这个 match 是穷尽的，所以新增码时编译器会拦下这里 ——
+        // 前端那张 `UserFacingError` 码→文案映射表**没有**这个保护
+        // （它有 `_ =>` 兜底），漏了会静默显示「未知错误」。
+        CommandErrorCode::NotConfigured => 412,
         CommandErrorCode::Conflict
         | CommandErrorCode::Cancelled
         | CommandErrorCode::Paused
