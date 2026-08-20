@@ -256,9 +256,15 @@
                   </ItemsControl.ItemsPanel>
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:DocumentBlockViewModel}">
-                      <SelectableTextBlock Text="{Binding Text}"
-                                           Classes="reading"
-                                           Margin="0,0,0,18" />
+                      <!-- U203：阅读态**渲染** Markdown，而不是把 `#`/`**`/`>`/三连短横线
+                           原样印在稿纸上（那是全应用唯一一个「读自己作品」的界面）。
+                           ⚠️ 修改态（下面的 ae:TextEditor）仍显示源码，两态刻意不一致——
+                           一边读成书、一边改稿，别「统一」。
+                           段间距由 MarkdownReaderBlock 内部各片段的 Margin 承担
+                           （`Ariadne.Reading.*` token），所以这里不再写块级 Margin：
+                           两处都写会让段落之间出现双份留白。 -->
+                      <ctl:MarkdownReaderBlock Source="{Binding Text}"
+                                               ContinuesPreviousLine="{Binding StartsMidLine}" />
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
@@ -594,6 +600,14 @@
                       <Button Classes="primary" HorizontalAlignment="Right" Content="{Binding ImportText}" Command="{Binding ImportCommand}" />
                     </StackPanel>
                     <StackPanel Spacing="8" IsVisible="{Binding IsCreateChapterMode}">
+                      <!-- U208-B：无项目时说清原因。灰掉按钮不够——本仓规矩是
+                           「禁用理由必须配文字」，否则作者看着一颗点不动的按钮
+                           无从知道差什么（他填的字全是对的，缺的是一个项目）。 -->
+                      <TextBlock Classes="caption"
+                                 TextWrapping="Wrap"
+                                 Foreground="{DynamicResource Ariadne.StatusWarning}"
+                                 Text="{Binding CreateChapterBlockedText}"
+                                 IsVisible="{Binding HasCreateChapterBlockedText}" />
                       <Button Classes="primary" HorizontalAlignment="Right"
                               Content="{Binding CreateChapterSubmitText}"
                               Command="{Binding CreateChapterCommand}" />

@@ -828,6 +828,7 @@
   "ui.template.tag.outline": "大纲生成",
   "ui.template.tag.review": "审查",
   "ui.template.tag.summary": "总结",
+  "ui.works.create_chapter.needs_project": "还没有打开项目 —— 先在欢迎页新建或打开一个，才能建章节。",
   "ui.works.sidebar.title": "创作大纲与目录",
   "ui.works.global_outline": "全局总纲",
   "ui.works.stage_title": "阶段：{title}",

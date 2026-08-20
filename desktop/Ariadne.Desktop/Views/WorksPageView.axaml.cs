@@ -8,6 +8,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
+using Ariadne.Desktop.Controls;
 using Ariadne.Desktop.ViewModels;
 
 namespace Ariadne.Desktop.Views;
@@ -605,7 +606,7 @@ public partial class WorksPageView : UserControl
 
         var block = e.Container as SelectableTextBlock
                     ?? e.Container.GetVisualDescendants().OfType<SelectableTextBlock>().FirstOrDefault();
-        if (block is null)
+        if (block is null && e.Container is not MarkdownReaderBlock)
         {
             return;
         }
@@ -617,8 +618,16 @@ public partial class WorksPageView : UserControl
             {
                 return;
             }
-            block.SelectionStart = 0;
-            block.SelectionEnd = block.Text?.Length ?? 0;
+            // U203：一个容器现在可能渲染成多个片段控件，逐个刷。
+            // 这里不能只刷上面那个 first —— 那样滚回视口的块只有开头一段是选中的。
+            var segments = e.Container is MarkdownReaderBlock reader
+                ? (IReadOnlyList<SelectableTextBlock>)reader.SelectableSegments
+                : block is null ? Array.Empty<SelectableTextBlock>() : new[] { block };
+            foreach (var segment in segments)
+            {
+                segment.SelectionStart = 0;
+                segment.SelectionEnd = ReadingBlockText(segment).Length;
+            }
         }, DispatcherPriority.Loaded);
     }
 
@@ -694,13 +703,16 @@ public partial class WorksPageView : UserControl
     private List<ReadingSelectionAggregator.BlockSelection> CollectReadingSelections()
     {
         var result = new List<ReadingSelectionAggregator.BlockSelection>();
-        foreach (var (index, block) in EnumerateReadingBlocks())
+        foreach (var (index, segment, block) in EnumerateReadingBlocks())
         {
             var start = Math.Min(block.SelectionStart, block.SelectionEnd);
             var end = Math.Max(block.SelectionStart, block.SelectionEnd);
             if (end > start)
             {
-                result.Add(new ReadingSelectionAggregator.BlockSelection(index, start, end));
+                // U203：切片必须按**渲染后**的可见文本，不能回头切原始正文——
+                // `# 标题` 渲染成 `标题` 后，控件给出的索引已经不对应原文了。
+                result.Add(new ReadingSelectionAggregator.BlockSelection(
+                    index, start, end, segment, ReadingBlockText(block)));
             }
         }
         return result;
@@ -712,20 +724,45 @@ public partial class WorksPageView : UserControl
     /// 逐块 SelectAll 是这个结构下唯一可行的做法：正文被切成多个独立控件，
     /// 没有一个跨块的选区模型。视觉上会看到已渲染的块整片刷黑；
     /// 被虚拟化回收的块没有控件实例、当场刷不到，但它们滚进视口时会重新走
-    /// 容器准备逻辑——所以这里同时记住「全选态」，由 <see cref="OnReadingBlockAttached"/>
+    /// 容器准备逻辑——所以这里同时记住「全选态」，由 <see cref="OnReadingBlockPrepared"/>
     /// 补上。否则「Ctrl+A 后往下滚，后半章是没选中的」。
     /// </summary>
     private void SelectAllReadingBlocks()
     {
         _readingSelectAllActive = true;
-        foreach (var (_, block) in EnumerateReadingBlocks())
+        foreach (var (_, _, block) in EnumerateReadingBlocks())
         {
             block.SelectionStart = 0;
-            block.SelectionEnd = block.Text?.Length ?? 0;
+            block.SelectionEnd = ReadingBlockText(block).Length;
         }
     }
 
-    private IEnumerable<(int Index, SelectableTextBlock Block)> EnumerateReadingBlocks()
+    /// <summary>
+    /// U203：取一个阅读态片段的可见文本。
+    ///
+    /// **必须先看 <c>Text</c> 再看 <c>Inlines.Text</c>**：探针实测（Avalonia 12.0.5）
+    /// 一旦用了 <c>Inlines</c>，<c>TextBlock.Text</c> 就恒为 null，全文只在
+    /// <c>Inlines.Text</c> 里；而走 <c>Text</c> 直出的纯文本段落，<c>Inlines</c>
+    /// 是一个空集合（<c>Inlines.Text</c> 为空串）。顺序反了会让带格式的段落
+    /// 长度算成 0 ⇒ Ctrl+A 在那些段落上**一个字也选不中**，而界面上看不出为什么。
+    /// </summary>
+    private static string ReadingBlockText(SelectableTextBlock block)
+    {
+        if (!string.IsNullOrEmpty(block.Text))
+        {
+            return block.Text!;
+        }
+        return block.Inlines?.Text ?? string.Empty;
+    }
+
+    /// <summary>
+    /// 枚举已实体化的阅读态片段：(块索引, 块内片段序号, 控件)。
+    ///
+    /// U203 之后一个块会渲染成多个 <see cref="SelectableTextBlock"/>（标题、段落、
+    /// 引用各自一个控件），所以这里**必须枚举全部后代**而不是每个容器只取第一个。
+    /// 只取第一个的后果是 Ctrl+A 只刷黑每块的开头一段、Ctrl+C 只复制到那一段。
+    /// </summary>
+    private IEnumerable<(int Index, int Segment, SelectableTextBlock Block)> EnumerateReadingBlocks()
     {
         if (DocumentReaderScroll.Presenter?.Child is not ItemsPresenter itemsPresenter
             || itemsPresenter.Panel is not { } panel)
@@ -735,13 +772,28 @@ public partial class WorksPageView : UserControl
 
         for (var index = 0; index < panel.Children.Count; index++)
         {
-            // 模板根就是 SelectableTextBlock；若将来模板变了，用视觉树兜底而不是崩。
             var child = panel.Children[index];
-            var block = child as SelectableTextBlock
-                        ?? child.GetVisualDescendants().OfType<SelectableTextBlock>().FirstOrDefault();
-            if (block is not null)
+            // MarkdownReaderBlock 自己按正文顺序登记了片段，优先用它——
+            // 视觉树遍历顺序在嵌套容器（引用块的 Border、列表行的 Grid）里
+            // 并不保证等于正文顺序，而顺序错了复制出来的段落就是乱的。
+            if (child is MarkdownReaderBlock reader)
             {
-                yield return (index, block);
+                for (var segment = 0; segment < reader.SelectableSegments.Count; segment++)
+                {
+                    yield return (index, segment, reader.SelectableSegments[segment]);
+                }
+                continue;
+            }
+
+            // 兜底：模板若被改成别的形状，用视觉树找而不是崩。
+            var segmentIndex = 0;
+            foreach (var block in child.GetVisualDescendants().OfType<SelectableTextBlock>())
+            {
+                yield return (index, segmentIndex++, block);
+            }
+            if (child is SelectableTextBlock direct && segmentIndex == 0)
+            {
+                yield return (index, 0, direct);
             }
         }
     }

@@ -115,9 +115,24 @@ public partial class BrandLogo : UserControl
             LogoImage.Source = next;
             old?.Dispose();
         }
-        catch
+        catch (Exception error)
         {
-            // 资源未加载时忽略
+            // 静默失败的**适用范围**：资源字典还没加载好、母版资源缺失、
+            // 渲染平台尚不可用这一类**会抛异常**的情况。此时宁可不画 Logo，
+            // 也不该让整个窗口起不来。
+            //
+            // ⚠️ 它**拦不住** U10000 那一类缺陷（「图案画出来了但看不见」）：
+            // 那条路上 ResolveColor 正常返回、RenderLineBitmap 正常产出位图、
+            // Source 正常赋值，**全程零异常**，问题只在成像的可见度上。
+            // ⇒ 下一个人若在查「Logo 不显示」，**别在这个 catch 上花时间**，
+            // 它查不出那类问题；去量渲染产物的可见像素占比
+            // （见 BrandLogoVisibilityTests）。
+            //
+            // 留一条痕迹而不是纯 `catch {}`：吞掉异常且不留痕会让「资源真的缺了」
+            // 与「一切正常」在现象上完全同形。照项目现有做法走 Console.Error，
+            // 不引新日志框架。
+            Console.Error.WriteLine(
+                $"[BrandLogo] 重着色失败（OnAccent={OnAccent}），本次不更新图像：{error.Message}");
         }
     }
 

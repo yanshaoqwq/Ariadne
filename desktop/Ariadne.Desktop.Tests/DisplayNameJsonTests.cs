@@ -157,7 +157,10 @@ public sealed class DisplayNameJsonTests
         // 教训：决定「某个键不补译」时，**基线调整必须在同一次提交里完成** ——
         // 「刻意不补」和「忘了补」在语言包里长得一模一样，
         // 基线是唯一能区分两者的地方。基线没跟着动，那个「刻意」就没有留下任何证据。
-        const int JapaneseBaseline = 105;
+        // 105 → 106（2026-08-20，U208-B）：新增 `ui.works.create_chapter.needs_project`
+        // 时同样只补 en、ja 留给后续补译 —— **这一次基线在同一次改动里就加了**，
+        // 没有重演上面那个「刻意不补却没留证据」的错误。
+        const int JapaneseBaseline = 106;
 
         var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
         var chinese = LoadPack(Path.Combine(resourceDir, "display_name.json"));

@@ -11,8 +11,31 @@ namespace Ariadne.Desktop.ViewModels;
 /// </summary>
 public static class ReadingSelectionAggregator
 {
-    /// <summary>一个块的选区采样：块索引 + 块内起止（半开区间）。</summary>
-    public readonly record struct BlockSelection(int BlockIndex, int Start, int End);
+    /// <summary>
+    /// 一个片段的选区采样：块索引 + 块内起止（半开区间）。
+    /// </summary>
+    /// <param name="BlockIndex">块索引（<c>DocumentBlocks</c> 里的位置）。</param>
+    /// <param name="Start">起始索引（含）。</param>
+    /// <param name="End">结束索引（不含）。</param>
+    /// <param name="SegmentIndex">
+    /// U203：同一块内的**片段序号**。阅读态渲染 Markdown 后，一个块会渲染成多个
+    /// <c>SelectableTextBlock</c>（标题、段落、引用各一个控件），采样顺序不做假设，
+    /// 所以块内也需要一个排序键。
+    /// </param>
+    /// <param name="SegmentText">
+    /// U203：该片段**渲染后可见**的文本。
+    ///
+    /// 为什么不能省掉它、继续从 <c>DocumentBlockViewModel.Text</c> 切：渲染后
+    /// 可见文本已经不等于原始正文了（`# 标题` 显示成 `标题`），
+    /// 拿控件给出的可见索引去切原始正文会**切错位置**——用户复制标题会得到 `# `。
+    /// null 表示「按原始正文切」，保留给未渲染路径与既有用例。
+    /// </param>
+    public readonly record struct BlockSelection(
+        int BlockIndex,
+        int Start,
+        int End,
+        int SegmentIndex = 0,
+        string? SegmentText = null);
 
     /// <summary>
     /// 把各块的选区采样归并成一段全篇文本。
@@ -30,6 +53,7 @@ public static class ReadingSelectionAggregator
         var ordered = selections
             .Where(item => item.BlockIndex >= 0 && item.BlockIndex < blocks.Count)
             .OrderBy(item => item.BlockIndex)
+            .ThenBy(item => item.SegmentIndex)
             .ToList();
         if (ordered.Count == 0)
         {
@@ -37,9 +61,10 @@ public static class ReadingSelectionAggregator
         }
 
         var builder = new System.Text.StringBuilder();
+        var appendedAny = false;
         foreach (var selection in ordered)
         {
-            var text = blocks[selection.BlockIndex].Text;
+            var text = selection.SegmentText ?? blocks[selection.BlockIndex].Text;
             // 钳位而不是信任采样：控件在文本刚变化、选区尚未同步的那一帧会给出越界值，
             // 直接切片就是 ArgumentOutOfRangeException——用户只会看到「复制没反应」。
             // end 的下界取 start（而非 0）：这同时把 End < Start 的倒置采样压成空区间。
@@ -47,7 +72,17 @@ public static class ReadingSelectionAggregator
             var end = Math.Clamp(selection.End, start, text.Length);
             if (end > start)
             {
+                // U203：渲染态下**段与段之间的换行不在文本里**——它是版面
+                // （各片段的 Margin / LineBreak）承载的。所以跨片段拼接时必须补回换行，
+                // 否则 Ctrl+A + Ctrl+C 粘出来是「第一段第二段第三段」连成一片。
+                // 只在有 SegmentText（即渲染路径）时补：未渲染路径的块文本本身
+                // 已含边界换行，再补就多一个空行。
+                if (appendedAny && selection.SegmentText is not null)
+                {
+                    builder.Append('\n');
+                }
                 builder.Append(text, start, end - start);
+                appendedAny = true;
             }
         }
         return builder.ToString();

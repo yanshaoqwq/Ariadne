@@ -1276,12 +1276,35 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     /// </summary>
     private bool CanCreateChapter()
     {
-        return !HasImportChapterIdError
+        // U208-B：**先看有没有项目**。原先只校验五个字段，于是未打开项目时
+        // 「新建章节」可点、可填、可提交，走到后端才被拒 ——
+        // 而拒绝话术是「输入内容不符合要求，请检查后重试」，
+        // 把作者引向「检查自己刚填的字」，而他填的完全正确，缺的是一个项目。
+        // ⇒ 这是本轮 U208-A 那类「错误归因把人指向反方向」的前端版本：
+        // 与其让他填完一整个表单再收一句错话，不如一开始就说清缺什么。
+        return _backend.HasProjectRoot
+               && !HasImportChapterIdError
                && !HasImportChapterTitleError
                && !HasImportOrderError
                && ImportTargetValidation.IsValid
                && !HasImportConflict;
     }
+
+    /// <summary>
+    /// 「新建章节」不可用时的原因文字。
+    ///
+    /// ⚠️ 灰掉按钮**不够**，必须同时说清为什么 —— 本仓已定的规矩
+    /// （`WorkspacePageViewModel.RunEntryTooltip` / `GitPageViewModel.RestoreBlockedText`
+    /// 都是这个范式）：只灰掉的话作者看着一颗点不动的按钮，无从知道差什么。
+    /// 无项目是唯一「不是他填错」的那种不可用，所以只有这一档需要单独措辞；
+    /// 字段错误各自有就地提示，不在这里重复。
+    /// </summary>
+    public string CreateChapterBlockedText => _backend.HasProjectRoot
+        ? string.Empty
+        : _displayNames.Text("ui.works.create_chapter.needs_project");
+
+    /// <summary>是否要显示上面那句原因（无项目时才显示）。</summary>
+    public bool HasCreateChapterBlockedText => !_backend.HasProjectRoot;
 
     /// 导入源允许在项目外：作者从下载目录 / U 盘 / 别的写作软件导出目录挑稿子是常规用法，
     /// 后端 import_source_path_buf 也只禁 `..` 不查项目根（U163-B）。
@@ -1975,7 +1998,10 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 $"read-block-{index}",
                 index++,
                 block,
-                offset));
+                offset,
+                // U203：上一块不以换行结尾 ⇒ 本块首行是那一行的后半截。
+                // 阅读态据此不对首行做块级标记识别（见 DocumentBlockViewModel.StartsMidLine）。
+                offset > 0 && content[offset - 1] != '\n'));
             offset += block.Length;
         }
         OnPropertyChanged(nameof(HasDocumentBlocks));
@@ -2008,7 +2034,18 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             }
             if (split < preferredStart)
             {
-                split = start + TargetDocumentBlockSize;
+                // U203：先退一步找**任何**行边界，哪怕这样切出来的块小于目标粒度。
+                //
+                // 原实现在这里直接 `start + TargetDocumentBlockSize` 硬切，
+                // 于是「窗口里有换行、但都落在目标位置之前」时会切在行中间。
+                // 阅读态要按行首标记识别 Markdown，切在标题行中间就会把
+                // 前半截当标题、后半截当正文（U203 报告点名的那个前提）。
+                // 宁可让块小一点：块粒度只影响虚拟化的批量大小，
+                // 而切错行会让作者看到半个标题。
+                var lineBoundary = content.LastIndexOf('\n', limit - 1, limit - start);
+                // +1：切点要落在换行**之后**，块才以 `\n` 结尾。停在换行之前会让
+                // 下一块以空行开头，且 StartsMidLine 会误判为 true（上一块末字符不是 \n）。
+                split = lineBoundary > start ? lineBoundary + 1 : start + TargetDocumentBlockSize;
             }
             else
             {
@@ -2459,12 +2496,16 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 return;
             }
 
-            // 选区改写必须在编辑模式（阅读模式是 SelectableTextBlock，不会进入 RequestEditorSelection）。
-            if (!IsEditMode)
-            {
-                IsEditMode = true;
-            }
-
+            // U208-F：**不要**在这里无条件切编辑模式。
+            //
+            // 原写法是「取选区之前先 `IsEditMode = true`」，理由（阅读模式是
+            // `SelectableTextBlock`，不会进入 `RequestEditorSelection`）本身成立，
+            // 但它把「**可能**需要编辑模式」执行成了「**一定**切过去」：
+            // 作者在阅读态问一句「这一章节奏怎么样」——那是纯问答、根本不碰正文——
+            // 界面却把他从阅读态踢进修改态，而他没点过那个开关。
+            // 失败时更糟：切过去了、答案没拿到，作者要自己切回来。
+            //
+            // ⇒ 切换挪进 `TryResolve` 成功分支（见下），也就是**真的要改正文时**才切。
             var instruction = ProjectAiMessage.Trim();
             var documentContent = AssembleDocumentContent();
             var selection = selectionOverride ?? RequestEditorSelection?.Invoke();
@@ -2476,6 +2517,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                     out var selectionEnd,
                     out var selectedText))
             {
+                // U208-F：确实要改正文了，此刻才切编辑模式 —— 选区改写会写回正文，
+                // 而写回要求编辑器在场。放在这里而非函数开头，是「纯问答不该改变界面态」。
+                if (!IsEditMode)
+                {
+                    IsEditMode = true;
+                }
+
                 await SendProjectAiSelectionEditAsync(
                     instruction,
                     documentContent,
@@ -3826,17 +3874,28 @@ public sealed class DocumentBlockViewModel
         string id,
         int index,
         string text,
-        int startOffset)
+        int startOffset,
+        bool startsMidLine = false)
     {
         Id = id;
         Index = index;
         Text = text;
         StartOffset = startOffset;
+        StartsMidLine = startsMidLine;
     }
 
     public string Id { get; }
     public int Index { get; }
     public string Text { get; }
+    /// <summary>
+    /// U203：本块的第一行是否是上一块最后一行的**后半截**。
+    ///
+    /// 只有正文里出现「单行长度超过块粒度」时才为 true（<see cref="SplitDocumentBlocks"/>
+    /// 走到硬切那一支）。阅读态的 Markdown 识别必须知道这件事：
+    /// 一个被切开的长行，其后半截若恰好以 `-` 或 `#` 开头，
+    /// 按行首标记去识别就会把半句话渲染成列表项或标题。
+    /// </summary>
+    public bool StartsMidLine { get; }
     /// <summary>
     /// U129：该块首字符在**整篇正文**中的偏移。
     ///

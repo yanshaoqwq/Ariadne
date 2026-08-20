@@ -953,6 +953,7 @@
   "ui.window.minimize": "Minimize",
   "ui.window.no_project_title": "No project open",
   "ui.window.project_title": "{name}",
+  "ui.works.create_chapter.needs_project": "No project is open yet — create or open one from the welcome page first.",
   "ui.works.characters": "Characters",
   "ui.works.characters_count": "{count} characters",
   "ui.works.collapse": "Collapse",
