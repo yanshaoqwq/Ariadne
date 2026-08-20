@@ -23,6 +23,15 @@ public interface IAriadneBackendClient
     /// <summary>D3：查询项目维护状态；无维护时返回 null。</summary>
     Task<ProjectMaintenanceState?> GetProjectMaintenanceAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// U196-B：解除「维护失败」态，让项目重新可写。
+    ///
+    /// 只对 <c>status == "failed"</c> 生效（<c>active</c> 表示确实有维护在跑，
+    /// 清掉它等于绕过 checkout 期间的保护），并连带入队一次全量索引重建 ——
+    /// 回档中断后索引与正文的对应关系不可信。
+    /// </summary>
+    Task<MaintenanceRecoveryReport> RecoverProjectMaintenanceAsync(CancellationToken cancellationToken = default);
+
     Task<CurrentProjectStatus?> GetCurrentProjectAsync(CancellationToken cancellationToken = default);
 
     Task<ProjectInitReport> CreateProjectAsync(string projectRoot, string? name = null, CancellationToken cancellationToken = default);

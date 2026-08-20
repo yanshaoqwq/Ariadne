@@ -11,6 +11,8 @@ public enum GitOperationState
     Refreshing,
     Checkpointing,
     Restoring,
+    /// <summary>U196-B：正在解除「维护失败」态。</summary>
+    Recovering,
 }
 
 public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
@@ -57,6 +59,19 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     private string _errorText = string.Empty;
     private long _loadGeneration;
 
+    /// <summary>
+    /// U196-C：磁盘工作区是否有未提交变更。
+    ///
+    /// 此前 <c>status.Dirty</c> 只用来生成一行文案（<c>DirtyStateText</c>），
+    /// **零处判定使用** —— 于是同一屏上写着「存在未提交变更」，
+    /// 而「回档到副本」照样可点，点下去必然被后端拒绝。
+    /// </summary>
+    private bool _isWorktreeDirty;
+
+    /// <summary>U196-B：项目是否停在「维护失败」态（所有写操作被拒）。</summary>
+    private bool _isMaintenanceFailed;
+    private string _maintenanceDiagnosticText = string.Empty;
+
     public GitPageViewModel(
         DisplayNameService displayNames,
         IAriadneBackendClient backend,
@@ -84,10 +99,37 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         ToggleRightPanelCommand = new RelayCommand(() => _ = ToggleRightPanelAsync());
         RefreshCommand = new RelayCommand(() => _ = RefreshAsync(), CanStartOperation);
         CreateCheckpointCommand = new RelayCommand(() => _ = CreateCheckpointAsync(), CanStartOperation);
+        // U207-G：空态里那颗「创建存档」。与右栏那颗共用同一条落盘链路
+        // （`CreateCheckpointAsync`），只多一件事：顺手把右栏展开。
+        // 理由见 `CreateFirstCheckpointAsync` 的注释——第一次点完之后，
+        // 作者需要知道以后该去哪里点。
+        CreateFirstCheckpointCommand = new RelayCommand(
+            () => _ = CreateFirstCheckpointAsync(),
+            CanStartOperation);
         ViewDetailsCommand = new RelayCommand(() => ViewDetails(SelectedCommit), () => HasSelection);
+        // U196-C：`!IsRestoreBlocked` 是本条的修复本体。
+        //
+        // ⚠️ 灰掉按钮**不够**，必须同时给出禁用理由（`RestoreBlockedText`）：
+        // 项目里已有的正确范式是 `WorkflowVariableGroupViewModel.BlockingReason()`
+        // 与 `WorkspacePageViewModel` 的 run-node 前置校验（「禁用理由必须配文字，
+        // 不能只灰掉按钮」）。只灰掉的话作者看着一颗点不动的按钮，
+        // 而让工作区变干净的动作（创建存档）就在同一栏里，没人指路。
+        // ⚠️ 变异验证过（U196-M4，2026-08-20）：摘掉 `!IsRestoreBlocked` 后
+        // **只有** `DirtyWorktree_DisablesRestoreAndSaysWhy` 变红，
+        // 而右键菜单那条（`DirtyWorktree_AlsoDisablesTheContextMenuRestore`）**仍绿**
+        // ⇒ 两个入口是各自独立的判据，改一处不会连带保护另一处。
         RestoreCommand = new RelayCommand(
             () => _ = RestoreSelectedAsync(),
-            () => HasSelection && CanStartOperation());
+            () => HasSelection && CanStartOperation() && !IsRestoreBlocked);
+        // U196-B：解除「维护失败」态。
+        //
+        // ⚠️ CanExecute 里**不能**放 `!IsMaintenanceFailed` 之类导致失败的前提——
+        // 这颗按钮存在的全部意义就是「项目正处在维护失败态」那条分支。
+        // 同一教训已被 U182-M 记在 OpenProjectCommand 上（兜底按钮的 CanExecute
+        // 不能包含导致失败的那个前提，否则错误态下它永远是灰的）。
+        RecoverMaintenanceCommand = new RelayCommand(
+            () => _ = RecoverMaintenanceAsync(),
+            () => IsMaintenanceFailed && OperationState == GitOperationState.Idle && _backend.HasProjectRoot);
         CopyIdCommand = new RelayCommand(() => _ = CopyCommitIdAsync(SelectedCommit), () => HasSelection);
         // U182-M：错误态的重试不能复用 RefreshCommand——后者的 CanExecute 里有
         // `_backend.HasProjectRoot`，而「无项目」正是这颗按钮要走的那条分支。
@@ -105,8 +147,11 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     public RelayCommand ToggleRightPanelCommand { get; }
     public RelayCommand RefreshCommand { get; }
     public RelayCommand CreateCheckpointCommand { get; }
+    public RelayCommand CreateFirstCheckpointCommand { get; }
     public RelayCommand ViewDetailsCommand { get; }
     public RelayCommand RestoreCommand { get; }
+    /// <summary>U196-B：解除「维护失败」态，让项目重新可写。</summary>
+    public RelayCommand RecoverMaintenanceCommand { get; }
     public RelayCommand CopyIdCommand { get; }
     public RelayCommand OpenProjectCommand { get; }
     public ObservableCollection<GitHistoryItemViewModel> Commits { get; }
@@ -208,6 +253,66 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         get => _dirtyStateText;
         private set => SetProperty(ref _dirtyStateText, value);
     }
+
+    /// <summary>
+    /// U196-C：回档是否被前置条件挡住。
+    ///
+    /// 目前只有一个成因（工作区脏），但刻意抽成一个属性而不是直接写
+    /// <c>!IsWorktreeDirty</c>：它与 <see cref="RestoreBlockedText"/> 是一对
+    /// —— 只要有第二个成因加进来，「拦」和「说明为什么拦」必须一起改，
+    /// 分散在两处判断的话极易只加拦截、忘了文案（那就退化成一颗点不动的按钮）。
+    /// </summary>
+    public bool IsRestoreBlocked => _isWorktreeDirty;
+
+    /// <summary>
+    /// U196-C：回档按钮被禁用的**理由**。未被禁用时为空串。
+    ///
+    /// 本仓已定的规矩：禁用按钮必须配文字说明，不能只灰掉
+    /// （`WorkflowVariableGroupViewModel.BlockingReason()` 是同一形态）。
+    /// 文案与后端拒绝共用同一个 key（`commands.rs::RESTORE_DIRTY_WORKTREE_MESSAGE_KEY`），
+    /// 因此「本地拦住」与「后端拒绝」两条路上作者读到的是同一句话。
+    /// </summary>
+    public string RestoreBlockedText => IsRestoreBlocked
+        ? _displayNames.Text("ui.git.restore_blocked_dirty")
+        : string.Empty;
+
+    /// <summary>
+    /// U196-B：项目是否停在「维护失败」态。
+    ///
+    /// # 为什么这条状态必须出现在 Git 页上
+    ///
+    /// 后端 `ensure_available` 对 `failed` 与 `active` 同等拦截 ⇒ 保存正文、
+    /// 创建存档、运行工作流、导入章节全部被拒。而维护状态机是**吸收态**
+    /// （`update_maintenance` 的 SQL 带 `AND status = 'active'`），
+    /// 自己不会恢复。顶栏横幅说「请先处理」却没有任何可点的东西，
+    /// 而**处置只能在这一页做**（回档是它的成因，解除是它的出路）。
+    /// </summary>
+    public bool IsMaintenanceFailed => _isMaintenanceFailed;
+
+    public string MaintenanceFailedTitle => _displayNames.Text("ui.git.maintenance.failed_title");
+    public string MaintenanceFailedHint => _displayNames.Text("ui.git.maintenance.failed_hint");
+    public string RecoverMaintenanceText => _displayNames.Text("ui.git.maintenance.recover");
+
+    /// <summary>
+    /// U196-B：中断时后端记下的英文诊断串，作为**二级信息**呈现。
+    ///
+    /// ⚠️ 刻意不做主文案：它是 `{error}` 里那串工程诊断（顶栏横幅直接把它
+    /// 插进句子中间，作者读到的是一句中英混排的话）。这里主文案是
+    /// <see cref="MaintenanceFailedHint"/>，诊断另起一行、可为空。
+    /// </summary>
+    public string MaintenanceDiagnosticText
+    {
+        get => _maintenanceDiagnosticText;
+        private set
+        {
+            if (SetProperty(ref _maintenanceDiagnosticText, value))
+            {
+                OnPropertyChanged(nameof(HasMaintenanceDiagnostic));
+            }
+        }
+    }
+
+    public bool HasMaintenanceDiagnostic => !string.IsNullOrWhiteSpace(MaintenanceDiagnosticText);
 
     /// <summary>
     /// U197-H：「另有页面存在未保存改动」这句提示。
@@ -312,6 +417,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         GitOperationState.Refreshing => _displayNames.Text("ui.git.operation.refreshing"),
         GitOperationState.Checkpointing => _displayNames.Text("ui.git.operation.checkpointing"),
         GitOperationState.Restoring => _displayNames.Text("ui.git.operation.restoring"),
+        GitOperationState.Recovering => _displayNames.Text("ui.git.maintenance.recovering"),
         _ => string.Empty,
     };
 
@@ -365,11 +471,37 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     public bool ShowContent => HasCommits && _loadState is PageLoadState.Content or PageLoadState.ContentError;
 
     /// <summary>
-    /// U182-M：只有「没打开项目」这一种空态给可点动作。
-    /// 「项目里还没有存档」时该点的是右栏的「创建存档」，不是打开项目。
+    /// U182-M：只有「没打开项目」这一种空态给「打开项目」这个动作。
+    /// 「项目里还没有存档」时该点的是「创建存档」——见
+    /// <see cref="ShowCreateCheckpointAction"/>。
     /// </summary>
     public bool ShowOpenProjectAction =>
         _loadState == PageLoadState.IdleNeedProject && _requestOpenProject is not null;
+
+    /// <summary>
+    /// U207-G：「项目里还没有存档」这一种空态里那颗「创建存档」按钮。
+    ///
+    /// # 这条要解决的问题
+    ///
+    /// 空态文案是「写完一章或想留个保险时，**在这里存一下**」，
+    /// 而唯一那颗「创建存档」按钮在**右栏**里，右栏又可以是折叠的
+    /// （偏好项 <c>git.right_panel</c> 记住上次状态）。
+    /// ⇒ 空态指了路，路的尽头是个折叠面板，作者第一次来必然找不到。
+    /// 与 U182-L（13 个空态里只有 3 个给出下一步）同源，
+    /// 但本条更隐蔽：**给了下一步，而下一步不可达**——
+    /// 屏上看起来是"已经引导过了"，所以复查时容易一眼放过。
+    ///
+    /// # 为什么只在 Empty 这一种状态下出现
+    ///
+    /// <c>ShowEmpty</c> 覆盖 Empty 与 IdleNeedProject 两种。
+    /// 无项目时点「创建存档」只能得到一句错误——那正是 U182-M 修掉的形态
+    /// （宁可没有按钮，也不要一颗点了没反应的）。所以判据必须是
+    /// <c>PageLoadState.Empty</c> 本身，不能图省事复用 <c>ShowEmpty</c>。
+    /// 再叠一道 <c>HasProjectRoot</c>：Empty 态照理一定有项目根，
+    /// 但按钮的可点与可见得由同一个前提决定，否则又是一颗会失败的按钮。
+    /// </summary>
+    public bool ShowCreateCheckpointAction =>
+        _loadState == PageLoadState.Empty && _backend.HasProjectRoot;
 
     public string EmptyTitle => _loadState == PageLoadState.IdleNeedProject
         ? _displayNames.Text("ui.empty.need_project.title")
@@ -463,6 +595,14 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         // U182-K：进入加载态**在发起后端调用之前**。放到 await 之后就等于没有加载态——
         // 加载态要覆盖的正是「请求在路上」这段时间。
         LoadState = PageLoadState.Loading;
+        // U196-B：维护态要在仓库状态**之前**读。
+        //
+        // 理由是维护失败态下 `get_git_repository_status` 本身就会失败
+        // （`get_git_repository_status_impl` 第二行取 `acquire_project_mutation_guard`，
+        // 而那个函数第一行就是 `ensure_available()`）⇒ 右栏会显示一句
+        // 「输入内容不符合要求」。先把维护态读出来，作者至少能在同一屏上
+        // 看到那句错误的真实成因，以及可点的处置。
+        await RefreshMaintenanceStateAsync(cancellationToken).ConfigureAwait(true);
         await RefreshRepositoryStatusAsync(cancellationToken).ConfigureAwait(true);
         cancellationToken.ThrowIfCancellationRequested();
         try
@@ -510,10 +650,84 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         // U197-H：没打开项目时**不显示**「另有页面未保存」——
         // 那句话的前提是「本项目磁盘干净」，而此刻压根没有本项目。
         ClearOtherPagesUnsavedHint();
+        // U196-B/C：没打开项目就没有工作区、也没有维护态。
+        // 尤其是 dirty 必须清掉：留着上一个项目的 true 会让下一个项目
+        // 一打开就有一颗被禁用的回档按钮，理由还是上一个项目的。
+        SetWorktreeDirty(false);
+        SetMaintenanceFailed(false, null);
         // U182-K/M：没打开项目不是「空」也不是「错」，是第三种状态——
         // 它的下一步是「打开项目」，而 Empty 的下一步是「创建存档」。
         LoadState = PageLoadState.IdleNeedProject;
         NotifyHistoryState();
+    }
+
+    /// <summary>
+    /// U196-B：读维护态。失败时按「没有维护」处理。
+    ///
+    /// ⚠️ 读不到时**不能**假设有维护：那会在一次网络/序列化抖动之后
+    /// 凭空给作者一个「项目只读」的横幅和一颗会失败的按钮。
+    /// 真正的门禁在后端每一条写命令里，前端这一屏只是**呈现 + 出路**。
+    /// </summary>
+    private async Task RefreshMaintenanceStateAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var state = await _backend.GetProjectMaintenanceAsync(cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            // 只认 failed：active 表示确实有维护在跑，那种情况下作者要做的是等，
+            // 而不是解除（解除会绕过 checkout 期间的保护）。
+            var failed = state is not null
+                         && string.Equals(state.Status, "failed", StringComparison.Ordinal);
+            SetMaintenanceFailed(failed, failed ? state?.Error : null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch
+        {
+            SetMaintenanceFailed(false, null);
+        }
+    }
+
+    private void SetMaintenanceFailed(bool failed, string? diagnostic)
+    {
+        var diagnosticText = failed && !string.IsNullOrWhiteSpace(diagnostic)
+            ? _displayNames.Format("ui.git.maintenance.failed_diagnostic", new Dictionary<string, string>
+            {
+                ["error"] = diagnostic!.Trim(),
+            })
+            : string.Empty;
+        MaintenanceDiagnosticText = diagnosticText;
+        if (_isMaintenanceFailed == failed)
+        {
+            return;
+        }
+        _isMaintenanceFailed = failed;
+        OnPropertyChanged(nameof(IsMaintenanceFailed));
+        RecoverMaintenanceCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>
+    /// U196-C：记下磁盘 dirty，并把依赖它的两个派生量一起通知。
+    ///
+    /// ⚠️ `RestoreCommand.NotifyCanExecuteChanged()` 不能漏：漏了的表现是
+    /// 「状态已经对了但按钮还停在上一屏」——与「根本没接这条判定」在屏幕上
+    /// 完全同形（同一教训已写在 `NotifyLoadStateDerived` 的注释里）。
+    /// </summary>
+    private void SetWorktreeDirty(bool dirty)
+    {
+        if (_isWorktreeDirty == dirty)
+        {
+            return;
+        }
+        _isWorktreeDirty = dirty;
+        OnPropertyChanged(nameof(IsRestoreBlocked));
+        OnPropertyChanged(nameof(RestoreBlockedText));
+        RestoreCommand.NotifyCanExecuteChanged();
+        foreach (var commit in Commits)
+        {
+            commit.NotifyOperationStateChanged();
+        }
     }
 
     private async Task RefreshRepositoryStatusAsync(CancellationToken cancellationToken = default)
@@ -540,6 +754,13 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             // 「磁盘干净」这个前提没拿到，凭空说「另有未保存」会让作者
             // 以为提示指的是刚才那个错误。
             ClearOtherPagesUnsavedHint();
+            // U196-C：拿不到 dirty 就**不拦**回档。
+            //
+            // 这是刻意选的方向：前端这道门是「别让作者白点」，权威判定在后端
+            // （`ensure_worktree_clean_before_restore`，且它拦在进入维护态之前，
+            // 拒绝的代价只是一次被拒的操作）。不知情时灰掉按钮会让作者
+            // 面对一颗永远点不动的「回档」，而理由是一个我们自己也没拿到的前提。
+            SetWorktreeDirty(false);
             NotifyRepositoryVisibility();
         }
     }
@@ -668,7 +889,9 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             ViewDetails,
             RestoreCommitAsync,
             CopyCommitIdAsync,
-            CanStartOperation);
+            // U196-C：右键菜单那颗「回档到此存档」此前传的是 CanStartOperation
+            // ⇒ 工作区脏时它照样可点。两个入口必须共用同一道前置判断。
+            CanStartRestore);
     }
 
     private void SelectAfterRefresh(string? previousId)
@@ -714,6 +937,29 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
     }
 
+    /// <summary>
+    /// U207-G：空态里那颗「创建存档」的动作。
+    ///
+    /// # 为什么顺手展开右栏
+    ///
+    /// 这颗按钮的存在意义是让第一次存档**一键可达**；但存完之后空态就消失了，
+    /// 而以后每一次存档、以及给存档写说明的输入框，都只在右栏里。
+    /// 若不展开，作者第二次想存档时会回到与本条完全相同的困境：
+    /// 知道功能存在，但找不到入口。展开右栏等于把「以后去这里」这件事**演示**一遍。
+    ///
+    /// 展开动作**先于**落盘：落盘失败时 <c>StatusText</c> 会报错，
+    /// 而那句错误旁边就该是重试用的那颗按钮和输入框，此时右栏更需要开着。
+    ///
+    /// ⚠️ 展开**不写入偏好**（不调 <c>_persistPanelState</c>）：
+    /// 作者手动折叠过右栏是他表达的偏好，一次自动展开不该把它改掉。
+    /// 这与 <c>ViewDetails</c> 的处理一致（那里也是直接置 true 不落盘）。
+    /// </summary>
+    private async Task CreateFirstCheckpointAsync()
+    {
+        IsRightPanelOpen = true;
+        await CreateCheckpointAsync().ConfigureAwait(true);
+    }
+
     private async Task RestoreSelectedAsync()
     {
         if (SelectedCommit is null)
@@ -726,6 +972,16 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
 
     private async Task RestoreCommitAsync(GitHistoryItemViewModel commit)
     {
+        // U196-C：这道判断**不是** CanExecute 的重复。
+        //
+        // 右键菜单里那颗「回档到此存档」走的是 `GitHistoryItemViewModel.RestoreCommand`
+        // ——它有自己的 CanExecute。任何一处漏判，作者就会走完两个确认框
+        // 再被后端拒绝。收口在这里，所有入口共用同一条前置判断与同一句理由。
+        if (IsRestoreBlocked)
+        {
+            StatusText = RestoreBlockedText;
+            return;
+        }
         if (!TryBeginOperation(GitOperationState.Restoring))
         {
             return;
@@ -756,6 +1012,78 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         catch (Exception ex)
         {
             StatusText = UserFacingError.Format(ex, _displayNames);
+            // U196-B：回档失败**就是**项目进入维护失败态的那一刻，
+            // 而顶栏横幅只在打开项目时刷新（`MainWindowViewModel.RefreshMaintenanceStatusAsync`
+            // 的唯一调用点在 `ActivateProjectAsync` 里）⇒ 本次会话内它根本不会出现。
+            // 于是作者读到一句错误，然后每一次保存都失败，屏上却没有任何解释。
+            // 这里当场把维护态读回来，恢复面板与出路在同一屏出现。
+            await RefreshMaintenanceStateAsync(CancellationToken.None).ConfigureAwait(true);
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
+    /// <summary>
+    /// U196-B：解除「维护失败」态。
+    ///
+    /// # 出路本身早就存在，只是没人能发现
+    ///
+    /// `begin_maintenance` 只拒 `active`、对 `failed` 会 `ON CONFLICT DO UPDATE`
+    /// 覆盖 ⇒ 「再点一次回档」确实能重置状态。但那要求作者去重做**刚刚失败的那件事**，
+    /// 反直觉到没人会试；而它对最容易触发的成因（工作区脏）**根本不成立**——
+    /// 脏工作区会让回档再次失败，而唯一能让工作区变干净的「创建存档」
+    /// 走 `acquire_project_mutation`，在维护态下同样被拒。那是个死锁。
+    ///
+    /// 所以这颗按钮走的是专门的 `recover_project_maintenance`：
+    /// 只清 `failed`、连带入队全量索引重建、失败则退回 `failed`。
+    /// </summary>
+    private async Task RecoverMaintenanceAsync()
+    {
+        if (!IsMaintenanceFailed)
+        {
+            return;
+        }
+        if (!TryBeginOperation(GitOperationState.Recovering))
+        {
+            return;
+        }
+        try
+        {
+            var report = await _backend.RecoverProjectMaintenanceAsync().ConfigureAwait(true);
+            // 先把维护态读回来（这是判定「真的解禁了吗」的唯一依据），
+            // 再整页刷新：`RefreshCoreAsync` 里的仓库状态在维护未解除时会失败。
+            await RefreshMaintenanceStateAsync(CancellationToken.None).ConfigureAwait(true);
+            await RefreshCoreAsync(CancellationToken.None).ConfigureAwait(true);
+            // 别的页面此刻手里全是「写操作被拒」之后的状态，让它们重新拉一遍。
+            await _reloadProjectData().ConfigureAwait(true);
+            // ⚠️ 结果文案必须写在**所有刷新之后**，这不是风格问题。
+            //
+            // `RefreshCoreAsync` 末尾的 `SelectAfterRefresh` 无条件把 `StatusText`
+            // 改写成「共 N 个存档点」，而 `_reloadProjectData()` 会让 Git 页
+            // **再刷一遍自己**（`ReloadCachedProjectPagesExceptAsync(null)` 遍历
+            // 整个 `_pageCache`，git 页也在里面）⇒ 写在前面的结果文案会被覆盖两次，
+            // 作者读到的是一句与他刚做的事无关的「共 N 个存档点」。
+            //
+            // 📌 顺带发现（**不在本条修复范围内，已写进报告**）：`RestoreCommitAsync`
+            // 与 `CreateCheckpointAsync` 都是「先写文案再刷新」，所以
+            // 「已切换到回档副本 X。{followup}」和「已创建存档」这两句
+            // **在成功路径上从来没被作者读到过**。那是同一形态的既有缺陷，
+            // 涉及另两条命令，需要单独定文案优先级，不在这里顺手改。
+            //
+            // 两种结果对作者的意义不同，不能共用一句「已恢复」：
+            // worker 没起来时索引重建还在队列里，此刻搜索到的可能是回档前的旧内容。
+            StatusText = report.IndexRebuildStarted
+                ? _displayNames.Text("ui.git.maintenance.recovered_rebuilding")
+                : _displayNames.Text("ui.git.maintenance.recovered_queued");
+        }
+        catch (Exception ex)
+        {
+            StatusText = UserFacingError.Format(ex, _displayNames);
+            // 恢复失败后维护态可能仍是 failed（后端会退回原状态），
+            // 面板必须留在屏上——否则作者以为解除成功了，接着又被每一次保存拒绝。
+            await RefreshMaintenanceStateAsync(CancellationToken.None).ConfigureAwait(true);
         }
         finally
         {
@@ -802,6 +1130,10 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         DirtyStateText = status.Dirty
             ? _displayNames.Text("ui.git.dirty")
             : _displayNames.Text("ui.git.clean");
+        // U196-C：同一个 status.Dirty 此前**只**生成上面那行文案。
+        // 现在它同时决定回档按钮能不能点 —— 屏上写着「存在未提交变更」
+        // 却让作者点下去必然失败，正是本条报的缺陷。
+        SetWorktreeDirty(status.Dirty);
         // U197-H：磁盘 dirty 判完才能决定要不要补「另有页面未保存」那句
         // （只在磁盘干净时补，理由见 HasOtherPagesUnsaved 的注释）。
         RefreshOtherPagesUnsavedHint(status.Dirty);
@@ -946,6 +1278,18 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         return OperationState == GitOperationState.Idle && _backend.HasProjectRoot;
     }
 
+    /// <summary>
+    /// U196-C：能不能发起回档 = 一般前置条件 + 工作区干净。
+    ///
+    /// 单独一个方法而不是在两处各写一遍 `&& !IsRestoreBlocked`：
+    /// 回档有两个入口（右栏按钮、行右键菜单），两处判断分开写就一定会漂
+    /// —— 原缺陷正是「右栏那颗与右键那颗用了同一个宽松判据」的另一半。
+    /// </summary>
+    private bool CanStartRestore()
+    {
+        return CanStartOperation() && !IsRestoreBlocked;
+    }
+
     private void NotifySelectionCommands()
     {
         ViewDetailsCommand.NotifyCanExecuteChanged();
@@ -957,7 +1301,15 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     {
         RefreshCommand.NotifyCanExecuteChanged();
         CreateCheckpointCommand.NotifyCanExecuteChanged();
+        // U207-G：空态那颗与右栏那颗是两个 RelayCommand 实例，
+        // CanExecute 变化必须**逐个**通知——只通知一个的表现是
+        // 「操作进行中空态按钮还能点」，与「没有防重入」同形。
+        CreateFirstCheckpointCommand.NotifyCanExecuteChanged();
         RestoreCommand.NotifyCanExecuteChanged();
+        // U196-B：恢复按钮也要跟着操作态变灰，否则解除过程中还能再点一次
+        // （第二次会撞上「没有可解除的失败态」，把一次成功的恢复
+        // 变成屏上一句拒绝文案）。
+        RecoverMaintenanceCommand.NotifyCanExecuteChanged();
         foreach (var commit in Commits)
         {
             commit.NotifyOperationStateChanged();
@@ -970,6 +1322,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         OnPropertyChanged(nameof(IsCommitListEmpty));
         OnPropertyChanged(nameof(ShowEmpty));
         OnPropertyChanged(nameof(ShowContent));
+        OnPropertyChanged(nameof(ShowCreateCheckpointAction));
         OnPropertyChanged(nameof(EmptyTitle));
         OnPropertyChanged(nameof(EmptyHint));
         NotifySelectionCommands();
@@ -992,6 +1345,10 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         OnPropertyChanged(nameof(ShowEmpty));
         OnPropertyChanged(nameof(ShowContent));
         OnPropertyChanged(nameof(ShowOpenProjectAction));
+        // U207-G：空态那颗「创建存档」的可见性也由 _loadState 决定，
+        // 漏在这里的表现正是「跃迁到 Empty 了但按钮没出现」——
+        // 与「压根没实现这颗按钮」在屏幕上同形（见上面这段注释说的同一类坑）。
+        OnPropertyChanged(nameof(ShowCreateCheckpointAction));
         OnPropertyChanged(nameof(EmptyTitle));
         OnPropertyChanged(nameof(EmptyHint));
     }
@@ -1074,7 +1431,10 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         Action<GitHistoryItemViewModel> viewDetails,
         Func<GitHistoryItemViewModel, Task> restore,
         Func<GitHistoryItemViewModel, Task> copyId,
-        Func<bool> canStartOperation)
+        // U196-C：这个委托只喂 RestoreCommand，名字随之改成 canStartRestore ——
+        // 叫 canStartOperation 会诱导下一个人把它复用给别的命令，
+        // 而它现在含着「工作区必须干净」这个只对回档成立的前提。
+        Func<bool> canStartRestore)
     {
         CommitId = commitId;
         Summary = summary;
@@ -1110,7 +1470,7 @@ public sealed class GitHistoryItemViewModel : ViewModelBase
         {
             select(this);
             _ = restore(this);
-        }, canStartOperation);
+        }, canStartRestore);
         CopyIdCommand = new RelayCommand(() =>
         {
             select(this);

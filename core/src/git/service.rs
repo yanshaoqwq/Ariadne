@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,55 @@ pub struct GitService {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitStagePolicy {
     pub ignored_paths: Vec<String>,
+}
+
+/// 一次性的临时 Git 索引文件（U207-F）。Drop 时删掉自己和 git 留下的 `.lock`。
+///
+/// ⚠️ **绝不能落在工作区里**：`git add -- .` 会把这个文件自己也扫进去，
+/// 于是临时索引出现在它自己产出的 diff 里（实测复现过：diff 末尾多出
+/// `new file mode ... tmpidx` 两段）。所以优先落在 `.git/` 下 ——
+/// 一定同文件系统、且 git 从不把 `.git` 当工作区内容扫描。
+/// `.git` 不是目录（linked worktree / submodule 的 gitdir 指针文件）时退回系统临时目录，
+/// 那里同样在工作区之外。
+struct ScratchIndex {
+    path: PathBuf,
+}
+
+impl ScratchIndex {
+    fn new(repo_root: &Path) -> Self {
+        // pid + 进程内自增序号：同一进程里两次并发刷新版本页不会撞同一个索引文件。
+        // 用 len()/时间戳都不行——前者没有计数可用，后者在同毫秒内会重名。
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "ariadne-diff-index-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let git_dir = repo_root.join(".git");
+        let parent = if git_dir.is_dir() {
+            git_dir
+        } else {
+            std::env::temp_dir()
+        };
+        Self {
+            path: parent.join(name),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchIndex {
+    fn drop(&mut self) {
+        // 清理失败不该让「看一眼变更摘要」这件事报错：文件名带 pid + 序号，
+        // 最坏结果是留一个孤儿文件，而下一次调用的 read-tree 会把它整份覆盖。
+        let _ = std::fs::remove_file(&self.path);
+        let mut lock = self.path.clone().into_os_string();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(PathBuf::from(lock));
+    }
 }
 
 impl Default for GitStagePolicy {
@@ -222,14 +272,44 @@ impl GitService {
 
     /// 流式统计完整 diff 行数，但只保留指定字符数的预览，避免大型 diff 整体驻留内存。
     /// Concurrently drains stderr (C8) so a full stderr pipe cannot deadlock stdout read.
+    ///
+    /// # U207-F：口径必须与 `status_with_policy` 逐项一致
+    ///
+    /// 原实现是裸 `git diff -- . <排除项>`。报告猜的「pathspec 与 status 不一致」
+    /// **不成立**——两处都调 `policy.exclude_pathspecs()`，排除清单本来就是同一份。
+    /// 真正的错位在**比较对象**：裸 `git diff` 比的是「工作区 ↔ 索引」，
+    /// 只看**已跟踪文件的未暂存改动**；而 status 带 `--untracked-files=all`，
+    /// 未跟踪文件与已暂存改动全都算。
+    /// ⇒ 12 章正文是新文件（从未 `add` 过）时，同一个面板里
+    /// 「未提交变更 = 存在」与「变更摘要 = 0 行 diff」互相打脸，
+    /// 作者无法判断到底有没有东西要存 —— 而版本页是百万字项目唯一的护栏。
+    ///
+    /// 修法：在**临时索引**里 `read-tree`（有 HEAD 读 HEAD，没有读空树）
+    /// 再 `git add -N --ignore-removal`，然后照常 `git diff`。
+    /// 此时索引 == HEAD 树 + 未跟踪文件的占位项，
+    /// 「工作区 ↔ 索引」的差集正好等于 status 的口径。
+    ///
+    /// 每个选项都是实测挑出来的，换掉任何一个都会重新引入错位：
+    /// - `git diff HEAD` 只补上「已暂存」，未跟踪文件仍然报 0 行 —— 不够；
+    /// - `-N`（intent-to-add，只记「将要加入」不写内容）实测**零新增对象**；
+    ///   换成 `-A` 会真的把 blob 写进 `.git/objects`，
+    ///   等于每次刷新版本页都给对象库塞一批松散对象；
+    /// - `--ignore-removal` 是为了**保住删除**：不加它，`add` 会把已删文件的
+    ///   索引项一并摘掉，于是「工作区 ↔ 索引」看不到那次删除，
+    ///   而 status 明明报了 ` D` —— 又是一处新的打脸（实测复现过）；
+    /// - 真实索引绝不能碰：那会把作者没打算存的东西暂存起来，
+    ///   下一次 checkpoint 就顺手一起提交了。
     pub fn diff_preview_with_policy(
         &self,
         policy: &GitStagePolicy,
         preview_char_limit: usize,
     ) -> CoreResult<GitDiffPreview> {
+        let excludes = policy.exclude_pathspecs()?;
+        // scratch 必须活到 diff 子进程收尾之后：Drop 一执行索引文件就没了。
+        let scratch = self.prepare_status_scoped_index(&excludes)?;
         let mut args = vec!["diff".to_owned(), "--".to_owned(), ".".to_owned()];
-        args.extend(policy.exclude_pathspecs()?);
-        let mut child = self.spawn_git(args)?;
+        args.extend(excludes);
+        let mut child = self.spawn_git_with_index(args, Some(scratch.path()))?;
         let stdout = child
             .stdout
             .take()
@@ -268,6 +348,32 @@ impl GitService {
         ];
         args.extend(policy.exclude_pathspecs()?);
         self.run_git(args)
+    }
+
+    /// 建一个临时索引，内容 = HEAD 树 + 未跟踪文件的 intent-to-add 占位项。
+    /// 拿它当 `git diff` 的比较基准，就能让 diff 的口径等于
+    /// `status --untracked-files=all` 的口径（理由见 `diff_preview_with_policy`）。
+    fn prepare_status_scoped_index(&self, excludes: &[String]) -> CoreResult<ScratchIndex> {
+        let scratch = ScratchIndex::new(&self.repo_root);
+        // read-tree 无条件跑：它同时负责把上一次进程崩溃残留的同名文件整份覆盖掉，
+        // 否则残留索引会让 diff 拿一个陌生的基准去比。
+        // 空仓库（无 HEAD）读空树——此时所有文件都算新增，正是 status 的口径。
+        let base = if self.has_head_commit()? {
+            "HEAD"
+        } else {
+            "--empty"
+        };
+        self.run_git_with_index(Some(scratch.path()), ["read-tree", base])?;
+        let mut args = vec![
+            "add".to_owned(),
+            "--intent-to-add".to_owned(),
+            "--ignore-removal".to_owned(),
+            "--".to_owned(),
+            ".".to_owned(),
+        ];
+        args.extend(excludes.iter().cloned());
+        self.run_git_with_index(Some(scratch.path()), args)?;
+        Ok(scratch)
     }
 
     /// 返回最近 commit 摘要。
@@ -513,7 +619,17 @@ impl GitService {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let output = self.run_git_output(args)?;
+        self.run_git_with_index(None, args)
+    }
+
+    /// 与 `run_git` 相同，但允许把 `GIT_INDEX_FILE` 指向临时索引
+    /// （只有 U207-F 的 diff 口径对齐用得到，见 `prepare_status_scoped_index`）。
+    fn run_git_with_index<I, S>(&self, index_file: Option<&Path>, args: I) -> CoreResult<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let output = self.run_git_output_with_index(index_file, args)?;
         ensure_git_stdout_within_limit(&output)?;
         if output.status.success() {
             return Ok(output.stdout.trim_end().to_owned());
@@ -527,6 +643,18 @@ impl GitService {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
+        self.run_git_output_with_index(None, args)
+    }
+
+    fn run_git_output_with_index<I, S>(
+        &self,
+        index_file: Option<&Path>,
+        args: I,
+    ) -> CoreResult<GitCommandOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
         let args = args
             .into_iter()
             .map(|arg| arg.as_ref().to_os_string())
@@ -535,7 +663,7 @@ impl GitService {
             .first()
             .map(|arg| arg.to_string_lossy().into_owned())
             .unwrap_or_else(|| "command".to_owned());
-        let mut child = self.spawn_git(args)?;
+        let mut child = self.spawn_git_with_index(args, index_file)?;
         let stdout = child
             .stdout
             .take()
@@ -566,7 +694,17 @@ impl GitService {
         })
     }
 
-    fn spawn_git(&self, args: Vec<impl Into<OsString>>) -> CoreResult<Child> {
+    /// 起 git 子进程。`index_file` 非 None 时把 `GIT_INDEX_FILE` 指向临时索引
+    /// （只有 U207-F 的 diff 口径对齐用得到，见 `prepare_status_scoped_index`）。
+    ///
+    /// 这里没有 `spawn_git(args)` 的无参重载：曾经有，改成 index 可选后
+    /// 全仓零调用者 ⇒ 按 U116 的判定标准（完全体后仍零消费者即废弃）当场删掉，
+    /// 而不是留一个"以后可能有人用"的空壳。
+    fn spawn_git_with_index(
+        &self,
+        args: Vec<impl Into<OsString>>,
+        index_file: Option<&Path>,
+    ) -> CoreResult<Child> {
         self.cancellation.check()?;
         let mut command = Command::new("git");
         command
@@ -575,6 +713,9 @@ impl GitService {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(index_file) = index_file {
+            command.env("GIT_INDEX_FILE", index_file);
+        }
         #[cfg(unix)]
         command.process_group(0);
         Ok(command.spawn()?)

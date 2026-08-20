@@ -151,7 +151,13 @@ public sealed class DisplayNameJsonTests
         // （代价是代码改动不回滚而上下文全丢）。⇒ 这个键由后续小模型统一补译，
         // 此处只把账记上。**这不是遗漏，是刻意的分工**。
         const int EnglishBaseline = 97;
-        const int JapaneseBaseline = 104;
+        // 104 → 105（2026-08-20）：U208-A 新增 `ui.error.not_configured` 时**只补了 en**，
+        // ja 按上面那条分工留给后续补译，而**忘了同批把这个基线加一**。
+        // ⚠️ 这条守卫因此红了一轮，抓到的正是它设计要抓的人（我自己）。
+        // 教训：决定「某个键不补译」时，**基线调整必须在同一次提交里完成** ——
+        // 「刻意不补」和「忘了补」在语言包里长得一模一样，
+        // 基线是唯一能区分两者的地方。基线没跟着动，那个「刻意」就没有留下任何证据。
+        const int JapaneseBaseline = 105;
 
         var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
         var chinese = LoadPack(Path.Combine(resourceDir, "display_name.json"));

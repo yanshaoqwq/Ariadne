@@ -637,6 +637,10 @@ fn dispatch_request(
             )?)
         }
         "get_project_maintenance" => ok(commands::get_project_maintenance(state)?),
+        // U196-B：维护失败态是吸收态（`update_maintenance` 只认 `status = 'active'`），
+        // 而它与 `active` 一样拦掉项目全部写操作。此前**只有这条读命令**，
+        // 作者读到「请先处理」却没有任何可执行的处置 —— 这就是那个处置。
+        "recover_project_maintenance" => ok(commands::recover_project_maintenance(state)?),
         "list_index_dead_letters" => ok(commands::list_index_dead_letters(state)?),
         "requeue_index_dead_letter" => {
             let params: RequeueIndexDeadLetterParams = params(request.params)?;

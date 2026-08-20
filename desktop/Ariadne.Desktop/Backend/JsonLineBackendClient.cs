@@ -87,6 +87,14 @@ public sealed class JsonLineBackendClient : IAriadneBackendClient, IDisposable
         return InvokeAsync<ProjectMaintenanceState>("get_project_maintenance", null, cancellationToken);
     }
 
+    // U196-B：用 InvokeRequiredAsync 而不是 InvokeAsync —— 这条命令成功时后端**必定**
+    // 返回一份报告，拿到 null 说明链路出了问题，不能被当成「恢复成功但没有细节」
+    // 静默走过去（那正是「把失败报成成功」的形状）。
+    public Task<MaintenanceRecoveryReport> RecoverProjectMaintenanceAsync(CancellationToken cancellationToken = default)
+    {
+        return InvokeRequiredAsync<MaintenanceRecoveryReport>("recover_project_maintenance", null, cancellationToken);
+    }
+
     public Task<CurrentProjectStatus?> GetCurrentProjectAsync(CancellationToken cancellationToken = default)
     {
         return InvokeAsync<CurrentProjectStatus>("get_current_project", null, cancellationToken);

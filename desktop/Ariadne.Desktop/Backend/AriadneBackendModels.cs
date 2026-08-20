@@ -24,6 +24,21 @@ public sealed record ProjectMaintenanceState(
     [property: JsonPropertyName("phase")] string Phase,
     [property: JsonPropertyName("error")] string? Error);
 
+/// <summary>
+/// U196-B：解除「维护失败」态的结果。
+///
+/// <para>
+/// <c>IndexRebuildStarted</c> 要如实呈现：worker 没起来时索引重建仍在队列里，
+/// 要等下次打开项目才完成 ⇒ 此刻搜索到的可能是回档前的旧内容。
+/// 与「已在后台重建」对作者是两件事，不能共用一句「已恢复」。
+/// </para>
+/// </summary>
+public sealed record MaintenanceRecoveryReport(
+    [property: JsonPropertyName("cleared_kind")] string ClearedKind,
+    [property: JsonPropertyName("cleared_phase")] string ClearedPhase,
+    [property: JsonPropertyName("cleared_error")] string? ClearedError,
+    [property: JsonPropertyName("index_rebuild_started")] bool IndexRebuildStarted);
+
 public sealed record UiPreferences(
     [property: JsonPropertyName("theme")] string Theme,
     [property: JsonPropertyName("git_auto_color")] string GitAutoColor,

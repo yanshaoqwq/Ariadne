@@ -8,7 +8,7 @@
   <!-- 根容器透明：让 MainWindow 底层的径向光晕透上来 -->
   <Grid ColumnDefinitions="*,Auto" Background="Transparent">
     <Panel Grid.Column="0">
-      <Grid RowDefinitions="Auto,Auto,*"
+      <Grid RowDefinitions="Auto,Auto,Auto,*"
             Margin="0">
         <Border Grid.Row="0" Classes="page-header">
           <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14">
@@ -35,7 +35,43 @@
           </Grid>
         </Border>
 
+        <!-- U196-B：维护失败恢复面板。
+             放在页眉正下方、内容区之上，且**不在右栏里**——右栏可折叠，
+             而这条状态下作者的每一次保存都在失败，出路不能藏在折叠面板后面。
+             状态说明 + 诊断 + 一颗可点的处置，形态照 in-doubt 恢复面板
+             （WorkspacePageView 那个「全项目失败恢复的范本」）。 -->
         <Border Grid.Row="1"
+                Classes="layer"
+                BorderBrush="{DynamicResource Ariadne.StatusWarning}"
+                BorderThickness="1"
+                Padding="14,11"
+                Margin="24,8,20,0"
+                IsVisible="{Binding IsMaintenanceFailed}">
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="14">
+            <StackPanel Grid.Column="0" Spacing="4" VerticalAlignment="Center">
+              <TextBlock Text="{Binding MaintenanceFailedTitle}"
+                         FontWeight="SemiBold"
+                         Foreground="{DynamicResource Ariadne.StatusWarning}"
+                         TextWrapping="Wrap" />
+              <TextBlock Text="{Binding MaintenanceFailedHint}"
+                         Classes="secondary"
+                         TextWrapping="Wrap" />
+              <!-- 诊断是英文工程串，只作二级信息、可为空。顶栏横幅把它直接插进
+                   句子中间，作者读到的是一句中英混排的话。 -->
+              <TextBlock Text="{Binding MaintenanceDiagnosticText}"
+                         Classes="caption mono"
+                         TextWrapping="Wrap"
+                         IsVisible="{Binding HasMaintenanceDiagnostic}" />
+            </StackPanel>
+            <Button Grid.Column="1"
+                    Classes="primary"
+                    Content="{Binding RecoverMaintenanceText}"
+                    Command="{Binding RecoverMaintenanceCommand}"
+                    VerticalAlignment="Center" />
+          </Grid>
+        </Border>
+
+        <Border Grid.Row="2"
                 Classes="command-strip"
                 Padding="24,9"
                 IsVisible="{Binding HasStatusText}">
@@ -56,7 +92,7 @@
            U182-K：四个态互斥叠放在同一格里，各自绑**不同**的属性——
            原缺陷正是「空态与错误态共用一个判据」（`Commits.Count == 0`），
            于是后端报错时有 200 个存档点的项目被告知「你没有存档」。 -->
-      <Grid Grid.Row="2">
+      <Grid Grid.Row="3">
         <Grid IsVisible="{Binding ShowContent}" RowDefinitions="Auto,*">
           <!-- U182-K：已有存档时出错走这条内容内错误条（ContentError），
                不把列表清掉换成整页错误页——那份列表是用户手上唯一的诊断材料。 -->
@@ -243,6 +279,17 @@
                     IsVisible="{Binding ShowOpenProjectAction}"
                     HorizontalAlignment="Center"
                     Margin="0,4,0,0" />
+            <!-- U207-G：空态文案说的是「在这里存一下」，而在此之前唯一那颗
+                 「创建存档」按钮在**右栏**里，右栏还可以是折叠的 ⇒ 指了路，
+                 路的尽头是折叠面板。这颗按钮就是那句「这里」。
+                 只在「项目里还没有存档」时出现（ShowCreateCheckpointAction，
+                 不是 ShowEmpty——无项目时点它只能得到一句错误）。 -->
+            <Button Classes="primary"
+                    Content="{Binding CreateCheckpointText}"
+                    Command="{Binding CreateFirstCheckpointCommand}"
+                    IsVisible="{Binding ShowCreateCheckpointAction}"
+                    HorizontalAlignment="Center"
+                    Margin="0,4,0,0" />
           </StackPanel>
         </Border>
       </Grid>
@@ -344,6 +391,14 @@
                       HorizontalAlignment="Stretch"
                       Content="{Binding RestoreNewBranchText}"
                       Command="{Binding RestoreCommand}" />
+              <!-- U196-C：禁用理由必须配文字，不能只灰掉按钮。
+                   「创建存档」就在上一分区里，那正是让工作区变干净的动作 ——
+                   一步之遥，此前没人指路。 -->
+              <TextBlock Text="{Binding RestoreBlockedText}"
+                         Classes="caption"
+                         Foreground="{DynamicResource Ariadne.StatusWarning}"
+                         TextWrapping="Wrap"
+                         IsVisible="{Binding IsRestoreBlocked}" />
             </StackPanel>
             </Border>
 

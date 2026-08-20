@@ -4156,6 +4156,14 @@ pub fn restore_to_new_branch_with_cancellation(
     let _activation = state.lock_project_activation()?;
     let project_root = project_root_from_state(state, None)?;
     cancellation.check().map_err(CommandError::from)?;
+    // U196-C：这道门必须在 begin_maintenance **之前**，理由见函数注释。
+    //
+    // ⚠️ 变异验证过（U196-M1，2026-08-20）：把这一行挪到下面那个闭包里
+    // （即 begin_maintenance 之后），`git_restore_recovery_contracts.rs` 的
+    // `dirty_worktree_restore_is_rejected_without_bricking_the_project`
+    // **只有那条「维护态必须为 None」的断言变红**，错误码与文案两条仍绿
+    // ⇒ 修复本体是**调用位置**，不是错误变体。挪它之前请先读那条用例。
+    ensure_worktree_clean_before_restore(&project_root, cancellation)?;
     let documents = document_service(&project_root);
     let maintenance = documents.invalidation_outbox();
     maintenance
@@ -4206,6 +4214,248 @@ pub fn restore_to_new_branch_with_cancellation(
             let _ = maintenance.fail_maintenance("restore_incomplete", &error);
             Err(error)
         }
+    }
+}
+
+/// U196-C：「工作区脏 ⇒ 回档必失败」这条拒绝的文案 key。
+///
+/// 后端拒绝与前端**按钮禁用理由**共用同一个 key，两处文案不可能漂开。
+/// 分开写两句的话，作者读到的会是两种说法描述同一件事。
+pub const RESTORE_DIRTY_WORKTREE_MESSAGE_KEY: &str = "ui.git.restore_blocked_dirty";
+
+/// U196-B：`recover_project_maintenance` 拒绝执行时的文案 key。
+pub const MAINTENANCE_NOT_FAILED_MESSAGE_KEY: &str = "ui.git.maintenance.nothing_to_recover";
+
+/// U196-C：把「工作区脏」这道门**前移到进入维护态之前**。
+///
+/// # 为什么必须前移，而不是只把错误文案改对
+///
+/// 原顺序是 `begin_maintenance` → 排空 → checkout 阶段 → `ensure_clean_worktree`
+/// 拒绝 → `fail_maintenance("restore_incomplete")`。于是「作者有未提交改动」
+/// 这件**极常见**的事，代价是整个项目进入维护失败态：`ensure_available` 对
+/// `failed` 与 `active` 同等拦截，保存正文 / 创建存档 / 运行工作流 / 导入章节全被拒。
+///
+/// 而此时作者唯一能让工作区变干净的动作——「创建存档」——走
+/// `acquire_project_mutation`，那个函数**第一行就是 `ensure_available()`**
+/// ⇒ 一并被拒。再点一次回档也仍然脏、仍然失败。**这是一个真死锁**，
+/// 只能去命令行 git 或手改 SQLite（U196 报告判「有出路且不需要改后端就能自救」
+/// 时漏了这一支：它对「脏工作区」这个最容易触发的成因不成立）。
+///
+/// 前移之后这条失败退回成「一次被拒绝的操作」：项目状态一个字节都没动。
+///
+/// # 判定必须与 `ensure_clean_worktree` 用同一个探针
+///
+/// 两处都用 `status_with_policy` + 同一份 exclude 策略。若这里比后面宽松，
+/// 等于门没装（照样放进去一个注定失败的回档）；若比后面严格，会拦掉本来能成功的
+/// 回档，而那种缺陷表现为「按钮点不动」，比报错更难归因。
+///
+/// ⚠️ 刻意**不**复用 `get_git_repository_status_impl`：它会 `acquire_project_mutation`
+/// 并额外算 diff 预览，而这里只需要 porcelain 一行都没有这个事实。
+fn ensure_worktree_clean_before_restore(
+    project_root: &Path,
+    cancellation: &crate::contracts::ExecutionCancellation,
+) -> CommandResult<()> {
+    let config = ConfigStore::new(project_root)
+        .load_or_create()
+        .map_err(error_to_string)?;
+    let policy = git_stage_policy_from_config(&config);
+    let porcelain = git_service_with_cancellation(project_root, cancellation)
+        .status_with_policy(&policy)
+        .map_err(error_to_string)?;
+    if porcelain.trim().is_empty() {
+        return Ok(());
+    }
+    let changed = porcelain
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    // 诊断串保留 "worktree must be clean before restore_to_new_branch" 这句：
+    // `git/service.rs::ensure_clean_worktree` 仍是 git 锁内的最终防线，
+    // 两处同一句话，日志里不会因为拦在哪一层而看起来像两种故障。
+    Err(CommandError::with_key(
+        crate::command_error::CommandErrorCode::Conflict,
+        RESTORE_DIRTY_WORKTREE_MESSAGE_KEY,
+        format!(
+            "worktree must be clean before restore_to_new_branch; {changed} path(s) changed"
+        ),
+    ))
+}
+
+/// U196-B：解除「维护失败」态的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaintenanceRecoveryReport {
+    /// 被解除的是哪一类维护（当前只有 `git_restore`）。
+    pub cleared_kind: String,
+    /// 中断在哪个阶段。它是作者判断「回档到底做了多少」的唯一线索。
+    pub cleared_phase: String,
+    /// 中断时后端记下的诊断串（英文，只作二级信息）。
+    pub cleared_error: Option<String>,
+    /// 索引重建的后台 worker 是否真的起来了。
+    ///
+    /// 为什么要把它报出去而不是当成必然成功：worker 起不来时事件仍在队列里，
+    /// 索引要等到下次打开项目才重建。这两种情况对作者的意义不同
+    /// （现在就能搜 vs 现在搜到的结果可能是旧的），不能用同一句「已恢复」盖住。
+    pub index_rebuild_started: bool,
+}
+
+/// U196-B：把「维护失败」这个吸收态解开，让作者能继续写。
+///
+/// # 这条命令为什么必须存在
+///
+/// 维护状态机是**吸收态**：`update_maintenance` 的 SQL 带
+/// `WHERE id = 1 AND status = 'active'`，所以 `complete_maintenance` /
+/// `update_maintenance_phase` 对 `failed` 全部无效；而 `failed` 与 `active`
+/// 一样拦掉项目的所有写操作。此前全仓**没有任何出口**：
+/// `ipc.rs` 里 `maintenance` 只出现一次（`get_project_maintenance`，纯读）。
+///
+/// 同一个 outbox、同一份代码里，索引 dead-letter 想到了手动补救
+/// （`requeue_index_dead_letter`），maintenance failed 没有 —— 这是遗漏，不是能力问题。
+///
+/// # 三条安全边界
+///
+/// 1. **只清 `failed`**。`active` 表示确实有一场维护正在跑，清掉它等于
+///    绕过 checkout 期间的保护。这一条有两层保障：本函数先判 `status == "failed"`，
+///    而 `begin_maintenance` 自己也拒 `active`。
+/// 2. **必须连带重建索引**。restore 中断后索引与正文的对应关系不可信，
+///    直接放行写入会留下检索错乱（作者搜到的是回档前的段落，且无法归因）。
+/// 3. **失败要退回 `failed`，不能留在 `active`**。见下面两处 `fail_maintenance`。
+pub fn recover_project_maintenance(
+    state: &AriadneAppState,
+) -> CommandResult<MaintenanceRecoveryReport> {
+    let project_root = project_root_from_state(state, None)?;
+    validate_initialized_project_root(&project_root)?;
+    let documents = document_service(&project_root);
+    let maintenance = documents.invalidation_outbox();
+    let current = maintenance.maintenance_state().map_err(error_to_string)?;
+    // ⚠️ 变异验证过（U196-M3，2026-08-20）：把这个 filter 放宽（改成任何状态都放行）后，
+    // `begin_maintenance` 的内层拒绝**仍然拦住** active 态（安全性没破），
+    // 但作者读到的从「项目当前没有需要解除的维护失败状态」退化成
+    // `ui.error.validation`「输入内容不符合要求」⇒ 外层这道 filter 的价值
+    // 不在安全性、在**说得出人话**。两道都要在，别因为「后端反正会拒」而删掉这道。
+    let Some(failed) = current.filter(|state| state.status == "failed") else {
+        // 没有可解除的失败态时**明确拒绝**，不报成功：把「什么都没做」说成
+        // 「已恢复」会让作者以为写操作解禁了，而拦他的其实是别的东西。
+        return Err(CommandError::with_key(
+            crate::command_error::CommandErrorCode::Conflict,
+            MAINTENANCE_NOT_FAILED_MESSAGE_KEY,
+            "project has no failed maintenance state to recover from",
+        ));
+    };
+
+    // `failed` → `active`：这是 `begin_maintenance` 的既有行为
+    // （`ON CONFLICT DO UPDATE SET … error = NULL`），也是本命令能用现成公开 API
+    // 走完的原因，无需给 outbox 加新方法。
+    //
+    // ⚠️ 「会不会顶掉一场**正在跑**的维护」这一跳已核实：不会。
+    // `outbox.rs:71-79` 里 `begin_maintenance` 读到 `Some("active")` 时
+    // **直接返回 Err**（"project maintenance is already active"），
+    // 只有 `failed` / `completed` / 无记录才会被覆盖。
+    // 于是「只清 failed」有两道独立保障：上面那个 `filter(status == "failed")`
+    // 与 outbox 自己这道拒绝。删掉任何一道，另一道仍拦得住。
+    maintenance
+        .begin_maintenance("maintenance_recovery", "clearing_failed_state")
+        .map_err(error_to_string)?;
+
+    // 索引重建先入队、再解禁：顺序反了的话，解禁到入队之间那个窗口里
+    // 作者的保存会被当成「索引是可信的」记进去。
+    if let Err(error) = maintenance.enqueue_full_rebuild_if_absent(
+        &project_root.to_string_lossy(),
+        "maintenance_recovery_full_rebuild",
+        &format!("maintenance-recovery:{}", failed.phase),
+    ) {
+        return Err(restore_failed_maintenance_after_recovery_error(
+            maintenance,
+            &failed.phase,
+            error_to_string(error),
+        ));
+    }
+
+    // ⚠️ 变异验证过（U196-M2，2026-08-20）：把这一段摘掉后
+    // `recover_project_maintenance` **仍然返回 Ok**，而状态停在 `active`
+    // ——写操作照旧全被拒。用例红在「状态必须是 completed」那条上，
+    // 不是红在「命令返回 Err」上（那条在缺陷下照样绿）。
+    if let Err(error) = maintenance.complete_maintenance("recovered") {
+        return Err(restore_failed_maintenance_after_recovery_error(
+            maintenance,
+            &failed.phase,
+            error_to_string(error),
+        ));
+    }
+
+    // 到这一行写操作才真正解禁。索引重建放在解禁**之后**：
+    // `spawn_indexing_worker_for_state` 内部要取 mutation guard，
+    // 而那个 guard 在维护未解除时必然被拒。
+    let index_rebuild_started = spawn_indexing_worker_for_state(state).is_ok();
+    let report = MaintenanceRecoveryReport {
+        cleared_kind: failed.kind.clone(),
+        cleared_phase: failed.phase.clone(),
+        cleared_error: failed.error.clone(),
+        index_rebuild_started,
+    };
+    record_maintenance_recovery_log(&project_root, &report);
+    Ok(report)
+}
+
+/// U196-B：恢复过程自身失败时把状态放回 `failed`。
+///
+/// 为什么不能留在 `active`：`active` 同样拦掉全部写操作，而且
+/// `begin_maintenance` 见到 `active` 会直接拒绝 ⇒ 连「再点一次回档」
+/// 和「再点一次解除」这两条既有出路都一起堵掉，比原地不动更糟。
+fn restore_failed_maintenance_after_recovery_error(
+    maintenance: &IndexInvalidationOutbox,
+    original_phase: &str,
+    error: CommandError,
+) -> CommandError {
+    if let Err(rollback_error) = maintenance.fail_maintenance(original_phase, &error) {
+        // 回滚也失败：只能记录。此时 SQLite 自身不可写，任何补救都做不了，
+        // 但至少让日志里留下「状态可能停在 active」这条线索。
+        eprintln!(
+            "[ariadne] maintenance recovery rollback failed: {rollback_error}; \
+             maintenance may remain active"
+        );
+    }
+    error
+}
+
+/// U196-B：解除维护态写一条诊断日志。
+///
+/// 这是一次「强行放行 + 索引重建」的状态改写，事后若检索结果看起来不对，
+/// 它是唯一能说明「项目曾在半完成的回档上被放行过」的痕迹。
+/// 与 `record_git_restore_log` 同一形态（Warning 级、未读、带 metadata）。
+///
+/// ⚠️ `log_id` 带时间戳而不是用 `cleared_phase`：`fail_maintenance` 把 phase
+/// 一律改写成 `restore_incomplete`（见 `outbox.rs::fail_maintenance` 的调用点），
+/// 拿它做 id 的话第二次恢复会**覆盖**第一次的记录
+/// （`insert_run_log` 是 `ON CONFLICT(log_id) DO UPDATE`）。
+fn record_maintenance_recovery_log(project_root: &Path, report: &MaintenanceRecoveryReport) {
+    let message = format!(
+        "Project maintenance recovery cleared {} failed at phase {}; index_rebuild_started={}",
+        report.cleared_kind, report.cleared_phase, report.index_rebuild_started
+    );
+    let log_id = match now_timestamp_ms() {
+        Ok(timestamp) => format!("maintenance-recovery-{timestamp}"),
+        Err(_) => format!("maintenance-recovery-{}", report.cleared_phase),
+    };
+    let entry = UiRunLogEntry {
+        log_id,
+        timestamp_ms: 0,
+        kind: UiRunLogKind::Diagnostic,
+        level: UiRunLogLevel::Warning,
+        message,
+        workflow_id: None,
+        run_id: None,
+        node_id: None,
+        unread: true,
+        metadata: json!({
+            "source": "maintenance_recovery",
+            "cleared_kind": report.cleared_kind,
+            "cleared_phase": report.cleared_phase,
+            "cleared_error": report.cleared_error,
+            "index_rebuild_started": report.index_rebuild_started,
+        }),
+    };
+    if let Err(error) = UiRunLogStore::default_for_project(project_root).append(entry) {
+        eprintln!("[ariadne] failed to record maintenance recovery log: {error}");
     }
 }
 
@@ -15658,3 +15908,4 @@ mod permission_and_preset_resolution_tests {
         }
     }
 }
+
