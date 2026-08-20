@@ -535,6 +535,52 @@
            不能写死系数（Ariadne.Font.Reading 是 fallback 链，换机器度量就变）。 -->
       <x:Double x:Key="Ariadne.Reading.LineHeight">30</x:Double>
 
+      <!-- ===== 稿纸上的 Markdown 层级（U203）=====
+           阅读态要把正文里的 `#`/`>`/三连短横线/`**` 渲染出来，这些是它需要的尺度。
+
+           **刻意与 Ariadne.Size.*（界面尺度）分开**，理由同 Size.Reading 那段注释：
+           这一族是「读成书」的排版维度，跟着正文字号走，而不是跟着界面走。
+           把标题挂到 Size.Title(20) 上，将来调界面密度会连带改动小说的章节标题。
+
+           级差按 1.15~1.17 的等比收（24 / 21 / 18），到 h4 收回正文字号——
+           长篇小说实际用到的层级是「卷 / 章 / 节」三档，h4 以下靠字重与色阶区分就够，
+           再往上放大只会让稿纸看起来像 PPT。 -->
+      <x:Double x:Key="Ariadne.Reading.Heading1Size">24</x:Double>
+      <x:Double x:Key="Ariadne.Reading.Heading2Size">21</x:Double>
+      <x:Double x:Key="Ariadne.Reading.Heading3Size">18</x:Double>
+      <!-- h4~h6：与正文同字号，只靠字重/色阶分层。等于 Size.Reading 是刻意的，
+           不引用它是因为将来若要「h4 略大于正文」，改这里不该牵动正文。 -->
+      <x:Double x:Key="Ariadne.Reading.HeadingMinorSize">16</x:Double>
+      <!-- 大标题的行高必须自己给：正文行高 30 配 24px 字会顶头（1.25 倍），
+           而 h3 及以下（18px）用 30 正好，所以只有 h1/h2 需要单独一档。 -->
+      <x:Double x:Key="Ariadne.Reading.Heading1LineHeight">34</x:Double>
+      <x:Double x:Key="Ariadne.Reading.Heading2LineHeight">32</x:Double>
+      <!-- 代码用等宽字，比正文小一档：等宽 CJK 字面本来就宽，
+           跟正文同为 16px 时一行代码会明显挤出版心。 -->
+      <x:Double x:Key="Ariadne.Reading.CodeSize">14</x:Double>
+      <!-- 分隔线厚度：发丝线。1px 是「一条线」的下限，再粗就成了分区块。 -->
+      <x:Double x:Key="Ariadne.Reading.RuleHeight">1</x:Double>
+
+      <!-- 段间距。**不是随手取的 16**：正文行高 30，段间距取约半行 ⇒
+           段落之间有呼吸但仍读得出是同一节；取满一行（30）会让每段都像新起一节。
+           ⚠️ 渲染态下「空行」不再是一行空白字符，而是这个 Margin —— 见
+           MarkdownReaderBlock 的注释。改这个值等于改所有段落的疏密。 -->
+      <Thickness x:Key="Ariadne.Reading.ParagraphMargin">0,0,0,16</Thickness>
+      <!-- 标题上方留白 > 下方留白，是排版通例：标题属于它下面那段内容，
+           上紧下松会让标题看起来在给上一节收尾。 -->
+      <Thickness x:Key="Ariadne.Reading.HeadingMargin">0,24,0,10</Thickness>
+      <Thickness x:Key="Ariadne.Reading.SubHeadingMargin">0,18,0,8</Thickness>
+      <!-- 引用块：左竖线 3px + 文字缩进 16px。竖线用 Border 左边框，不画图元。 -->
+      <Thickness x:Key="Ariadne.Reading.QuoteBarThickness">3,0,0,0</Thickness>
+      <Thickness x:Key="Ariadne.Reading.QuotePadding">16,2,0,2</Thickness>
+      <!-- 分隔线上下留白比段间距大一档：它的职责是「场景切换」，
+           留白不够时读者会把它当装饰而不是断点。 -->
+      <Thickness x:Key="Ariadne.Reading.RuleMargin">0,22,0,28</Thickness>
+      <!-- 列表项之间比段落更紧（它们是一组），标记与内容之间留 10px。 -->
+      <Thickness x:Key="Ariadne.Reading.ListRowMargin">0,0,0,8</Thickness>
+      <Thickness x:Key="Ariadne.Reading.ListMarkerMargin">0,0,10,0</Thickness>
+      <Thickness x:Key="Ariadne.Reading.CodePadding">14,10</Thickness>
+
       <!-- 页面级边距：所有主功能页共用，让切页时版心不跳。
            底部比顶部厚，是给滚动到底的内容留呼吸，不是笔误。 -->
       <Thickness x:Key="Ariadne.Page.Margin">40,30,40,44</Thickness>
@@ -1039,6 +1085,100 @@
     <Setter Property="LineHeight" Value="{DynamicResource Ariadne.Reading.LineHeight}" />
     <Setter Property="TextWrapping" Value="Wrap" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextPrimary}" />
+  </Style>
+
+  <!-- ================== 稿纸上的 Markdown 呈现（U203）==================
+       阅读态把正文里的标记**渲染出来**（此前是把 `#`、`**`、`>`、三连短横线
+       原样印在稿纸上——那是唯一一个「读自己作品」的界面）。
+       宿主控件是 `MarkdownReaderBlock`，它只挂 class，所有视觉在这里。
+
+       ⚠️ 这一族选择器**刻意不带 `.reading` 复合**（写成 `.md-h1` 而不是
+       `.reading.md-h1`）：`ReadingEditingParityTests` 按「选择器含 .reading
+       且块内含 LineHeight」抓样式块并断言行高必须引 Reading.LineHeight，
+       复合选择器会被它抓进去，于是标题的独立行高被误判成「又抄了一遍 30」。
+       正文段落那一档仍挂 `.reading`（它就该与修改态同排版）。
+
+       ⚠️ 颜色一律走既有 token，本节**没有新增任何 Color 键**：
+       主题有 12 个变体（ThemeAccessibilityAudit），新增色键要逐个变体补齐
+       并过对比度审计，而标题/引用/代码在语义上就是
+       TextHeading / TextSecondary / BackgroundCode，无需另立一套。 -->
+  <Style Selector="SelectableTextBlock.md-paragraph">
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.ParagraphMargin}" />
+  </Style>
+  <!-- 标题共性：衬线、标题色、字重。字号/行高按级别在下面分档。 -->
+  <Style Selector="SelectableTextBlock.md-heading">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Reading}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.SubHeadingMargin}" />
+    <Setter Property="LineHeight" Value="{DynamicResource Ariadne.Reading.LineHeight}" />
+  </Style>
+  <Style Selector="SelectableTextBlock.md-h1">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Reading.Heading1Size}" />
+    <Setter Property="LineHeight" Value="{DynamicResource Ariadne.Reading.Heading1LineHeight}" />
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.HeadingMargin}" />
+  </Style>
+  <Style Selector="SelectableTextBlock.md-h2">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Reading.Heading2Size}" />
+    <Setter Property="LineHeight" Value="{DynamicResource Ariadne.Reading.Heading2LineHeight}" />
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.HeadingMargin}" />
+  </Style>
+  <Style Selector="SelectableTextBlock.md-h3">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Reading.Heading3Size}" />
+  </Style>
+  <!-- h4~h6 与正文同字号，靠字重与色阶分层（见 token 那段注释）。
+       h6 再降一档到次级文字色：到这一层已经是「小注」而不是标题了。 -->
+  <Style Selector="SelectableTextBlock.md-h4, SelectableTextBlock.md-h5">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Reading.HeadingMinorSize}" />
+  </Style>
+  <Style Selector="SelectableTextBlock.md-h6">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Reading.HeadingMinorSize}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <!-- 引用块：左竖线取强调描边色（青绿），文字降到次级色。
+       整体不铺底——铺底会在稿纸上切出一块「卡片」，破坏纸面的连续感。 -->
+  <Style Selector="Border.md-quote">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
+    <Setter Property="BorderThickness" Value="{DynamicResource Ariadne.Reading.QuoteBarThickness}" />
+    <Setter Property="Padding" Value="{DynamicResource Ariadne.Reading.QuotePadding}" />
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.ParagraphMargin}" />
+  </Style>
+  <Style Selector="SelectableTextBlock.md-quote-text">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <!-- 分隔线：中间实、两端淡出的渐变细线，与刊头分隔同一语汇（那处是内联渐变刷）。
+       这里用纯色发丝线而非渐变：场景分隔在正文中会反复出现，
+       渐变线重复十几次会显得刻意。 -->
+  <Style Selector="Border.md-rule">
+    <Setter Property="Height" Value="{DynamicResource Ariadne.Reading.RuleHeight}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BorderDefault}" />
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.RuleMargin}" />
+  </Style>
+  <!-- 列表：标记与内容分两列（悬挂缩进），标记用次级弱色。 -->
+  <Style Selector="Grid.md-list-row">
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.ListRowMargin}" />
+  </Style>
+  <Style Selector="TextBlock.md-list-marker">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.ListMarkerMargin}" />
+  </Style>
+  <Style Selector="SelectableTextBlock.md-list-text">
+    <Setter Property="TextWrapping" Value="Wrap" />
+  </Style>
+  <!-- 围栏代码块：等宽 + 代码底色 + 小圆角。小说里少见，但正文可能夹带
+       设定表/命令示例，把三个反引号原样印出来比渲染成代码块更糟。 -->
+  <Style Selector="Border.md-code">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundCode}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Small}" />
+    <Setter Property="Padding" Value="{DynamicResource Ariadne.Reading.CodePadding}" />
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Reading.ParagraphMargin}" />
+  </Style>
+  <Style Selector="SelectableTextBlock.md-code-text">
+    <Setter Property="FontFamily" Value="{DynamicResource Ariadne.Font.Mono}" />
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Reading.CodeSize}" />
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
+    <Setter Property="TextWrapping" Value="Wrap" />
   </Style>
 
   <!-- ============================ 卡片 / 层 ============================ -->
@@ -3281,6 +3421,55 @@
   <Style Selector="TextBlock.budget-error">
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
     <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <!-- ============================================================
+       U207-C②：危险色在**禁用态**退成中性 —— 把 `Button.primary:disabled`
+       那条已定的规则推广到 danger 一族。
+
+       原状（实测取证）：画布下栏三个运行控制键在空闲态全禁用，
+       `Button:disabled` 的 Opacity=0.45 让暂停/继续淡成灰线（非纸白像素 66 / 53），
+       而停止那个方块因为走错误色仍是**粉红实心**（100 px）
+       ⇒ 界面上最醒目的运行控制恰是此刻最无意义的那个。
+
+       为什么改不动：那个方块的 Fill 原本**内联**写在 Path 上
+       （`Fill="{DynamicResource Ariadne.StatusError}"`）。Avalonia 的
+       `LocalValue=0` 压过 `StyleTrigger=1`/`Template=2`/`Style=3`，
+       所以任何样式规则都碰不到它 —— 这不是声明顺序问题，挪位置白费功夫。
+       修法是把颜色交给 class（见 WorkspacePageView.axaml 的 `StopRunIcon`），
+       样式层才有可能接管。
+
+       ⚠️ 这几条必须留在文件**末尾**：`Path.icon-fill`（:1015）也设 Fill，
+       Avalonia 同优先级按文档顺序、后者胜（文件上方 budget 那组注释同一条理由）。
+       搬到 `Path.icon-fill` 之前就会被整条盖掉。
+
+       退成 `Ariadne.TextSecondary` 而不是 `TextSubtle`：这个图标的邻居
+       （暂停/继续）就是 TextSecondary，取同一枚令牌才让三键在禁用态**齐平**，
+       而「齐平」正是本条要的结果 —— 换成更淡的 TextSubtle 只是把
+       「停止最扎眼」换成「停止最看不见」，仍然是三键不齐。
+       文字型 danger 按钮则跟 `Button.primary:disabled` 的先例走 TextSubtle。
+       ============================================================ -->
+  <Style Selector="Path.icon-fill.danger">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.StatusError}" />
+  </Style>
+  <!-- 禁用宿主里的危险图标：退到与同组中性图标同一枚令牌。
+       选择器带 `Button:disabled` 祖先，且声明在上面那条之后 ——
+       两种口径（更具体 / 文档顺序在后）都判它赢，不赌任何一种。
+       ⚠️ 刻意**不**同时造一条描边版 `Path.icon.danger`：全仓零处使用描边型
+       危险图标，预造规则等于给样式表加一条永不触发的死规则（AGENTS §4）。
+       真出现第一个描边危险图标时照这条补 Stroke 即可。 -->
+  <Style Selector="Button:disabled Path.icon-fill.danger">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.TextSecondary}" />
+  </Style>
+  <!-- 文字型危险按钮：`Button.danger` 把 Foreground 设在**宿主**上，
+       经模板的 TemplateBinding 以 Template(2) 优先级落到 ContentPresenter，
+       所以两处都要写 —— 只写 `/template/ ContentPresenter` 会被宿主值盖回去，
+       只写宿主又管不到已被模板绑定下传的那一层。 -->
+  <Style Selector="Button.danger:disabled">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+  </Style>
+  <Style Selector="Button.danger:disabled /template/ ContentPresenter">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
   </Style>
 
 </Styles>

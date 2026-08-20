@@ -1279,6 +1279,7 @@
   "ui.workspace.reload_default_done": "Canvas reloaded.",
   "ui.workspace.resume": "Resume",
   "ui.workspace.run": "Run",
+  "ui.workspace.run.needs_start_node": "No start node on the canvas yet — drag one in from the node library below, then run.",
   "ui.workspace.run_from_start": "Run from start",
   "ui.workspace.variables": "Variables",
   "ui.workspace.variables_expand": "Show variables",

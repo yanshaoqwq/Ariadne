@@ -970,6 +970,7 @@
   "error.workflow.worker_spawn_failed.recovery": "请重试启动；若持续失败，请导出诊断信息并检查系统线程资源。",
   "ui.workspace.workflow_selector": "工作流",
   "ui.workspace.run": "运行",
+  "ui.workspace.run.needs_start_node": "画布上还没有「开始」节点 —— 先从下方节点库拖一个过来，才能运行。",
   "ui.workspace.run_from_start": "从起始节点运行",
   "ui.workspace.variables": "变量",
   "ui.workspace.variables_expand": "展开变量",

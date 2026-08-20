@@ -138,6 +138,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         PauseWorkflowCommand = new RelayCommand(() => _ = PauseWorkflowAsync(), CanPauseWorkflow);
         StopWorkflowCommand = new RelayCommand(() => _ = StopWorkflowAsync(), CanStopWorkflow);
         ResumeWorkflowCommand = new RelayCommand(() => _ = ResumeWorkflowAsync(), CanResumeWorkflow);
+        // U207-C①：下栏标题栏的「开始运行」入口。原先此处只有暂停/继续/停止三个
+        // **运行中**控制，空画布上一个开始入口都没有（起始节点卡上的三角要先有节点，
+        // 执行面板的主按钮要先切 tab），作者只会把「继续」当播放键去点。
+        RunWorkflowCommand = new RelayCommand(() => _ = RunWorkflowFromEntryAsync(), CanRunWorkflowFromEntry);
         SendProjectAiCommand = new RelayCommand(() => _ = SendProjectAiAsync(), HasProjectAiMessage);
         ApplyNodeConfigCommand = new RelayCommand(() => _ = ApplyNodeConfigAsync(), () => HasSelectedNode);
         ToggleBreakpointCommand = new RelayCommand(() => _ = ToggleBreakpointAsync(), () => HasSelectedNode);
@@ -988,6 +992,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public RelayCommand PauseWorkflowCommand { get; }
     public RelayCommand StopWorkflowCommand { get; }
     public RelayCommand ResumeWorkflowCommand { get; }
+    /// <summary>U207-C①：空闲态下栏标题栏那个「运行」主按钮。</summary>
+    public RelayCommand RunWorkflowCommand { get; }
     public RelayCommand SendProjectAiCommand { get; }
     public RelayCommand ApplyNodeConfigCommand { get; }
     public RelayCommand ToggleBreakpointCommand { get; }
@@ -1460,6 +1466,68 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public bool CanStopWorkflow() =>
         HasCurrentRun() && CanvasRunControlHelpers.CanStop(CurrentRunStatus);
 
+    /// <summary>
+    /// U207-C①：运行控制三键（暂停/继续/停止）此刻是否值得出现在界面上。
+    ///
+    /// 判据刻意取「三者**至少一个**真能做事」，而不是「有 run id」：
+    /// - 空闲（从未跑过）：三者全 false ⇒ 整组不渲染，同一位置让给「运行」；
+    /// - 终态（succeeded/failed/stopped）：run id 还在，但三者仍全 false
+    ///   ⇒ 也算空闲，换回「运行」（跑完一轮后下一件事是再跑一轮，
+    ///     而不是停止一个已经停了的运行）。
+    ///
+    /// 这样写的另一个好处是自维护：以后 <see cref="CanvasRunControlHelpers"/>
+    /// 的生命周期矩阵怎么改，显隐都跟着对，不会漏掉某个状态。
+    /// </summary>
+    public bool ShowRunControls =>
+        CanPauseWorkflow() || CanResumeWorkflow() || CanStopWorkflow();
+
+    /// <summary>
+    /// 「运行」入口与运行控制三键**互斥**：同一块地方在同一时刻只承担一件事。
+    ///
+    /// 缺陷原形是两者都不在（空画布 + 默认「节点库」tab ⇒ 零个开始入口）
+    /// 却常驻三个点不动的控制键，界面上最醒目的反而是此刻最无意义的「停止」。
+    /// </summary>
+    public bool ShowRunEntry => !ShowRunControls;
+
+    /// <summary>
+    /// 「运行」按钮能不能点。
+    ///
+    /// 没有起始节点时禁用——但**禁用理由必须配文字**（与 <see cref="RunNodeAsync"/>
+    /// 里对 required 变量的处置同一条规矩），那句话由
+    /// <see cref="RunEntryTooltip"/> 承担，且挂在按钮外层的容器上
+    /// （Avalonia 禁用控件不参与命中测试，挂在按钮自己身上永远看不到）。
+    /// </summary>
+    public bool CanRunWorkflowFromEntry() => HasStartNodes && CanPersistWorkflow();
+
+    /// <summary>
+    /// 悬停说明：能跑时说「从起始节点运行」，不能跑时说**差什么**。
+    ///
+    /// 三档顺序按「先决条件的依赖次序」排：没项目 → 画布没加载好 → 没起始节点。
+    /// 反过来排会在没打开项目时对着作者念「先拖一个开始节点」，那是句废话。
+    /// </summary>
+    public string RunEntryTooltip
+    {
+        get
+        {
+            if (!_backend.HasProjectRoot)
+            {
+                return _displayNames.Text("ui.empty.need_project.hint");
+            }
+
+            if (!CanPersistWorkflow())
+            {
+                return _displayNames.Text("ui.workspace.load_required_before_save");
+            }
+
+            if (!HasStartNodes)
+            {
+                return _displayNames.Text("ui.workspace.run.needs_start_node");
+            }
+
+            return RunFromStartText;
+        }
+    }
+
     /// <summary>W8：最近一次已知 run 生命周期状态（running/paused/…）。</summary>
     public string CurrentRunStatus => _runSession.Status;
     private bool HasProjectAiMessage() => !string.IsNullOrWhiteSpace(ProjectAiMessage);
@@ -1884,6 +1952,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         PauseWorkflowCommand.NotifyCanExecuteChanged();
         StopWorkflowCommand.NotifyCanExecuteChanged();
         ResumeWorkflowCommand.NotifyCanExecuteChanged();
+        // U207-C①：三键的显隐是这三个 can-execute 的函数，所以必须在**同一处**广播。
+        // 漏了这两行的话，运行起来后「运行」按钮不会让位，三键也不会出现。
+        OnPropertyChanged(nameof(ShowRunControls));
+        OnPropertyChanged(nameof(ShowRunEntry));
         NotifyConfirmationCommandStates();
     }
 
@@ -3203,6 +3275,43 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
     }
 
+    /// <summary>
+    /// U207-C①：下栏「运行」按钮 —— 从起始节点开跑。
+    ///
+    /// 挑哪个起始节点：优先当前选中的那个（作者的注意力就在它上面），
+    /// 否则取第一个。与 Ctrl+K 的 <see cref="ResolveVariableFillTarget"/> 同一套取舍，
+    /// 区别是这里不要求节点带变量。
+    ///
+    /// 落到 <see cref="RunNodeAsync"/> 而不是另开一条启动路径：那条路上
+    /// 已经串好了 required 变量本地拦截 → 图校验 → 落盘 → 快照 → run session，
+    /// 绕开它就等于新造一个少了四道工序的运行入口
+    /// （`WorkspaceCanvas08Tests.N9` 守的正是「全部运行入口走同一个 coordinator」）。
+    /// </summary>
+    private async Task RunWorkflowFromEntryAsync()
+    {
+        var target = ResolveRunEntryTarget();
+        if (target is null)
+        {
+            // 理论上按钮此时是禁用的；真到了这里也要给句话，不能静默什么都不做——
+            // 「点了没反应」正是本编号被误报成「运行键失灵」的起因。
+            StatusText = _displayNames.Text("ui.workspace.run.needs_start_node");
+            return;
+        }
+
+        await RunNodeAsync(target).ConfigureAwait(true);
+    }
+
+    /// <summary>「运行」这一下要从哪个起始节点开跑。</summary>
+    private WorkflowNodeViewModel? ResolveRunEntryTarget()
+    {
+        if (SelectedNode is { IsStartNode: true } selected)
+        {
+            return selected;
+        }
+
+        return StartNodes.FirstOrDefault();
+    }
+
     private async Task PauseWorkflowAsync()
     {
         await RunControlAsync(() => _runSession.PauseAsync(StatusText));
@@ -4077,6 +4186,9 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         _workflowLoadState = state;
         SaveCommand.NotifyCanExecuteChanged();
         RunSelectedNodeCommand.NotifyCanExecuteChanged();
+        // U207-C①：「运行」与起始节点卡上的三角同源同门禁，加载态变了要一起刷新。
+        RunWorkflowCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(RunEntryTooltip));
         foreach (var node in Nodes)
         {
             node.NotifyRunCommandState();
@@ -4483,6 +4595,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         OnPropertyChanged(nameof(HasNodes));
         OnPropertyChanged(nameof(EmptyCanvasTitle));
         OnPropertyChanged(nameof(EmptyCanvasHint));
+        // U207-C①：画上第一个起始节点后「运行」要立刻可点，删光后要立刻变回禁用，
+        // 悬停说明也要跟着从「先拖一个开始节点」换成「从起始节点运行」。
+        RunWorkflowCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(RunEntryTooltip));
         // 起始节点集合变了，Ctrl+K 有无可填目标随之变化——不通知的话
         // 新画上第一个起始节点后按 Ctrl+K 仍然「没反应」。
         OpenVariableFillCommand.NotifyCanExecuteChanged();

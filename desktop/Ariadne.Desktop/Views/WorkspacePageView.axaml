@@ -1259,33 +1259,66 @@
                       Content="{Binding ExecutionText}" Command="{Binding ShowExecutionCommand}" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-              <Button Classes="icon-btn"
-                      ToolTip.Tip="{Binding PauseText}"
-                      AutomationProperties.Name="{Binding PauseText}"
-                      Command="{Binding PauseWorkflowCommand}">
-                <!-- 暂停：两条竖杠 -->
-                <Path Classes="icon-fill" Width="11" Height="11" Stretch="Uniform"
-                      Fill="{DynamicResource Ariadne.TextSecondary}"
-                      Data="M7,5 L10,5 L10,19 L7,19 Z M14,5 L17,5 L17,19 L14,19 Z" />
-              </Button>
-              <Button Classes="icon-btn"
-                      ToolTip.Tip="{Binding ResumeText}"
-                      AutomationProperties.Name="{Binding ResumeText}"
-                      Command="{Binding ResumeWorkflowCommand}">
-                <!-- 继续：三角 -->
-                <Path Classes="icon-fill" Width="11" Height="11" Stretch="Uniform"
-                      Fill="{DynamicResource Ariadne.TextSecondary}"
-                      Data="M8,5 L19,12 L8,19 Z" />
-              </Button>
-              <Button Classes="icon-btn"
-                      ToolTip.Tip="{Binding StopText}"
-                      AutomationProperties.Name="{Binding StopText}"
-                      Command="{Binding StopWorkflowCommand}">
-                <!-- 停止：实心方块。停止是危险动作，图标走错误色。 -->
-                <Path Classes="icon-fill" Width="10" Height="10" Stretch="Uniform"
-                      Fill="{DynamicResource Ariadne.StatusError}"
-                      Data="M6,6 L18,6 L18,18 L6,18 Z" />
-              </Button>
+              <!-- U207-C①：空闲态这里放「运行」，而不是三个此刻全都点不动的运行控制键。
+                   缺陷形态是「一个运行入口都没有，却常驻三个运行控制」：
+                   起始节点卡上的小三角要先有节点（:674 IsVisible=IsStartNode），
+                   执行面板的主按钮要先切 tab（默认停在「节点库」），
+                   于是空画布上唯一像播放键的东西是「继续」——它当然点不动。
+
+                   ToolTip 挂在**外层 Border** 而不是按钮上：Avalonia 的禁用控件
+                   不参与命中测试，挂在按钮上时「为什么还不能运行」这句话
+                   恰好在最需要它的时候看不到。Background 必须给个 Transparent，
+                   否则 Border 自身没有命中面，悬停事件同样进不来。 -->
+              <Border x:Name="RunEntryHost"
+                      IsVisible="{Binding ShowRunEntry}"
+                      Background="Transparent"
+                      ToolTip.Tip="{Binding RunEntryTooltip}">
+                <Button x:Name="RunEntryButton"
+                        Classes="primary btn-compact"
+                        MinWidth="72"
+                        Content="{Binding RunText}"
+                        AutomationProperties.Name="{Binding RunText}"
+                        Command="{Binding RunWorkflowCommand}" />
+              </Border>
+              <!-- 运行控制三键：只在「三者至少一个真能做事」时出现（ShowRunControls）。
+                   终态（succeeded/failed/stopped）也算空闲，此时换回「运行」——
+                   作者跑完一轮后下一件事通常是再跑一轮，不是停止一个已停的运行。 -->
+              <StackPanel x:Name="RunControlsPanel"
+                          Orientation="Horizontal" Spacing="4" VerticalAlignment="Center"
+                          IsVisible="{Binding ShowRunControls}">
+                <Button x:Name="PauseRunButton" Classes="icon-btn"
+                        ToolTip.Tip="{Binding PauseText}"
+                        AutomationProperties.Name="{Binding PauseText}"
+                        Command="{Binding PauseWorkflowCommand}">
+                  <!-- 暂停：两条竖杠 -->
+                  <Path x:Name="PauseRunIcon" Classes="icon-fill" Width="11" Height="11" Stretch="Uniform"
+                        Fill="{DynamicResource Ariadne.TextSecondary}"
+                        Data="M7,5 L10,5 L10,19 L7,19 Z M14,5 L17,5 L17,19 L14,19 Z" />
+                </Button>
+                <Button x:Name="ResumeRunButton" Classes="icon-btn"
+                        ToolTip.Tip="{Binding ResumeText}"
+                        AutomationProperties.Name="{Binding ResumeText}"
+                        Command="{Binding ResumeWorkflowCommand}">
+                  <!-- 继续：三角 -->
+                  <Path x:Name="ResumeRunIcon" Classes="icon-fill" Width="11" Height="11" Stretch="Uniform"
+                        Fill="{DynamicResource Ariadne.TextSecondary}"
+                        Data="M8,5 L19,12 L8,19 Z" />
+                </Button>
+                <Button x:Name="StopRunButton" Classes="icon-btn"
+                        ToolTip.Tip="{Binding StopText}"
+                        AutomationProperties.Name="{Binding StopText}"
+                        Command="{Binding StopWorkflowCommand}">
+                  <!-- 停止：实心方块。停止是危险动作，图标走错误色。
+                       U207-C②：错误色**必须由 class 给**，不能内联写 Fill——
+                       内联是 LocalValue(0)，压过一切样式规则，于是
+                       `Button:disabled` 那条退色规则永远打不动它，
+                       禁用态下这个粉红方块反倒成了界面上最醒目的运行控制
+                       （报告逐像素量过：停止 100 px vs 暂停 66 / 继续 53）。
+                       现由 `Path.icon-fill.danger` 供色，退色规则见主题文件末尾。 -->
+                  <Path x:Name="StopRunIcon" Classes="icon-fill danger" Width="10" Height="10" Stretch="Uniform"
+                        Data="M6,6 L18,6 L18,18 L6,18 Z" />
+                </Button>
+              </StackPanel>
             </StackPanel>
           </Grid>
           <ScrollViewer Margin="0" IsVisible="{Binding IsNodeLibraryPanel}" VerticalScrollBarVisibility="Auto">

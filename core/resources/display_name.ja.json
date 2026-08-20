@@ -1271,6 +1271,7 @@
   "ui.workspace.reload_default_done": "キャンバスを再読み込みしました。",
   "ui.workspace.resume": "再開",
   "ui.workspace.run": "実行",
+  "ui.workspace.run.needs_start_node": "キャンバスにまだ開始ノードがありません。下のノードライブラリから一つドラッグしてから実行してください。",
   "ui.workspace.run_from_start": "開始ノードから実行",
   "ui.workspace.variables": "変数",
   "ui.workspace.variables_expand": "変数を表示",
