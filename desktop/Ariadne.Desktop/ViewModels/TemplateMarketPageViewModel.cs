@@ -22,6 +22,8 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
 
     private readonly DisplayNameService _displayNames;
     private readonly IAriadneBackendClient _backend;
+    private readonly Func<Task> _reloadOtherProjectPages;
+    private readonly Func<Task<bool>> _confirmProjectReload;
     private string _searchQuery = string.Empty;
     private string _statusText = string.Empty;
     private string _repositoryBaseUrl = string.Empty;
@@ -34,10 +36,30 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
     private CancellationTokenSource? _requestCts;
     private bool _initialCatalogLoadStarted;
 
-    public TemplateMarketPageViewModel(DisplayNameService displayNames, IAriadneBackendClient backend)
+    /// <param name="reloadOtherProjectPages">
+    /// 装完模板后重载**除本页以外**的已缓存项目页（U207-D/U198-A）。
+    /// 后端安装时已把模板图并进项目画布并落盘，画布页却还捧着装模板前的那份图；
+    /// 不通知它，作者切回画布只会看到空画布 + 空态引导，判定「导入失败」再点一次。
+    /// 传 null 表示无壳独立使用（单元测试），此时不通知任何人。
+    /// ⚠️ 绝不能传「连本页一起重载」的版本：本页的 ReloadProjectDataAsync 是换项目语义，
+    /// 会清空目录列表、抹掉成功文案，并让本次安装请求的 FinishRequest 被当成过期请求
+    /// 跳过 ⇒ 整页永久卡在忙碌态。
+    /// </param>
+    /// <param name="confirmProjectReload">
+    /// 安装前的未保存改动闸门。安装会重写磁盘上的项目画布，随后本页要求画布页重载——
+    /// 没有这道闸门，作者画布上未保存的编辑会被静默丢弃（而不是像 U198-A 描述的那样
+    /// 撞 expected_revision 冲突）。走同意即可先保存再合并，一点不丢。
+    /// </param>
+    public TemplateMarketPageViewModel(
+        DisplayNameService displayNames,
+        IAriadneBackendClient backend,
+        Func<Task>? reloadOtherProjectPages = null,
+        Func<Task<bool>>? confirmProjectReload = null)
     {
         _displayNames = displayNames;
         _backend = backend;
+        _reloadOtherProjectPages = reloadOtherProjectPages ?? (() => Task.CompletedTask);
+        _confirmProjectReload = confirmProjectReload ?? (() => Task.FromResult(true));
         Templates = new ObservableCollection<TemplateCardViewModel>();
         Tags = new ObservableCollection<TemplateTagViewModel>
         {
@@ -422,6 +444,14 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
                 return;
             }
 
+            // 安装会重写磁盘上的项目画布，之后画布页必须重载才能看见新节点；
+            // 重载会覆盖画布页内存里的图，所以先让作者处置未保存改动（保存 / 丢弃 / 取消）。
+            if (!await _confirmProjectReload().ConfigureAwait(true))
+            {
+                StatusText = _displayNames.Text("ui.common.cancel");
+                return;
+            }
+
             await _backend.InstallTemplateAsync(
                 repositoryBaseUrl,
                 template.Id,
@@ -435,6 +465,9 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
             {
                 ["name"] = ResolveDisplayText(template.Name),
             });
+            // U207-D：判据是「切到画布页节点可见」，不是「不再撞 expected_revision 冲突」——
+            // 画布永远空着时后者也满足。所以这一步必须真的把新画布拉回来。
+            await _reloadOtherProjectPages().ConfigureAwait(true);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

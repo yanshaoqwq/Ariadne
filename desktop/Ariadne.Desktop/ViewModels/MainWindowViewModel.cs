@@ -792,7 +792,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
                 // 而它正是为「磁盘干净≠东西已入库」这件事而生的。
                 () => HasCachedUnsavedChanges),
             "run_logs" => new RunLogPageViewModel(_displayNames, _backend),
-            "templates" => new TemplateMarketPageViewModel(_displayNames, _backend),
+            // U207-D/U198-A：装完模板后后端已把模板图并进项目画布（`install_template`
+            // 走 `merge_workflow_into_project_canvas` + `save_workflow_graph_locked`），
+            // 但前端画布页手里还是装模板之前那份图 ⇒ 切回去看到的是空画布 + 空态引导，
+            // 作者会判定「导入失败」再点一次。这里补的就是那条通知链。
+            // 排除 "templates" 自己，理由见 ReloadCachedProjectPagesExceptAsync 注释。
+            "templates" => new TemplateMarketPageViewModel(
+                _displayNames,
+                _backend,
+                () => ReloadCachedProjectPagesExceptAsync("templates"),
+                ConfirmCachedProjectPagesLeaveAsync),
             "settings" => new SettingsPageViewModel(
                 _displayNames,
                 _backend,
@@ -1222,10 +1231,31 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
         BatchLeaveSaveCoordinator.ClearJournal(BatchLeaveSaveCoordinator.DefaultJournalPath);
     }
 
-    private async Task ReloadCachedProjectPagesAsync()
+    private Task ReloadCachedProjectPagesAsync() => ReloadCachedProjectPagesExceptAsync(null);
+
+    /// <summary>
+    /// 重载所有已缓存的项目数据页，可排除**发起者自己**。
+    ///
+    /// U207-D/U198-A：模板页装完模板后要通知画布页重载，但它**不能把自己也重载一遍**。
+    /// `TemplateMarketPageViewModel.ReloadProjectDataAsync` 走的是「换项目了」语义
+    /// （`ResetCatalogCache`：清空检索结果 + 作废在途请求 + 清 StatusText），
+    /// 在「装完模板」这个时刻触发会一次造成三处倒退：
+    /// 目录列表被清空、「已导入模板：X」的成功文案被抹掉、并且
+    /// 由于 `_requestGeneration` 被自增，装模板那次请求的 `FinishRequest` 会当成
+    /// 过期请求直接返回 ⇒ `_isBusy` 永久为 true，整页按钮从此禁用。
+    ///
+    /// 所以这里不是「顺手加个可选参数」，而是复用这个回调的**前提条件**：
+    /// 只有「自己的 reload 不会破坏自己当前这次交互」的页面才能直接用无参版本
+    /// （Git 页恢复提交后确实想让自己整页刷新，所以它用无参版本）。
+    /// </summary>
+    private async Task ReloadCachedProjectPagesExceptAsync(string? exceptPageId)
     {
         foreach (var (id, page) in _pageCache.ToArray())
         {
+            if (exceptPageId is not null && string.Equals(id, exceptPageId, StringComparison.Ordinal))
+            {
+                continue;
+            }
             if (page is IProjectDataReloadable)
             {
                 await ReloadPageAsync(id, page).ConfigureAwait(true);
