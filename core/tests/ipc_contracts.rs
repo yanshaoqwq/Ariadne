@@ -1398,7 +1398,23 @@ fn ipc_reports_git_repository_status_for_desktop_details() {
         .expect("ipc response should include git repository status");
     assert_eq!(data["status"], "degraded");
     assert_eq!(data["dirty"], true);
-    assert_eq!(data["diff_line_count"], 0);
+    // U207-F（2026-08-20）：原断言是 `diff_line_count == 0`。
+    //
+    // 那个 0 **编码的正是 U207-F 要修的缺陷**：这个项目没有任何 commit、
+    // 12 章正文都是未跟踪文件 ⇒ status 带 `--untracked-files=all` 说「脏」，
+    // 而裸 `git diff` 只比「工作区↔索引」、看不见未跟踪文件 ⇒ 报 0 行。
+    // 同一屏上「存在未提交变更」与「0 行 diff」互相打脸，作者无法判断有没有东西要存。
+    //
+    // 口径对齐后它必然非 0。⚠️ 断言改成 `> 0` 而不是钉死 177：
+    // 那个数字取决于测试装置写了多少行正文，钉死它会让「往装置里多加一章」
+    // 这种无关改动把用例弄红。要守的性质是**两行数据不再互相矛盾**。
+    let diff_lines = data["diff_line_count"]
+        .as_u64()
+        .expect("diff_line_count should be a number");
+    assert!(
+        diff_lines > 0,
+        "dirty=true 却报 {diff_lines} 行 diff ⇒ 版本页又会同屏显示两个互相打脸的值（U207-F）"
+    );
 }
 
 #[test]

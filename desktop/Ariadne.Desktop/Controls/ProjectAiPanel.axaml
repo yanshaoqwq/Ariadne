@@ -23,14 +23,28 @@
          换成开关会改变命中区语义（U164-D 另有一条专门讨论「应该是滑块」，
          那条待做，此处不预先改，避免两条互相盖）。
 
-         ⚠️ 左右 Padding 取 0：共同左基线由宿主 Padding 单独决定。
+         ⚠️ **左** Padding 取 0：共同左基线由宿主 Padding 单独决定
+         （实测印证：AutoMode 标签的首个墨点与下方对话框外框左缘同在 x=1153，
+         对齐的是**列基线**而不是对话框的内文——所以左边一旦加内边距，
+         整条 AutoMode 就会从右栏那一列的基线上掉下来。别为了「左右对称」加它）。
+         **右** Padding 取 12（U208-E）：选中态的琥珀底是画在**控件自身**边界上的
+         （`Button.subtle.selected /template/ ContentPresenter` 的 Background，
+         而 ContentPresenter 满格铺满按钮、Padding 只内缩文字），
+         于是右侧一旦为 0，「开启」二字就直接压在色块边缘上。
+         实测（`r3-13-automode-toggle.png` 像素测量）：色块 x1153-1445，
+         状态文字墨点止于 1444 ⇒ **右余白 1px**。12 取自下方对话框自己的内边距
+         （`ProjectAiComposer` 的 `Padding="12,10"`），不自创新尺度。
+         ⚠️ 不要改成左右都 12 来"对称"：那会同时踩掉上面那条左基线。
+         ⚠️ 也不要指望在主题里给 `.selected` 加内边距 —— 底色和内边距作用在
+         同一个 ContentPresenter 上，在主题里改会波及全部 `Button.subtle`。
+
          AutoMode 移出框后**不需要顶部 Padding**——这是它与发送键的关键差别：
          它已经不在框内，框的内边距管不到它，自己撑高度只会把两者推远。 -->
     <Button Classes="subtle"
             ctl:SelectedClass.IsSelected="{Binding ProjectAutomation.IsEnabled}"
             HorizontalAlignment="Stretch"
             HorizontalContentAlignment="Stretch"
-            Padding="0,2"
+            Padding="0,2,12,2"
             Command="{Binding ProjectAutomation.ToggleCommand}"
             AutomationProperties.Name="{Binding ProjectAutomation.Label}">
       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">

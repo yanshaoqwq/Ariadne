@@ -6219,10 +6219,23 @@ fn d3a_maintenance_keeps_project_status_read_only_and_blocks_config_repair() {
     assert!(!app_config.exists());
 }
 
+/// 维护失败态必须拦住项目的**所有**写路径（保存正文 / 启动工作流）。
+///
+/// # U196-C 改写了这条用例的前提，留档说明
+///
+/// 原版靠「脏工作区 + 回档」来制造 `failed` 维护态，并断言此后写入被拒。
+/// 那个前提**已被刻意移除**：脏工作区现在拦在 `begin_maintenance` **之前**
+/// （`ensure_worktree_clean_before_restore`），因为原顺序让一次极常见的误点
+/// 把整个项目变成只读，而唯一能清理工作区的「创建存档」在维护态下同样被拒
+/// ⇒ 死锁。那条环路与它的出路在 `git_restore_recovery_contracts.rs` 里。
+///
+/// 本用例保留下来的部分是**门禁本身**：`failed` 与 `active` 同等拦截写操作。
+/// 这个性质与「谁把状态置成 failed」无关，所以改用 outbox 公开 API 直接造态
+/// ——`fail_maintenance` 的真实调用点（磁盘满、断电、checkout 冲突、
+/// cancellation、索引重建失败）都会落到同一个状态上。
 #[test]
 fn failed_git_restore_persists_maintenance_gate_for_document_writes() {
     let temp = tempfile::tempdir().unwrap();
-    let app_state = tempfile::tempdir().unwrap();
     ariadne::frontend::initialize_project(temp.path()).unwrap();
     run_git(temp.path(), ["config", "user.name", "Ariadne Test"]);
     run_git(
@@ -6231,18 +6244,16 @@ fn failed_git_restore_persists_maintenance_gate_for_document_writes() {
     );
     let document = temp.path().join("documents").join("chapter.md");
     std::fs::write(&document, "base").unwrap();
-    let checkpoint = create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
+    create_checkpoint_impl(temp.path(), "base".to_owned()).unwrap();
     std::fs::write(&document, "dirty").unwrap();
-    let state = AriadneAppState::new(
-        temp.path(),
-        app_state.path(),
-        Arc::new(MemorySecretStore::default()),
-    );
 
-    let restore_error =
-        restore_to_new_branch(&state, checkpoint.commit_id, "restore/blocked".to_owned())
-            .unwrap_err();
-    assert!(restore_error.contains("worktree must be clean"));
+    // 复现「回档跑到一半失败」的后果，不复现它的某一个成因。
+    let gate =
+        IndexInvalidationOutbox::new(temp.path().join(".runtime").join("index_invalidation.db"));
+    gate.begin_maintenance("git_restore", "checking_out_branch")
+        .unwrap();
+    gate.fail_maintenance("restore_incomplete", "disk full while checking out")
+        .unwrap();
 
     let write_error = save_document_content_impl(
         temp.path(),

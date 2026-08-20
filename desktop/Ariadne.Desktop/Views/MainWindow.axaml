@@ -32,7 +32,14 @@
       CornerRadius="10"
       ClipToBounds="True">
     <Panel>
-    <Grid RowDefinitions="54,Auto,Auto,*">
+    <!-- U208-G：**只有 3 行**。诊断横幅曾独占第 3 行，那让它一出现就把整页下推
+         46px、展开详情再推 41px（实测：左栏「作品」高亮块顶边 255 → 301 → 342）。
+         代价不是"不好看"：作者点「展开详情」时，**他刚点的那颗按钮已经移到别处**，
+         下一次点击会落到被推下来的另一个控件上（报告作者本人就误点到了项目菜单）。
+         横幅现已移进内容区当浮层（见下方 `Panel Grid.Column="1"` 末尾）。
+         ⚠️ 维护门禁横幅（第 2 行）**刻意留在流内**：它是持续性门禁而非瞬时错误，
+         浮层化会让它长期盖住正文；且它不带作者要连点的控件，推挤在那里是可接受的。 -->
+    <Grid RowDefinitions="54,Auto,*">
 
       <!-- ================= 顶栏（自定义标题栏 + 项目 + 预算） ================= -->
       <Grid
@@ -219,52 +226,11 @@
                    Foreground="{DynamicResource Ariadne.StatusWarning}" />
       </Border>
 
-      <!-- U1：默认只显示本地化摘要，作者主动展开后才显示脱敏诊断。 -->
-      <Border Grid.Row="2"
-              IsVisible="{Binding HasDiagnostic}"
-              Background="{DynamicResource Ariadne.LogWarningBg}"
-              BorderBrush="{DynamicResource Ariadne.StatusWarning}"
-              BorderThickness="0,0,0,1"
-              Padding="12,6">
-        <StackPanel Spacing="6">
-          <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
-            <TextBlock Grid.Column="0" Text="{Binding DiagnosticTitleText}"
-                       Classes="caption" FontWeight="SemiBold" VerticalAlignment="Center" />
-            <TextBlock Grid.Column="1" Text="{Binding DiagnosticSummaryText}"
-                       Classes="caption" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-            <Button Grid.Column="2" Classes="subtle" Command="{Binding ToggleDiagnosticCommand}"
-                    Content="{Binding DiagnosticToggleText}"
-                    AutomationProperties.Name="{Binding DiagnosticToggleText}" />
-            <Button Grid.Column="3" Classes="subtle" Command="{Binding ClearDiagnosticCommand}"
-                    Content="{Binding DiagnosticClearText}"
-                    AutomationProperties.Name="{Binding DiagnosticClearText}" />
-          </Grid>
-          <Border IsVisible="{Binding IsDiagnosticExpanded}"
-                  Background="{DynamicResource Ariadne.BackgroundSubtle}"
-                  BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                  BorderThickness="1" CornerRadius="4" Padding="8">
-            <!-- U153：MaxHeight 必须挂 ScrollViewer 而不是 TextBlock。
-                 同样的写法在两类控件上语义相反：ScrollViewer 上是「限高可滚」，
-                 TextBlock 上是「裁掉多余」——且裁切发生在测量阶段，
-                 TextBlock 向父级上报的 DesiredSize 已被钉死，外层再包滚动也救不回来。
-                 原先 MaxHeight="96" 让 40 行调用栈只剩 17.6% 可见，
-                 而按钮文案是「展开详情」，功能与文案直接矛盾。
-                 限高从 96 放宽到 320（与 ConfirmDialogView 的弹窗限高同值）：
-                 「展开详情」承接的是排障最需要看全的脱敏诊断，
-                 96px 只有 7 行，连一屏调用栈都装不下；320 约 24 行，
-                 既让常见诊断一眼看完，又不至于让顶栏吃掉半屏。 -->
-            <ScrollViewer MaxHeight="320"
-                          VerticalScrollBarVisibility="Auto"
-                          HorizontalScrollBarVisibility="Disabled">
-              <TextBlock Text="{Binding DiagnosticDetailText}" Classes="caption"
-                         TextWrapping="Wrap" />
-            </ScrollViewer>
-          </Border>
-        </StackPanel>
-      </Border>
+      <!-- U1 的诊断横幅原先在这里独占一行 —— 已移进内容区当浮层（U208-G）。
+           ⚠️ 别搬回来。它在流内就会把整页下推，见本文件顶部那段注释。 -->
 
       <!-- ================= 主体：侧栏 + 内容 ================= -->
-      <Grid Grid.Row="3" ColumnDefinitions="Auto,*">
+      <Grid Grid.Row="2" ColumnDefinitions="Auto,*">
 
         <!-- 左侧栏：折叠时仅图标（U66）。
              导轨是「凹槽」，选中纸片朝左撬起并留在槽内，故 ClipToBounds=True 保持槽缘干净。
@@ -386,6 +352,71 @@
                XAML 里写死会让「减少动效」这个偏好在切页这条最显眼的路径上失效。 -->
           <TransitioningContentControl x:Name="PageHost" Content="{Binding CurrentPage}" />
 
+          <!-- U1：默认只显示本地化摘要，作者主动展开后才显示脱敏诊断。
+               U208-G：**浮在内容之上，不占流式空间**。
+               ⚠️ 落点选在内容列（`Grid.Column="1"`）而不是整个主体行，有两个理由：
+               1. 左栏导航因此**一个像素都不动** —— 那正是本条的验收判据
+                  （横幅出现前后「作品」高亮块顶边 y 必须相同）。盖住导航就等于
+                  把「下推」换成「遮挡」，判据过了而问题没解决。
+               2. 它天然盖不到顶栏。项目有 U181「模态弹窗挡不住顶栏」的反面案例，
+                  本条是它的镜像：横幅不能反过来去挡关闭/最大化键。
+                  浮层在第 3 行之内，第 1 行的窗口控制键不可能被覆盖。
+               ⚠️ 声明顺序必须在 `PageHost` **之后**：Panel 里后声明的在上层，
+                  反过来会被页面内容盖住、按钮点不到（与 ProjectAiComposer 同一条坑）。
+               ⚠️ 全局遮罩 `DialogScrim` 声明在本行之后且 RowSpan 覆盖本行，
+                  所以弹窗打开时仍然盖住横幅 —— 模态该盖住它，这是对的。
+               背景取 LogWarningBg（不透明纯色，#FEF3C7 / 暗色 #3D2E12），
+               浮层下方的正文不会透上来；边框由 0,0,0,1 改为四边 1px：
+               贴边横条靠底边线与内容分隔，脱离流之后必须自己成为一张卡片。 -->
+          <Border x:Name="DiagnosticBanner"
+                  IsVisible="{Binding HasDiagnostic}"
+                  VerticalAlignment="Top"
+                  Margin="16,12,16,0"
+                  Background="{DynamicResource Ariadne.LogWarningBg}"
+                  BorderBrush="{DynamicResource Ariadne.StatusWarning}"
+                  BorderThickness="1"
+                  CornerRadius="8"
+                  BoxShadow="{DynamicResource Ariadne.Shadow.Flyout}"
+                  Padding="12,8">
+            <StackPanel Spacing="6">
+              <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                <TextBlock Grid.Column="0" Text="{Binding DiagnosticTitleText}"
+                           Classes="caption" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" Text="{Binding DiagnosticSummaryText}"
+                           Classes="caption" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                <Button Grid.Column="2" Classes="subtle" Command="{Binding ToggleDiagnosticCommand}"
+                        Content="{Binding DiagnosticToggleText}"
+                        AutomationProperties.Name="{Binding DiagnosticToggleText}" />
+                <Button Grid.Column="3" Classes="subtle" Command="{Binding ClearDiagnosticCommand}"
+                        Content="{Binding DiagnosticClearText}"
+                        AutomationProperties.Name="{Binding DiagnosticClearText}" />
+              </Grid>
+              <Border IsVisible="{Binding IsDiagnosticExpanded}"
+                      Background="{DynamicResource Ariadne.BackgroundSubtle}"
+                      BorderBrush="{DynamicResource Ariadne.BorderMuted}"
+                      BorderThickness="1" CornerRadius="4" Padding="8">
+                <!-- U153：MaxHeight 必须挂 ScrollViewer 而不是 TextBlock。
+                     同样的写法在两类控件上语义相反：ScrollViewer 上是「限高可滚」，
+                     TextBlock 上是「裁掉多余」——且裁切发生在测量阶段，
+                     TextBlock 向父级上报的 DesiredSize 已被钉死，外层再包滚动也救不回来。
+                     原先 MaxHeight="96" 让 40 行调用栈只剩 17.6% 可见，
+                     而按钮文案是「展开详情」，功能与文案直接矛盾。
+                     限高从 96 放宽到 320（与 ConfirmDialogView 的弹窗限高同值）：
+                     「展开详情」承接的是排障最需要看全的脱敏诊断，
+                     96px 只有 7 行，连一屏调用栈都装不下；320 约 24 行，
+                     既让常见诊断一眼看完，又不至于让顶栏吃掉半屏。
+                     ⚠️ U208-G 之后这个 320 更要留住：浮层展开只盖住正文顶部一块，
+                     若无限高它会盖满整页。 -->
+                <ScrollViewer MaxHeight="320"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                  <TextBlock Text="{Binding DiagnosticDetailText}" Classes="caption"
+                             TextWrapping="Wrap" />
+                </ScrollViewer>
+              </Border>
+            </StackPanel>
+          </Border>
+
         </Panel>
       </Grid>
       <!-- ================= 全局弹窗遮罩 ================= -->
@@ -405,7 +436,7 @@
            Avalonia 取「将要进入的那个状态」的时长，天然双向，无需手写调度。 -->
       <Border x:Name="DialogScrim"
               Grid.Row="1"
-              Grid.RowSpan="3"
+              Grid.RowSpan="2"
               Classes="dialog-scrim"
               Classes.dialog-open="{Binding Dialog.IsOpen}"
               Background="{DynamicResource Ariadne.Scrim}"
