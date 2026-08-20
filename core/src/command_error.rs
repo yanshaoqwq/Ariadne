@@ -206,7 +206,10 @@ impl CommandError {
             | CoreError::PortTypeMismatch { .. } => CommandErrorCode::Validation,
             CoreError::RegistryDuplicate { .. }
             | CoreError::WorkflowStateRevisionConflict { .. }
-            | CoreError::DocumentAlreadyExists { .. } => CommandErrorCode::Conflict,
+            | CoreError::DocumentAlreadyExists { .. }
+            // U196-A：文档 CAS 冲突归 Conflict —— 目标文案 `ui.error.conflict`
+            // 「内容已被其它操作更新」此前到不了这条路上（构造点用的是 validation）。
+            | CoreError::DocumentVersionConflict { .. } => CommandErrorCode::Conflict,
             CoreError::RegistryMissing { .. } | CoreError::WorkflowRunNotFound { .. } => {
                 CommandErrorCode::NotFound
             }

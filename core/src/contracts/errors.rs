@@ -48,8 +48,17 @@ pub enum CoreError {
     PermissionDenied { action: String, reason: String },
 
     /// 预算硬限制超限。
-    #[error("budget exceeded: limit ${limit_usd:.4}, requested ${requested_usd:.4}")]
-    BudgetExceeded { limit_usd: f64, requested_usd: f64 },
+    ///
+    /// `reason` 说的是**哪一道门拦的**（日限额 / 月限额 / Auto Mode 预授权耗尽 /
+    /// 单次调用上限）。三者数字可能相同而下一步动作完全不同：
+    /// 日限额要改设置、Auto Mode 额度耗尽要重新授权。缺了它，
+    /// 界面只能说「预算已达上限」而说不出该去改哪里。
+    #[error("budget exceeded: limit ${limit_usd:.4}, requested ${requested_usd:.4}{}", reason.as_ref().map(|r| format!(" ({r})")).unwrap_or_default())]
+    BudgetExceeded {
+        limit_usd: f64,
+        requested_usd: f64,
+        reason: Option<String>,
+    },
 
     /// 运行时资源限制超限。
     #[error("resource limit exceeded for {resource}: {reason}")]
@@ -116,6 +125,30 @@ pub enum CoreError {
     /// create-only 文档写入发现目标已经存在；调用方必须显式声明覆盖意图。
     #[error("document already exists: {}", path.display())]
     DocumentAlreadyExists { path: PathBuf },
+
+    /// U196-A：文档写入的乐观并发（CAS）校验失败 —— 手上的 base_version
+    /// 已经不是磁盘上的当前版本。
+    ///
+    /// **不要用 `validation` 表达这件事**：它会让作者读到「输入内容不符合要求，
+    /// 请检查后重试」，而他的输入完全合法，真实原因是正文在别处被改过
+    /// （另一个页面、工作流写回、或上一次保存尚未落盘完成）。
+    /// 正确文案 `ui.error.conflict`（「内容已被其它操作更新」）**早就存在**。
+    ///
+    /// 与 `DocumentAlreadyExists` 的区别：那条是「不该有的东西已经有了」
+    /// （create-only 语义），这条是「有的东西变了」（update 语义）。
+    /// 两者的下一步动作不同：前者要改名或声明覆盖，后者要刷新后重做。
+    #[error(
+        "document version conflict: {} expected version {expected_version}, found {actual_version}",
+        path.display()
+    )]
+    DocumentVersionConflict {
+        path: PathBuf,
+        // ⚠️ `String` 而非数字：文档版本是内容哈希一类的不透明标识
+        // （`documents/models.rs:51` 的 `pub version: String`），
+        // 按数字建模会在这里编译不过，也会误导后人以为它单调递增、可比大小。
+        expected_version: String,
+        actual_version: String,
+    },
 
     /// 指定工作流运行不存在，save 不得隐式复活已删除记录。
     #[error("workflow run not found: {workflow_id}/{run_id}")]

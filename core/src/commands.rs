@@ -13512,12 +13512,39 @@ fn ensure_workflow_daily_budget_allows_call(
         },
     );
     if decision.action == crate::costs::BudgetAction::Pause {
-        return Err(CoreError::validation(format!(
-            "workflow paused by budget: {} (spent today ${spent_today:.4})",
-            decision
-                .reason
-                .unwrap_or_else(|| "daily budget exhausted".to_owned())
-        )));
+        // U196-A：这里**必须**用 `BudgetExceeded` 而不是 `validation`。
+        //
+        // 变体选取决定了四件事，而不只是错误文案：
+        // 1. IPC 错误码 —— `command_error.rs` 的 `from_core` 按变体分派，
+        //    走 `validation` 会让前端收到 `Validation` 码；
+        // 2. 界面文案 —— 于是作者读到「输入内容不符合要求，请检查后重试」，
+        //    而他的输入完全合法，真正原因是预算打满。正确文案 `ui.error.budget`
+        //    （「预算已达上限。请调整额度…」）**早就存在**，只是到不了这条路上；
+        // 3. 节点失败分类 —— `runtime.rs` 的 `node_error_kind` 对 `Validation`
+        //    靠关键词嗅探 message（schema/argument/tool/json），猜不中归 `System`
+        //    ⇒ 预算打满会让界面建议作者「检查 runtime.db、文件锁、磁盘」；
+        //    而 `BudgetExceeded` 有**显式分支**直接归 `NodeErrorKind::Budget`。
+        // 4. 重试策略 —— `Budget` 类不自动重试（那句注释写在 `node_error_kind` 头上），
+        //    归成 `System` 则可能被当成可重试的环境问题。
+        //
+        // ⚠️ 在此之前 `CoreError::BudgetExceeded` 是**有定义、有两处 match、
+        // 零个构造点**的「接错线的活代码」——不是死代码，是从没被接上的正确出口。
+        //
+        // `limit_usd` 取日限额：本函数守的就是工作流这条路的**日**预算门
+        // （函数名即 `ensure_workflow_daily_budget_allows_call`）。
+        // 未设日限额时用 0 —— U112 已定夺 `0` 在日预算语义里就是「不设上限」，
+        // 而走到这里说明确实被拦了（例如 Auto Mode 预授权额度耗尽），
+        // 此时给 0 比编一个假数字诚实。
+        let limit_usd = limits.daily_usd.unwrap_or(0.0);
+        return Err(CoreError::BudgetExceeded {
+            limit_usd,
+            requested_usd: projected,
+            // 带上「哪一道门拦的」：日限额、月限额、Auto Mode 预授权耗尽的
+            // 数字可能相同而下一步动作不同（改设置 vs 重新授权）。
+            // `evaluate_budget` 已经算出这个结论，丢掉它等于让界面只能说
+            // 「预算已达上限」而说不出该去改哪里。
+            reason: decision.reason,
+        });
     }
     Ok(())
 }

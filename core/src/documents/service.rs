@@ -630,9 +630,20 @@ fn validate_write_base_version(
     };
     let current = documents.metadata_for_path(path, format)?;
     if current.version != base_version {
-        return Err(CoreError::validation(
-            "document base_version does not match current document",
-        ));
+        // U196-A：这里**必须**是 `DocumentVersionConflict` 而不是 `validation`。
+        //
+        // 走 `validation` 会让 `command_error.rs` 的 `from_core` 把它分派成
+        // `Validation` 码 ⇒ 作者读到「输入内容不符合要求，请检查后重试」，
+        // 而他的输入完全合法：真实原因是正文在别处被改过。
+        // 那句话把他引向「检查自己刚打的字」，而正确动作是「刷新后重做」。
+        //
+        // 两个版本串都带上：作者看不懂哈希，但**它们不同**这一点本身是证据，
+        // 而排查「为什么明明只有我一个人在编辑」时需要这两个值。
+        return Err(CoreError::DocumentVersionConflict {
+            path: path.to_path_buf(),
+            expected_version: base_version.to_owned(),
+            actual_version: current.version,
+        });
     }
 
     Ok(())

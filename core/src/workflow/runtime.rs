@@ -3355,6 +3355,15 @@ fn node_error_kind(error: &CoreError) -> NodeErrorKind {
                 NodeErrorKind::System
             }
         }
+        // U196-A：文档 CAS 冲突是**并发**问题，不是环境问题。
+        //
+        // 归 `System` 会让界面建议作者「检查 runtime.db、文件锁、磁盘」——
+        // 而正确动作是刷新后重做。用 `Retryable`：这类冲突重跑一次通常就过了
+        // （拿到新 base_version 再写），把它标成不可重试反而堵住自愈路径。
+        //
+        // ⚠️ 刻意**不复用** `Validation` 那支的关键词嗅探：嗅探是为存量
+        // `validation` 错误兜底的权宜，新变体有精确类型就该走显式分支。
+        CoreError::DocumentVersionConflict { .. } => NodeErrorKind::Retryable,
         CoreError::Json(_) => NodeErrorKind::ToolArguments,
         CoreError::Io(_) | CoreError::Yaml(_) | CoreError::ResourceLimitExceeded { .. } => {
             NodeErrorKind::System
