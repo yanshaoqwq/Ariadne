@@ -1263,6 +1263,15 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
         }
         await RefreshBudgetStatusAsync().ConfigureAwait(true);
         await RefreshSidebarBadgesAsync(new SidebarBadgeCounts(0, 0, 0)).ConfigureAwait(true);
+        // U196-B 收尾：顶栏维护横幅也要跟着重载走一遍。
+        //
+        // 没有这一行的症状是：作者点「解除维护失败」，写操作**真的**解禁了，
+        // 而横幅仍旧写着「项目维护失败…请先处理后再保存或运行」——
+        // 修好了却继续劝退，作者不会去试。
+        // ⚠️ 同一行**顺带修好「成功回档后横幅不消失」**：回档成功也走这条重载路径。
+        // 这里刷的是宿主自己的状态（不是某个缓存页），所以放在页面循环之后、
+        // 与预算/徽章刷新并列 —— 三者都是「重载后宿主该重新问一遍的东西」。
+        await RefreshMaintenanceStatusAsync().ConfigureAwait(true);
     }
 
     private async Task LoadProjectDataPagesAsync(long? expectedGeneration = null)
