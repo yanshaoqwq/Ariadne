@@ -382,7 +382,138 @@ public sealed class ControlSurfaceThemingTests
     }
 
     /// <summary>
-    /// 主题令牌的真实色值。缺键直接失败：那意味着判据本身失效。
+    /// U213-E：**开态开关的轨道底色必须是品牌强调色，不是 Fluent 默认蓝。**
+    ///
+    /// 本轮把 AutoMode 从「满宽 <c>Button.subtle</c> + 选中琥珀底」换成
+    /// 「标签 + <c>ToggleSwitch</c>」，而在此之前**全仓 ToggleSwitch 使用数 = 0**
+    /// ⇒ 这是第一次把这个控件引进产品，它的默认外观就是 FluentTheme 的。
+    /// 与 U164-B 的 Expander 是同一个问题、只是换了控件：不配色就是把一个丑
+    /// 换成另一个丑。这条用例是「新控件必须同批配色」这个约束的**唯一**执行者。
+    ///
+    /// 判据落在 <c>Border#SwitchKnobBounds</c> 的 Background 上 ——
+    /// 那是 Fluent 模板里画**开态轨道**的那个部件（关态轨是另一个
+    /// <c>Border#OuterBorder</c>，两者靠 Opacity 互换）。拿 ToggleSwitch 宿主的
+    /// Background 当判据等于什么都没测：宿主那层我们刻意设成透明。
+    ///
+    /// ⚠️ 部件名与资源键名都是从 <c>Avalonia.Themes.Fluent.dll</c> 的字符串表
+    /// 抽出来的，不是照抄上游教程 —— Avalonia 缺资源键/错部件名都是**静默失效**。
+    /// 这条用例同时充当那批键名的存在性证明：名字写错时它会红。
+    /// </summary>
+    [Fact]
+    public async Task CheckedToggleSwitchTrackFollowsBrandAccentNotFluentBlue()
+    {
+        await RunHeadlessAsync(async () =>
+        {
+            var toggle = new ToggleSwitch { IsChecked = true, OnContent = null, OffContent = null };
+            var window = new Window { Width = 320, Height = 200, Content = toggle };
+            window.Show();
+            await Drain();
+
+            var expected = ResolveThemeColor(toggle, "Ariadne.Color.AccentPrimary");
+            var actual = ResolvePartColor(toggle, "SwitchKnobBounds");
+
+            Assert.NotEqual(FluentDefaultBlue, actual);
+            Assert.Equal(expected, actual);
+
+            window.Close();
+            await Drain();
+        });
+    }
+
+    /// <summary>
+    /// U213-E：关态轨道**不铺底**，只有一圈边线色描边。
+    ///
+    /// 这一条是「不要卡片」这个产品约束在控件层的落点，也是与 CheckBox 未选中态
+    /// 同一手势的守卫。缺了它，「关态轨道铺一块灰」这种改法能让上面那条照样绿，
+    /// 而 AutoMode 悬在对话框外、周围没有容器 —— 一铺底就又冒出一块方形色片，
+    /// 也就是用户这轮抱怨的「难看的卡片」换个尺寸重演。
+    ///
+    /// 判据取两条：关态轨的 Background **透明**（alpha=0），描边等于
+    /// <c>BorderDefault</c> 令牌。只断透明不够：描边也没了的话开关就整个消失。
+    /// </summary>
+    [Fact]
+    public async Task UncheckedToggleSwitchTrackIsOutlineOnlyWithNoFill()
+    {
+        await RunHeadlessAsync(async () =>
+        {
+            var toggle = new ToggleSwitch { IsChecked = false, OnContent = null, OffContent = null };
+            var window = new Window { Width = 320, Height = 200, Content = toggle };
+            window.Show();
+            await Drain();
+
+            var track = toggle.GetVisualDescendants().OfType<Border>()
+                .FirstOrDefault(border => border.Name == "OuterBorder");
+            Assert.NotNull(track);
+
+            var fill = track!.Background as ISolidColorBrush;
+            Assert.NotNull(fill);
+            Assert.Equal(0, fill!.Color.A);
+
+            var stroke = track.BorderBrush as ISolidColorBrush;
+            Assert.NotNull(stroke);
+            Assert.Equal(ResolveThemeColor(toggle, "Ariadne.Color.BorderDefault"), stroke!.Color);
+
+            window.Close();
+            await Drain();
+        });
+    }
+
+    /// <summary>
+    /// U213-E：**个性化换强调色后，开关必须跟着变。**
+    ///
+    /// # 这一条是渲染取证抓出来的，不是照抄先例
+    ///
+    /// 我先只加了主题字典里的资源键，然后按纪律真的把界面渲染出来看
+    /// （玫瑰主题、开态、实机 Xvfb 截图）—— 旁边的主按钮是玫瑰色
+    /// <c>#DA706A</c>，而开关轨道仍是**预设青绿** <c>#6FB9AD</c>：
+    /// 同一屏上两个强调色。成因与 U184 记的那对拉扯完全一致
+    /// （见 <see cref="PersonalizedAccentReachesCheckBoxAndSlider"/> 的注释）：
+    /// 字典内部只能用 <c>StaticResource</c>，而它加载后就锁定、不跟随
+    /// <c>ThemeApplication.Apply</c> 的运行时改写。
+    ///
+    /// ⇒ 结论推广成一条规则：**引入任何吃 Fluent 资源键的新控件，
+    /// 都必须同批把它的强调色键登记进 <c>OverlayBrushKeys</c> 并在 Apply 里写入**。
+    /// 光配字典是做一半，而做一半这件事**不报错**。
+    ///
+    /// 判据同 U184 那条：Apply 之后真实部件的画刷变了、恢复预设后回到青绿
+    /// （后半段覆盖 Reset 不留僵尸色）。「键在不在清单里」是弱判据。
+    /// </summary>
+    [Fact]
+    public async Task PersonalizedAccentReachesToggleSwitch()
+    {
+        await RunHeadlessAsync(async () =>
+        {
+            var toggle = new ToggleSwitch { IsChecked = true, OnContent = null, OffContent = null };
+            var window = new Window { Width = 320, Height = 200, Content = toggle };
+            window.Show();
+            await Drain();
+
+            Color? TrackFill() => (toggle.GetVisualDescendants().OfType<Border>()
+                .FirstOrDefault(border => border.Name == "SwitchKnobBounds")
+                ?.Background as ISolidColorBrush)?.Color;
+
+            var preset = ResolveThemeColor(toggle, "Ariadne.Color.AccentPrimary");
+            Assert.Equal(preset, TrackFill());
+
+            const string BrandHex = "#B45309";
+            var brand = Color.Parse(BrandHex);
+            Assert.NotEqual(preset, brand);
+            ThemeApplication.Apply("light", "#EDF0EE", "#FAFBFA", BrandHex);
+            await Drain();
+
+            Assert.Equal(brand, TrackFill());
+
+            ThemeApplication.Apply("light");
+            await Drain();
+            Assert.Equal(preset, TrackFill());
+
+            window.Close();
+            await Drain();
+        });
+    }
+
+    /// <summary>
+    /// 主题令牌的真实色值。缺键直接失败：那意味着判据本身失效。</summary>
     ///
     /// ⚠️ **必须传 <c>ActualThemeVariant</c>**，这是变异测试第二次抓出来的坑
     /// （第一次是被吞掉的断言，见 <c>RunHeadlessAsync</c> 的注释）。

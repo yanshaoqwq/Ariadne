@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Presenters;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -52,71 +53,83 @@ public sealed class AiPanelAndDiagnosticLayoutTests
         _session = session;
 
     /// <summary>
-    /// U208-E：Auto Mode **选中态**下，状态文字与琥珀色块右缘之间必须留出余白。
+    /// U208-E → **U213-E 之后判据反转**：Auto Mode 这一行**不许再有任何底色**。
     ///
-    /// # 判据为什么取「文字右缘到色块右缘的实测距离」
+    /// # 本条原来断言什么，为什么现在必须反过来
     ///
-    /// 实机像素测量（`r3-13-automode-toggle.png`）：色块 x1153–1445，
-    /// 状态文字墨点止于 x1444 ⇒ **右余白 1px**，字压在色块边缘上。
-    /// 断言「XAML 里 Padding 的右值 ≥ 8」是**读代码**，不是读结果：
-    /// 主题里任何一条 `Button.subtle` 的 Padding setter、或者宿主换个
-    /// HorizontalContentAlignment，都能让那个属性值仍然是 12 而实际余白仍是 0。
+    /// 原判据是「选中态琥珀色块的右缘与状态文字之间留 ≥8px 余白」——
+    /// 实机测得缺陷版本只有 1px，字压在色块边缘上（U208-E）。那条判据是对的，
+    /// 但它的**前提**（这一行有一块琥珀底、里面有一行状态文字）已经被 U213-E 移除：
+    /// 用户原话「要做的自动模式悬浮也变成了难看的卡片，做成悬浮文字和开关」，
+    /// 于是 `Button.subtle` + `SelectedClass.IsSelected` 换成了
+    /// 「`TextBlock` 标签 + `ToggleSwitch`」，底色与状态文字**双双不存在了**。
     ///
-    /// # 为什么要同时断言色块真的在
+    /// ⚠️ **改成反向钉住而不是删掉这条用例**：删掉的话，「哪天有人为了强调开启态
+    /// 又给这一行刷个底」不会有任何东西变红，而那正是用户明确否掉的形态。
+    /// 本仓已记：产品改了要同批改用例，且正解是**反转判据**、不是移除断言。
     ///
-    /// 选中态的琥珀底来自 `Button.subtle.selected /template/ ContentPresenter`
-    /// 的 Background。若 `SelectedClass.IsSelected` 没接上，ContentPresenter
-    /// 就是透明的 —— 此时"余白"随便多少都无意义，用例会在缺陷仍在时变成绿的。
-    /// 所以先钉住「底色 = Ariadne.AccentLight」，再量余白。
+    /// # 判据：三条各自不可省
+    ///
+    /// 1. 这一行里**没有** `Button`（不再是「整块可点」——那是当初长成卡片的根源）；
+    /// 2. 有一个 `ToggleSwitch`，且它的 `IsChecked` 真的跟着开启态（否则只是摆件）；
+    /// 3. 这一行的任何可视元素都**没有** `Ariadne.AccentLight` 底
+    ///    —— 这一条才是「不许再变回卡片」的本体。
     /// </summary>
     [Fact]
-    public async Task U208E_AutoModeSelected_LeavesGapBetweenStateTextAndSelectionFill()
+    public async Task U213E_AutoModeRow_IsALabelWithASwitchAndCarriesNoFill()
     {
         await RunAsync(async () =>
         {
             var (window, panel) = await OpenAutoModePanelAsync(autoModeEnabled: true);
             try
             {
-                var button = panel.GetVisualDescendants().OfType<Button>()
-                    .First(candidate => candidate.Classes.Contains("subtle"));
-                var presenter = button.GetVisualDescendants().OfType<ContentPresenter>().First();
+                // 判据 1：不再是「整块可点」。
+                Assert.Empty(panel.GetVisualDescendants().OfType<Button>()
+                    .Where(candidate => candidate.Classes.Contains("subtle")));
 
-                // 前置：琥珀底真的画出来了（否则下面的余白测量没有参照物）。
+                // 判据 2：开关在，且真的反映开启态。
+                var toggle = Assert.Single(
+                    panel.GetVisualDescendants().OfType<ToggleSwitch>());
+                Assert.True(
+                    toggle.IsChecked,
+                    "AutoMode 已启用，而开关停在关的位置 ⇒ IsEnabledRequest 没绑上，"
+                    + "开关变成了一个不反映状态的摆件。");
+
+                // 判据 3（本体）：这一行里不许出现强调色底。
                 // ⚠️ 取主题资源**必须带 ActualThemeVariant**：不带变体的
-                // `FindResource(key)` 在这里返回 null（实测），而项目记忆里那条
-                // 「Avalonia 缺资源键静默失效」说的就是它不报错也不回落 ——
-                // 于是 `Assert.NotNull` 会把「我取资源的方式不对」误报成「主题缺键」。
-                // 形式抄 `ReadingMarkdownRenderTests` 里那条同类断言。
+                // `FindResource(key)` 在这里返回 null（实测），而「Avalonia 缺资源键
+                // 静默失效」会让 Assert.NotNull 把「取资源方式不对」误报成「主题缺键」。
                 Assert.True(
-                    button.TryFindResource(
-                        "Ariadne.AccentLight", button.ActualThemeVariant, out var fillToken)
+                    toggle.TryFindResource(
+                        "Ariadne.AccentLight", toggle.ActualThemeVariant, out var fillToken)
                     && fillToken is ISolidColorBrush,
-                    "主题里取不到 Ariadne.AccentLight —— 选中态底色的参照物不存在。");
-                var expectedFill = (ISolidColorBrush)fillToken!;
-                var actualFill = presenter.Background as ISolidColorBrush;
-                Assert.True(
-                    actualFill is not null && actualFill.Color == expectedFill.Color,
-                    "选中态没画出琥珀底 —— SelectedClass.IsSelected 没接上，"
-                    + "此时余白测量没有参照物，用例会在缺陷仍在时假绿。");
+                    "主题里取不到 Ariadne.AccentLight —— 本条的比对基准不存在。");
+                var forbidden = ((ISolidColorBrush)fillToken!).Color;
 
-                // 状态文字（Grid 第 1 列）右缘在 presenter 坐标系里的 x。
-                var stateText = button.GetVisualDescendants().OfType<TextBlock>()
-                    .OrderBy(text => text.Bounds.X)
-                    .Last();
-                Assert.False(string.IsNullOrWhiteSpace(stateText.Text));
-
-                var textRight = stateText.TranslatePoint(
-                    new Point(stateText.Bounds.Width, 0), presenter);
-                Assert.NotNull(textRight);
-                var gap = presenter.Bounds.Width - textRight!.Value.X;
-
-                // 缺陷版本实测 gap=1（headless 量出的 1 与实机截图像素量出的 1 一致，
-                // 见本条报告的「取证」小节）；修复后 gap=13（1 + 右内边距 12）。
-                Assert.True(
-                    gap >= 8,
-                    $"状态文字右缘到琥珀色块右缘只有 {gap:0.##}px（缺陷版本实测 1px）——"
-                    + "选中态底色画在控件自身边界上（ContentPresenter 满格铺满按钮，"
-                    + "Padding 只内缩文字），右内边距为 0 时字就压在色块边缘上（U208-E）。");
+                foreach (var visual in panel.GetVisualDescendants().OfType<Control>())
+                {
+                    // ToggleSwitch 自己的**开态轨道**就该是强调色，跳过它的内部。
+                    if (visual == toggle || toggle.GetVisualDescendants().Contains(visual))
+                    {
+                        continue;
+                    }
+                    // ⚠️ `Background` 不在 `Control` 上，它由 `TemplatedControl` /
+                    // `Panel` / `Border` 各自单独定义 —— 所以要按类型分别取，
+                    // 不能对基类反射一个统一的 BackgroundProperty（那样连编译都过不了）。
+                    var background = visual switch
+                    {
+                        Border border => border.Background,
+                        Panel layoutPanel => layoutPanel.Background,
+                        TemplatedControl templated => templated.Background,
+                        _ => null,
+                    };
+                    if (background is ISolidColorBrush brush && brush.Color == forbidden)
+                    {
+                        Assert.Fail(
+                            $"{visual.GetType().Name} 又刷上了 Ariadne.AccentLight 底 ⇒ "
+                            + "AutoMode 这一行正在变回用户否掉的那块满宽琥珀卡片（U213-E）。");
+                    }
+                }
             }
             finally
             {

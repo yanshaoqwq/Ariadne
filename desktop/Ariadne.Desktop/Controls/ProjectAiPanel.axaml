@@ -19,39 +19,71 @@
   -->
   <StackPanel Spacing="6" HorizontalAlignment="Stretch">
     <!-- AutoMode：在对话框**外**、其上方，**无边框无底**。
-         用 subtle 按钮而非 ToggleSwitch：项目里这一处的既有交互是整块点击切换，
-         换成开关会改变命中区语义（U164-D 另有一条专门讨论「应该是滑块」，
-         那条待做，此处不预先改，避免两条互相盖）。
+         形态 = 「一行标签 + 一个开关」（U213-E，并入 U164-D）。用户原话：
+         「要做的自动模式悬浮也变成了难看的卡片，做成悬浮文字和开关」。
 
-         ⚠️ **左** Padding 取 0：共同左基线由宿主 Padding 单独决定
-         （实测印证：AutoMode 标签的首个墨点与下方对话框外框左缘同在 x=1153，
-         对齐的是**列基线**而不是对话框的内文——所以左边一旦加内边距，
-         整条 AutoMode 就会从右栏那一列的基线上掉下来。别为了「左右对称」加它）。
-         **右** Padding 取 12（U208-E）：选中态的琥珀底是画在**控件自身**边界上的
-         （`Button.subtle.selected /template/ ContentPresenter` 的 Background，
-         而 ContentPresenter 满格铺满按钮、Padding 只内缩文字），
-         于是右侧一旦为 0，「开启」二字就直接压在色块边缘上。
-         实测（`r3-13-automode-toggle.png` 像素测量）：色块 x1153-1445，
-         状态文字墨点止于 1444 ⇒ **右余白 1px**。12 取自下方对话框自己的内边距
-         （`ProjectAiComposer` 的 `Padding="12,10"`），不自创新尺度。
-         ⚠️ 不要改成左右都 12 来"对称"：那会同时踩掉上面那条左基线。
-         ⚠️ 也不要指望在主题里给 `.selected` 加内边距 —— 底色和内边距作用在
-         同一个 ContentPresenter 上，在主题里改会波及全部 `Button.subtle`。
+         # 为什么从 `Button.subtle` 换成 `ToggleSwitch`
 
-         AutoMode 移出框后**不需要顶部 Padding**——这是它与发送键的关键差别：
+         旧写法是满宽 `Button.subtle` + `SelectedClass.IsSelected`。主题里
+         `Button.subtle.selected /template/ ContentPresenter` 会刷
+         `Ariadne.AccentLight` 的 Background，而 ContentPresenter 满格铺满按钮
+         ⇒ `HorizontalAlignment=Stretch` 下**一开启就是一整条满宽琥珀实底**，
+         正是用户说的「难看的卡片」。开关本身就是「开/关」的标准控件，
+         底色随控件一起消失——**不是把底色调淡，是不再有底色可调**。
+         （U164-D 那条「应该是滑块」原本待做、此处刻意不预先改；用户已就形态
+         表过态，两条现在一起做完，不存在互相盖的问题了。）
+
+         # 三条几何约束在换控件后各自的下场
+
+         ⚠️ **左内边距仍必须是 0**（这条**没变**，别动）：共同左基线由宿主
+         Padding 单独决定（实测印证：AutoMode 标签的首个墨点与下方对话框外框
+         左缘同在 x=1153，对齐的是**列基线**而不是对话框的内文）。所以本 Grid
+         不设 Padding、标签不加 Margin——一旦加，整条 AutoMode 就从右栏那一列的
+         基线上掉下来。别为了「左右对称」加它。
+
+         ✅ **右内边距 12 已随底色一起去掉，这不是回归。** 它当初（U208-E）
+         存在的**唯一**理由是「选中态琥珀底画在控件自身边界上，右侧为 0 时
+         『开启』二字压在色块边缘」（实测右余白仅 1px）。现在既没有色块、
+         也没有那行状态字（`StateText` 已删，见 `ProjectAutomationState` 注释），
+         被它保护的两件东西都不存在了 ⇒ 留着 12 反而会把开关从右基线上推开。
+         想复核请看 `AiPanelAndDiagnosticLayoutTests`：那条用例已改成
+         **反向**钉住「这一行里不再有任何 AccentLight 底」。
+
+         ⚠️ **仍然不要加顶部内边距**——这是它与发送键的关键差别：
          它已经不在框内，框的内边距管不到它，自己撑高度只会把两者推远。 -->
-    <Button Classes="subtle"
-            ctl:SelectedClass.IsSelected="{Binding ProjectAutomation.IsEnabled}"
-            HorizontalAlignment="Stretch"
-            HorizontalContentAlignment="Stretch"
-            Padding="0,2,12,2"
-            Command="{Binding ProjectAutomation.ToggleCommand}"
-            AutomationProperties.Name="{Binding ProjectAutomation.Label}">
-      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-        <TextBlock Grid.Column="0" Text="{Binding ProjectAutomation.Label}" Classes="caption" />
-        <TextBlock Grid.Column="1" Text="{Binding ProjectAutomation.StateText}" Classes="caption" />
-      </Grid>
-    </Button>
+    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+      <TextBlock Grid.Column="0"
+                 Text="{Binding ProjectAutomation.Label}"
+                 Classes="caption"
+                 VerticalAlignment="Center" />
+      <!-- ⚠️ `IsChecked` 绑的是 `IsEnabledRequest`，**不是** `IsEnabled`。
+           `IsEnabled` 是「后端回读后确认的权威值」、setter 私有；能力守卫在
+           `CanToggle`（无项目 / 正在落盘时不许拨）。直接双向绑 `IsEnabled`
+           会整条绕过守卫：开关拨得动，而 `SetEnabledAsync` 里那句
+           `!HasProjectRoot` 直接 return ⇒ 开关停在「开」上、后端什么都没发生。
+           理由全文见 `ProjectAutomationState.IsEnabledRequest` 的注释。
+
+           ⚠️ `OnContent` / `OffContent` 置 `{x:Null}`：`ToggleSwitch` 默认自带
+           英文 "On" / "Off" 文案。不清掉的话这一行会出现**两处**状态信息
+           （开关的位置 + 它自己那个英文词），而且那个英文词不走
+           `display_name.json`、切语言不变——等于在中文界面里硬编码英文。
+           用户要的是「文字 + 开关」两件东西，状态由开关的位置表达。 -->
+      <ToggleSwitch Grid.Column="1"
+                    IsChecked="{Binding ProjectAutomation.IsEnabledRequest, Mode=TwoWay}"
+                    IsEnabled="{Binding ProjectAutomation.CanToggle}"
+                    OnContent="{x:Null}"
+                    OffContent="{x:Null}"
+                    VerticalAlignment="Center"
+                    AutomationProperties.Name="{Binding ProjectAutomation.Label}" />
+    </Grid>
+    <!-- AGENTS.md「错误必须配文字」：不能只把开关灰掉。灰开关只说「现在不行」，
+         不说「为什么」，作者会当成功能坏了。只在**没项目**时出现——
+         `IsBusy` 那一瞬也会让开关灰掉，但给它配文案只会闪一下，比不给更糟
+         （所以判据用 `IsBlockedWithoutProject` 而非 `!CanToggle`）。 -->
+    <TextBlock Text="{Binding ProjectAutomation.BlockedReasonText}"
+               IsVisible="{Binding ProjectAutomation.IsBlockedWithoutProject}"
+               Classes="caption"
+               TextWrapping="Wrap" />
     <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
   </StackPanel>
 </UserControl>

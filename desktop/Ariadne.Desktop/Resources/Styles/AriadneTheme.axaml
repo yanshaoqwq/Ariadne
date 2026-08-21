@@ -240,6 +240,38 @@
           <SolidColorBrush x:Key="SliderTickBarFill" Color="{StaticResource Ariadne.Color.TextSubtle}" />
           <SolidColorBrush x:Key="SliderTickBarFillDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
           <SolidColorBrush x:Key="CheckBoxForegroundUnchecked" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <!-- U213-E：ToggleSwitch 资源键覆盖（浅色）。理由与键名清单见文件下方
+               `Styles.Resources` 里的 U213-E 注释块。与 CheckBox 同因同治：
+               必须在 Light/Dark **各放一份**，外层放一份会让暗色拿到亮色的值。 -->
+          <SolidColorBrush x:Key="ToggleSwitchContainerBackground" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchContainerBackgroundPointerOver" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchContainerBackgroundPressed" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchContentForeground" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchHeaderForegroundDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOff" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOffPointerOver" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOffPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOffDisabled" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOff" Color="{StaticResource Ariadne.Color.BorderDefault}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOffPointerOver" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOffPressed" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOffDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOnDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOn" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOnPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOnPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOnDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOff" Color="{StaticResource Ariadne.Color.TextSecondary}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPointerOver" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPressed" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOffDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOnDisabled" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
           <SolidColorBrush x:Key="Ariadne.ScrollThumb" Color="#38000000" />
           <SolidColorBrush x:Key="Ariadne.ScrollThumbHover" Color="#66000000" />
         </ResourceDictionary>
@@ -453,6 +485,37 @@
           <SolidColorBrush x:Key="SliderTickBarFill" Color="{StaticResource Ariadne.Color.TextSubtle}" />
           <SolidColorBrush x:Key="SliderTickBarFillDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
           <SolidColorBrush x:Key="CheckBoxForegroundUnchecked" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <!-- U213-E：ToggleSwitch 资源键覆盖（深色）。与上面浅色那份**逐键对应**，
+               缺一个键就会在该主题下露出 Fluent 默认色（不报错，静默）。 -->
+          <SolidColorBrush x:Key="ToggleSwitchContainerBackground" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchContainerBackgroundPointerOver" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchContainerBackgroundPressed" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchContentForeground" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchHeaderForegroundDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOff" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOffPointerOver" Color="{StaticResource Ariadne.Color.BackgroundHover}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOffPressed" Color="{StaticResource Ariadne.Color.BackgroundPressed}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOffDisabled" Color="Transparent" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOff" Color="{StaticResource Ariadne.Color.BorderDefault}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOffPointerOver" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOffPressed" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOffDisabled" Color="{StaticResource Ariadne.Color.BorderMuted}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOnDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOn" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOnPointerOver" Color="{StaticResource Ariadne.Color.AccentHover}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOnPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
+          <SolidColorBrush x:Key="ToggleSwitchStrokeOnDisabled" Color="{StaticResource Ariadne.Color.BorderStrong}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOff" Color="{StaticResource Ariadne.Color.TextSecondary}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPointerOver" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPressed" Color="{StaticResource Ariadne.Color.TextPrimary}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOffDisabled" Color="{StaticResource Ariadne.Color.TextSubtle}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
+          <SolidColorBrush x:Key="ToggleSwitchKnobFillOnDisabled" Color="{StaticResource Ariadne.Color.TextOnAccent}" />
           <SolidColorBrush x:Key="Ariadne.ScrollThumb" Color="#3DFFFFFF" />
           <SolidColorBrush x:Key="Ariadne.ScrollThumbHover" Color="#70FFFFFF" />
         </ResourceDictionary>
@@ -910,6 +973,59 @@
            内距需求，32 会让成组排列的权限清单之间出现明显空档。
            28 与 `ContextMenu MenuItem` 的 30 同一密度带，仍满足触控最小命中高度。 -->
       <x:Double x:Key="CheckBoxMinHeight">28</x:Double>
+
+      <!-- ========================================================
+           U213-E：ToggleSwitch 资源键覆盖（键本体在上面 Light/Dark 两份
+           ThemeDictionaries 里各一套，这里只放理由与判断依据）。
+
+           **为什么现在才有这段**：在本轮之前，全仓 `ToggleSwitch` 使用数 = **0**。
+           U213-E 把 AutoMode 那一行从「满宽 `Button.subtle` + 选中琥珀底」
+           换成「标签 + 开关」，于是**第一次**把这个控件引进产品。
+           不配样式的话它就是 FluentTheme 默认外观 —— 与 U164-B 的 Expander
+           同一个问题，只是换了控件：**把一个丑换成另一个丑**。
+           ⇒ 引入从未样式过的控件，必须与引入它的那次改动同批配色。
+
+           **为什么走资源键而不是 `/template/` 选择器**：与 CheckBox 同因
+           （见上面 U184 那段的优先级分析）。Fluent 的 ToggleSwitch 用
+           `:checked` / `:pointerover` 这类伪类样式直接写在模板部件
+           （`Border#OuterBorder` = 关态轨、`Border#SwitchKnobBounds` = 开态轨、
+           `Ellipse#SwitchKnobOn` / `#SwitchKnobOff` = 滑块、
+           `Grid#SwitchAreaGrid` = 命中区底）上，那是 `StyleTrigger`（=1）优先级，
+           而 `/template/` 是 Style（=3）—— **数字小者胜，弱两档、改不动**。
+           资源键是那些 setter 里 `{DynamicResource …}` 的来源，改源头即绕过之争。
+
+           **键名来自 `Avalonia.Themes.Fluent.dll` 里的实际字符串表**（UTF-16
+           抽取，不是凭印象写）—— 上游教程里的名字与本版本不一定一致，
+           而 Avalonia 缺资源键是**静默失效**：写错一个字就是死键，
+           不报错、不回落，只留下「看着配齐了」的错觉。
+
+           **覆盖了哪些态**（关/开 × 静息/悬停/按下/禁用，轨 + 描边 + 滑块）：
+           - 关态轨 `ToggleSwitchFillOff*`：静息**透明** + `BorderDefault` 描边。
+             与 CheckBox 未选中态同一手势（不铺底、只有一圈线），
+             这样「关」在纸色背景上不会变成一块灰色异物；
+             悬停 / 按下才浮出 `BackgroundHover` / `BackgroundPressed`。
+           - 开态轨 `ToggleSwitchFillOn*`：`AccentPrimary` / `AccentHover` /
+             `AccentPressed` —— 与 `Button.primary` 和 CheckBox 选中态**同一组色阶**，
+             所以三者的「被按下」手感是同一种。
+             ⚠️ 这里的青绿是**开关本体那 40×20 的轨道**，不是 U213-E 要消灭的
+             「满宽琥珀卡片」：后者是 `Button.subtle.selected` 的 `AccentLight`
+             刷在满格 ContentPresenter 上，随按钮一起删掉了。
+           - 描边 `ToggleSwitchStrokeOn*` 取与同态轨道**同色**而非 Transparent：
+             `ToggleSwitchOnStrokeThickness` 是 Fluent 自己的键、我们没覆盖，
+             若它非 0，透明描边会在开态轨上留一圈能透出底下关态轨的缝。
+             同色则无论那个厚度是多少都看不出接缝。
+           - 滑块 `…KnobFillOff*` 走文字色阶（关态是「墨点在轨上」）、
+             `…KnobFillOn*` 走 `TextOnAccent`（压在强调色上的前景，
+             与 CheckBox 勾号同一条规定，不写硬编码 `White`）。
+           - 禁用：轨 `BorderStrong`（不保留强调色——半透明青绿会变浑浊灰绿，
+             且「看着像能拨却拨不动」反而误导，与 `Button.primary:disabled` 同理），
+             关态描边退 `BorderMuted`。整行降透明另由下方 `ToggleSwitch:disabled` 承担。
+           - 命中区底 `ToggleSwitchContainerBackground*` 三态**全透明**：
+             这一条直接对着用户这轮的原话（「变成了难看的卡片」）——
+             Fluent 默认会在悬停/按下时给整个控件（含标签）铺一层底，
+             那正是「卡片」观感的另一个来源。AutoMode 悬在对话框外、
+             周围没有任何容器，一铺底就又冒出一块方形色片。
+           ======================================================== -->
 
       <!-- ========================================================
            U184：Slider 资源键覆盖。
@@ -2771,6 +2887,33 @@
        补间会让「不可用」这个信息延迟 140ms 才完全呈现，
        而这类级联禁用往往紧跟用户刚点的那一下，延迟会被读成卡顿。 -->
   <Style Selector="CheckBox">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Foreground" Duration="0:0:0.14" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- U213-E：ToggleSwitch 的样式层。配色部分同样在上方资源键覆盖里
+       （原因见那段注释：模板部件是 StyleTrigger 优先级，`/template/` 改不动）。
+       这里只放**资源键表达不了**的两件事，且都作用在 ToggleSwitch **宿主自身**。
+
+       禁用：与 `CheckBox:disabled` / `TextBox:disabled` 取同一档 0.5
+       （`UI组件状态表.md` §1.4 输入控件那一档，不是按钮的 0.45/0.6）。
+       ⚠️ 为什么资源键不够：那些键只管 40×20 的轨道和滑块，管不到**整行**。
+       AutoMode 无项目时开关会灰掉，旁边那句「还没打开项目」是文字解释，
+       而「这一整行现在不参与」需要整行降透明才一眼看得出。
+       ⚠️ 与 CheckBox 那条一致，刻意**不给 Opacity 加过渡**：
+       禁用态由绑定瞬时翻转，补间会让「不可用」延迟 140ms 才呈现，读作卡顿。 -->
+  <Style Selector="ToggleSwitch:disabled">
+    <Setter Property="Opacity" Value="0.5" />
+  </Style>
+  <!-- 开/关的颜色补间。140ms 是全仓最高频的过渡时长，与 CheckBox 同节奏。
+       ⚠️ 过渡挂宿主的 Foreground（标签文字色）；轨道与滑块的补间由 Fluent 自己
+       模板里的 `KnobTransitions` 承担（它有，滑块位移不是硬跳）。
+       挂 `/template/` 上的 Background 过渡是白费——那层是 StyleTrigger，
+       连 Setter 都递不进去。 -->
+  <Style Selector="ToggleSwitch">
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Foreground" Duration="0:0:0.14" Easing="CubicEaseOut" />

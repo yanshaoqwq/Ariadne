@@ -128,6 +128,26 @@ public static class ThemeApplication
         "SliderThumbBackground",
         "SliderThumbBackgroundPointerOver",
         "SliderThumbBackgroundPressed",
+        // U213-E：ToggleSwitch 的**开态**键。与上面 CheckBox / Slider 同因同治
+        // （字典里只能是 StaticResource ⇒ 个性化换色必须在运行时补一刀）。
+        //
+        // 这一条不是照抄先例，是**渲染取证抓出来的**：AutoMode 换成开关后，
+        // 在玫瑰主题的实机截图里，旁边的主按钮是玫瑰色 `#DA706A`，
+        // 而开关轨道仍是预设青绿 `#6FB9AD` —— 同屏两个强调色。
+        // ⇒ 引入任何吃 Fluent 资源键的新控件，都必须同批在这里登记它的强调色键，
+        // 否则「个性化换色」对这个控件永远无效，而且**不报错**。
+        //
+        // ⚠️ 只列跟随强调色的：关态轨/描边跟随边线色、关态滑块跟随文字色，
+        // 它们由字典的明暗两份各自给对，列进来只会在 Reset 时误删（同 CheckBox 注释）。
+        "ToggleSwitchFillOn",
+        "ToggleSwitchFillOnPointerOver",
+        "ToggleSwitchFillOnPressed",
+        "ToggleSwitchStrokeOn",
+        "ToggleSwitchStrokeOnPointerOver",
+        "ToggleSwitchStrokeOnPressed",
+        "ToggleSwitchKnobFillOn",
+        "ToggleSwitchKnobFillOnPointerOver",
+        "ToggleSwitchKnobFillOnPressed",
     };
 
     private static string? _lastTheme;
@@ -324,6 +344,18 @@ public static class ThemeApplication
         SetBrush(resources, "SliderThumbBackground", tokens.AccentPrimary);
         SetBrush(resources, "SliderThumbBackgroundPointerOver", accentLightHover);
         SetBrush(resources, "SliderThumbBackgroundPressed", tokens.AccentPressed);
+        // U213-E：ToggleSwitch 开态轨道 + 描边 + 滑块。轨与描边同色，
+        // 是为了不让 Fluent 自己的 `ToggleSwitchOnStrokeThickness`（我们没覆盖）
+        // 在开态轨上留一圈能透出关态轨的缝。滑块压在强调色上 ⇒ 跟随 TextOnAccent。
+        SetBrush(resources, "ToggleSwitchFillOn", tokens.AccentPrimary);
+        SetBrush(resources, "ToggleSwitchFillOnPointerOver", accentLightHover);
+        SetBrush(resources, "ToggleSwitchFillOnPressed", tokens.AccentPressed);
+        SetBrush(resources, "ToggleSwitchStrokeOn", tokens.AccentPrimary);
+        SetBrush(resources, "ToggleSwitchStrokeOnPointerOver", accentLightHover);
+        SetBrush(resources, "ToggleSwitchStrokeOnPressed", tokens.AccentPressed);
+        SetBrush(resources, "ToggleSwitchKnobFillOn", tokens.TextOnAccent);
+        SetBrush(resources, "ToggleSwitchKnobFillOnPointerOver", tokens.TextOnAccent);
+        SetBrush(resources, "ToggleSwitchKnobFillOnPressed", tokens.TextOnAccent);
 
         // 颜色键（Ariadne.Color.*）：渐变笔刷（主操作按钮、欢迎页卡、空态插画）绑的是 Color
         // 而非 Brush，只覆盖上面那批 Brush 时它们仍读字典里写死的预设色，于是个性化换色后
