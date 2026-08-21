@@ -587,12 +587,36 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         SaveGeneralCommand = new RelayCommand(() => _ = SaveGeneralAsync(), () => CanSave(GeneralSection));
         RefreshModelsCommand = new RelayCommand(() => _ = FetchModelsAsync(), CanUsePersistedProvider);
         TestProviderDraftCommand = new RelayCommand(() => _ = TestProviderDraftAsync(), CanTestProviderDraft);
+        // U211-A：`SaveModelCommand` 的门**保留** `CanSave(ModelsSection)`，这是刻意的。
+        // 没有读取基线时保存会真的丢数据：`BuildProviderDefaultModelRoutes()` 此刻拿到的
+        // 四条路由全是「无」占位（`_providerConfig` 为 null ⇒ `RebuildProviderDefaultModelRoutes`
+        // 填不出任何候选）⇒ `RouteTarget` 全返回 null ⇒ 后端
+        // `apply_provider_default_model_routes` 把项目里现有的四条默认路由**全部清空**，
+        // 而那四个值从头到尾没被读到过。
+        // 另有一层：`RunSectionSaveAsync` → `TryBeginSave` 自己就查 `IsLoaded(section)`，
+        // 只放开 CanExecute 会造出一个「点了就报『已禁止保存』」的按钮——比灰着更糟。
+        // 作者在这个状态下的正确出路是页面顶部失败横幅里的「重试」（它在 models
+        // 子树之外，不受本页禁用门影响）。
         SaveModelCommand = new RelayCommand(() => _ = SaveModelAsync(), () => CanSave(ModelsSection) && !IsLegacyOtherProvider);
         SaveProviderKeyCommand = new RelayCommand(() => _ = SaveProviderKeyAsync(), CanUsePersistedProvider);
         RevokeProviderKeyCommand = new RelayCommand(() => _ = RevokeProviderKeyAsync(), CanRevokeProviderKey);
         RemoveProviderCommand = new RelayCommand(() => _ = RemoveProviderAsync(), CanUsePersistedProvider);
-        AddProviderCommand = new RelayCommand(() => _ = AddProviderDraftAsync(), () => CanSave(ModelsSection));
-        AddProviderModelCommand = new RelayCommand(AddProviderModelRow, () => CanSave(ModelsSection));
+        // U211-A：「添加供应商」的门**只看项目是否打开**，不看 `IsLoaded(models)`。
+        //
+        // 它打开的是一张空表单：分配一个新 id（只读 `ProviderOptions` 里已有的 id 避重）、
+        // 灌一份 blank snapshot。**一个字节的已加载数据都不读**，所以「读取失败」
+        // 与它的正确性无关。而原先绑 `CanSave(ModelsSection)` 的后果是：
+        // 模型分区读取失败 ⇒ 列表空 + 添加按钮灰 ⇒ 新用户在产品的第一步上无路可走。
+        //
+        // 这是 U208-B「门禁粒度错了」的**镜像**：那条是该禁没禁，这条是不该禁却禁了。
+        // 同一处代码两个方向都错过——所以别把「放开」理解成「一律放开」，
+        // 逐个动作问「它读不读已加载数据、写不写盘」才是判据。
+        AddProviderCommand = new RelayCommand(() => _ = AddProviderDraftAsync(), () => _backend.HasProjectRoot);
+        // U211-A：同上，纯新建。往 `ProviderModels` 里加一行空的模型编辑行，
+        // 不读已加载数据、不发任何请求。它落在被 `IsProviderEditorEditable` 管着的
+        // 那个 Border 里，所以「草稿可编辑」那条放宽同时也决定了它到底点不点得动
+        // （只改 CanExecute 不改容器门 = 做一半，屏上仍是灰的）。
+        AddProviderModelCommand = new RelayCommand(AddProviderModelRow, () => _backend.HasProjectRoot);
         SavePresetsCommand = new RelayCommand(() => _ = SavePresetsAsync(), () => CanSave(PresetsSection));
         SaveTemplateRepositoryCommand = new RelayCommand(
             () => _ = SaveTemplateRepositoryAsync(),
@@ -1615,7 +1639,24 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
     public string ModelsText { get => _modelsText; set => SetProperty(ref _modelsText, value); }
     public string EmbeddingModelId { get => _embeddingModelId; set => SetProperty(ref _embeddingModelId, value); }
     public bool IsLegacyOtherProvider => string.Equals(ProviderType, "other", StringComparison.Ordinal);
-    public bool IsProviderEditorEditable => IsModelsEditable && !IsLegacyOtherProvider;
+
+    /// <summary>
+    /// 供应商编辑表单能不能改。
+    ///
+    /// U211-A：`|| IsSelectedProviderDraft` 是新加的一路。**草稿没有已落库基线可覆盖**，
+    /// 所以在「模型」分区读取失败时它照样安全可编辑；而读取失败时列表里全是
+    /// 内置目录填出来的草稿（<c>FillBuiltInProviderCatalog</c>），于是整张表单
+    /// 重新能打字——这正是缺陷里「Base URL 输入框打不进字」那一条。
+    ///
+    /// 反过来，**已落库** provider 在读取失败时刻意仍不可编辑：那时表单里装的是默认值
+    /// 而不是它在后端的真实值，放开编辑等于请作者在一份假数据上改。
+    ///
+    /// ⚠️ 这个属性挂在三个 `settings-section` 容器上（`SettingsPageView.axaml`），
+    /// Avalonia 的 `IsEnabled` 沿视觉树继承 ⇒ 判据必须落在 `IsEffectivelyEnabled`，
+    /// 断言子控件自己的 `IsEnabled` 会恒绿（U213-A 的教训）。
+    /// </summary>
+    public bool IsProviderEditorEditable =>
+        (IsModelsEditable || IsSelectedProviderDraft) && !IsLegacyOtherProvider;
     public bool ManualModelsVisible { get => _manualModelsVisible; set => SetProperty(ref _manualModelsVisible, value); }
     public ProviderModelRouteOption? SelectedDefaultLlmRoute
     {
@@ -2943,6 +2984,21 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
     {
         _failedSectionRetries[section] = retry;
         _failedSectionErrors[section] = error;
+        // U211-A：「模型」分区读失败时把供应商列表回落到内置目录。
+        //
+        // 为什么钩在这里而不是在 `Deferred` 的 apply 回调里：apply **只在成功时**执行，
+        // 失败路径上根本没有任何前端代码碰过 `ProviderOptions` ⇒ 它停在
+        // `RebuildProviderOptionsFromConfig` 上一次 `Clear()` 之后的空态。
+        // 而本方法是失败路径上唯一一定会过的收口（首帧失败与「重试」再失败都走它），
+        // 挂在这里能同时覆盖两种时机。
+        //
+        // 只在真的没读到时兜底：`_providerConfig` 非 null 说明曾成功读过一次
+        // （例如重试前那次成功、之后某次刷新失败），此时用内置目录盖掉真实数据
+        // 反而是把已知信息换成猜测。
+        if (string.Equals(section, ModelsSection, StringComparison.Ordinal) && _providerConfig is null)
+        {
+            RebuildProviderOptionsFromConfig(preferProviderId: ProviderId);
+        }
         for (var index = SectionLoadFailures.Count - 1; index >= 0; index--)
         {
             if (string.Equals(SectionLoadFailures[index].Section, section, StringComparison.Ordinal))
@@ -3842,7 +3898,10 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         _providerModelRefreshSession.Invalidate();
         _providerConfig = status;
         RebuildProviderOptionsFromConfig(status.DefaultLlmProviderId);
-        SetSectionBaseline(ModelsSection);
+        // 这个钩子模拟的是**一次成功读取**（生产路径上等价于 Deferred 的 apply 回调
+        // 之后 AcceptLoaded 落基线），所以要显式标 loaded；U211-A 把
+        // `SetBaseline` 的隐式标记去掉了，这里必须自己说出来。
+        SetSectionBaseline(ModelsSection, markLoaded: true);
     }
 
     internal Task RefreshProviderModelsForTestsAsync() => FetchModelsAsync();
@@ -4013,8 +4072,14 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         ProviderOptions.Clear();
         if (_providerConfig is null)
         {
+            // U211-A：`_providerConfig` 为 null 时**不能**留一片空列表。
+            // 这个分支在「模型」分区读取失败时必达（`Deferred` 的 apply 回调只在成功时跑，
+            // 所以 `_providerConfig` 停在 null），而 `ProviderOptions.Clear()` 已经执行过了
+            // ⇒ 屏上一个供应商都不剩。首次使用的第一步就是这一页，作者只能自己猜
+            // 「我该添加什么」——openai / anthropic / gemini 是**内置目录**而不是用户数据，
+            // 藏起来没有任何收益。
+            FillBuiltInProviderCatalog(preferProviderId);
             RebuildAvailableLlmModelOptions();
-            ProviderStatus = _displayNames.Text("ui.settings.models.no_provider_status");
             return;
         }
 
@@ -4050,6 +4115,71 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
             });
         RebuildAvailableLlmModelOptions();
         RebuildProviderDefaultModelRoutes();
+    }
+
+    /// <summary>
+    /// U211-A：内置服务目录。与后端 <c>default_provider_status_configs</c>
+    /// （`core/src/commands.rs`）返回的**同一批 id**，那份才是权威——这里只是在读取失败、
+    /// 拿不到那份返回时的前端兜底，让列表不至于是空的。
+    ///
+    /// ⚠️ 后端加了新的内置 provider 要同步这里，否则读取失败时的目录会比正常态少一项。
+    /// 守卫见 <c>ModelsPageAlwaysOffersAWayInTests</c> 里对 id 集合的断言。
+    ///
+    /// provider_type 用后端的对应值（`open_ai` / `anthropic` / `gemini`），
+    /// **不是** `CreateBlankDraftSnapshot` 的 `open_ai_compatible`：这三个是有专属协议的
+    /// 已知服务，落成「兼容服务」会让作者以为还得自己填 Base URL。
+    /// 显示名复用 `provider_type.*` 的既有键（值就是 OpenAI / Anthropic / Gemini），
+    /// 不新造一套只为它们服务的文案键。
+    /// </summary>
+    private static readonly (string ProviderId, string ProviderType, string DisplayNameKey)[]
+        BuiltInProviderCatalog =
+        {
+            ("openai", "open_ai", "ui.settings.models.provider_type.open_ai"),
+            ("anthropic", "anthropic", "ui.settings.models.provider_type.anthropic"),
+            ("gemini", "gemini", "ui.settings.models.provider_type.gemini"),
+        };
+
+    /// <summary>
+    /// 用内置目录填满 <see cref="ProviderOptions"/>，并选中其中一项进入编辑。
+    ///
+    /// 全部标 <c>isDraft: true</c>：这批项**没有**经过本项目的后端确认，
+    /// 「已落库」这个状态此刻根本不可知。标成非草稿会让 <c>CanUsePersistedProvider</c>
+    /// 放开「保存密钥 / 移除 / 刷新」三个动作——那会拿一份没读到的状态去发写请求。
+    ///
+    /// 状态行用专门的键说明「这是内置目录、本项目配置尚未读到」，而不是沿用
+    /// `no_provider_status`（「还没有服务状态」）：后者在列表里明明有三项时是句假话，
+    /// 而且它说不出「你现在看到的不是本项目的真实配置」这件唯一重要的事。
+    /// </summary>
+    private void FillBuiltInProviderCatalog(string? preferProviderId)
+    {
+        foreach (var entry in BuiltInProviderCatalog)
+        {
+            var option = CreateProviderOption(
+                entry.ProviderId,
+                _displayNames.Text(entry.DisplayNameKey),
+                _displayNames.Text("ui.common.not_configured"),
+                isDraft: true);
+            // 先把表单快照挂上：`SelectProviderForEditing` 优先用快照，
+            // 没有快照时会走 `CreateBlankDraftSnapshot` 的默认类型
+            // `open_ai_compatible`，内置目录的类型就丢了。
+            var snapshot = CreateBlankDraftSnapshot(
+                entry.ProviderId,
+                option.DisplayName,
+                entry.ProviderType);
+            option.CaptureForm(snapshot);
+            ProviderOptions.Add(option);
+        }
+
+        var selected = ProviderOptions.FirstOrDefault(option =>
+                string.Equals(option.ProviderId, preferProviderId, StringComparison.Ordinal))
+            ?? ProviderOptions.FirstOrDefault();
+        if (selected?.PeekForm() is { } form)
+        {
+            ApplyFormSnapshot(form);
+            SetSelectedProviderOption(selected.ProviderId);
+        }
+
+        ProviderStatus = _displayNames.Text("ui.settings.models.builtin_catalog_status");
     }
 
     private ProviderOptionViewModel CreateProviderOption(
@@ -4267,6 +4397,8 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
                         _selectedProviderOption = null;
                         OnPropertyChanged(nameof(SelectedProviderOption));
                         OnPropertyChanged(nameof(IsSelectedProviderDraft));
+                        // U211-A：选中项清空 ⇒ 不再是草稿 ⇒ 编辑门要重算。
+                        NotifyProviderCommands();
                     }
                     else if (option?.PeekForm() is { } cleanSnapshot)
                     {
@@ -4365,11 +4497,19 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         }
     }
 
-    private static ProviderFormSnapshot CreateBlankDraftSnapshot(string id, string displayName) =>
+    /// <param name="providerType">
+    /// 服务类型。默认 `open_ai_compatible` 是「用户手动新建一个我们不认识的服务」这条路的正解。
+    /// U211-A 的内置目录要传自己的类型（`open_ai` / `anthropic` / `gemini`）——
+    /// 它们是有专属协议的已知服务，落成「兼容服务」会让作者以为还得自己填 Base URL。
+    /// </param>
+    private static ProviderFormSnapshot CreateBlankDraftSnapshot(
+        string id,
+        string displayName,
+        string providerType = "open_ai_compatible") =>
         new()
         {
             ProviderId = id,
-            ProviderType = "open_ai_compatible",
+            ProviderType = providerType,
             DisplayName = displayName,
             BaseUrl = string.Empty,
             Enabled = true,
@@ -5189,6 +5329,8 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
                     _selectedProviderOption = null;
                     OnPropertyChanged(nameof(SelectedProviderOption));
                     OnPropertyChanged(nameof(IsSelectedProviderDraft));
+                    // U211-A：同上，选中项清空后编辑门要重算。
+                    NotifyProviderCommands();
                 }
             }
             finally
@@ -7576,9 +7718,14 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         return fields.ToDictionary(field => field, field => current[field], StringComparer.Ordinal);
     }
 
-    private void SetSectionBaseline(string section)
+    /// <param name="markLoaded">
+    /// U211-A：只有代表「一次成功读取」的调用方才传 true。
+    /// 普通的「把当前表单当成干净基线」（切换供应商等纯 UI 动作）必须传 false，
+    /// 否则会把读取失败的分区伪装成已加载、把保存门开回来。
+    /// </param>
+    private void SetSectionBaseline(string section, bool markLoaded = false)
     {
-        _draftState.SetBaseline(section, CurrentSectionValues(section));
+        _draftState.SetBaseline(section, CurrentSectionValues(section), markLoaded);
         NotifySectionStateChanged();
         UpdateDirtyState();
     }
@@ -7588,6 +7735,16 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         && !_draftState.IsSaving(section)
         && !(section == ModelsSection && _providerRemovalInProgress);
 
+    /// <summary>
+    /// 「刷新模型 / 保存密钥 / 移除供应商」共用的门。
+    ///
+    /// U211-A：`CanSave(ModelsSection)` 这一条**保留**。这三个动作都要求 provider
+    /// 已经在本项目落库（后两个还会写盘 / 动凭据），而「它在后端是什么状态」正是
+    /// 读取失败时不可知的那件事。下面 `_providerConfig?...Configured` 那一条在
+    /// `_providerConfig` 为 null 时本来就为假，所以放开 `CanSave` 也不会改变行为——
+    /// 但留着它是对的：它表达的是「这组动作依赖已加载状态」这个意图，
+    /// 而不是靠另一条判定碰巧覆盖到。
+    /// </summary>
     private bool CanUsePersistedProvider()
     {
         var selected = SelectedProviderOption;
@@ -7599,8 +7756,17 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
                 && string.Equals(provider.Provider, selected.ProviderId, StringComparison.Ordinal)) == true;
     }
 
+    /// <summary>
+    /// 「测试连接」的门。
+    ///
+    /// U211-A：**放开** `CanSave(ModelsSection)`，改成只要项目已打开。理由：
+    /// `TestProviderDraftAsync` 是一次**只读探测**——它把当前表单的内容发给后端
+    /// 试连一下，不写配置、不写凭据、不读任何已加载数据。
+    /// 作者填完 Base URL 与 key 的第一个动作就是想先测一下；在读取失败时把它灰掉
+    /// 没有任何安全收益，只是把人堵死在「不知道自己填对没有」。
+    /// </summary>
     private bool CanTestProviderDraft() =>
-        CanSave(ModelsSection)
+        _backend.HasProjectRoot
         && SelectedProviderOption is not null
         && !IsLegacyOtherProvider;
 
@@ -7623,6 +7789,10 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         SaveProviderKeyCommand?.NotifyCanExecuteChanged();
         RevokeProviderKeyCommand?.NotifyCanExecuteChanged();
         RemoveProviderCommand?.NotifyCanExecuteChanged();
+        // U211-A：`IsProviderEditorEditable` 现在也看 `IsSelectedProviderDraft`
+        // （草稿在读取失败时仍可编辑），而选中项换人正是走这里通知的 ⇒
+        // 派生属性必须跟着重算，否则「选中草稿」与「表单能不能打字」会脱节。
+        OnPropertyChanged(nameof(IsProviderEditorEditable));
     }
 
     private void UpdateDirtyState() => UpdateDirtyState(updateStatus: true);
@@ -7854,6 +8024,10 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         OnPropertyChanged(nameof(IsAppRuntimeEditable));
         OnPropertyChanged(nameof(IsRetrievalEditable));
         OnPropertyChanged(nameof(IsGitEditable));
+        // U211-A：`IsProviderEditorEditable` 由 `IsModelsEditable` 派生，
+        // 后者在这里通知了，派生的那个也必须通知——否则读取从失败恢复成功后，
+        // 供应商表单会停在上一次算出的可编辑性上（Avalonia 不会替你重算）。
+        OnPropertyChanged(nameof(IsProviderEditorEditable));
         // U178-A：骨架态的判据是「有没有分区落过值」，而分区落值正是在这里被通知的。
         // 漏掉这一条会让骨架一直铺到 IsLoading 清零那一刻，
         // 于是先到的分区明明有值也看不见——「读到即显示」就成了空话。

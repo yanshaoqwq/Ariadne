@@ -573,6 +573,7 @@
   "ui.settings.models.models.placeholder": "1行に1モデル：id, 能力, コンテキスト, 入力価格, 出力価格",
   "ui.settings.models.new_provider_name": "新しいプロバイダー",
   "ui.settings.models.no_provider_status": "まだプロバイダーの状態がありません。",
+  "ui.settings.models.builtin_catalog_status": "以下は組み込みのプロバイダーカタログです。このプロジェクトのプロバイダー設定は読み込めませんでした。変更を保存する前に、ページ上部の「再試行」で読み込み直してください。",
   "ui.settings.models.output_cost": "出力価格 / 100万トークン",
   "ui.settings.models.provider": "プロバイダー",
   "ui.settings.models.provider_added": "下書きプロバイダー {id} を追加しました。保存すると有効になります。",

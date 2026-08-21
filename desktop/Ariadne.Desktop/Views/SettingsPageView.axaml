@@ -445,10 +445,26 @@
             </Border>
           </StackPanel>
 
-          <StackPanel IsVisible="{Binding IsModelsSelected}" IsEnabled="{Binding IsModelsEditable}" Spacing="18">
+          <!-- U211-A：本 StackPanel 只绑 IsVisible，**刻意不绑 IsEnabled**。
+               原先写的是 IsEnabled="{Binding IsModelsEditable}"，而
+               IsModelsEditable = CanSave("models")，第一个条件就是「模型分区读取成功」
+               ⇒ 读取失败时整棵子树一起变灰：供应商列表空白、Base URL 打不进字、
+               「保存密钥 / 测试连接 / 刷新 / 移除」全灰、「添加供应商」点了零反应。
+               而这一页是首次使用的第一步 ⇒ 对新用户 100% 阻断，且**没有任何出路**。
+               ⚠️ Avalonia 的 IsEnabled 沿视觉树继承（实际可交互性看 IsEffectivelyEnabled），
+               子级再写 IsEnabled="True" 也压不回来 ⇒ 唯一的解法是祖先链上不设这道门。
+               这与权限页 U213-A 的修法、以及「检索」/「版本控制」两页早已采用的写法一致。
+               ⇒ 门下沉到各个「有读取基线才能编辑」的小节自身（下方三处
+               IsEnabled="{Binding IsProviderEditorEditable}"）。
+               **新增小节时**：会写盘或依赖已加载基线的表单要自己绑 IsEnabled；
+               新建类 / 只读探测类的入口不要绑，也不要为了省事把门重新提到这一层。
+               守卫见 `ModelsPageAlwaysOffersAWayInTests`。 -->
+          <StackPanel IsVisible="{Binding IsModelsSelected}" Spacing="18">
             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="14">
               <TextBlock Grid.Column="0" Text="{Binding ModelsTitle}" Classes="title" />
-              <Button Grid.Column="1" Classes="secondary" Content="{Binding TestProviderDraftText}" Command="{Binding TestProviderDraftCommand}" />
+              <!-- 「测试连接」是只读探测、「刷新」要求 provider 已落库：
+                   两者各自的 CanExecute 已经表达了前提，容器上不再叠一道门。 -->
+              <Button Grid.Column="1" x:Name="TestProviderDraftButton" Classes="secondary" Content="{Binding TestProviderDraftText}" Command="{Binding TestProviderDraftCommand}" />
               <Button Grid.Column="2" Classes="secondary" Content="{Binding RefreshText}" Command="{Binding RefreshModelsCommand}" />
             </Grid>
             <TextBlock Text="{Binding ProviderScopeHelpText}" Classes="caption" TextWrapping="Wrap" />
@@ -463,14 +479,19 @@
                   <StackPanel DockPanel.Dock="Top" Spacing="6" Margin="0,0,0,12">
                     <TextBlock Text="{Binding ProviderListTitle}" Classes="subtitle" />
                   </StackPanel>
+                  <!-- U211-A：这个按钮是「模型」页唯一的**出路**——列表为空时作者只能靠它。
+                       它自己不绑 IsEnabled，前提由 AddProviderCommand.CanExecute
+                       （只看项目是否打开）表达；祖先链上也不许有门，否则出路会跟着
+                       故障一起灰掉。x:Name 是守卫的着力点，改名要同步用例。 -->
                   <Button DockPanel.Dock="Bottom"
+                          x:Name="AddProviderButton"
                           Classes="secondary"
                           HorizontalAlignment="Stretch"
                           Margin="0,12,0,0"
                           Content="{Binding AddProviderText}"
                           Command="{Binding AddProviderCommand}" />
                   <ScrollViewer MaxHeight="360" VerticalScrollBarVisibility="Auto">
-                    <ItemsControl ItemsSource="{Binding ProviderOptions}">
+                    <ItemsControl x:Name="ProviderCatalogList" ItemsSource="{Binding ProviderOptions}">
                       <ItemsControl.ItemTemplate>
                         <DataTemplate DataType="{x:Type vm:ProviderOptionViewModel}">
                           <Button Classes="nav"
@@ -524,6 +545,7 @@
                              AutomationProperties.Name="{Binding ProviderDisplayNameLabel}" />
                     <TextBlock Grid.Row="3" Grid.Column="0" Text="{Binding BaseUrlLabel}" Classes="secondary" VerticalAlignment="Center" />
                     <TextBox Grid.Row="3" Grid.Column="1"
+                             x:Name="ProviderBaseUrlInput"
                              Text="{Binding ProviderBaseUrl, Mode=TwoWay}"
                              PlaceholderText="{Binding BaseUrlPlaceholder}"
                              AutomationProperties.Name="{Binding BaseUrlLabel}"

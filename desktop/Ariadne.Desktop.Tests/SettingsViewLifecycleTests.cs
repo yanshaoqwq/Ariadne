@@ -123,7 +123,13 @@ public sealed class SettingsViewLifecycleTests
             Create<IAriadneBackendClient, NoopBackend>();
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) =>
-            throw new NotSupportedException(targetMethod?.Name);
+            // U211-A：`HasProjectRoot` 必须放行。本用例只关心视觉树生命周期，从不加载数据，
+            // 但「模型」页几个按钮的 CanExecute 现在会在 attach 时读这个属性
+            // （出路的门改成只看项目是否打开）⇒ 一律抛异常会让挂载阶段就炸。
+            // 其余方法仍然抛：这个桩的立场是「谁多调了一条后端就当场看得见」。
+            string.Equals(targetMethod?.Name, "get_HasProjectRoot", StringComparison.Ordinal)
+                ? false
+                : throw new NotSupportedException(targetMethod?.Name);
     }
 }
 

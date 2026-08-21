@@ -578,6 +578,7 @@
   "ui.settings.models.models.placeholder": "One model per line: id, capability, context, input price, output price",
   "ui.settings.models.new_provider_name": "New provider",
   "ui.settings.models.no_provider_status": "No provider status yet.",
+  "ui.settings.models.builtin_catalog_status": "Below is the built-in provider catalog. This project's provider configuration could not be loaded — use \"Retry\" at the top of the page to load it again before saving changes.",
   "ui.settings.models.output_cost": "Output price / 1M tokens",
   "ui.settings.models.provider": "Provider",
   "ui.settings.models.provider_added": "Draft provider {id} added; save to apply.",

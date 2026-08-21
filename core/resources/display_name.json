@@ -341,6 +341,7 @@
   "ui.settings.models.key_status": "密钥",
   "ui.settings.models.default_provider": "默认服务",
   "ui.settings.models.no_provider_status": "还没有服务状态。",
+  "ui.settings.models.builtin_catalog_status": "下面是内置服务目录；本项目的服务配置尚未读取成功，请先用页面顶部的「重试」重新读取，再保存改动。",
   "ui.settings.presets.title": "预设",
   "ui.settings.presets.desc": "配置模型别名、节点预设、节点默认值和模板来源。",
   "ui.settings.presets.market": "模板市场预设",
