@@ -607,8 +607,16 @@ public sealed class DesktopUxHelpersTests
         Assert.Contains("BorderThickness=\"0\"", composer, StringComparison.Ordinal);
 
         // Both product pages host the same control (no duplicated composer markup).
-        Assert.Contains("ctl:ProjectAiComposer", works, StringComparison.Ordinal);
-        Assert.Contains("ctl:ProjectAiComposer", workspace, StringComparison.Ordinal);
+        //
+        // ⚠️ 2026-08-21 更正：断言从 `ctl:ProjectAiComposer` 改为 `ctl:ProjectAiPanel`。
+        // U164-E 之后两页挂的是 **Panel**（它把 AutoMode 那一行移到了对话框之外，
+        // 内部再包 Composer），见 `WorksPageView.axaml:1050` / `WorkspacePageView.axaml:2049`
+        // 的注释「与工作区/作品页共用 ProjectAiPanel」。
+        // ⇒ 用例要守的性质是「两页共用同一个控件、没有复制一份 composer 标记」，
+        //   那条性质**仍然成立**，只是共用的那个控件外面又套了一层。
+        //   把控件名钉死等于守「别再套一层」，而那不是本用例的诉求。
+        Assert.Contains("ctl:ProjectAiPanel", works, StringComparison.Ordinal);
+        Assert.Contains("ctl:ProjectAiPanel", workspace, StringComparison.Ordinal);
         Assert.DoesNotContain("Classes=\"ai-composer\"", works, StringComparison.Ordinal);
         Assert.DoesNotContain("Classes=\"ai-composer\"", workspace, StringComparison.Ordinal);
 
@@ -1061,10 +1069,33 @@ public sealed class DesktopUxHelpersTests
         // 输入框改为独占一行、发送键落到它下方右侧：原先两者分列同一行，
         // 输入框只剩「整框宽度减去发送键」那一截，看到的框比能写的区域宽。
         // 守卫的是「输入框铺满整框宽度」这条性质，不是它当年在第几列。
-        Assert.Contains("<TextBox Grid.Row=\"1\"", composer, StringComparison.Ordinal);
+        //
+        // ⚠️ 两条断言在 2026-08-21 按同一理由更正：**它们把「性质」写成了具体的结构字符串**。
+        //
+        // ① 原为 `Assert.Contains("<TextBox Grid.Row=\"1\"", composer)` ——
+        //    U164-E 之后 Composer 是**单格 Panel、不是 Grid 的多行**
+        //   （`ProjectAiComposer.axaml:44` 的注释写明「改回 RowDefinitions 会让高度…」）。
+        //    产品改对了、用例留在旧结构上，于是它守的其实是「别修 U164-E」。
+        // ② 原为 `Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", workspace)` ——
+        //    U206-B 给画布页的项目 AI 页加了「查设定出处」面板，行定义变成 `Auto,*,Auto`。
+        //    面板挂第 0 行、对话区第 1 行、输入面第 2 行 ⇒ **性质不变，字符串变了**。
+        //
+        // ⇒ 现在断言的是那条真正的性质：容器与输入面都横向铺满。
+        //   行数留给版式自由变动 —— 那本来就不是本用例要守的东西。
+        Assert.Contains("<TextBox", composer, StringComparison.Ordinal);
         Assert.DoesNotContain("<TextBox Grid.Column=\"0\"", composer, StringComparison.Ordinal);
-        Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", works, StringComparison.Ordinal);
-        Assert.Contains("RowDefinitions=\"*,Auto\" HorizontalAlignment=\"Stretch\"", workspace, StringComparison.Ordinal);
+        foreach (var (name, markup) in new[] { ("WorksPageView", works), ("WorkspacePageView", workspace) })
+        {
+            var projectAiTab = markup.IndexOf(
+                "IsVisible=\"{Binding IsProjectAiTab}\"", StringComparison.Ordinal);
+            Assert.True(projectAiTab > 0, $"{name} 里找不到项目 AI 页的容器");
+            // 那个容器所在的那一行标签必须自己也横向铺满，否则输入面无论怎么 Stretch
+            // 都只能铺满一个没铺满的父容器。
+            var lineEnd = markup.IndexOf('\n', projectAiTab);
+            var containerLine = markup[projectAiTab..(lineEnd < 0 ? markup.Length : lineEnd)];
+            Assert.Contains("HorizontalAlignment=\"Stretch\"", containerLine, StringComparison.Ordinal);
+        }
+
         Assert.Contains("HorizontalAlignment=\"Stretch\" />", works, StringComparison.Ordinal);
         Assert.Contains("HorizontalAlignment=\"Stretch\" />", workspace, StringComparison.Ordinal);
     }

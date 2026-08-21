@@ -19,7 +19,16 @@ public sealed class WorksEditorCommandTests
         vm.RequestFocusQuickEditInstruction = () => focusRequests++;
 
         Assert.True(vm.OpenQuickEditCommand.TryExecute());
-        Assert.True(vm.IsEditMode);
+        // U130 之后**刻意不再**把作者推进修改模式：按 Ctrl+K 要的是「跟 AI 说一句」，
+        // 改写结果落在 diff 预览里，同意之后才需要编辑器在场。
+        // 本行原先断言 `IsEditMode` 为真 —— 那是 U130 之前的行为，
+        // 产品改对了而用例没跟改（`WorksPageViewModel.cs:1463` 的注释写明了这个决定）。
+        // ⚠️ 判据改成**反向钉住**，而不是删掉这一行：删掉的话
+        // 「哪天有人又把切模式加回 OpenQuickEdit」不会有任何东西变红。
+        Assert.False(
+            vm.IsEditMode,
+            "OpenQuickEdit 把作者推进了修改模式 —— U130 刻意取消了这个行为"
+            + "（Ctrl+K 只是「跟 AI 说一句」，不是「我要开始改」）。");
         Assert.Equal(1, focusRequests);
         Assert.False(vm.QuickAiCommand.TryExecute());
     }

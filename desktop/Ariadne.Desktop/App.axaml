@@ -67,7 +67,8 @@
                      Fill="{DynamicResource Ariadne.AccentPrimary}"
                      IsVisible="{Binding IsPending}" />
             <Border Grid.Column="3" Classes="badge" IsVisible="{Binding HasBadge}" VerticalAlignment="Center">
-              <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="10"
+              <TextBlock Text="{Binding BadgeCount}" Foreground="White"
+                         FontSize="{DynamicResource Ariadne.Size.Badge}"
                          HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
           </Grid>
@@ -81,7 +82,13 @@
             <Border Grid.Column="1" Classes="badge"
                     HorizontalAlignment="Right" VerticalAlignment="Top"
                     Margin="0,-2,-4,0" IsVisible="{Binding HasBadge}">
-              <TextBlock Text="{Binding BadgeCount}" Foreground="White" FontSize="9"
+              <!-- U204-B：折叠态原写 9、展开态原写 10，两处用的是**同一个**
+                   `Border.badge`（18×18 定高 + Padding 5,0），却各写一个数字且
+                   没有任何注释交代那个 9 ⇒ 判为漂移而非决定，一并收到
+                   `Ariadne.Size.Badge`（该 token 原值 10.5 全仓零引用，
+                   已按「token 记录实际生效的决策」改为 10）。 -->
+              <TextBlock Text="{Binding BadgeCount}" Foreground="White"
+                         FontSize="{DynamicResource Ariadne.Size.Badge}"
                          HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
             <!-- 折叠态同样要能看出「在读」：文字不在，只剩图标，指示更不可省 -->

@@ -111,7 +111,12 @@ public sealed class WorksPageGuardrailTests
     [Fact]
     public void CreateChapterBlockedReason_IsBoundInTheMarkup()
     {
-        var markup = ReadWorksMarkup();
+        // ⚠️ **剥 XAML 注释后再匹配**。本条对源码原文做 `Contains`，
+        // `<!-- … -->` 里若出现同样的字符串就会假命中 ——
+        // U210 施工时正是这样假绿的（变异标记里复述了被断言的字符串）。
+        // 本文件上面那条用例已经因为同类原因红过一次（我的注释引用了缺陷代码），
+        // 那次教训只落在了 C# 行注释上，XAML 这一侧当时没跟着做。
+        var markup = StripXamlComments(ReadWorksMarkup());
 
         Assert.Contains(
             "{Binding CreateChapterBlockedText}",
@@ -122,6 +127,12 @@ public sealed class WorksPageGuardrailTests
             markup,
             StringComparison.Ordinal);
     }
+
+    /// <summary>剥掉 <c>&lt;!-- --&gt;</c> 注释，只留真实标记。</summary>
+    private static string StripXamlComments(string markup)
+        => System.Text.RegularExpressions.Regex.Replace(
+            markup, "<!--.*?-->", string.Empty,
+            System.Text.RegularExpressions.RegexOptions.Singleline);
 
     /// <summary>那句原因文案的键必须真的存在，否则界面显示方括号原文。</summary>
     [Fact]

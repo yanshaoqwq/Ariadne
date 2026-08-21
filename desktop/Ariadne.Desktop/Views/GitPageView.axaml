@@ -43,7 +43,7 @@
         <Border Grid.Row="1"
                 Classes="layer"
                 BorderBrush="{DynamicResource Ariadne.StatusWarning}"
-                BorderThickness="1"
+                BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                 Padding="14,11"
                 Margin="24,8,20,0"
                 IsVisible="{Binding IsMaintenanceFailed}">
@@ -79,11 +79,18 @@
             <Ellipse Grid.Column="0" Width="6" Height="6"
                      Fill="{DynamicResource Ariadne.AccentPrimary}"
                      VerticalAlignment="Center" />
-            <TextBlock Grid.Column="1"
-                       Text="{Binding StatusText}"
-                       Classes="caption"
-                       TextWrapping="Wrap"
-                       VerticalAlignment="Center" />
+            <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+              <TextBlock Text="{Binding StatusText}"
+                         Classes="caption"
+                         TextWrapping="Wrap" />
+              <!-- U198-B：失败补救行，与状态行同一条 strip 内分主次。 -->
+              <TextBlock Text="{Binding RecoveryText}"
+                         Classes="caption"
+                         Foreground="{DynamicResource Ariadne.StatusWarning}"
+                         IsVisible="{Binding HasRecoveryText}"
+                         TextWrapping="Wrap"
+                         AutomationProperties.LiveSetting="Polite" />
+            </StackPanel>
           </Grid>
         </Border>
 
@@ -93,13 +100,24 @@
            原缺陷正是「空态与错误态共用一个判据」（`Commits.Count == 0`），
            于是后端报错时有 200 个存档点的项目被告知「你没有存档」。 -->
       <Grid Grid.Row="3">
-        <Grid IsVisible="{Binding ShowContent}" RowDefinitions="Auto,*">
+        <Grid IsVisible="{Binding ShowContent}" RowDefinitions="Auto,Auto,*">
+          <!-- U210：存档流的**静息态描述**（「共 N 个存档点」）在这里，
+               不再挤进上面那条状态 strip。
+               状态 strip 承载的是「刚才那次动作的结果」（已存档 / 已切换到回档副本
+               / 失败原因），而这句是「列表现在是什么样」——两者寿命不同：
+               原来共用一个属性时，刷新总是后写，于是每一句成功文案
+               都被自己的刷新抹掉，作者从来没读到过。
+               位置紧贴列表上方，因为它描述的正是下方这份列表。 -->
+          <TextBlock Grid.Row="0"
+                     Text="{Binding HistorySummaryText}"
+                     Classes="caption"
+                     Margin="24,0,20,8" />
           <!-- U182-K：已有存档时出错走这条内容内错误条（ContentError），
                不把列表清掉换成整页错误页——那份列表是用户手上唯一的诊断材料。 -->
-          <Border Grid.Row="0"
+          <Border Grid.Row="1"
                   Classes="layer"
                   BorderBrush="{DynamicResource Ariadne.StatusError}"
-                  BorderThickness="1"
+                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                   Padding="12,8"
                   Margin="24,0,20,8"
                   IsVisible="{Binding IsContentError}">
@@ -113,7 +131,7 @@
                       Command="{Binding RefreshCommand}" />
             </StackPanel>
           </Border>
-          <ListBox Grid.Row="1"
+          <ListBox Grid.Row="2"
                  ItemsSource="{Binding Commits}"
                  SelectedItem="{Binding SelectedCommit, Mode=TwoWay}"
                  SelectionMode="Single"
@@ -250,7 +268,7 @@
              必须带重试：「错误必须配文字」之外还得给出路，否则用户只能重启。 -->
         <Border Classes="empty-state" IsVisible="{Binding IsStandaloneError}" VerticalAlignment="Center">
           <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="420">
-            <TextBlock Text="{Binding ErrorTitle}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
+            <TextBlock Text="{Binding ErrorTitle}" Classes="empty-title" HorizontalAlignment="Center" TextAlignment="Center" />
             <TextBlock Text="{Binding ErrorText}"
                        Classes="secondary"
                        HorizontalAlignment="Center"
@@ -268,7 +286,7 @@
         <Border Classes="empty-state" IsVisible="{Binding ShowEmpty}" VerticalAlignment="Center">
           <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="420">
             <ctl:EmptyStateArt Kind="GitRag" Width="210" Height="168" HorizontalAlignment="Center" />
-            <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
+            <TextBlock Text="{Binding EmptyTitle}" Classes="empty-title" HorizontalAlignment="Center" TextAlignment="Center" />
             <TextBlock Text="{Binding EmptyHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
             <!-- U182-M：把「点左上角项目名」这句位置描述换成真能点的动作。
                  只在 IdleNeedProject 且宿主注入了打开链路时出现——

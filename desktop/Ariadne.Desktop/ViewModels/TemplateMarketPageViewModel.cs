@@ -5,7 +5,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAware, IProjectDataReloadable
+public sealed class TemplateMarketPageViewModel : PageViewModelBase, ILocalizedUiAware, IProjectDataReloadable
 {
     private const int PageSize = 20;
     private const string OfficialRepositoryUrl = "ariadne://official-templates/v1";
@@ -25,7 +25,6 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
     private readonly Func<Task> _reloadOtherProjectPages;
     private readonly Func<Task<bool>> _confirmProjectReload;
     private string _searchQuery = string.Empty;
-    private string _statusText = string.Empty;
     private string _repositoryBaseUrl = string.Empty;
     private int _page = -1;
     private bool _isBusy;
@@ -124,12 +123,6 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
 
     public bool CanInteract => !IsBusy;
 
-    public string StatusText
-    {
-        get => _statusText;
-        private set => SetProperty(ref _statusText, value);
-    }
-
     public string SearchQuery
     {
         get => _searchQuery;
@@ -224,7 +217,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
         {
             if (IsCurrent(searchGeneration, requestGeneration))
             {
-                StatusText = UserFacingError.Format(ex, _displayNames);
+                StatusText = ReportFailure(ex, _displayNames);
                 SetState(SearchState.Error);
             }
         }
@@ -274,7 +267,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
         {
             if (IsCurrent(searchGeneration, requestGeneration))
             {
-                StatusText = UserFacingError.Format(ex, _displayNames);
+                StatusText = ReportFailure(ex, _displayNames);
                 SetState(SearchState.Error);
             }
         }
@@ -414,7 +407,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
         {
             if (requestGeneration == _requestGeneration)
             {
-                StatusText = UserFacingError.Format(ex, _displayNames);
+                StatusText = ReportFailure(ex, _displayNames);
             }
         }
         finally
@@ -476,7 +469,7 @@ public sealed class TemplateMarketPageViewModel : ViewModelBase, ILocalizedUiAwa
         {
             if (requestGeneration == _requestGeneration)
             {
-                StatusText = UserFacingError.Format(ex, _displayNames);
+                StatusText = ReportFailure(ex, _displayNames);
             }
         }
         finally

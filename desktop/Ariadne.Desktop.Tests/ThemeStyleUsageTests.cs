@@ -140,6 +140,31 @@ public sealed class ThemeStyleUsageTests
             {
                 mounted.Add(match.Groups[1].Value);
             }
+
+            // ⑤ C#：`Classes.Add(cond switch { 1 => "md-h1", ... })`
+            //
+            // 🔴 **第四次同类漏报**（文件头注释说"踩了三次"，这是第四次）。
+            // 上面那条正则要求参数**紧跟**字符串字面量，而 switch / 三元表达式里
+            // 字面量在参数内部 ⇒ `MarkdownReaderBlock.cs:129` 那 6 个标题类
+            // （`md-h1`…`md-h6`，U203 的 Markdown 渲染在用）被整组报成死样式。
+            //
+            // 讽刺的是那段源码的注释写着「字面量挂类：死样式扫描器只认字面量，
+            // 插值会把 6 个在用的类报成死样式」—— 施工者**为了迁就这个扫描器**
+            // 特意避开了插值、改用 switch 写字面量，而扫描器仍然读不到。
+            // ⇒ 迁就工具的写法只有在**验证过工具真的认**之后才算迁就成功。
+            //
+            // 这里改成：先框出 `Classes.Add(` / `.Set(` / `.Remove(` 的整段实参
+            //（括号配平，最多 4 层嵌套），再把其中所有字符串字面量都算作挂载。
+            // 宁可多算（把无关字面量当成类名，只会让死样式漏报）也不能少算 ——
+            // **误报比漏报危险得多**：漏报只是少清一点，误报会让人删掉在用的样式。
+            foreach (Match match in Regex.Matches(
+                text, @"Classes\.(?:Add|Set|Remove)\((?<args>(?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)"))
+            {
+                foreach (Match literal in Regex.Matches(match.Groups["args"].Value, @"""([^""]+)"""))
+                {
+                    mounted.Add(literal.Groups[1].Value);
+                }
+            }
         }
 
         return mounted;

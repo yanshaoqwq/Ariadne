@@ -114,6 +114,118 @@ public static partial class UserFacingError
     public static string PrimaryForCode(string? code, DisplayNameService names, string? contextKey = null)
         => new UserFailure(BackendException.NormalizeCode(code), null).PrimaryText(names, contextKey);
 
+    /// <summary>
+    /// 「下一步做什么」（U198-B）。主文案回答「出了什么事」，这条回答「我现在能做什么」。
+    ///
+    /// ## 两级取法，以及为什么第二级不可省
+    ///
+    /// 1. `BackendException.RecoveryAction` → `ui.settings.recovery.{action}`：
+    ///    后端给出的**精确**建议，优先。
+    /// 2. 失败码 → `ui.recovery.{code}`：兜底。
+    ///
+    /// ⚠️ **只做第一级等于什么都没做**：全仓 `recovery_action` 的产出点只有
+    /// `commands.rs:10091-10156` 一处（检索/Qdrant 配置分区），也就是说
+    /// 配置页的检索分区之外，`RecoveryAction` **永远是 null**。
+    /// 报告里「把配置页那套 RecoveryText 搬到其它页」如果照字面理解为「搬第一级」，
+    /// 得到的是五个恒空字段——一个装好了、永不亮的灯。第二级（按失败码给建议）
+    /// 才是让其余五页真的有话可说的那一半。
+    ///
+    /// ## 为什么有些码刻意没有建议
+    ///
+    /// `cancelled` / `paused` / `stopped` 是**作者自己发起**的中止，没有"补救"可言。
+    /// 硬凑一句「请重试」会把这一行变成噪声，作者学会忽略它之后，
+    /// 真正需要看的那次也不会看——这一行的价值全在它不常出现。
+    /// </summary>
+    public static string Recovery(Exception? ex, DisplayNameService names)
+    {
+        // 走 BackendException 的原始字段而不是 UserFailure：RecoveryAction 没有
+        // 进 UserFailure（它是"精确建议"，不属于稳定失败身份的一部分）。
+        var recoveryAction = ex switch
+        {
+            BackendException be => be.RecoveryAction,
+            { InnerException: BackendException inner } => inner.RecoveryAction,
+            _ => null,
+        };
+        if (!string.IsNullOrWhiteSpace(recoveryAction))
+        {
+            var precise = Localized(names, $"ui.settings.recovery.{recoveryAction}");
+            if (!string.IsNullOrEmpty(precise))
+            {
+                return precise;
+            }
+        }
+
+        var failure = FromException(ex);
+        return RecoveryForCode(failure.Code, names);
+    }
+
+    /// <summary>按失败码取兜底建议；主文案已经说清下一步的码返回空串。</summary>
+    public static string RecoveryForCode(string? code, DisplayNameService names)
+    {
+        var normalized = BackendException.NormalizeCode(code);
+        return CodesWithoutRecoveryHint.Contains(normalized)
+            ? string.Empty
+            : Localized(names, $"ui.recovery.{normalized}");
+    }
+
+    /// <summary>
+    /// **刻意没有补救建议的失败码**，两类原因，别当成漏掉的：
+    ///
+    /// 1. 作者自己发起的中止（`cancelled` / `paused` / `stopped`）——没有"补救"可言。
+    /// 2. `ui.error.{code}` 主文案里**已经**写了下一步该做什么。
+    ///    例如 `ui.error.conflict` = 「内容已被其它操作更新，请刷新后重试。」
+    ///    —— 再补一行「请刷新后重试」就是把同一句话在一屏里印两遍。
+    ///    这一行的价值全在它**不常出现**：一旦变成每次失败都挂一句废话，
+    ///    作者学会跳过它之后，真正要紧的那次也不会看。
+    ///
+    /// ⇒ 后端新增 `CommandErrorCode` 时，这里必须**二选一**：给它一句建议，
+    ///   或把它列进这张表并确认主文案确实交代了动作。
+    ///   守卫是 `RecoveryHintCoverageTests`，判据取「与 `ui.error.*` 逐一对应」——
+    ///   「存在若干条 ui.recovery.* 键」那种存在性判据在只补一条时照样绿。
+    /// </summary>
+    private static readonly HashSet<string> CodesWithoutRecoveryHint = new(StringComparer.Ordinal)
+    {
+        // 第 1 类：作者自己中止
+        "cancelled", "paused", "stopped",
+        // 第 2 类：主文案已含动作
+        "network", "validation", "conflict", "external", "io", "ipc",
+        "legacy_run", "resource_limit", "internal", "operation_failed", "indexing_not_ready",
+    };
+
+    /// <summary>
+    /// 后端已成文的建议（工作流 `recovery_suggestion` / `pause_reason` 这一类）。
+    ///
+    /// ⚠️ 它有**两种形态**，都要吃（U196-E / U198-B）：
+    /// - 文案 key（形如 `error.workflow.worker_failed.recovery`）⇒ 查语言包；
+    /// - 成文中文（`workflow/runtime.rs:recovery_suggestion()` 直接返回的句子）⇒ 原样显示。
+    ///
+    /// 判别方式是「像不像 key」而不是「查得到就是 key」：查不到的 key 必须落到
+    /// 空串，绝不能把 `[error.xxx]` 这种缺键占位符当成建议印给作者。
+    /// </summary>
+    public static string RecoveryFromSuggestion(string? suggestion, DisplayNameService names)
+    {
+        if (string.IsNullOrWhiteSpace(suggestion))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = suggestion.Trim();
+        return LooksLikeKey(trimmed) ? Localized(names, trimmed) : trimmed;
+    }
+
+    /// <summary>缺键时 <see cref="DisplayNameService.Text"/> 返回 <c>[key]</c>；那不是文案。</summary>
+    private static string Localized(DisplayNameService names, string key)
+    {
+        var text = names.Text(key);
+        return text.StartsWith('[') && text.EndsWith(']') ? string.Empty : text;
+    }
+
+    /// <summary>形如 `a.b.c` 的全小写点分标识符才算 key；中文句子不会误判为 key。</summary>
+    private static bool LooksLikeKey(string value) => KeyShape().IsMatch(value);
+
+    [GeneratedRegex(@"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$", RegexOptions.Compiled)]
+    private static partial Regex KeyShape();
+
     public static string Sanitize(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw))

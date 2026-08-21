@@ -10,7 +10,7 @@
   <UserControl.Styles>
     <Style Selector="Border.works-tree-node">
       <Setter Property="Padding" Value="7,5" />
-      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
       <Setter Property="Background" Value="Transparent" />
     </Style>
     <Style Selector="Border.works-tree-node.current">
@@ -71,27 +71,46 @@
                 </DataTemplate>
               </ComboBox.ItemTemplate>
             </ComboBox>
-            <Border Width="1" Margin="6,4" Background="{DynamicResource Ariadne.BorderMuted}" />
-            <!-- U130：快速 AI 改写有了自己的可见入口。此前只能靠 Ctrl+K 或右键菜单，
-                 而它又与「修改」按钮共用同一个 IsEditMode，用户无从知道这是两件事。 -->
-            <Button Classes="icon-btn" ToolTip.Tip="{Binding QuickEditTitle}" AutomationProperties.Name="{Binding QuickEditTitle}" Command="{Binding OpenQuickEditCommand}">
-              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Sparkle}" />
-            </Button>
-            <!-- 图标按钮：新建章节 / 导入稿件 / 导出合并 / 保存 -->
-            <!-- U174：「新建章节」此前在全应用不存在（后端无命令、这里无按钮、语言包无文案），
-                 作者拿到空项目后只能先去项目外手工造一个 .md 再走导入。 -->
-            <Button Classes="icon-btn" ToolTip.Tip="{Binding CreateChapterText}" AutomationProperties.Name="{Binding CreateChapterText}" Command="{Binding OpenCreateChapterPanelCommand}">
-              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Add}" />
-            </Button>
-            <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" AutomationProperties.Name="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}">
-              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
-            </Button>
-            <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}" AutomationProperties.Name="{Binding ExportText}" Command="{Binding ExportCommand}">
-              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Export}" />
-            </Button>
-            <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}" AutomationProperties.Name="{Binding SaveText}" Command="{Binding SaveCommand}">
-              <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
-            </Button>
+            <Border Classes="group-divider" />
+            <!-- U205-A / U195-G-①（当年「未做」的那一半）：这 5 个动作原先与
+                 「模式+格式」之间只有 1 条线，**5 个动作内部零分组**、全排等距 6px，
+                 而它们是三类。现按画布工具条那套模板（U195-L 判定的全项目最佳实践）
+                 改成「命名分组 StackPanel + 组间发丝线 + 组内 Spacing 比组间更密」：
+                   [阅读|修改] [格式▾] │ [AI 改写] │ [新建 导入 导出] │ [保存]
+                 组内 2px、组间约 15px（6 spacing + 4 内缩 ×2 + 1 线）。
+                 ⚠️ 刻意**不靠加大等距间距**解决：画布工具条已证明 2px + 分组线
+                 比 8px 无分组更易读，而加间距只会让这条顶栏更装不下（U194-G）。 -->
+            <StackPanel x:Name="WorksAiActions" Orientation="Horizontal" Spacing="2">
+              <!-- U130：快速 AI 改写有了自己的可见入口。此前只能靠 Ctrl+K 或右键菜单，
+                   而它又与「修改」按钮共用同一个 IsEditMode，用户无从知道这是两件事。
+                   自成一组：它是唯一会花钱、会让模型改动正文的键。 -->
+              <Button Classes="icon-btn" ToolTip.Tip="{Binding QuickEditTitle}" AutomationProperties.Name="{Binding QuickEditTitle}" Command="{Binding OpenQuickEditCommand}">
+                <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Sparkle}" />
+              </Button>
+            </StackPanel>
+            <Border Classes="group-divider" />
+            <!-- 稿件出入组：新建章节 / 导入稿件 / 导出合并。三者都是「文件进出」。 -->
+            <StackPanel x:Name="WorksFileActions" Orientation="Horizontal" Spacing="2">
+              <!-- U174：「新建章节」此前在全应用不存在（后端无命令、这里无按钮、语言包无文案），
+                   作者拿到空项目后只能先去项目外手工造一个 .md 再走导入。 -->
+              <Button Classes="icon-btn" ToolTip.Tip="{Binding CreateChapterText}" AutomationProperties.Name="{Binding CreateChapterText}" Command="{Binding OpenCreateChapterPanelCommand}">
+                <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Add}" />
+              </Button>
+              <Button Classes="icon-btn" ToolTip.Tip="{Binding ImportText}" AutomationProperties.Name="{Binding ImportText}" Command="{Binding OpenImportPanelCommand}">
+                <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Import}" />
+              </Button>
+              <Button Classes="icon-btn" ToolTip.Tip="{Binding ExportText}" AutomationProperties.Name="{Binding ExportText}" Command="{Binding ExportCommand}">
+                <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Export}" />
+              </Button>
+            </StackPanel>
+            <Border Classes="group-divider" />
+            <!-- 提交组：保存独立成组。它是这排里唯一「把内存里的改动写进磁盘」的键，
+                 与「读进来 / 写出去」不是同一类；已有 accent 描边区分，再加组边界。 -->
+            <StackPanel x:Name="WorksCommitActions" Orientation="Horizontal" Spacing="2">
+              <Button Classes="icon-btn save" ToolTip.Tip="{Binding SaveText}" AutomationProperties.Name="{Binding SaveText}" Command="{Binding SaveCommand}">
+                <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Save}" />
+              </Button>
+            </StackPanel>
           </StackPanel>
         </Grid>
       </Border>
@@ -126,7 +145,7 @@
                   Padding="40,48">
             <StackPanel Spacing="14" HorizontalAlignment="Center" MaxWidth="360">
               <ctl:EmptyStateArt Kind="WorksSnap" Width="160" Height="128" HorizontalAlignment="Center" />
-              <TextBlock Text="{Binding EmptyIndexTitle}" Classes="title" HorizontalAlignment="Center" TextAlignment="Center" />
+              <TextBlock Text="{Binding EmptyIndexTitle}" Classes="empty-title" HorizontalAlignment="Center" TextAlignment="Center" />
               <TextBlock Text="{Binding EmptyIndexHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
               <TextBlock Text="{Binding EmptyIndexText}" Classes="subtle" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
               <!-- U174：空态是新项目作者的第一落点，「新建章节」必须在这里就有。
@@ -147,7 +166,7 @@
                  （左右两栏都还没有内容）。呼吸点竖排在文字下方而非并排：
                  这里文字是 subtitle 居中大字，并排会把整块重心推偏。 -->
             <StackPanel Spacing="10" HorizontalAlignment="Center">
-              <TextBlock Text="{Binding WorksTreeLoadingText}" Classes="subtitle" TextAlignment="Center" />
+              <TextBlock Text="{Binding WorksTreeLoadingText}" Classes="empty-title" TextAlignment="Center" />
               <ctl:BusyDots IsActive="{Binding IsWorksTreeLoading}" HorizontalAlignment="Center" />
             </StackPanel>
           </Border>
@@ -157,7 +176,7 @@
                   VerticalAlignment="Center" HorizontalAlignment="Center"
                   Padding="40,48">
             <StackPanel Spacing="12" HorizontalAlignment="Center" MaxWidth="420">
-              <TextBlock Text="{Binding WorksTreeErrorText}" Classes="subtitle" TextWrapping="Wrap" TextAlignment="Center" />
+              <TextBlock Text="{Binding WorksTreeErrorText}" Classes="empty-title" TextWrapping="Wrap" TextAlignment="Center" />
               <Button Classes="primary" HorizontalAlignment="Center"
                       Content="{Binding RetryWorksTreeText}" Command="{Binding RetryWorksTreeCommand}" />
             </StackPanel>
@@ -170,7 +189,7 @@
             <!-- U185-A：同上。这一处等的是**单篇正文**，百万字项目里
                  一章可能几万字，等待窗口比索引加载更长，更需要「还在动」的证据。 -->
             <StackPanel Spacing="10" HorizontalAlignment="Center">
-              <TextBlock Text="{Binding DocumentLoadingTargetText}" Classes="subtitle" TextWrapping="Wrap" TextAlignment="Center" />
+              <TextBlock Text="{Binding DocumentLoadingTargetText}" Classes="empty-title" TextWrapping="Wrap" TextAlignment="Center" />
               <ctl:BusyDots IsActive="{Binding IsDocumentLoading}" HorizontalAlignment="Center" />
             </StackPanel>
           </Border>
@@ -182,7 +201,7 @@
                   Padding="40,48">
             <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="360">
               <ctl:EmptyStateArt Kind="WorksSnap" Width="140" Height="112" HorizontalAlignment="Center" />
-              <TextBlock Text="{Binding NoDocumentText}" Classes="subtitle" HorizontalAlignment="Center" TextAlignment="Center" />
+              <TextBlock Text="{Binding NoDocumentText}" Classes="empty-title" HorizontalAlignment="Center" TextAlignment="Center" />
               <TextBlock Text="{Binding EmptyIndexHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
             </StackPanel>
           </Border>
@@ -326,12 +345,47 @@
                                 VerticalScrollBarVisibility="Auto">
                     <SelectableTextBlock Text="{Binding ChapterOutlineText}"
                                          Classes="reading"
-                                         FontSize="14"
+                                         FontSize="{DynamicResource Ariadne.Size.Body}"
                                          TextWrapping="Wrap" />
                   </ScrollViewer>
                 </Grid>
               </Border>
             </Grid>
+          </Border>
+
+          <!-- ============ U198-B：作品页的失败反馈显示位 ============
+               此前作品页的**页级** StatusText 在界面上没有任何绑定位置
+               （`{Binding StatusText}` 的 4 处命中全在
+               `vm:WorksSummaryDetailItemViewModel` 的 DataTemplate 里，绑的是子项
+               的同名属性）—— 保存失败、导入失败、章节读取失败，作者一个字都看不到。
+               本条只解决「失败时看得见原因 + 下一步」；U194-A 还要求保存失败走
+               阻断式提示（有数据风险），那一条不在此处。
+
+               位置取「稿纸左下角浮层」而不是还原到刊头：U136 把它从刊头删掉是因为
+               「真正的页上只该有章节名」，还原等于把那个判断推翻。浮层与快速编辑
+               小窗同一层级（document-surface 的兄弟），**不参与稿纸布局**，
+               正文高度不因它出现而变化；靠左避开右下角的快速编辑窗。 -->
+          <Border Grid.Row="0" Grid.RowSpan="2"
+                  x:Name="WorksStatusHost"
+                  IsVisible="{Binding HasStatusText}"
+                  HorizontalAlignment="Left"
+                  VerticalAlignment="Bottom"
+                  Margin="26,0,0,26"
+                  Padding="11,7"
+                  MaxWidth="440"
+                  Classes="soft-panel">
+            <StackPanel Spacing="3">
+              <TextBlock Text="{Binding StatusText}"
+                         Classes="caption"
+                         TextWrapping="Wrap"
+                         AutomationProperties.LiveSetting="Polite" />
+              <TextBlock Text="{Binding RecoveryText}"
+                         Classes="caption"
+                         Foreground="{DynamicResource Ariadne.StatusWarning}"
+                         IsVisible="{Binding HasRecoveryText}"
+                         TextWrapping="Wrap"
+                         AutomationProperties.LiveSetting="Polite" />
+            </StackPanel>
           </Border>
 
           <!-- ============ U130：快速 AI 改写 —— 悬浮毛玻璃小窗 ============
@@ -392,7 +446,7 @@
                      的常驻空位，没有 diff 时也照占（U130）。 -->
                 <Border IsVisible="{Binding HasQuickEditDiff}"
                         Background="{DynamicResource Ariadne.BackgroundCode}"
-                        CornerRadius="8"
+                        CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                         Padding="0,6">
                   <ScrollViewer MaxHeight="240"
                                 HorizontalScrollBarVisibility="Auto"
@@ -953,7 +1007,7 @@
                 <!-- 侧栏索引空：主栏已有打响指全幅空态，此处只保留短提示 -->
                 <Border Classes="empty-state" Padding="12,16" IsVisible="{Binding IsWorksTreeEmpty}">
                   <StackPanel Spacing="6">
-                    <TextBlock Text="{Binding EmptyIndexTitle}" Classes="subtitle" />
+                    <TextBlock Text="{Binding EmptyIndexTitle}" Classes="empty-title" />
                     <TextBlock Text="{Binding EmptyIndexHint}" Classes="caption" TextWrapping="Wrap" />
                   </StackPanel>
                 </Border>
@@ -974,14 +1028,14 @@
                     <DataTemplate DataType="{x:Type vm:ChatBubbleViewModel}">
                       <Border Background="{Binding BubbleBackground}"
                               BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                              BorderThickness="1"
+                              BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                               CornerRadius="10"
                               Padding="12,8"
                               HorizontalAlignment="{Binding HorizontalAlignment}"
                               MaxWidth="320"
                               Margin="0,0,0,6">
                         <StackPanel Spacing="4">
-                          <TextBlock Text="{Binding RoleLabel}" Classes="subtle" FontSize="11" />
+                          <TextBlock Text="{Binding RoleLabel}" Classes="subtle" FontSize="{DynamicResource Ariadne.Size.Micro}" />
                           <TextBlock Text="{Binding Content}" TextWrapping="Wrap" FontSize="13" />
                         </StackPanel>
                       </Border>

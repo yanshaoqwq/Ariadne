@@ -103,7 +103,7 @@
              筛选来源只有"点明细里的 ID"，生效项以可移除 chip 呈现。
              工作流 ID 框一并删掉——桌面端 2026-07-20 起固定单画布约束，
              它恒为 "default"，永远只有一个可能值。 -->
-        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+        <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
           <ItemsControl Grid.Column="0"
                         ItemsSource="{Binding ActiveIdFilters}"
                         IsVisible="{Binding HasActiveIdFilters}"
@@ -129,12 +129,26 @@
               </DataTemplate>
             </ItemsControl.ItemTemplate>
           </ItemsControl>
+          <!-- U205-F：原先这个键挂 `IsVisible="{Binding HasActiveFilter}"`，
+               于是筛选一生效/一清空它就出现/消失，**把右边的「标记已读」横向推走**
+               —— 与 `UI组件状态表.md:11`「不得改变布局尺寸」的约定冲突，
+               且作者刚点完「清除筛选」，手还在原位时下一颗键已经挪到那儿了。
+               改成**常驻 + 自动禁用**：`ClearFiltersCommand` 的 CanExecute 本来
+               就是 HasActiveFilter（`RunLogPageViewModel.cs:64`，且已接
+               NotifyCanExecuteChanged）⇒ 无筛选时它自己灰掉，宽度照占。
+               **不用 Opacity=0 占位**：那会留下一个看不见但占着位置的东西，
+               作者永远不知道「清除筛选」这个功能存在；灰键 + ToolTip 讲明
+               启用条件是本项目已定的做法（画布审批历史键同款）。 -->
           <Button Grid.Column="1"
                   Classes="subtle"
                   Content="{Binding ClearFiltersText}"
                   Command="{Binding ClearFiltersCommand}"
-                  IsVisible="{Binding HasActiveFilter}" />
-          <Button Grid.Column="2"
+                  ToolTip.Tip="{Binding ClearFiltersHintText}"
+                  AutomationProperties.HelpText="{Binding ClearFiltersHintText}" />
+          <!-- U205-A：「清除筛选」作用于筛选条件，「标记已读」改的是记录状态
+               （且它不可撤销）—— 两类动作原先只隔 8px 等距。 -->
+          <Border Grid.Column="2" Classes="group-divider" />
+          <Button Grid.Column="3"
                   Classes="secondary"
                   Content="{Binding MarkReadText}"
                   Command="{Binding MarkReadCommand}" />
@@ -162,12 +176,29 @@
               IsVisible="{Binding IsStandaloneError}"
               Margin="0,24,0,0">
         <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="420">
-          <TextBlock Text="{Binding ErrorTitle}" Classes="subtitle" HorizontalAlignment="Center" />
+          <TextBlock Text="{Binding ErrorTitle}" Classes="empty-title" HorizontalAlignment="Center" />
           <TextBlock Text="{Binding ErrorText}"
                      Classes="secondary"
                      HorizontalAlignment="Center"
                      TextAlignment="Center"
                      TextWrapping="Wrap" />
+          <!-- U198-B：整页错误态**也**要有补救行。
+               这一份不是「顺手再加一处」——下方那份渲染位挂在
+               `IsVisible="{Binding ShowContent}"` 里，而 `ShowContent` 要求
+               `HasLogs`（`RunLogPageViewModel.cs:117`）⇒ **一条日志都还没有时
+               加载失败，走的正是这个整页错误态，下方那份建议根本不参与渲染**。
+               而「一条日志都还没有」恰好就是作者第一次点运行失败时的状态，
+               也就是 U198-B 要救的那个人。
+               「属性接好了」不等于「作者看得见」：接线只保证有值，
+               能不能到眼前取决于渲染位所在容器在**那个失败态下**是否可见。 -->
+          <TextBlock Text="{Binding RecoveryText}"
+                     Classes="caption"
+                     Foreground="{DynamicResource Ariadne.StatusWarning}"
+                     IsVisible="{Binding HasRecoveryText}"
+                     HorizontalAlignment="Center"
+                     TextAlignment="Center"
+                     TextWrapping="Wrap"
+                     AutomationProperties.LiveSetting="Polite" />
           <Button Classes="secondary"
                   Content="{Binding RefreshText}"
                   Command="{Binding RefreshCommand}"
@@ -179,7 +210,7 @@
         <Border Grid.Row="0"
                 Classes="layer"
                 BorderBrush="{DynamicResource Ariadne.StatusError}"
-                BorderThickness="1"
+                BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                 Padding="12,8"
                 Margin="24,0,20,8"
                 IsVisible="{Binding IsContentError}">
@@ -190,11 +221,19 @@
                     Command="{Binding RefreshCommand}" />
           </StackPanel>
         </Border>
-        <TextBlock Grid.Row="1"
-                   Text="{Binding StatusText}"
-                   Classes="caption"
-                   Opacity="0.9"
-                   Margin="24,0,20,8" />
+        <StackPanel Grid.Row="1" Spacing="3" Margin="24,0,20,8">
+          <TextBlock Text="{Binding StatusText}"
+                     Classes="caption"
+                     Opacity="0.9" />
+          <!-- U198-B：失败补救行。放在状态行下方、日志流上方，作者读完「怎么了」
+               紧接着就是「下一步做什么」；没有建议时整条不占版面。 -->
+          <TextBlock Text="{Binding RecoveryText}"
+                     Classes="caption"
+                     Foreground="{DynamicResource Ariadne.StatusWarning}"
+                     IsVisible="{Binding HasRecoveryText}"
+                     TextWrapping="Wrap"
+                     AutomationProperties.LiveSetting="Polite" />
+        </StackPanel>
         <!-- 去 card：日志流铺满，不套圆角描边盒子；行间发丝线已足够分层。 -->
         <ListBox Grid.Row="2"
                  ItemsSource="{Binding Logs}"
@@ -295,7 +334,7 @@
               VerticalAlignment="Center">
         <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="420">
           <ctl:EmptyStateArt Kind="RunLog" Width="200" Height="143" HorizontalAlignment="Center" />
-          <TextBlock Text="{Binding EmptyTitle}" Classes="subtitle" HorizontalAlignment="Center" />
+          <TextBlock Text="{Binding EmptyTitle}" Classes="empty-title" HorizontalAlignment="Center" />
           <TextBlock Text="{Binding EmptyHint}"
                      Classes="caption"
                      HorizontalAlignment="Center"

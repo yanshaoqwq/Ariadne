@@ -488,7 +488,19 @@
       <x:Double x:Key="Ariadne.Size.Subtitle">16</x:Double>
       <x:Double x:Key="Ariadne.Size.Body">14</x:Double>
       <x:Double x:Key="Ariadne.Size.Caption">12</x:Double>
-      <x:Double x:Key="Ariadne.Size.Badge">10.5</x:Double>
+      <!-- 微标签（U204-A）：检查器分区名、单位后缀、路径 mono 串这一档。
+           **它此前不是 token 而是 11 个散落的字面量**（主题里 2 处 + 页面 9 处）——
+           `Size.Caption`(12) 与它只差 1px，肉眼分不出，于是「这里该用哪一个」
+           无从判断，新写一处只能靠抄最近的那一行。收成 token 才有可引用的答案。 -->
+      <x:Double x:Key="Ariadne.Size.Micro">11</x:Double>
+      <!-- 角标数字（U204-B）。**原值 10.5 是个从未在屏幕上出现过的数字**：
+           这个 token 全仓零引用，真实渲染取 App.axaml 里的 10（展开态）与 9（折叠态）。
+           改成 10 而不是把 10.5 推到界面上 —— token 化的方向是让 token 记录
+           已经生效的决策，而不是借「提高引用率」引入一次没人要求的视觉变化。
+           展开/折叠两态统一到 10：两处角标用的是**同一个** `Border.badge`
+           （18×18 定高），容器相同却写 10 与 9，且全仓没有一句注释交代那个 9 ——
+           它是漂移而不是决定，所以收成一个 token 而不是建两个。 -->
+      <x:Double x:Key="Ariadne.Size.Badge">10</x:Double>
       <!-- 正文字号（U200）。**刻意与 Size.Subtitle 分开，尽管当前两者同为 16**：
            它们是两个独立的设计维度——小标题跟随界面尺度，正文字号是阅读舒适度
            （U194-F 要做的「排版可调」调的是这一个）。合并成一个 token 后
@@ -514,13 +526,21 @@
            ⚠️ U200 之前这句注释引用的 token **根本不存在**，字号是三处各写一遍的
            字面量 16 ⇒ 推导链的根不可引用，「关系写在注释里」只是写在注释里。
            现在 Size.Reading 是真 token 了，但 XAML 静态资源**算不了乘法**：
-           这两个数字仍需手改，注释是唯一的关系载体。改字号时连带改本值与
-           SurfaceMaxWidth，守卫见 ReadingEditingParityTests 的字号同源那条。 -->
+           这两个数字仍需手改。
+           ✅ **U204-B：注释不再是关系的唯一载体。**
+           `ScaleTokenUsageTests.ReadingMeasureDerivation_IsArithmeticallyConsistent`
+           直接从本文件解析这四个数并验算 576 = 16×36、720 = 576+72+72 ——
+           改字号忘改版心会当场变红。这才是「不会再分头漂移」的可执行形态：
+           在此之前，这三个 token 全仓零引用，改它们**不影响任何渲染**，
+           承诺与现实之间没有任何东西把关。 -->
       <x:Double x:Key="Ariadne.Reading.MeasureMaxWidth">576</x:Double>
       <!-- 稿纸内边距：左右 72 是版心两侧的「书页留白」，
            上下不对称（56 / 52）是因为刊头本身带下沿留白，视觉上要压掉一点。 -->
       <Thickness x:Key="Ariadne.Reading.SurfacePadding">72,56,72,52</Thickness>
-      <!-- 稿纸外框宽 = 测量宽 + 左右内边距 = 576 + 144 -->
+      <!-- 稿纸外框宽 = 测量宽 + 左右内边距 = 576 + 144。
+           ✅ U204-B：**这个值现在真的被读了** —— `WorksPageViewModel`
+           的 `DocumentSurfaceMaxWidth` 从本 token 取基准宽（此前是那边硬编码
+           一个 720d，主题里这个 720 无人问津）。改这里会真的改变稿纸宽度。 -->
       <x:Double x:Key="Ariadne.Reading.SurfaceMaxWidth">720</x:Double>
       <!-- 正文行高（U151）。30 配 16px 中文衬线正文是刻意选的：约 1.875 倍，
            长篇阅读靠行距而不是字号撑开呼吸；收到 1.16 倍（AvaloniaEdit 默认）
@@ -587,6 +607,53 @@
       <!-- 面板/工作区内边距：比页面级紧一档，用于画布、检查器这类密集区域。 -->
       <Thickness x:Key="Ariadne.Page.PanelPadding">14,10,14,14</Thickness>
       <Thickness x:Key="Ariadne.Page.SectionMargin">34,28</Thickness>
+
+      <!-- ===== 按钮簇的组间分隔（U205-A）=====
+           发丝线粗细。项目此前有 5 处手写发丝分隔线，**用了 3 套不同数字**
+           （WelcomeView 的 `Width=1 Height=14 Margin=6,0`、WorksPageView 的
+           `Margin=6,4`、画布工具条的 `Margin=4,5`）⇒ 「分组线」在这个代码库里
+           不是一个语汇，而是三次各自为政的巧合：改一处不会带动另两处，
+           新写一处也无从知道该抄哪一套。收成 token + 一个 class 之后，
+           「分组」才第一次成为可复用的东西。
+           ⚠️ 用 `Border.group-divider` 时**不要再内联写 Width/Margin/Background**：
+           内联是 `BindingPriority.LocalValue`(0)，数值小的胜 ⇒ 它压过所有样式层，
+           而且**静默**（不报错、不回落），会让这几个 token 在那一处彻底失效。 -->
+      <x:Double x:Key="Ariadne.Stroke.Hairline">1</x:Double>
+      <!-- 分隔线内缩：左右 4（两侧各自还有容器的 Spacing，合计约 10~14px 组间距），
+           上下 5 让线比按钮矮一截 —— 满高的线会读成「表格列线」而不是「组边界」。
+           取值沿用画布工具条那一套（U195-L 判定的全项目最佳实践），
+           另两处旧数字向它收敛，而不是取三者平均：平均值谁都不是。 -->
+      <Thickness x:Key="Ariadne.Group.DividerInset">4,5</Thickness>
+
+      <!-- ===== 描边宽度（U204-A）=====
+           全仓 146 处 `BorderThickness` 字面量、token 引用只有 1 处
+           （`Ariadne.Reading.QuoteBarThickness`），其中「四边发丝线」这一个语汇
+           独占 28 处 —— 描边宽度此前基本不是一个可引用的概念。
+
+           ⚠️ **必须是 `Thickness` 而不能复用上面那个 `x:Double` 的
+           `Ariadne.Stroke.Hairline`**：`DynamicResource` **不跑类型转换器**，
+           把 double 绑到 `BorderThickness` 会**静默失效**（不报错、不回落，
+           描边整个消失），而所有静态判据照样全绿。两个 key 是同一个设计值
+           （都是 1px 发丝线）的两种目标类型，改一个必须改另一个 ——
+           守卫见 `ScaleTokenUsageTests` 的发丝线同源那条。 -->
+      <Thickness x:Key="Ariadne.Stroke.HairlineAll">1</Thickness>
+
+      <!-- ===== 可点目标尺度（U205-B）=====
+           工具条图标按钮 30×26。**26 是权衡过的值、不是随手写的**，
+           所以这里只是把它从字面量收成 token（改一次全项目跟随），
+           不擅自抬到 32：同文件 `Button.window-control` 的注释记录了
+           `44×54 → 40×36 → 36×30` 这条收紧史，说明这一族尺寸是调过的；
+           桌面端有鼠标，26px 可点，抬高 6px 会挤爆已报溢出的作品页顶栏（U194-G）。
+           ⇒ U205-B 判 P2 并按「token 化 + 留档」处置，真正偏小的是下面那个引脚。 -->
+      <x:Double x:Key="Ariadne.Control.IconButtonWidth">30</x:Double>
+      <x:Double x:Key="Ariadne.Control.IconButtonHeight">26</x:Double>
+      <!-- 节点卡上「＋加数据输入引脚」的点击目标。原为 14×16 —— 全项目最小的可点目标，
+           且它在**可缩放画布**上：缩到 50% 就只剩 7×8px，鼠标很难压住。
+           抬到 20×20（图形仍是 10×10 的加号，只是把透明命中区放大），
+           50% 缩放下等于 10×10，与原尺寸在 100% 下相当。
+           为什么不抬到 26（与 icon-btn 齐平）：它挂在节点卡数据引脚列里，
+           再高会把引脚行距撑开，那是把一个可点性问题换成一个版式问题。 -->
+      <x:Double x:Key="Ariadne.Control.PinHitTarget">20</x:Double>
 
       <!-- 字体：Inter 不含中文，必须挂中文黑体 fallback（系统实测可用：WenQuanYi Zen Hei / AR PL UMing CN / DejaVu）。
            Windows 上前面的 Segoe UI / Microsoft YaHei 会优先命中，Linux 上回退到文泉驿正黑。 -->
@@ -1044,7 +1111,7 @@
        小字号 + 加字距 + 弱色，是桌面检查器（Figma/Blender/VS Code）的通行做法：
        靠字重与字距区分层级，而不是靠给每个分区套盒子。 -->
   <Style Selector="TextBlock.inspector-label">
-    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Micro}" />
     <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="LetterSpacing" Value="0.7" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
@@ -2319,13 +2386,22 @@
   </Style>
   <!-- 空态排版：空态往往独占大半屏，标题必须撑得起这块面积。
        原先 16px subtitle + 12px caption 在 1440 宽的空场里像两行小字，
-       这里拉大标题、放松说明行距，让空白有一个体面的视觉焦点。 -->
-  <Style Selector="Border.empty-state TextBlock.subtitle">
-    <Setter Property="FontSize" Value="20" />
+       这里拉大标题、放松说明行距，让空白有一个体面的视觉焦点。
+
+       ✅ **U204-D：空态标题不再靠覆盖 `.subtitle` 实现，改为自己的 `.empty-title`。**
+       原先是 `Border.empty-state TextBlock.subtitle { FontSize=20 }`，
+       加上画布右栏那条 `Border.inspector-group TextBlock.subtitle { FontSize=11 }`，
+       同一个 `.subtitle` 在界面上表达 **16 / 20 / 11 三种层级**（42 / 12 / 9 处）——
+       读代码时看见 `Classes="subtitle"` 无法判断它会有多大，这正是「class 名
+       不再携带信息」的形态。而 20 已经撞上 `Size.Title`(20)、11 又低于
+       `Size.Caption`(12)，两个覆盖值都不在 `.subtitle` 自己的语义半径里。
+       ⇒ 拆成三个各自显式挂 token 的类，`.subtitle` 恢复成「只有一个字号」。
+       ⚠️ 这里挂 `Size.Title` 而不是再写一个 20：空态标题与页标题本就同级，
+       它们同源才是对的；此前那个 20 只是**恰好**等于 Size.Title。 -->
+  <Style Selector="TextBlock.empty-title">
+    <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Title}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextHeading}" />
-  </Style>
-  <Style Selector="Border.empty-state TextBlock.title">
-    <Setter Property="FontSize" Value="23" />
   </Style>
   <Style Selector="Border.empty-state TextBlock.caption">
     <Setter Property="FontSize" Value="13" />
@@ -2424,10 +2500,29 @@
   <Style Selector="Button.icon-btn">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Width" Value="30" />
-    <Setter Property="Height" Value="26" />
+    <!-- U205-B：30×26 从字面量收成 token（见 Ariadne.Control.IconButton* 那段注释里
+         「为什么不抬到 32」的判定）。收 token 的意义是：下一轮真要调这一族尺寸时
+         改一处即可，而不是在 22 个实例里逐个找。 -->
+    <Setter Property="Width" Value="{DynamicResource Ariadne.Control.IconButtonWidth}" />
+    <Setter Property="Height" Value="{DynamicResource Ariadne.Control.IconButtonHeight}" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
+  </Style>
+  <!-- U205-B：节点卡数据输入引脚的「＋」。原为内联 Width=14 Height=16，
+       是全项目最小的可点目标，且它在可缩放画布上（50% 缩放 ⇒ 7×8px）。
+       这里只放大**透明命中区**，加号图形仍是 10×10 的 Path，视觉不变胖。
+       ⚠️ 尺寸必须由这个 class 给：写回内联就又是 LocalValue 压过样式，
+       token 在那一处静默失效。 -->
+  <Style Selector="Button.pin-add">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Width" Value="{DynamicResource Ariadne.Control.PinHitTarget}" />
+    <Setter Property="Height" Value="{DynamicResource Ariadne.Control.PinHitTarget}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Small}" />
+  </Style>
+  <Style Selector="Button.pin-add:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundHover}" />
   </Style>
   <!-- 图标自转：悬停时图标绕自身中心转（先快转一圈→短暂停顿→持续慢转）。
        节奏由 HoverSpin 行为在代码里逐帧驱动——Avalonia 的关键帧动画不支持
@@ -2892,6 +2987,36 @@
     <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
     <Setter Property="Height" Value="1" />
     <Setter Property="Margin" Value="0,6" />
+  </Style>
+
+  <!-- ============================================================
+       U205-A：按钮簇的组间发丝竖线（唯一的可复用形态）
+       ============================================================
+       **为什么是新 class 而不是复用 `Separator`**：上面那条基础样式已把
+       `Separator.Height` 钉成 1（为菜单里的横向分隔服务，全仓 10 处 Separator
+       都在菜单里）。竖线需要「宽 1、高度随簇拉伸」，用 Separator 就得再写一条
+       `Height=NaN` 去覆盖自己刚设的值 —— 那是与自己的样式打架。
+       而全项目既有的 5 处发丝分隔线**本来就是 Border**，改成 class 引用是纯收敛，
+       不引入第二种写法。
+
+       **为什么必须是 class 而不是「大家各自写 Border Width=1」**：
+       U205 的根因不是「没人想分组」，而是**分组没有默认形态**：
+       同一个团队在 ContextMenu 里用 `<Separator/>` 分了 6 组、在按钮簇里
+       零使用，因为按钮簇没有一个「一行就能用」的东西。补上这个 class
+       之后，加一条分组线的成本从「抄三个属性、猜该抄哪一套数字」
+       降到 `<Border Classes="group-divider" />`。
+
+       ⚠️ **挂了这个 class 就不要再内联写 Width / Margin / Background**：
+       内联属性是 `BindingPriority.LocalValue`(0)，比 Style(3) 优先且**静默生效**
+       —— 那会让 token 在那一处失效，而界面上看不出任何异常。
+       本项目已在同一根因上踩过三次（见 U207-C② 的内联 Fill）。 -->
+  <Style Selector="Border.group-divider">
+    <Setter Property="Width" Value="{DynamicResource Ariadne.Stroke.Hairline}" />
+    <Setter Property="Margin" Value="{DynamicResource Ariadne.Group.DividerInset}" />
+    <Setter Property="Background" Value="{DynamicResource Ariadne.BorderMuted}" />
+    <!-- 高度不写死：随所在簇拉伸，簇里换了更高的控件也不用回来改数字。
+         上下各内缩 5（见 Ariadne.Group.DividerInset）已让它比按钮矮一截。 -->
+    <Setter Property="VerticalAlignment" Value="Stretch" />
   </Style>
 
   <!-- ============================================================

@@ -242,7 +242,21 @@ public sealed class ChapterCreationJourneyTests
                     // 路径校验对相对路径不需要它。
                     return Task.FromResult<CurrentProjectStatus?>(null);
                 case "get_HasProjectRoot":
-                    return false;
+                    // U208-B 之后必须返回 true。
+                    //
+                    // 本用例演的是「作者在作品页里新建章节」——那个场景**隐含项目已打开**
+                    // （作品页的章节树就是从项目里读出来的）。原先返回 false 只是当初图省事：
+                    // 那时 `CanCreateChapter` 还没有项目闸，返回什么都不影响结论。
+                    // `034011f`（U208-B）给它加了闸之后，这个替身就在描述一个
+                    // **本用例并不想演的场景**，于是「填好标题后创建可点」永远为假。
+                    //
+                    // ⚠️ 修法刻意是**改替身**而不是放宽 `CanCreateChapter`：
+                    // 那个闸正是 U208-B 的修复本体（未开项目时按钮可点可填可提交，
+                    // 走到后端才被拒，而拒绝话术把作者引向「检查自己刚填的字」）。
+                    // 为了让用例变绿去削弱产品，等于把缺陷改回来 ——
+                    // 本仓已记：**「改了产品没同批改用例」的正解是改用例，
+                    // 前提是先确认用例演的场景到底是什么。**
+                    return true;
             }
 
             // 其余方法返回该方法返回类型的已完成 Task，避免 VM 里 await null 崩掉。

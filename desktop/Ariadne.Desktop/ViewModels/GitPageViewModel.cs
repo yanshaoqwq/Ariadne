@@ -15,7 +15,7 @@ public enum GitOperationState
     Recovering,
 }
 
-public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
+public sealed class GitPageViewModel : PageViewModelBase, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
 {
     private const string RightPanelPreferenceKey = "git.right_panel";
     private readonly DisplayNameService _displayNames;
@@ -41,7 +41,8 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
     private bool _isRightPanelOpen = true;
     private string _checkpointMessage = string.Empty;
     private string _restoreBranchName = string.Empty;
-    private string _statusText = string.Empty;
+    // U210：静息态描述与 StatusText 分离后的独立存储（见 HistorySummaryText 注释）。
+    private string _historySummaryText = string.Empty;
     private string _repositoryStatusText = string.Empty;
     private string _currentBranchText = string.Empty;
     private string _headText = string.Empty;
@@ -184,7 +185,30 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
                 CtxRestoreText,
                 CtxCopyIdText);
         }
+        // U210：`HistorySummaryText` 存的是**已格式化好的**文案（不是 key），
+        // 所以 `OnPropertyChanged(string.Empty)` 只会让界面重读同一份旧语言字符串。
+        // 它只依赖 `Commits.Count`，在这里原地重算是安全的。
+        // 刻意不改成 get-only 计算属性：那样每次 `Commits` 变动都要记得手工通知，
+        // 而漏通知的表现是「存档数不更新」——与本条修的缺陷同类的隐形失效。
+        RecomputeHistorySummary();
         OnPropertyChanged(string.Empty);
+    }
+
+    /// <summary>U210：由 <see cref="Commits"/> 的当前条数重算静息态描述。</summary>
+    private void RecomputeHistorySummary()
+    {
+        // 没打开项目时不写任何存档数：那是第三种状态（见 ClearProjectState）。
+        if (!_backend.HasProjectRoot)
+        {
+            HistorySummaryText = string.Empty;
+            return;
+        }
+        HistorySummaryText = Commits.Count == 0
+            ? EmptyText
+            : _displayNames.Format("ui.git.count", new Dictionary<string, string>
+            {
+                ["count"] = Commits.Count.ToString(),
+            });
     }
 
     private async Task ToggleRightPanelAsync()
@@ -200,7 +224,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -216,19 +240,34 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         set => SetProperty(ref _restoreBranchName, value);
     }
 
-    public string StatusText
+    /// <summary>
+    /// U210：存档流的**静息态描述**（「共 N 个存档点」）。
+    ///
+    /// # 为什么必须是一个独立属性，而不是继续写进 StatusText
+    ///
+    /// 原缺陷：`SelectAfterRefresh` 无条件把 `StatusText` 改写成这句话，
+    /// 而每条成功路径的顺序都是「先写结果文案 → 再调刷新」⇒
+    /// 「已存档：X」「已切换到回档副本 X」执行过、然后被自己的刷新抹掉，
+    /// 作者读到的是一句与他刚做的事无关的「共 12 个存档点」。
+    ///
+    /// 两种文案的**寿命根本不同**，这才是要分开的理由：
+    /// 静息态描述随列表内容走（列表一变它就该变），
+    /// 动作结果随一次交互走（下一次动作开始前都该留着）。
+    /// 让后者去躲前者（保留期计时器之类）只是把冲突推迟；
+    /// 分成两个属性、界面各有位置，冲突就不存在了。
+    ///
+    /// ⚠️ 空列表时仍返回 <see cref="EmptyText"/>（而不是空串）：
+    /// 这个属性的定义是「存档流此刻的静息态描述」，空列表的静息态描述
+    /// 就是「还没有存档。」。它在空态下**看不见**是渲染位的事
+    /// （渲染位在 `ShowContent` 里，空态时 `ShowEmpty` 那块空态面板接管
+    /// 并给出更完整的 `ui.empty.git.title` / `.hint`），不是靠这里返空串实现的。
+    /// 把可见性判断塞进取值逻辑会让属性名与行为脱节。
+    /// </summary>
+    public string HistorySummaryText
     {
-        get => _statusText;
-        set
-        {
-            if (SetProperty(ref _statusText, value))
-            {
-                OnPropertyChanged(nameof(HasStatusText));
-            }
-        }
+        get => _historySummaryText;
+        private set => SetProperty(ref _historySummaryText, value);
     }
-
-    public bool HasStatusText => !string.IsNullOrWhiteSpace(StatusText);
 
     public string RepositoryStatusText
     {
@@ -640,6 +679,11 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         SelectedCommit = null;
         StatusText = string.Empty;
         ErrorText = string.Empty;
+        // U210：静息态描述说的是「本项目有多少存档点」，没项目就没这回事。
+        // 漏清会让下一个项目在加载完成前顶着上一个项目的存档数。
+        // 这里给空串而不是 EmptyText：「没打开项目」不是「还没有存档」，
+        // 那正是 U182-K/M 分开的第三种状态。
+        HistorySummaryText = string.Empty;
         RepositoryStatusText = string.Empty;
         CurrentBranchText = _displayNames.Text("ui.common.none");
         HeadText = _displayNames.Text("ui.common.none");
@@ -743,7 +787,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
         catch (Exception ex)
         {
-            RepositoryStatusText = UserFacingError.Format(ex, _displayNames);
+            RepositoryStatusText = ReportFailure(ex, _displayNames);
             CurrentBranchText = _displayNames.Text("ui.common.none");
             HeadText = _displayNames.Text("ui.common.none");
             DirtyStateText = _displayNames.Text("ui.common.none");
@@ -801,7 +845,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             // U182-K 的原缺陷正在这里：此前只写 StatusText、**不标记状态**，
             // 于是 Commits 仍为空 ⇒ 空态照常渲染，用户读到的是「你没有存档」。
             // 现在按「手上还有没有内容」分两种呈现，与 RunLog 同一区分。
-            ErrorText = UserFacingError.Format(ex, _displayNames);
+            ErrorText = ReportFailure(ex, _displayNames);
             StatusText = ErrorText;
             LoadState = Commits.Count > 0 ? PageLoadState.ContentError : PageLoadState.Error;
             // 刻意不 Commits.Clear()：上一次成功的快照是用户手上唯一的诊断材料。
@@ -894,6 +938,20 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             CanStartRestore);
     }
 
+    /// <summary>
+    /// 刷新后重选 + 落定加载态。
+    ///
+    /// ⚠️ U210：这里**不再碰 `StatusText`**。
+    ///
+    /// 它原来无条件写「共 N 个存档点」，而本页每条成功路径都是
+    /// 「先写结果文案 → 再调 `RefreshCoreAsync`」⇒ 结果文案被这一行抹掉。
+    /// 静息态描述现在走 `HistorySummaryText`（列表上方，与列表同寿命），
+    /// `StatusText` 只承载「最近一次动作的结果 / 失败原因」。
+    ///
+    /// 加新的刷新收尾逻辑时不要图省事往回写 StatusText——
+    /// 那等于把 U210 原样造回来，而它的症状（成功文案闪一下被覆盖）
+    /// 肉眼捕捉不到，只有守卫测试拦得住。
+    /// </summary>
     private void SelectAfterRefresh(string? previousId)
     {
         SelectedCommit = previousId is null
@@ -902,12 +960,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         // U182-K：加载成功了才有资格说「空」——此时确实问过后端且它说没有。
         ErrorText = string.Empty;
         LoadState = Commits.Count == 0 ? PageLoadState.Empty : PageLoadState.Content;
-        StatusText = Commits.Count == 0
-            ? EmptyText
-            : _displayNames.Format("ui.git.count", new Dictionary<string, string>
-            {
-                ["count"] = Commits.Count.ToString(),
-            });
+        RecomputeHistorySummary();
         NotifyHistoryState();
     }
 
@@ -929,7 +982,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
         finally
         {
@@ -1011,7 +1064,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
             // U196-B：回档失败**就是**项目进入维护失败态的那一刻，
             // 而顶栏横幅只在打开项目时刷新（`MainWindowViewModel.RefreshMaintenanceStatusAsync`
             // 的唯一调用点在 `ActivateProjectAsync` 里）⇒ 本次会话内它根本不会出现。
@@ -1058,19 +1111,20 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
             await RefreshCoreAsync(CancellationToken.None).ConfigureAwait(true);
             // 别的页面此刻手里全是「写操作被拒」之后的状态，让它们重新拉一遍。
             await _reloadProjectData().ConfigureAwait(true);
-            // ⚠️ 结果文案必须写在**所有刷新之后**，这不是风格问题。
+            // 结果文案写在所有刷新之后。
             //
-            // `RefreshCoreAsync` 末尾的 `SelectAfterRefresh` 无条件把 `StatusText`
-            // 改写成「共 N 个存档点」，而 `_reloadProjectData()` 会让 Git 页
-            // **再刷一遍自己**（`ReloadCachedProjectPagesExceptAsync(null)` 遍历
-            // 整个 `_pageCache`，git 页也在里面）⇒ 写在前面的结果文案会被覆盖两次，
-            // 作者读到的是一句与他刚做的事无关的「共 N 个存档点」。
+            // ⚠️ 这个顺序原来是**必需的**：`SelectAfterRefresh` 曾无条件把 `StatusText`
+            // 改写成「共 N 个存档点」，而 `_reloadProjectData()` 还会让 Git 页
+            // 再刷一遍自己（`ReloadCachedProjectPagesExceptAsync(null)` 遍历整个
+            // `_pageCache`，git 页也在里面）⇒ 写在前面就会被覆盖两次。
+            // **U210 已把覆盖源拆掉**（静息态描述搬去 `HistorySummaryText`，
+            // 刷新路径不再拥有 `StatusText` 的写权），所以现在这个顺序不再是安全前提，
+            // 只是「先做完事、再报结果」的自然写法。
             //
-            // 📌 顺带发现（**不在本条修复范围内，已写进报告**）：`RestoreCommitAsync`
-            // 与 `CreateCheckpointAsync` 都是「先写文案再刷新」，所以
-            // 「已切换到回档副本 X。{followup}」和「已创建存档」这两句
-            // **在成功路径上从来没被作者读到过**。那是同一形态的既有缺陷，
-            // 涉及另两条命令，需要单独定文案优先级，不在这里顺手改。
+            // 📌 别把它当成「必须靠顺序躲开刷新」的证据去照抄：那条依赖已经不存在，
+            // 而依赖顺序的写法一旦被复制到新命令上，就会在有人调整 await 次序时静默失效。
+            // 同一形态的另两处（`RestoreCommitAsync` / `CreateCheckpointAsync`）
+            // 就是 U210 的本体，已随该条一并修好。
             //
             // 两种结果对作者的意义不同，不能共用一句「已恢复」：
             // worker 没起来时索引重建还在队列里，此刻搜索到的可能是回档前的旧内容。
@@ -1080,7 +1134,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
             // 恢复失败后维护态可能仍是 failed（后端会退回原状态），
             // 面板必须留在屏上——否则作者以为解除成功了，接着又被每一次保存拒绝。
             await RefreshMaintenanceStateAsync(CancellationToken.None).ConfigureAwait(true);
@@ -1228,7 +1282,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -1258,12 +1312,30 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         };
     }
 
+    /// <summary>
+    /// 动作开始的唯一闸门。
+    ///
+    /// U210：顺带承担「清掉上一次动作的结果文案」。
+    ///
+    /// `StatusText` 分离出静息态描述之后就只剩「最近一次动作的结果」这一种语义，
+    /// 于是它的自然寿命是「直到下一次动作开始」——清除时机放在这里是**结构性**的：
+    /// 所有动作都必须过这道闸，不存在「新加一条命令忘了清」的漏法。
+    /// 用计时器按秒退回则要每条路径各自维护时序状态，且在测试里不可判定。
+    ///
+    /// ⚠️ 这一行不会误清本次动作自己的结果文案：成功路径上的
+    /// `RefreshCoreAsync` 是**直接调用**、不过这道闸；而 `_reloadProjectData()`
+    /// 回头触发的 Git 页自刷新走 `RefreshAsync` → 这道闸，此时
+    /// `OperationState` 还是本次动作（`EndOperation` 在 `finally` 里、在它之后），
+    /// `CanStartOperation()` 为 false ⇒ 直接 return，碰不到 StatusText。
+    /// 改动 EndOperation 的位置前请先想清楚这一点。
+    /// </summary>
     private bool TryBeginOperation(GitOperationState operation)
     {
         if (!CanStartOperation())
         {
             return false;
         }
+        StatusText = string.Empty;
         OperationState = operation;
         return true;
     }
@@ -1372,7 +1444,7 @@ public sealed class GitPageViewModel : ViewModelBase, IProjectDataReloadable, IU
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 

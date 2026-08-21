@@ -15,7 +15,7 @@ public enum PageLoadState
     ContentError,
 }
 
-public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable, ILocalizedUiAware
+public sealed class RunLogPageViewModel : PageViewModelBase, IProjectDataReloadable, ILocalizedUiAware
 {
     private const int PageSize = 100;
     private readonly DisplayNameService _displayNames;
@@ -25,7 +25,6 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
     private string _selectedKind = string.Empty;
     private string _runIdFilter = string.Empty;
     private string _nodeIdFilter = string.Empty;
-    private string _statusText = string.Empty;
     private PageLoadState _loadState = PageLoadState.Loading;
     private string _errorText = string.Empty;
     private bool _hasMore;
@@ -86,6 +85,16 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
     public string LoadMoreText => _displayNames.Text("ui.run_log.load_more");
     public string LoadingMoreText => _displayNames.Text("ui.run_log.loading_more");
     public string ClearFiltersText => _displayNames.Text("ui.run_log.clear_filters");
+
+    /// <summary>
+    /// U205-F：「清除筛选」的悬停说明。
+    ///
+    /// 这个键从「按 <c>IsVisible</c> 出现/消失」改成「常驻 + 无筛选时禁用」，
+    /// 是为了不再把右边的「标记已读」横向推走。**改完必须补这句文案**：
+    /// 灰键若不说明启用条件，就变成一个「点了没反应」的键 ——
+    /// 那是用一个新缺陷换掉旧缺陷（项目记忆：放宽/改变约束必须同批改文案）。
+    /// </summary>
+    public string ClearFiltersHintText => _displayNames.Text("ui.run_log.clear_filters.hint");
     public string CopySelectedText => _displayNames.Text("ui.run_log.copy_selected");
 
     public string EmptyText => _displayNames.Text("ui.run_log.empty");
@@ -260,12 +269,6 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         }
     }
 
-    public string StatusText
-    {
-        get => _statusText;
-        set => SetProperty(ref _statusText, value);
-    }
-
     public string ErrorText
     {
         get => _errorText;
@@ -355,7 +358,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
             }
 
             // U72: keep previous content when possible; never demote errors to Empty.
-            ErrorText = UserFacingError.Format(ex, _displayNames);
+            ErrorText = ReportFailure(ex, _displayNames);
             StatusText = ErrorText;
             LoadState = Logs.Count > 0 ? PageLoadState.ContentError : PageLoadState.Error;
             // Do not Logs.Clear() — preserve last good snapshot for diagnosis.
@@ -401,7 +404,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         {
             if (generation == _loadGeneration)
             {
-                ErrorText = UserFacingError.Format(ex, _displayNames);
+                ErrorText = ReportFailure(ex, _displayNames);
                 StatusText = ErrorText;
                 LoadState = PageLoadState.ContentError;
             }
@@ -438,7 +441,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
             ErrorText = StatusText;
             LoadState = Logs.Count > 0 ? PageLoadState.ContentError : PageLoadState.Error;
         }
@@ -626,7 +629,7 @@ public sealed class RunLogPageViewModel : ViewModelBase, IProjectDataReloadable,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
             return;
         }
 

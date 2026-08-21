@@ -131,6 +131,7 @@
   "ui.common.unit.seconds": "秒",
   "ui.common.unknown": "不明",
   "ui.diagnostics.clear": "消去",
+  "ui.diagnostics.clear.hint": "消去するとこの診断情報は二度と参照できません。記録が必要な場合は先に詳細を展開してコピーしてください。",
   "ui.diagnostics.hide": "詳細を閉じる",
   "ui.diagnostics.show": "詳細を表示",
   "ui.diagnostics.title": "診断",
@@ -342,6 +343,7 @@
   "ui.run_log.all_kinds": "すべての種類",
   "ui.run_log.all_levels": "すべてのレベル",
   "ui.run_log.clear_filters": "絞り込みを解除",
+  "ui.run_log.clear_filters.hint": "絞り込み条件が有効なときに利用できます。",
   "ui.run_log.copy_selected": "選択した記録をコピー",
   "ui.run_log.copied": "選択した実行記録をコピーしました。",
   "ui.run_log.context.node": "ノード {id}",
@@ -1365,5 +1367,12 @@
   "ui.works.body_search.retry": "本文検索を再試行",
   "ui.works.body_search.hit_accessible": "本文の一致：{title}",
   "ui.works.body_search.unknown_document": "プロジェクト外または移動済みの文書",
-  "ui.works.body_search.knowledge_document": "執筆ナレッジベース"
+  "ui.works.body_search.knowledge_document": "執筆ナレッジベース",
+  "ui.recovery.unknown": "タイトルバーの診断バナーを展開して詳細を確認してください。繰り返す場合はアプリを再起動してください。",
+  "ui.recovery.permission": "「設定 → 権限」で対象範囲を許可するか、既に許可済みのディレクトリに変更してください。",
+  "ui.recovery.not_configured": "「設定 → プロバイダ」でまずプロバイダを保存し、その後に資格情報を保存してください。この順序が必要です。",
+  "ui.recovery.not_found": "このページを再読み込みしてください。本当に削除されている場合は、別のものを選ぶか新規作成してください。",
+  "ui.recovery.budget": "日次予算の上限は「設定 → 予算」にあります。自動支出の枠も同じセクションです。",
+  "ui.recovery.external_outcome_unknown": "「実行記録」ページでこの手順が既に反映されているか確認し、再試行するか省略するかを決めてください。",
+  "ui.recovery.serialization": "「バージョン」ページで直近の利用可能なチェックポイントに戻せます。"
 }

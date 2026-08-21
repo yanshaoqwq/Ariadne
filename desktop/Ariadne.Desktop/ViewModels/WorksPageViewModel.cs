@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
+using Avalonia;
 using Avalonia.Controls;
 using AvaloniaEdit.Document;
 using Ariadne.Desktop.Backend;
@@ -7,7 +8,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
+public sealed class WorksPageViewModel : PageViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
 {
     private const string ProjectAiConversationId = "works";
     private const string RightPanelPreferenceKey = "works.right_panel";
@@ -34,7 +35,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     private GridLength _rightPanelColumnWidth = new(320);
     private bool _isNavTreeTab = true;
     private bool _isImportPanelOpen;
-    private string _statusText = string.Empty;
     private string _projectAiMessage = string.Empty;
     private string _projectAiAnswer;
     private readonly List<ProjectAiChatMessage> _projectAiHistory = new();
@@ -306,11 +306,71 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
     /// U136/U140：基准 720 = 正文测量宽 576（16px × 36 字）+ 左右内边距 144。
     /// 对照栏展开时**必须把纸加宽**而不是让正文让位——否则版心被压到 372px、
     /// 每行只剩 23 个字，读起来比 65 字/行还难受（那正是这次要修的方向的反面）。
-    /// 加的量 = 对照栏宽 320 + 它与正文之间的 28 间距 + 20 内缩，与 XAML 里
-    /// 那个 Border 的 Margin/Padding 对齐；两处改动必须同步，否则纸宽与实际
-    /// 占位对不上，正文会被悄悄挤窄。
+    ///
+    /// ✅ **U204-B：基准宽改从主题 token `Ariadne.Reading.SurfaceMaxWidth` 读取。**
+    /// 此前这里硬编码 `720d`，而主题里那个同值 token **全仓零引用** ——
+    /// 主题注释宣称「改字号时把这里一起改」，可改主题里那两个数字
+    /// **不影响任何渲染**：真正决定稿纸宽度的是本文件的字面量。
+    /// 现在改主题会真的改变稿纸宽度，那句注释第一次成立。
     /// </summary>
-    public double DocumentSurfaceMaxWidth => IsOutlinePanelOpen ? 720d + 368d : 720d;
+    public double DocumentSurfaceMaxWidth =>
+        ResolveSurfaceBaseWidth()
+        + (IsOutlinePanelOpen ? OutlinePanelWidth + OutlinePanelGutter : 0d);
+
+    /// <summary>
+    /// 对照栏展开时纸要额外加宽的「非栏宽」部分 = 它与正文之间的 28 间距 + 20 内缩。
+    /// 与 XAML 里那个 Border 的 Margin/Padding 对齐；两处改动必须同步，
+    /// 否则纸宽与实际占位对不上，正文会被悄悄挤窄。
+    ///
+    /// U204-B：原先这一整块写成 `720d + 368d` 一个合数，
+    /// 368 = 320(栏宽) + 48(间距+内缩) 的分解只活在注释里 ——
+    /// 拆开之后「栏宽变了要不要改这里」有了明确答案（不用改）。
+    /// </summary>
+    private const double OutlinePanelGutter = 48d;
+
+    /// <summary>
+    /// 稿纸基准宽的**兜底值**，必须与 `Ariadne.Reading.SurfaceMaxWidth` 一致。
+    ///
+    /// 为什么要有兜底：ViewModel 会在没有 <see cref="Application"/> 的纯单元测试里
+    /// 被直接 new（`ReadingMeasureTests` 就是），那时资源字典根本不存在。
+    /// 兜底不是「可以和主题不一致」的许可 ——
+    /// `ScaleTokenUsageTests.ReadingSurfaceFallback_MatchesTheThemeToken`
+    /// 从主题文件解析出真值与本常量对比，漂了就变红。
+    /// ⚠️ 只有兜底而没有那条守卫，等于把字面量换了个位置。
+    /// </summary>
+    internal const double SurfaceBaseWidthFallback = 720d;
+
+    /// 读主题 token；读不到（无 Application / 键缺失 / 类型不符）时用兜底值。
+    /// 刻意**不抛异常**：稿纸宽度不是安全边界，为它让整页崩掉是更坏的结果。
+    private static double ResolveSurfaceBaseWidth()
+    {
+        if (Application.Current is not { } app)
+        {
+            return SurfaceBaseWidthFallback;
+        }
+
+        try
+        {
+            // 走 Application.TryGetResource（沿应用级字典 + 主题变体查找），
+            // 与 AppIconPainter.ResolveColor 同一套路子：ViewModel 没有可视树，
+            // 用不了控件上的 this.TryFindResource。
+            if (app.TryGetResource(
+                    "Ariadne.Reading.SurfaceMaxWidth",
+                    app.ActualThemeVariant,
+                    out var resource)
+                && resource is double width
+                && width > 0d)
+            {
+                return width;
+            }
+        }
+        catch
+        {
+            // 资源查找在极早期（App 尚未 Initialize）可能抛，退回兜底而不是崩。
+        }
+
+        return SurfaceBaseWidthFallback;
+    }
 
     /// 当前章节的大纲正文；找不到时是可诊断文案而非空串。
     public string ChapterOutlineText
@@ -382,7 +442,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -860,12 +920,6 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
             : HasUnsavedChanges
                 ? _displayNames.Text("ui.works.save_state.unsaved")
                 : _displayNames.Text("ui.works.save_state.saved");
-
-    public string StatusText
-    {
-        get => _statusText;
-        set => SetProperty(ref _statusText, value);
-    }
 
     public string ProjectAiMessage
     {
@@ -1580,7 +1634,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 && string.Equals(chapterId, _currentSummaryChapterId, StringComparison.Ordinal))
             {
                 ClearSummaryProjection();
-                SummaryErrorText = UserFacingError.Format(ex, _displayNames);
+                SummaryErrorText = ReportFailure(ex, _displayNames);
             }
         }
         finally
@@ -2136,7 +2190,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         {
             if (generation == _worksTreeLoadGeneration)
             {
-                _worksTreeErrorText = UserFacingError.Format(ex, _displayNames);
+                _worksTreeErrorText = ReportFailure(ex, _displayNames);
                 OnPropertyChanged(nameof(WorksTreeErrorText));
                 StatusText = _worksTreeErrorText;
                 SetWorksTreeState(WorksTreeLoadState.Error);
@@ -2237,7 +2291,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 && (string.Equals(nextDocumentId, _currentDocumentId, StringComparison.Ordinal)
                     || string.IsNullOrWhiteSpace(_currentDocumentId)))
             {
-                StatusText = UserFacingError.Format(ex, _displayNames);
+                StatusText = ReportFailure(ex, _displayNames);
             }
         }
         finally
@@ -2290,7 +2344,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -2319,7 +2373,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -2361,7 +2415,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -2415,7 +2469,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
         finally
         {
@@ -2469,13 +2523,13 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 }
                 catch (Exception openEx)
                 {
-                    StatusText = UserFacingError.Format(openEx, _displayNames);
+                    StatusText = ReportFailure(openEx, _displayNames);
                 }
             }
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -2557,7 +2611,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -2663,9 +2717,9 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         {
             ProjectAiBubbles.Add(new ChatBubbleViewModel(
                 "assistant",
-                UserFacingError.Format(ex, _displayNames)));
+                ReportFailure(ex, _displayNames)));
             OnPropertyChanged(nameof(HasProjectAiBubbles));
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -2973,7 +3027,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
         {
             if (generation == Volatile.Read(ref _quickEditGeneration))
             {
-                StatusText = UserFacingError.Format(ex, _displayNames);
+                StatusText = ReportFailure(ex, _displayNames);
             }
         }
         finally
@@ -3238,7 +3292,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 DocumentContent = string.Empty;
                 DocumentTitle = NoDocumentText;
                 ClearSummaryState();
-                StatusText = UserFacingError.Format(ex, _displayNames);
+                StatusText = ReportFailure(ex, _displayNames);
             }
         }
         finally
@@ -3547,7 +3601,7 @@ public sealed class WorksPageViewModel : ViewModelBase, IUnsavedChangesGuard, IP
                 SetBodySearchState(BodySearchState.Indexing, clearHits: true);
                 return;
             }
-            _bodySearchErrorText = UserFacingError.Format(ex, _displayNames);
+            _bodySearchErrorText = ReportFailure(ex, _displayNames);
             SetBodySearchState(BodySearchState.Failed, clearHits: true);
         }
         finally

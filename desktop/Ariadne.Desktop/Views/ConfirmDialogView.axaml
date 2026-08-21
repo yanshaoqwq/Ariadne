@@ -30,7 +30,7 @@
           <Border Width="36" Height="36" CornerRadius="10"
                   Background="{DynamicResource Ariadne.AccentLight}"
                   BorderBrush="{DynamicResource Ariadne.AccentBorder}"
-                  BorderThickness="1"
+                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                   VerticalAlignment="Top">
             <Path x:Name="SeverityIcon"
                   HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -40,7 +40,7 @@
                   Data="M12,3 L22,20 L2,20 Z M12,9 L12,14 M12,16.5 L12,17.5" />
           </Border>
           <TextBlock Text="{Binding Title}"
-                     FontSize="16"
+                     FontSize="{DynamicResource Ariadne.Size.Subtitle}"
                      FontWeight="SemiBold"
                      FontFamily="{DynamicResource Ariadne.Font.Ui}"
                      Foreground="{DynamicResource Ariadne.TextHeading}"
@@ -71,9 +71,9 @@
                        Text="{Binding InputText, Mode=TwoWay}"
                        PlaceholderText="{Binding InputPlaceholder}"
                        MinHeight="38"
-                       FontSize="14"
+                       FontSize="{DynamicResource Ariadne.Size.Body}"
                        FontFamily="{DynamicResource Ariadne.Font.Ui}"
-                       CornerRadius="8"
+                       CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                        MaxLength="80" />
             </StackPanel>
           </StackPanel>

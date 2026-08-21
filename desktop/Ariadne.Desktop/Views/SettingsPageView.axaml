@@ -31,7 +31,7 @@
       <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
       <Setter Property="Background" Value="{DynamicResource Ariadne.BackgroundSubtle}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderMuted}" />
-      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderThickness" Value="{DynamicResource Ariadne.Stroke.HairlineAll}" />
     </Style>
     <!-- 索引项无底色块无描边：文字悬在空白上，状态全部由左侧导轨段与字色承担。
          U162-F：项距 0,5 → 0,7。TextWrapping=Wrap 下长标题折行后，
@@ -468,7 +468,7 @@
                             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                               <StackPanel Grid.Column="0" Spacing="2">
                                 <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                                <TextBlock Text="{Binding ProviderId}" Classes="mono" FontSize="11" Opacity="0.85" />
+                                <TextBlock Text="{Binding ProviderId}" Classes="mono" FontSize="{DynamicResource Ariadne.Size.Micro}" Opacity="0.85" />
                               </StackPanel>
                               <Border Grid.Column="1" Classes="chip" VerticalAlignment="Center" Padding="8,2">
                                 <TextBlock Text="{Binding KeyStatus}" Classes="caption" />
@@ -517,7 +517,11 @@
                       <CheckBox Margin="0,0,18,8" IsChecked="{Binding ProviderEnabled, Mode=TwoWay}" Content="{Binding ProviderEnabledText}" />
                     </WrapPanel>
                     <TextBlock Grid.Row="5" Grid.Column="0" Text="{Binding ApiKeyLabel}" Classes="secondary" VerticalAlignment="Center" />
-                    <Grid Grid.Row="5" Grid.Column="1" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
+                    <!-- U205-E / U195-I：作者填完 key 想点「保存密钥」，右边紧挨着
+                         就是不可逆的「吊销密钥」，`ColumnSpacing=10` 对两者一视同仁。
+                         按同一条约定加组边界。danger 色已在区分"它是危险的"，
+                         组边界区分的是"它不属于保存这一组"——两者不重复。 -->
+                    <Grid Grid.Row="5" Grid.Column="1" ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="10">
                       <TextBox Grid.Column="0"
                                Text="{Binding ApiKey, Mode=TwoWay}"
                                PlaceholderText="{Binding ApiKeyPlaceholder}"
@@ -525,7 +529,8 @@
                                AutomationProperties.Name="{Binding ApiKeyLabel}"
                                AutomationProperties.HelpText="{Binding ApiKeyPlaceholder}" />
                       <Button Grid.Column="1" Classes="secondary" Content="{Binding SaveKeyText}" Command="{Binding SaveProviderKeyCommand}" />
-                      <Button Grid.Column="2" Classes="danger" Content="{Binding RevokeKeyText}" Command="{Binding RevokeProviderKeyCommand}" />
+                      <Border Grid.Column="2" Classes="group-divider" />
+                      <Button Grid.Column="3" Classes="danger" Content="{Binding RevokeKeyText}" Command="{Binding RevokeProviderKeyCommand}" />
                     </Grid>
                     <TextBlock Grid.Row="6" Grid.Column="0" Text="{Binding ProviderStatusLabel}" Classes="secondary" VerticalAlignment="Top" />
                     <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding ProviderStatus}" Classes="caption" TextWrapping="Wrap" />
@@ -569,7 +574,10 @@
             <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsProviderEditorEditable}">
               <StackPanel Spacing="12">
                 <TextBlock x:Name="AvailableModelsSectionAnchor" Text="{Binding AvailableModelsSectionTitle}" Classes="subtitle" />
-                <Grid ColumnDefinitions="2*,150,105,105,105,Auto" ColumnSpacing="8">
+                <!-- U205-D：列定义多出的那个 Auto 是给数据行里「移除」前的组分隔线占位的。
+                     表头与数据行的 ColumnDefinitions **必须逐字一致**，否则列宽各算一套、
+                     表头文字会与它标注的那一列错开（这类错位不报错，只是看起来"标题写错了"）。 -->
+                <Grid ColumnDefinitions="2*,150,105,105,105,Auto,Auto" ColumnSpacing="8">
                   <TextBlock Grid.Column="0" Text="{Binding ModelIdColumnLabel}" Classes="caption" TextWrapping="Wrap" />
                   <TextBlock Grid.Column="1" Text="{Binding ModelCapabilityColumnLabel}" Classes="caption" TextWrapping="Wrap" />
                   <TextBlock Grid.Column="2" Text="{Binding ModelContextColumnLabel}" Classes="caption" TextWrapping="Wrap" />
@@ -579,7 +587,7 @@
                 <ItemsControl ItemsSource="{Binding ProviderModels}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:ProviderModelEditorRow}">
-                      <Grid ColumnDefinitions="2*,150,105,105,105,Auto" ColumnSpacing="8" Margin="0,3">
+                      <Grid ColumnDefinitions="2*,150,105,105,105,Auto,Auto" ColumnSpacing="8" Margin="0,3">
                         <StackPanel Grid.Column="0" Spacing="3">
                           <!-- U145：模型 ID 的候选就是刷新/测试连接从服务商拉回的目录，
                                产品已经知道这批 id，此前却让用户对着文档手抄。
@@ -610,7 +618,14 @@
                           <TextBox Text="{Binding OutputCost, Mode=TwoWay}" AutomationProperties.Name="{Binding ModelOutputCostColumnLabel}" AutomationProperties.HelpText="{Binding OutputCostError}" />
                           <TextBlock Text="{Binding OutputCostError}" Classes="caption" Foreground="{DynamicResource Ariadne.StatusError}" IsVisible="{Binding HasOutputCostError}" TextWrapping="Wrap" />
                         </StackPanel>
-                        <Button Grid.Column="5" Classes="subtle" Content="{Binding RemoveModelText}" Command="{Binding RemoveCommand}" />
+                        <!-- U205-D：删除键原先与同行 5 个输入控件等距 8px 并列 ⇒ 作者在改
+                             上下文长度 / 单价这些数字时，**手指移动路径上就横着一个删除键**，
+                             误点即丢掉整条模型配置（含已填的价格，重填要回服务商文档查）。
+                             这里加一道组边界把「编辑这一行」与「删掉这一行」分开。
+                             ⚠️ 刻意**不做成 hover 才显形**：那会让「哪些行可删」变得不可预知，
+                             键盘/读屏用户更是完全找不到它（报告 D 条已权衡过这条路）。 -->
+                        <Border Grid.Column="5" Classes="group-divider" />
+                        <Button Grid.Column="6" Classes="subtle" Content="{Binding RemoveModelText}" Command="{Binding RemoveCommand}" />
                       </Grid>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>
@@ -713,10 +728,16 @@
                     <TextBlock Text="{Binding TemplateRepositoryLabel}" Classes="secondary" />
                     <TextBox Text="{Binding TemplateRepositoryBaseUrl, Mode=TwoWay}"
                              AutomationProperties.Name="{Binding TemplateRepositoryLabel}" />
+                    <!-- U205-E：「恢复官方模板库」（丢弃当前地址，不可撤销）与「保存」
+                         原先等距 10px 并排 —— 与 U195-I（保存密钥/吊销密钥）是同一个写法。
+                         本轮定下的约定：**不可逆操作不得与保存类操作等距并排**，
+                         中间必须有一道可见的组边界（而不是把 10px 调成 20px：
+                         量的差别在不同 DPI / 缩放下会退化，边界不会）。 -->
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
                       <Button Classes="secondary"
                               Content="{Binding RestoreOfficialTemplateRepositoryText}"
                               Command="{Binding RestoreOfficialTemplateRepositoryCommand}" />
+                      <Border Classes="group-divider" />
                       <Button Classes="primary"
                               Content="{Binding SaveTemplateRepositoryText}"
                               Command="{Binding SaveTemplateRepositoryCommand}" />
@@ -1247,7 +1268,7 @@
                                             IsVisible="{Binding IsSelected}"
                                             VerticalAlignment="Top" Margin="6,2,0,0" />
                                   </Grid>
-                                  <Border Height="28" CornerRadius="6" ClipToBounds="True">
+                                  <Border Height="28" CornerRadius="{DynamicResource Ariadne.Radius.Medium}" ClipToBounds="True">
                                     <Grid ColumnDefinitions="*,*,*">
                                       <Border Grid.Column="0" Background="{Binding SwatchMain}" />
                                       <Border Grid.Column="1" Background="{Binding SwatchSurface}" />
@@ -1297,10 +1318,10 @@
                               Padding="10,8">
                         <StackPanel Spacing="6">
                           <TextBlock Text="{Binding ThemeMainColorLabel}" Classes="caption" />
-                          <Border Height="28" CornerRadius="6"
+                          <Border Height="28" CornerRadius="{DynamicResource Ariadne.Radius.Medium}"
                                   Background="{Binding ThemeMainColorEditor.PreviewBrush}"
                                   BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                                  BorderThickness="1" />
+                                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}" />
                         </StackPanel>
                       </Button>
                       <Button Classes="theme-color-slot"
@@ -1312,10 +1333,10 @@
                               Padding="10,8">
                         <StackPanel Spacing="6">
                           <TextBlock Text="{Binding ThemeSurfaceColorLabel}" Classes="caption" />
-                          <Border Height="28" CornerRadius="6"
+                          <Border Height="28" CornerRadius="{DynamicResource Ariadne.Radius.Medium}"
                                   Background="{Binding ThemeSurfaceColorEditor.PreviewBrush}"
                                   BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                                  BorderThickness="1" />
+                                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}" />
                         </StackPanel>
                       </Button>
                       <Button Classes="theme-color-slot"
@@ -1326,10 +1347,10 @@
                               Padding="10,8">
                         <StackPanel Spacing="6">
                           <TextBlock Text="{Binding ThemeBrandColorLabel}" Classes="caption" />
-                          <Border Height="28" CornerRadius="6"
+                          <Border Height="28" CornerRadius="{DynamicResource Ariadne.Radius.Medium}"
                                   Background="{Binding ThemeBrandColorEditor.PreviewBrush}"
                                   BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                                  BorderThickness="1" />
+                                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}" />
                         </StackPanel>
                       </Button>
                     </UniformGrid>

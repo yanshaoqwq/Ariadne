@@ -200,20 +200,21 @@
     </Style>
     <!-- 分区标题降级：原来用 subtitle（16px SemiBold），与右栏自身的面板标题
          一样大，导致毫无层级、每块都在抢主角。检查器里的分区名应该是
-         「安静的定位标记」：小字号、加字距、弱色。 -->
-    <Style Selector="Border.inspector-group TextBlock.subtitle">
-      <Setter Property="FontSize" Value="11" />
-      <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="LetterSpacing" Value="0.7" />
-      <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
-    </Style>
+         「安静的定位标记」：小字号、加字距、弱色。
+         ✅ **U204-D：这里曾有一条 `Border.inspector-group TextBlock.subtitle`
+         把字号压到 11、字距 0.7、色改 TextSubtle —— 与主题里现成的
+         `TextBlock.inspector-label` 四条 Setter 逐条相同**，即用上下文覆盖
+         手抄了一遍一个已经存在的类。它的代价是 `.subtitle` 在全项目表达三种
+         字号（16/20/11），读到 `Classes="subtitle"` 时无法判断它会有多大。
+         那 9 处已直接改挂 `inspector-label`，本条覆盖随之删除 ——
+         **零视觉变化**（两套 Setter 完全等价），换来的是 class 名重新携带信息。 -->
     <!-- 行内属性行：标签在左窄列、字段在右，取代「标签在上、输入在下」的竖堆。
          检查器从一列叠框变成紧凑的属性表（Blender/Figma 检查器语汇），竖向高度砍半。
          键标签左对齐、弱色、垂直居中：右对齐会让长短不一的标签在左缘参差不齐，
          一列读下来像锯齿；左对齐则所有键起点同一条竖线。 -->
     <Style Selector="Grid.prop-row > TextBlock.k">
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSecondary}" />
-      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Caption}" />
       <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="TextAlignment" Value="Left" />
       <Setter Property="TextWrapping" Value="Wrap" />
@@ -222,7 +223,7 @@
          原先它们各占一格网格列，把相邻行的输入框左右缘顶得长短不齐。 -->
     <Style Selector="Grid.prop-row TextBlock.unit">
       <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
-      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontSize" Value="{DynamicResource Ariadne.Size.Micro}" />
       <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="IsHitTestVisible" Value="False" />
     </Style>
@@ -237,8 +238,8 @@
     <Style Selector="Button.inspector-edge-row">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="BorderThickness" Value="{DynamicResource Ariadne.Stroke.HairlineAll}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Ariadne.Radius.Medium}" />
       <Setter Property="Padding" Value="10,8" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
       <!-- 与最近项目行 / 检查器对象行同族：以右缘为铰链轻撬 -->
@@ -263,7 +264,7 @@
     <Style Selector="Button.inspector-edge-row.selected /template/ ContentPresenter">
       <Setter Property="Background" Value="{DynamicResource Ariadne.AccentLight}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.AccentBorder}" />
-      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderThickness" Value="{DynamicResource Ariadne.Stroke.HairlineAll}" />
     </Style>
     <!-- 拒绝理由线：默认宽 0 且不可点，武装后向左生长出来。
          用 Width 插值而不是 IsVisible 切换，是因为要的是「从按钮往左长出一条线」
@@ -470,8 +471,8 @@
                        IsVisible="{Binding ShowCanvasDetails}">
                   <Border Background="{DynamicResource Ariadne.BackgroundSurface}"
                           BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                          BorderThickness="1"
-                          CornerRadius="4"
+                          BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
+                          CornerRadius="{DynamicResource Ariadne.Radius.Small}"
                           Padding="5,1"
                           Opacity="0.92"
                           Cursor="Hand"
@@ -598,7 +599,7 @@
                 <Border x:Name="NodeKeyboardFocusHost"
                         Grid.Row="1"
                         Background="{DynamicResource Ariadne.NodeGlassFill}"
-                        BorderThickness="1"
+                        BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                         CornerRadius="12"
                         ClipToBounds="True"
                         Focusable="True"
@@ -654,7 +655,7 @@
                         </Border>
                         <TextBlock Grid.Column="1"
                                    Text="{Binding Label}"
-                                   FontWeight="SemiBold" FontSize="12"
+                                   FontWeight="SemiBold" FontSize="{DynamicResource Ariadne.Size.Caption}"
                                    Foreground="{DynamicResource Ariadne.TextPrimary}"
                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                         <StackPanel Grid.Column="2"
@@ -666,7 +667,7 @@
                                   VerticalContentAlignment="Center"
                                   Background="{DynamicResource Ariadne.AccentLight}"
                                   BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
-                                  BorderThickness="1"
+                                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                                   CornerRadius="5"
                                   IsVisible="{Binding IsStartNode}"
                                   ToolTip.Tip="{loc:Text ui.workspace.run}"
@@ -810,15 +811,16 @@
                             </DataTemplate>
                           </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                        <!-- 添加入口属于数据输入列表，不属于标题栏；透明无描边，一次点击即提交。 -->
-                        <Button Width="14"
-                                Height="16"
-                                Padding="0"
+                        <!-- 添加入口属于数据输入列表，不属于标题栏；透明无描边，一次点击即提交。
+                             U205-B：尺寸/底色/内边距全部由 `Button.pin-add` 给
+                             （原为内联 Width=14 Height=16 —— 全项目最小可点目标，
+                             在可缩放画布上 50% 缩放只剩 7×8px）。
+                             ⚠️ 不要把 Width/Height/Background 写回内联：LocalValue
+                             会静默压过样式，命中区又会缩回去而界面看不出差别。 -->
+                        <Button Classes="pin-add"
                                 HorizontalAlignment="Center"
                                 HorizontalContentAlignment="Center"
                                 VerticalContentAlignment="Center"
-                                Background="Transparent"
-                                BorderThickness="0"
                                 IsVisible="{Binding ShowDataInPinEditor}"
                                 ToolTip.Tip="{loc:Text ui.workspace.pin.add_data_in}"
                                 AutomationProperties.Name="{loc:Text ui.workspace.pin.add_data_in}"
@@ -930,7 +932,7 @@
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Pack}" />
                 </Button>
               </StackPanel>
-              <Border Width="1" Margin="4,5" Background="{DynamicResource Ariadne.BorderMuted}" />
+              <Border Classes="group-divider" />
               <StackPanel x:Name="CanvasFileActions" Orientation="Horizontal" Spacing="2">
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding ReloadProjectCanvasText}" AutomationProperties.Name="{Binding ReloadProjectCanvasText}" Command="{Binding ReloadProjectCanvasCommand}">
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Refresh}" />
@@ -953,7 +955,7 @@
                   </Panel>
                 </Button>
               </StackPanel>
-              <Border Width="1" Margin="4,5" Background="{DynamicResource Ariadne.BorderMuted}" />
+              <Border Classes="group-divider" />
               <StackPanel x:Name="CanvasViewActions" Orientation="Horizontal" Spacing="2">
                 <Button Classes="icon-btn" ToolTip.Tip="{Binding ZoomOutText}" AutomationProperties.Name="{Binding ZoomOutText}" Command="{Binding ZoomOutCommand}">
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Subtract}" />
@@ -977,7 +979,7 @@
                   <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Add}" />
                 </Button>
               </StackPanel>
-              <Border Width="1" Margin="4,5" Background="{DynamicResource Ariadne.BorderMuted}" />
+              <Border Classes="group-divider" />
               <!-- 审批历史入口（U187-A）。为什么必须在工具条上再开一个口子：
                    历史的呈现体在审阅面板里，而那个面板只在**有待审项**时渲染
                    ⇒ 全部审完后历史就够不着了，而「昨天全审完、今天想回看批过什么」
@@ -1004,12 +1006,22 @@
                 Padding="9,5"
                 MaxWidth="420"
                 Classes="soft-panel">
-          <TextBlock Text="{Binding StatusText}"
-                     Classes="caption"
-                     TextWrapping="NoWrap"
-                     TextTrimming="CharacterEllipsis"
-                     AutomationProperties.LiveSetting="Polite"
-                     ToolTip.Tip="{Binding StatusText}" />
+          <StackPanel Spacing="3">
+            <TextBlock Text="{Binding StatusText}"
+                       Classes="caption"
+                       TextWrapping="NoWrap"
+                       TextTrimming="CharacterEllipsis"
+                       AutomationProperties.LiveSetting="Polite"
+                       ToolTip.Tip="{Binding StatusText}" />
+            <!-- U198-B：失败补救行。只在有建议时出现（HasRecoveryText 为 false
+                 整条隐藏），用 StatusWarning 色与上面的状态行区分主次。 -->
+            <TextBlock Text="{Binding RecoveryText}"
+                       Classes="caption"
+                       Foreground="{DynamicResource Ariadne.StatusWarning}"
+                       IsVisible="{Binding HasRecoveryText}"
+                       TextWrapping="Wrap"
+                       AutomationProperties.LiveSetting="Polite" />
+          </StackPanel>
         </Border>
 
         <Border x:Name="MiniMapHost"
@@ -1020,8 +1032,8 @@
                 Height="100"
                 Background="{DynamicResource Ariadne.BackgroundSurface}"
                 BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                BorderThickness="1"
-                CornerRadius="8"
+                BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
+                CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                 Padding="8"
                 Opacity="0.9"
                 Cursor="Hand"
@@ -1052,7 +1064,7 @@
                           CornerRadius="2"
                           Background="{DynamicResource Ariadne.BorderStrong}"
                           BorderBrush="{DynamicResource Ariadne.BackgroundSurface}"
-                          BorderThickness="1"
+                          BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                           IsHitTestVisible="False" />
                 </DataTemplate>
               </ItemsControl.ItemTemplate>
@@ -1077,7 +1089,7 @@
                   Height="22"
                   Background="{DynamicResource Ariadne.BackgroundSurface}"
                   BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                  BorderThickness="1"
+                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                   CornerRadius="6,6,0,0"
                   Focusable="True"
                   Classes="keyboard-target bottom-pill"
@@ -1184,7 +1196,7 @@
                        IsVisible="{Binding VariableFill.HasDiff}" />
             <Border IsVisible="{Binding VariableFill.HasDiff}"
                     Background="{DynamicResource Ariadne.BackgroundCode}"
-                    CornerRadius="8"
+                    CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                     Padding="0,6">
               <ScrollViewer MaxHeight="240"
                             HorizontalScrollBarVisibility="Auto"
@@ -1304,6 +1316,12 @@
                         Fill="{DynamicResource Ariadne.TextSecondary}"
                         Data="M8,5 L19,12 L8,19 Z" />
                 </Button>
+                <!-- U205-A / U195-H：暂停与继续是**可逆的流控**，停止是**不可逆的终止**
+                     （已跑的节点不会回滚，重来一轮要重新花钱）。三键原先等距 4px ⇒
+                     运行中最容易误触的那一对距离最短。这里给停止加一道组边界，
+                     把「继续」到「停止」的手滑距离从 4px 拉到约 13px，
+                     且这个距离由组边界表达、不随 DPI/缩放退化（对照 U195-J 的判定）。 -->
+                <Border Classes="group-divider" />
                 <Button x:Name="StopRunButton" Classes="icon-btn"
                         ToolTip.Tip="{Binding StopText}"
                         AutomationProperties.Name="{Binding StopText}"
@@ -1341,7 +1359,7 @@
                       <StackPanel Orientation="Horizontal" Spacing="8" IsHitTestVisible="False">
                         <Path Classes="icon-fill" Width="11" Height="11"
                               Fill="{DynamicResource Ariadne.AccentPrimary}" Data="M8,5 L19,12 L8,19 Z" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding Title}" FontSize="12" VerticalAlignment="Center"
+                        <TextBlock Text="{Binding Title}" FontSize="{DynamicResource Ariadne.Size.Caption}" VerticalAlignment="Center"
                                    Foreground="{DynamicResource Ariadne.AccentPrimary}" FontWeight="SemiBold" />
                       </StackPanel>
                     </Button>
@@ -1363,7 +1381,7 @@
                             Command="{Binding AddCommand}">
                       <StackPanel Orientation="Horizontal" Spacing="8" IsHitTestVisible="False">
                         <Ellipse Width="7" Height="7" Fill="{DynamicResource Ariadne.AccentPrimary}" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding Title}" FontSize="12" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding Title}" FontSize="{DynamicResource Ariadne.Size.Caption}" VerticalAlignment="Center" />
                       </StackPanel>
                     </Button>
                   </DataTemplate>
@@ -1382,7 +1400,7 @@
                             Cursor="Hand"
                             AutomationProperties.Name="{Binding Title}"
                             Command="{Binding AddCommand}">
-                      <TextBlock Text="{Binding Title}" FontSize="12" IsHitTestVisible="False" />
+                      <TextBlock Text="{Binding Title}" FontSize="{DynamicResource Ariadne.Size.Caption}" IsHitTestVisible="False" />
                     </Button>
                   </DataTemplate>
                 </ItemsControl.ItemTemplate>
@@ -1392,7 +1410,11 @@
 
           <!-- 执行页：入口卡 + 当前运行控制台 -->
           <ScrollViewer IsVisible="{Binding IsExecutionPanel}" VerticalScrollBarVisibility="Auto">
-            <Grid x:Name="ExecutionLayoutGrid" Margin="14,10,14,14" MinHeight="160">
+            <!-- U204-B：`14,10,14,14` 原是本页的字面量，而主题里
+                 `Ariadne.Page.PanelPadding` 定义的正是这一组值且**全仓零引用** ——
+                 「面板内边距」看着是个体系，实际是这一行说了算。现已接上。 -->
+            <Grid x:Name="ExecutionLayoutGrid"
+                  Margin="{DynamicResource Ariadne.Page.PanelPadding}" MinHeight="160">
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="18" />
@@ -1507,7 +1529,7 @@
                               <TextBox Text="{Binding Variables.SummaryTemplate, Mode=TwoWay}"
                                        AutomationProperties.Name="{Binding Variables.SummaryLabelText}"
                                        FontFamily="{DynamicResource Ariadne.Font.Mono}"
-                                       FontSize="12" />
+                                       FontSize="{DynamicResource Ariadne.Size.Caption}" />
                               <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
                                 <TextBlock Grid.Column="0" Text="{Binding Variables.SummaryHintText}"
                                            Classes="subtle" TextWrapping="Wrap"
@@ -1533,7 +1555,7 @@
                 <Border Classes="empty-state" Padding="12,16" IsVisible="{Binding !HasStartNodes}">
                   <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="420">
                     <ctl:EmptyStateArt Kind="Workspace" Width="140" Height="112" HorizontalAlignment="Center" />
-                    <TextBlock Text="{Binding EmptyStartTitle}" Classes="subtitle" HorizontalAlignment="Center" />
+                    <TextBlock Text="{Binding EmptyStartTitle}" Classes="empty-title" HorizontalAlignment="Center" />
                     <TextBlock Text="{Binding EmptyStartHint}" Classes="caption" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
                   </StackPanel>
                 </Border>
@@ -1549,7 +1571,7 @@
                 <StackPanel Spacing="14">
                   <StackPanel Spacing="4">
                     <TextBlock Text="{Binding CurrentRunText}" Classes="subtitle" />
-                    <TextBlock Text="{Binding CurrentRunValueText}" Classes="mono" TextWrapping="Wrap" FontSize="12" />
+                    <TextBlock Text="{Binding CurrentRunValueText}" Classes="mono" TextWrapping="Wrap" FontSize="{DynamicResource Ariadne.Size.Caption}" />
                   </StackPanel>
                   <!-- 暂停/继续/停止已移到下栏标题栏右侧（图标三键）：
                        运行控制不该只在执行页内才够得着，切到节点库页同样要能停。 -->
@@ -1617,8 +1639,8 @@
               Padding="14,10"
               Background="{DynamicResource Ariadne.AccentLight}"
               BorderBrush="{DynamicResource Ariadne.AccentPrimary}"
-              BorderThickness="1"
-              CornerRadius="8"
+              BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
+              CornerRadius="{DynamicResource Ariadne.Radius.Large}"
               IsVisible="{Binding ShowConfirmationBanner}"
               ZIndex="20">
         <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
@@ -1640,7 +1662,9 @@
               BorderThickness="0"
               IsVisible="{Binding ShowConfirmationFullPanel}"
               ZIndex="15">
-        <Grid Margin="34,28" RowDefinitions="Auto,*" RowSpacing="22">
+        <!-- U204-B：`34,28` 同理接到 `Ariadne.Page.SectionMargin`（原零引用）。 -->
+        <Grid Margin="{DynamicResource Ariadne.Page.SectionMargin}"
+              RowDefinitions="Auto,*" RowSpacing="22">
           <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
             <StackPanel Grid.Column="0" Spacing="4">
               <TextBlock Text="{Binding ConfirmationsText}" Classes="display" />
@@ -1801,7 +1825,7 @@
                    挂在 TextBlock 上会变成「裁掉多余」（U153）。 -->
               <Border Grid.Row="1"
                       Background="{DynamicResource Ariadne.BackgroundCode}"
-                      CornerRadius="8"
+                      CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                       Padding="0,8"
                       IsVisible="{Binding HasConfirmationDiff}">
                 <ScrollViewer HorizontalScrollBarVisibility="Auto"
@@ -1918,13 +1942,79 @@
           </Border>
 
           <Grid>
-            <Grid IsVisible="{Binding IsProjectAiTab}" RowDefinitions="*,Auto" HorizontalAlignment="Stretch">
-              <ScrollViewer Grid.Row="0" Margin="12,10">
+            <Grid IsVisible="{Binding IsProjectAiTab}" RowDefinitions="Auto,*,Auto" HorizontalAlignment="Stretch">
+              <!-- U206-B：跨章知识查询。**常驻在对话流之上、不随它滚动**——
+                   放进 ScrollViewer 里的话，聊了十几轮之后要先滚回顶部才能查一次设定，
+                   而「这个设定当初在哪定的」恰恰是对话进行中最常要查的东西。
+                   分层用 dock-rail-header 的淡底色（与下方输入面同一套），不加硬分割线。 -->
+              <Border Grid.Row="0" Classes="dock-rail-header" Padding="12,10">
+                <StackPanel Spacing="6">
+                  <Grid ColumnDefinitions="Auto,*" ColumnSpacing="7">
+                    <Path Grid.Column="0" Classes="icon" Width="13" Height="13"
+                          VerticalAlignment="Center"
+                          Data="{StaticResource Ariadne.Icon.Search}" />
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding KnowledgeLookup.TitleText}"
+                               Classes="caption"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center" />
+                  </Grid>
+                  <TextBlock Text="{Binding KnowledgeLookup.HintText}"
+                             Classes="subtle" TextWrapping="Wrap" />
+                  <!-- 候选是**查过的词**（见 VM 注释：后端没有列举知识实体的命令）。
+                       MinimumPrefixLength=0 + 不自动补全：作者输的是中文人名，
+                       自动补全会在打字中途把词替换掉。 -->
+                  <AutoCompleteBox Text="{Binding KnowledgeLookup.Term, Mode=TwoWay}"
+                                   ItemsSource="{Binding KnowledgeLookup.TermCandidates}"
+                                   FilterMode="ContainsOrdinal"
+                                   MinimumPrefixLength="0"
+                                   IsTextCompletionEnabled="False"
+                                   MaxDropDownHeight="200"
+                                   AutomationProperties.Name="{Binding KnowledgeLookup.TitleText}" />
+                  <!-- 示例词单独一行而不是做输入框水印：这版 Avalonia 的 AutoCompleteBox
+                       没有对外暴露水印属性，靠模板里的内层 TextBox 去设会被 Template
+                       优先级压掉且**不报错**（缺资源/压优先级在 Avalonia 里都是静默失效）。 -->
+                  <TextBlock Text="{Binding KnowledgeLookup.PlaceholderText}"
+                             Classes="subtle" TextWrapping="Wrap" />
+                  <Button Classes="secondary" HorizontalAlignment="Stretch"
+                          Content="{Binding KnowledgeLookup.LookupButtonText}"
+                          AutomationProperties.Name="{Binding KnowledgeLookup.LookupButtonText}"
+                          Command="{Binding KnowledgeLookup.LookupCommand}" />
+
+                  <!-- 结果区整块随 HasResult 显隐：没命中时不留一个空框（U130 同一条）。 -->
+                  <StackPanel Spacing="4" IsVisible="{Binding KnowledgeLookup.HasResult}">
+                    <TextBlock Text="{Binding KnowledgeLookup.ResultTitle}"
+                               Classes="caption" FontWeight="SemiBold" TextWrapping="Wrap" />
+                    <!-- 出处这一行就是作者问的那个答案（「在哪一章定下的」），
+                         所以它跟标题同级、不缩进、不折叠。 -->
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                      <TextBlock Grid.Column="0"
+                                 Text="{Binding KnowledgeLookup.SourceLabelText}"
+                                 Classes="subtle" />
+                      <TextBlock Grid.Column="1"
+                                 Text="{Binding KnowledgeLookup.ResultSource}"
+                                 Classes="caption"
+                                 FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                                 TextWrapping="Wrap" />
+                    </Grid>
+                    <TextBlock Text="{Binding KnowledgeLookup.ResultText}"
+                               Classes="caption"
+                               FontFamily="{DynamicResource Ariadne.Font.Reading}"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding KnowledgeLookup.HasResultText}" />
+                    <Button Classes="subtle" HorizontalAlignment="Left"
+                            Content="{Binding KnowledgeLookup.AskAiText}"
+                            AutomationProperties.Name="{Binding KnowledgeLookup.AskAiText}"
+                            Command="{Binding KnowledgeLookup.AskAiCommand}" />
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+              <ScrollViewer Grid.Row="1" Margin="12,10">
                 <StackPanel Spacing="10">
                   <Border Classes="empty-state" Padding="8,16" IsVisible="{Binding !HasProjectAiBubbles}">
                     <StackPanel Spacing="6">
                       <ctl:EmptyStateArt Kind="ProjectAi" Width="120" Height="90" HorizontalAlignment="Left" />
-                      <TextBlock Text="{Binding EmptyProjectAiTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding EmptyProjectAiTitle}" Classes="empty-title" />
                       <TextBlock Text="{Binding EmptyProjectAiHint}" Classes="caption" TextWrapping="Wrap" />
                       <TextBlock Text="{Binding ProjectAiEmptyText}" Classes="subtle" TextWrapping="Wrap" />
                     </StackPanel>
@@ -1934,14 +2024,14 @@
                       <DataTemplate DataType="{x:Type vm:ChatBubbleViewModel}">
                         <Border Background="{Binding BubbleBackground}"
                                 BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                                BorderThickness="1"
+                                BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                                 CornerRadius="10"
                                 Padding="12,8"
                                 HorizontalAlignment="{Binding HorizontalAlignment}"
                                 MaxWidth="320"
                                 Margin="0,0,0,6">
                           <StackPanel Spacing="4">
-                            <TextBlock Text="{Binding RoleLabel}" Classes="subtle" FontSize="11" />
+                            <TextBlock Text="{Binding RoleLabel}" Classes="subtle" FontSize="{DynamicResource Ariadne.Size.Micro}" />
                             <TextBlock Text="{Binding Content}" TextWrapping="Wrap" FontSize="13" />
                           </StackPanel>
                         </Border>
@@ -1950,8 +2040,9 @@
                   </ItemsControl>
                 </StackPanel>
               </ScrollViewer>
-              <!-- 输入面：去掉顶部硬线，用一层更淡的底色把「输入区」从对话流里分出来 -->
-              <Border Grid.Row="1"
+              <!-- 输入面：去掉顶部硬线，用一层更淡的底色把「输入区」从对话流里分出来。
+                   Row 2（U206-B 把知识查询插到 Row 0 后整体下移一行）。 -->
+              <Border Grid.Row="2"
                       Classes="dock-rail-header"
                       Padding="12,10"
                       HorizontalAlignment="Stretch">
@@ -1970,7 +2061,7 @@
                   </Border>
                   <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
                     <TextBlock Text="{Binding SelectedNodeTitle}"
-                               FontSize="14" FontWeight="SemiBold"
+                               FontSize="{DynamicResource Ariadne.Size.Body}" FontWeight="SemiBold"
                                TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />
                     <TextBlock Text="{Binding SelectedNode.StatusText}"
                                Classes="caption" TextWrapping="Wrap"
@@ -2037,7 +2128,7 @@
                   <!-- 文档读：path + include_content（后端 WorkflowDocumentReadConfig） -->
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsDocumentNode}">
                     <StackPanel Spacing="8">
-                      <TextBlock Text="{Binding ImportFileLabel}" Classes="subtitle" />
+                      <TextBlock Text="{Binding ImportFileLabel}" Classes="inspector-label" />
                       <TextBlock Text="{Binding ImportFileHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                         <TextBox Grid.Column="0" Text="{Binding SelectedNode.ImportPath, Mode=TwoWay}" Classes="mono" AutomationProperties.Name="{Binding ImportFileHint}"
@@ -2053,7 +2144,7 @@
                   <!-- 搜索：query_alias + limit（后端 project search） -->
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsSearchNode}">
                     <StackPanel Spacing="9">
-                      <TextBlock Text="{Binding SearchNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding SearchNodeTitle}" Classes="inspector-label" />
                       <TextBlock Text="{Binding SearchNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding QueryAliasLabel}" />
@@ -2079,7 +2170,7 @@
                   <!-- 条件：input_alias / operator / expected -->
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsConditionNode}">
                     <StackPanel Spacing="9">
-                      <TextBlock Text="{Binding ConditionNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding ConditionNodeTitle}" Classes="inspector-label" />
                       <TextBlock Text="{Binding ConditionNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding ConditionInputAliasLabel}" />
@@ -2110,7 +2201,7 @@
                   <!-- 循环：max_iterations + stop_condition -->
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsLoopNode}">
                     <StackPanel Spacing="9">
-                      <TextBlock Text="{Binding LoopNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding LoopNodeTitle}" Classes="inspector-label" />
                       <TextBlock Text="{Binding LoopNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding MaxIterationsLabel}" />
@@ -2145,7 +2236,7 @@
                   <!-- 审批：approval_id + auto_approve -->
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsApprovalNode}">
                     <StackPanel Spacing="9">
-                      <TextBlock Text="{Binding ApprovalNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding ApprovalNodeTitle}" Classes="inspector-label" />
                       <TextBlock Text="{Binding ApprovalNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding ApprovalIdLabel}" />
@@ -2169,7 +2260,7 @@
                   <!-- 导出：artifact_id / format / title -->
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsExportNode}">
                     <StackPanel Spacing="9">
-                      <TextBlock Text="{Binding ExportNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding ExportNodeTitle}" Classes="inspector-label" />
                       <TextBlock Text="{Binding ExportNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12">
                         <TextBlock Grid.Column="0" Classes="k" Text="{Binding ExportArtifactIdLabel}" />
@@ -2204,7 +2295,7 @@
                   <!-- Summarizer：与 Rust WorkflowSummarizerNodeConfig 同字段，保存前由后端统一校验 -->
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.IsSummarizerNode}">
                     <StackPanel Spacing="8">
-                      <TextBlock Text="{Binding SummarizerNodeTitle}" Classes="subtitle" />
+                      <TextBlock Text="{Binding SummarizerNodeTitle}" Classes="inspector-label" />
                       <TextBlock Text="{Binding SummarizerNodeHint}" Classes="caption" TextWrapping="Wrap" Opacity="0.9" />
                       <Grid Classes="prop-row" ColumnDefinitions="80,*" ColumnSpacing="12"
                             IsVisible="{Binding HasSummarizerChapterChoices}">
@@ -2270,7 +2361,7 @@
                           IsVisible="{Binding SelectedNode.ShowDataInPinEditor}">
                     <StackPanel Spacing="9">
                       <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <TextBlock Grid.Column="0" Text="{Binding DataInPinsLabel}" Classes="subtitle" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="0" Text="{Binding DataInPinsLabel}" Classes="inspector-label" VerticalAlignment="Center" />
                         <Button Grid.Column="1" Classes="icon-btn"
                                 ToolTip.Tip="{Binding AddDataInPinText}"
                                 AutomationProperties.Name="{Binding AddDataInPinText}"
@@ -2311,7 +2402,7 @@
 
                   <Border Classes="inspector-group" Padding="14,6,14,12" IsVisible="{Binding SelectedNode.ShowPromptEditor}">
                     <StackPanel Spacing="10">
-                      <TextBlock Text="{Binding PromptTemplateText}" Classes="subtitle" />
+                      <TextBlock Text="{Binding PromptTemplateText}" Classes="inspector-label" />
                       <!-- U150/U115：从纯 TextBox 换成 AvaloniaEdit 子类。
                            TextBox **办不到**给子串挂颜色与命中区（没有富文本呈现层），
                            所以 `{{}}` 在里面就是普通文本——写错要跑一次工作流、
@@ -2444,7 +2535,7 @@
                               </Grid>
                               <StackPanel Grid.Column="1" Spacing="1">
                                 <TextBlock Text="{Binding Title}"
-                                           FontSize="12" FontWeight="SemiBold"
+                                           FontSize="{DynamicResource Ariadne.Size.Caption}" FontWeight="SemiBold"
                                            TextTrimming="CharacterEllipsis" />
                                 <TextBlock Text="{Binding KindDisplay}"
                                            Classes="caption" />
@@ -2556,7 +2647,7 @@
                             <StackPanel Spacing="3">
                               <TextBlock Text="{Binding ForwardTemplatePreviewLabel}" Classes="inspector-label" />
                               <TextBlock Text="{Binding SelectedEdge.ForwardTemplatePreview}"
-                                         TextWrapping="Wrap" FontSize="12" />
+                                         TextWrapping="Wrap" FontSize="{DynamicResource Ariadne.Size.Caption}" />
                             </StackPanel>
                           </Border>
 
@@ -2574,7 +2665,7 @@
                             <StackPanel Spacing="3">
                               <TextBlock Text="{Binding ReverseTemplatePreviewLabel}" Classes="inspector-label" />
                               <TextBlock Text="{Binding SelectedEdge.ReverseTemplatePreview}"
-                                         TextWrapping="Wrap" FontSize="12" />
+                                         TextWrapping="Wrap" FontSize="{DynamicResource Ariadne.Size.Caption}" />
                             </StackPanel>
                           </Border>
 

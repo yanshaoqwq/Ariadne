@@ -13,7 +13,7 @@
              ToolTip.Tip="{Binding AccessibleName, ElementName=Root}">
   <Border Background="{DynamicResource Ariadne.BackgroundSurface}"
           BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-          BorderThickness="1"
+          BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
           CornerRadius="8,0,0,8"
           BoxShadow="-2 0 6 0 #10000000">
     <Panel>

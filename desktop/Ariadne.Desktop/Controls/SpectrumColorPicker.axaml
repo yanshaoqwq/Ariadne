@@ -13,9 +13,9 @@
     <Button x:Name="CollapsedSwatch"
             Width="40" Height="40"
             Padding="0"
-            CornerRadius="8"
+            CornerRadius="{DynamicResource Ariadne.Radius.Large}"
             BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-            BorderThickness="1"
+            BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
             Cursor="Hand"
             HorizontalAlignment="Left"
             Click="OnSwatchClick">
@@ -42,7 +42,7 @@
               MinWidth="280"
               Background="{DynamicResource Ariadne.BackgroundElevated}"
               BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-              BorderThickness="1"
+              BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
               BoxShadow="0 8 24 0 #33000000"
               KeyDown="OnPopupKeyDown">
         <Grid RowDefinitions="Auto,Auto" RowSpacing="12">
@@ -50,10 +50,10 @@
             <Border x:Name="SvField"
                     Classes="color-range"
                     Grid.Column="0"
-                    CornerRadius="8"
+                    CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                     ClipToBounds="True"
                     BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                    BorderThickness="1"
+                    BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                     Cursor="Cross"
                     Focusable="True"
                     TabIndex="0"
@@ -93,10 +93,10 @@
             <Border x:Name="HueBar"
                     Classes="color-range"
                     Grid.Column="1"
-                    CornerRadius="6"
+                    CornerRadius="{DynamicResource Ariadne.Radius.Medium}"
                     ClipToBounds="True"
                     BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                    BorderThickness="1"
+                    BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                     Cursor="Hand"
                     Focusable="True"
                     TabIndex="1"
@@ -135,16 +135,16 @@
             <Border x:Name="PreviewSwatch"
                     Grid.Column="0"
                     Width="40" Height="40"
-                    CornerRadius="8"
+                    CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                     BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-                    BorderThickness="1" />
+                    BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}" />
             <StackPanel Grid.Column="1" Spacing="8">
               <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                 <TextBlock Text="#" Classes="caption" VerticalAlignment="Center" Width="28" />
                 <TextBox x:Name="HexBox"
                          Grid.Column="1"
                          Classes="mono"
-                         FontSize="12"
+                         FontSize="{DynamicResource Ariadne.Size.Caption}"
                          MinHeight="30"
                          Padding="8,4"
                          TabIndex="2"

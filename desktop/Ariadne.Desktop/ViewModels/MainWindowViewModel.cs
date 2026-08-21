@@ -175,6 +175,17 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
 
     public string DiagnosticClearText => _displayNames.Text("ui.diagnostics.clear");
 
+    /// <summary>
+    /// U205-C：「清除」的悬停说明。
+    ///
+    /// 这个键存在的理由不是「补全文案」，而是**清除是这条路上唯一不可逆的动作**：
+    /// <see cref="ClearDiagnostic"/> 把 summary / detail / failure 三份一起清空，
+    /// 而诊断横幅是失败信息的兜底显示位（U194-B）⇒ 清掉之后「刚才报了什么错」
+    /// 在界面上再也查不回来。它原先与「展开详情」是两个同款 subtle 键、等距 8px、
+    /// 零视觉区分，所以先分组，再由这句文案说明代价。
+    /// </summary>
+    public string DiagnosticClearHintText => _displayNames.Text("ui.diagnostics.clear.hint");
+
     public string DiagnosticSummaryText
     {
         get => _diagnosticSummaryText;
@@ -509,7 +520,32 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
         }
         _lastRefreshedTerminalRun = identity;
         _ = RefreshBudgetStatusAsync();
+        // U198-B「顺带」：终态也要刷侧栏角标。
+        //
+        // 原先 `RefreshSidebarBadgesAsync` 的三个调用点全在**进项目 / 离开项目**上，
+        // **运行链路零调用**（与 U197-A 同根）⇒ 一次运行跑完新产生的待审确认项、
+        // 新的运行记录、新的诊断，角标上一个都不涨，除非作者恰好切走再切回来。
+        // 而运行终态正是这三个数字唯一会同时变动的时刻。
+        //
+        // 复用上面那道 identity 去重（同一次运行只刷一次）：这两件事的触发条件
+        // 与「只刷一次」的理由完全相同，各自再记一个 last-refreshed 只会让
+        // 两份状态有机会漂移。
+        // fallback 传当前值而非 0：这里的 0 会把角标**清空**，
+        // 而一次 IPC 抖动不该让作者以为待审队列空了——读不到就维持原样。
+        _ = RefreshSidebarBadgesAsync(CurrentSidebarBadges());
     }
+
+    /// <summary>
+    /// 侧栏角标的当前值，用作刷新失败时的 fallback（「维持原样」而不是「清零」）。
+    /// </summary>
+    private SidebarBadgeCounts CurrentSidebarBadges() => new(
+        BadgeOf("workspace"),
+        BadgeOf("run_logs"),
+        BadgeOf("settings"));
+
+    private int BadgeOf(string id) =>
+        AllNavigationItems().FirstOrDefault(item => string.Equals(item.Id, id, StringComparison.Ordinal))
+            ?.BadgeCount ?? 0;
 
     public bool HasOpenProject
     {
@@ -730,6 +766,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
         OnPropertyChanged(nameof(DiagnosticTitleText));
         OnPropertyChanged(nameof(DiagnosticToggleText));
         OnPropertyChanged(nameof(DiagnosticClearText));
+        // 切语言时这句提示必须一起刷：漏一个 nameof 的后果是「界面上大部分文案变了、
+        // 悬停说明还是上一门语言」——项目记忆里那条「基元的适用前提不会跟着基元走」
+        // 说的正是这类漏项，它不会报错、只会让一处文案卡在旧语言上。
+        OnPropertyChanged(nameof(DiagnosticClearHintText));
         if (HasDiagnostic && _diagnosticFailure is { } failure)
         {
             DiagnosticSummaryText = failure.PrimaryText(_displayNames);

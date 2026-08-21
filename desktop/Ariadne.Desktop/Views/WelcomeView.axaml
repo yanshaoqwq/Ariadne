@@ -128,7 +128,7 @@
                   HorizontalAlignment="Stretch"
                   HorizontalContentAlignment="Stretch">
             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14" Margin="2">
-              <Border Grid.Column="0" Width="38" Height="38" CornerRadius="8"
+              <Border Grid.Column="0" Width="38" Height="38" CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                       Background="{DynamicResource Ariadne.GlassBorder}" VerticalAlignment="Center">
                 <Path Classes="icon" Width="18" Height="18"
                       Stroke="{DynamicResource Ariadne.TextOnAccent}"
@@ -139,7 +139,7 @@
                            FontWeight="SemiBold" FontSize="15"
                            Foreground="{DynamicResource Ariadne.TextOnAccent}" />
                 <TextBlock Text="{Binding CreateProjectHint}"
-                           FontSize="12" Opacity="0.78" TextWrapping="Wrap"
+                           FontSize="{DynamicResource Ariadne.Size.Caption}" Opacity="0.78" TextWrapping="Wrap"
                            Foreground="{DynamicResource Ariadne.TextOnAccent}" />
               </StackPanel>
               <Path Grid.Column="2" Classes="icon" Width="15" Height="15"
@@ -155,7 +155,7 @@
                   HorizontalAlignment="Stretch"
                   HorizontalContentAlignment="Stretch">
             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14" Margin="2">
-              <Border Grid.Column="0" Width="38" Height="38" CornerRadius="8"
+              <Border Grid.Column="0" Width="38" Height="38" CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                       Background="{DynamicResource Ariadne.AccentLight}"
                       VerticalAlignment="Center">
                 <Path Classes="icon" Width="18" Height="18"
@@ -178,8 +178,8 @@
           <Border IsVisible="{Binding HasStatusText}"
                   Background="{DynamicResource Ariadne.BackgroundElevated}"
                   BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                  BorderThickness="1"
-                  CornerRadius="8"
+                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
+                  CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                   Padding="12,9">
             <TextBlock Text="{Binding StatusText}"
                        Classes="caption"
@@ -190,8 +190,10 @@
           <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,4,0,0">
             <Button Classes="subtle" Padding="10,6"
                     Content="{Binding TutorialText}" Command="{Binding TutorialCommand}" />
-            <Border Width="1" Height="14" Margin="6,0"
-                    Background="{DynamicResource Ariadne.BorderMuted}" VerticalAlignment="Center" />
+            <!-- U205-A：原为内联 `Width=1 Height=14 Margin=6,0`——与另外两处发丝线
+                 各写一套数字。统一到 `group-divider` 后三处才是同一个语汇。
+                 Height 不再写死：随簇拉伸，换按钮内边距时不用回来改。 -->
+            <Border Classes="group-divider" />
             <Button Classes="subtle" Padding="10,6"
                     Content="{Binding FeedbackText}" Command="{Binding FeedbackCommand}" />
           </StackPanel>
@@ -204,7 +206,7 @@
                 x:Name="RecentProjectsCard"
                 Background="{DynamicResource Ariadne.BackgroundSurface}"
                 BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                BorderThickness="1"
+                BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
                 CornerRadius="10"
                 BoxShadow="{DynamicResource Ariadne.Shadow.Card}"
                 Padding="0"
@@ -224,7 +226,7 @@
               <!-- 计数：去掉描边胶囊，强调色文字自解释 -->
               <TextBlock Grid.Column="2"
                          Text="{Binding RecentCountText}"
-                         FontSize="12" FontWeight="SemiBold"
+                         FontSize="{DynamicResource Ariadne.Size.Caption}" FontWeight="SemiBold"
                          Foreground="{DynamicResource Ariadne.AccentPrimary}"
                          VerticalAlignment="Center"
                          IsVisible="{Binding HasRecentProjects}" />
@@ -247,7 +249,7 @@
                                 HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Stretch">
                           <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
-                            <Border Grid.Column="0" Width="36" Height="36" CornerRadius="8"
+                            <Border Grid.Column="0" Width="36" Height="36" CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                                     Classes="recent-identity"
                                     Classes.unavailable="{Binding IsUnavailable}"
                                     Background="{DynamicResource Ariadne.AccentLight}"
@@ -261,13 +263,13 @@
                                    把解释文字一起调淡，等于把唯一的补救线索也藏起来。 -->
                               <StackPanel Classes="recent-identity" Spacing="3"
                                           Classes.unavailable="{Binding IsUnavailable}">
-                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14"
+                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="{DynamicResource Ariadne.Size.Body}"
                                            TextTrimming="CharacterEllipsis" />
-                                <TextBlock Text="{Binding ProjectRoot}" Classes="mono" FontSize="11"
+                                <TextBlock Text="{Binding ProjectRoot}" Classes="mono" FontSize="{DynamicResource Ariadne.Size.Micro}"
                                            Opacity="0.8" TextTrimming="CharacterEllipsis" />
                                 <TextBlock Text="{Binding LastOpenedText}"
                                            Classes="caption"
-                                           FontSize="11"
+                                           FontSize="{DynamicResource Ariadne.Size.Micro}"
                                            IsVisible="{Binding HasLastOpened}" />
                               </StackPanel>
                               <!-- 失效原因：目录不存在 / 目录在但不是项目。
@@ -280,11 +282,11 @@
                                       Stroke="{DynamicResource Ariadne.StatusWarning}"
                                       Data="M12,3 L22,20 L2,20 Z M12,9 L12,14 M12,17 L12,17.5" />
                                 <TextBlock Text="{Binding UnavailableText}"
-                                           FontSize="11" FontWeight="SemiBold"
+                                           FontSize="{DynamicResource Ariadne.Size.Micro}" FontWeight="SemiBold"
                                            Foreground="{DynamicResource Ariadne.StatusWarning}"
                                            VerticalAlignment="Center" />
                                 <TextBlock Text="{Binding UnavailableHint}"
-                                           Classes="caption" FontSize="11" Opacity="0.75"
+                                           Classes="caption" FontSize="{DynamicResource Ariadne.Size.Micro}" Opacity="0.75"
                                            VerticalAlignment="Center"
                                            TextTrimming="CharacterEllipsis" />
                               </StackPanel>
@@ -343,7 +345,7 @@
               <Border Classes="empty-state" IsVisible="{Binding IsRecentEmpty}" Padding="28,44">
                 <StackPanel Spacing="10" HorizontalAlignment="Center" MaxWidth="280">
                   <ctl:EmptyStateArt Kind="WelcomeQuill" Width="200" Height="90" HorizontalAlignment="Center" />
-                  <TextBlock Text="{Binding EmptyRecentTitle}" Classes="subtitle"
+                  <TextBlock Text="{Binding EmptyRecentTitle}" Classes="empty-title"
                              HorizontalAlignment="Center" TextAlignment="Center" />
                   <TextBlock Text="{Binding EmptyRecentHint}" Classes="caption"
                              HorizontalAlignment="Center" TextAlignment="Center"

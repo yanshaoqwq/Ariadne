@@ -11,7 +11,7 @@
     MinHeight="480"
     CanResize="True"
     UseLayoutRounding="True"
-    TextElement.FontSize="14"
+    TextElement.FontSize="{DynamicResource Ariadne.Size.Body}"
     TextOptions.TextRenderingMode="SubpixelAntialias"
 
     RenderOptions.BitmapInterpolationMode="HighQuality"
@@ -28,7 +28,7 @@
       x:Name="WindowChrome"
       Background="{DynamicResource Ariadne.WindowBase}"
       BorderBrush="{DynamicResource Ariadne.BorderStrong}"
-      BorderThickness="1"
+      BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
       CornerRadius="10"
       ClipToBounds="True">
     <Panel>
@@ -374,12 +374,20 @@
                   Margin="16,12,16,0"
                   Background="{DynamicResource Ariadne.LogWarningBg}"
                   BorderBrush="{DynamicResource Ariadne.StatusWarning}"
-                  BorderThickness="1"
-                  CornerRadius="8"
+                  BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
+                  CornerRadius="{DynamicResource Ariadne.Radius.Large}"
                   BoxShadow="{DynamicResource Ariadne.Shadow.Flyout}"
                   Padding="12,8">
             <StackPanel Spacing="6">
-              <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+              <!-- U205-C：原为 `Auto,*,Auto,Auto` + ColumnSpacing=8，
+                   「展开详情」与「清除」是两个同款 subtle 键、等距 8px、零区分。
+                   代价特殊：清除会丢掉**唯一的故障线索**（`ClearDiagnostic` 把
+                   summary/detail/failure 三份都清空，且横幅是失败信息的兜底显示位），
+                   误点之后作者连「刚才报了什么错」都查不回来。
+                   ⇒ 清除单独成组（组边界 + 约 17px 手滑保护距离），并用 ToolTip
+                   把「点了会丢什么」讲明白。**刻意不加二次确认弹窗**：诊断横幅是
+                   轻量兜底位，为它挂一层模态会让「关掉一条已读的提示」变成两步。 -->
+              <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" ColumnSpacing="8">
                 <TextBlock Grid.Column="0" Text="{Binding DiagnosticTitleText}"
                            Classes="caption" FontWeight="SemiBold" VerticalAlignment="Center" />
                 <TextBlock Grid.Column="1" Text="{Binding DiagnosticSummaryText}"
@@ -387,14 +395,17 @@
                 <Button Grid.Column="2" Classes="subtle" Command="{Binding ToggleDiagnosticCommand}"
                         Content="{Binding DiagnosticToggleText}"
                         AutomationProperties.Name="{Binding DiagnosticToggleText}" />
-                <Button Grid.Column="3" Classes="subtle" Command="{Binding ClearDiagnosticCommand}"
+                <Border Grid.Column="3" Classes="group-divider" />
+                <Button Grid.Column="4" Classes="subtle" Command="{Binding ClearDiagnosticCommand}"
                         Content="{Binding DiagnosticClearText}"
-                        AutomationProperties.Name="{Binding DiagnosticClearText}" />
+                        ToolTip.Tip="{Binding DiagnosticClearHintText}"
+                        AutomationProperties.Name="{Binding DiagnosticClearText}"
+                        AutomationProperties.HelpText="{Binding DiagnosticClearHintText}" />
               </Grid>
               <Border IsVisible="{Binding IsDiagnosticExpanded}"
                       Background="{DynamicResource Ariadne.BackgroundSubtle}"
                       BorderBrush="{DynamicResource Ariadne.BorderMuted}"
-                      BorderThickness="1" CornerRadius="4" Padding="8">
+                      BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}" CornerRadius="{DynamicResource Ariadne.Radius.Small}" Padding="8">
                 <!-- U153：MaxHeight 必须挂 ScrollViewer 而不是 TextBlock。
                      同样的写法在两类控件上语义相反：ScrollViewer 上是「限高可滚」，
                      TextBlock 上是「裁掉多余」——且裁切发生在测量阶段，

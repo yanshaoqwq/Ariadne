@@ -168,6 +168,16 @@
                        TextAlignment="Center"
                        TextWrapping="Wrap"
                        AutomationProperties.LiveSetting="Assertive" />
+            <!-- U198-B：失败补救行。模板页的错误态本来只有一句「怎么了」+ 一颗重试键，
+                 而首次使用最常见的失败恰恰不是重试能解决的（没配服务商、没权限）。 -->
+            <TextBlock Text="{Binding RecoveryText}"
+                       Classes="caption"
+                       Foreground="{DynamicResource Ariadne.StatusWarning}"
+                       IsVisible="{Binding HasRecoveryText}"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       AutomationProperties.LiveSetting="Polite" />
             <Button Classes="secondary"
                     Content="{Binding RetryText}"
                     Command="{Binding SearchCommand}"

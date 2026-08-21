@@ -9,7 +9,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
+public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
 {
     private const string GeneralSection = "general";
     private const string ModelsSection = "models";
@@ -272,7 +272,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private SettingsTabViewModel _selectedTab;
     private SettingsSectionNavigationItemViewModel _selectedSectionNavigationItem;
     private string _selectedLanguage;
-    private string _statusText;
     private bool _isLoading;
     private bool _hasUnsavedChanges;
     private PendingSettingsNavigation? _pendingNavigation;
@@ -357,7 +356,6 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
     private bool _areAdvancedConfirmationPoliciesExpanded;
     private bool _areAdvancedRetrievalSettingsExpanded;
     private bool _areAdvancedAppRuntimeSettingsExpanded;
-    private string _recoveryText = string.Empty;
     private string _readableRootsText = string.Empty;
     private string _writableRootsText = string.Empty;
 
@@ -433,7 +431,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         _openTemplateMarket = openTemplateMarket;
         _saveUiPreferences = saveUiPreferences ?? (preferences => _backend.SaveUiPreferencesAsync(preferences));
         _selectedLanguage = _displayNames.NormalizeAvailableLanguage(displayNames.CurrentLanguage);
-        _statusText = displayNames.Text("ui.common.loading");
+        InitializeStatusText(displayNames.Text("ui.common.loading"));
 
         LanguageOptions = new ObservableCollection<LanguageOption>(
             displayNames.AvailableLanguages.Select(code => new LanguageOption(code, displayNames.LanguageLabel(code))));
@@ -800,7 +798,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -822,7 +820,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -857,24 +855,11 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
     public string Title => _displayNames.Text("ui.settings.title");
-    public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
-    public string RecoveryText
-    {
-        get => _recoveryText;
-        private set
-        {
-            if (SetProperty(ref _recoveryText, value))
-            {
-                OnPropertyChanged(nameof(HasRecoveryText));
-            }
-        }
-    }
-    public bool HasRecoveryText => !string.IsNullOrWhiteSpace(RecoveryText);
 
     /// <summary>
     /// 整页/分区加载在途。
@@ -3334,7 +3319,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         {
             if (_diagnosticsRefreshSession.IsCurrent(request, ownerGeneration))
             {
-                StatusText = UserFacingError.Format(ex, _displayNames);
+                StatusText = ReportFailure(ex, _displayNames);
             }
             return false;
         }
@@ -3405,7 +3390,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
         finally
         {
@@ -3455,7 +3440,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
         finally
         {
@@ -4175,7 +4160,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
                     }
                     catch (Exception ex)
                     {
-                        StatusText = UserFacingError.Format(ex, _displayNames);
+                        StatusText = ReportFailure(ex, _displayNames);
                         return false;
                     }
                 case UnsavedLeaveChoice.Discard:
@@ -4362,7 +4347,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             {
                 return;
             }
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -4418,7 +4403,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
             {
                 return;
             }
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -4581,7 +4566,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
             return Task.FromResult(false);
         }
     }
@@ -4650,7 +4635,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
             return Task.FromResult(false);
         }
     }
@@ -5043,7 +5028,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -5114,7 +5099,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
         finally
         {
@@ -6764,7 +6749,7 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
             return Task.FromResult(false);
         }
     }
@@ -7623,17 +7608,16 @@ public sealed class SettingsPageViewModel : ViewModelBase, IUnsavedChangesGuard,
 
     private void HandleSettingsFailure(Exception exception, string fallbackSection)
     {
-        StatusText = UserFacingError.Format(exception, _displayNames);
-        RecoveryText = string.Empty;
+        // U198-B：建议一律由 ReportFailure 算（`RecoveryAction` 精确建议优先，
+        // 失败码兜底）。这里原来在它之后手写了一段「先清空、再只按 RecoveryAction 重算」，
+        // 而 `recovery_action` 的后端产出点**只有检索/Qdrant 配置分区一处**
+        // （`commands.rs:10091-10156`）⇒ 那段代码等于把配置页锁回「1/6 时代」的行为：
+        // 配置页在权限被拒、服务商没配好这些**首次使用最常见**的失败上照旧一个字都没有。
+        // 删掉它不是简化，是让配置页也吃到第二级兜底。
+        StatusText = ReportFailure(exception, _displayNames);
         if (exception is not BackendException backend)
         {
             return;
-        }
-        if (!string.IsNullOrWhiteSpace(backend.RecoveryAction))
-        {
-            var recoveryKey = $"ui.settings.recovery.{backend.RecoveryAction}";
-            var localized = _displayNames.Text(recoveryKey);
-            RecoveryText = localized.StartsWith('[') ? string.Empty : localized;
         }
         if (!string.IsNullOrWhiteSpace(backend.Field))
         {

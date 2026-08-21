@@ -160,7 +160,11 @@ public sealed class DisplayNameJsonTests
         // 105 → 106（2026-08-20，U208-B）：新增 `ui.works.create_chapter.needs_project`
         // 时同样只补 en、ja 留给后续补译 —— **这一次基线在同一次改动里就加了**，
         // 没有重演上面那个「刻意不补却没留证据」的错误。
-        const int JapaneseBaseline = 106;
+        // 106 → 116（2026-08-21，U206-B）：新增 `ui.workspace.knowledge_lookup.*` 10 个键
+        // （跨章知识查询面板的入口文案），**zh/en 已同批补全**，ja 沿用上面那条分工。
+        // 这 10 个键都有生产引用（`KnowledgeLookupPanelViewModel` + `WorkspacePageView.axaml`），
+        // 不属于上面记过的「清单里混着死键」那一类，是应当补译的。
+        const int JapaneseBaseline = 116;
 
         var resourceDir = Path.GetDirectoryName(ResolveDisplayNamePath())!;
         var chinese = LoadPack(Path.Combine(resourceDir, "display_name.json"));

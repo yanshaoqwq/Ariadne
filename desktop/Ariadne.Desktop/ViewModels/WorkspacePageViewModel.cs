@@ -9,7 +9,7 @@ using Ariadne.Desktop.Localization;
 
 namespace Ariadne.Desktop.ViewModels;
 
-public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
+public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesGuard, IProjectDataReloadable, IUiPreferencesAware, ILocalizedUiAware
 {
     private const string RightPanelPreferenceKey = "workspace.right_panel";
     private const string ProjectAiConversationId = "workspace";
@@ -35,7 +35,6 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     private bool _isExecutionPanel;
     private WorkspaceRightPanelTab _rightPanelTab = WorkspaceRightPanelTab.ProjectAi;
     private readonly CanvasViewportSession _canvasViewport = new();
-    private string _statusText = string.Empty;
     private bool _hasUnsavedChanges;
     private string _savedSnapshot = string.Empty;
     private string _savedContentSnapshot = string.Empty;
@@ -226,13 +225,23 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
             _displayNames.Text,
             _displayNames.Format,
             message => StatusText = message,
-            ex => UserFacingError.Format(ex, _displayNames));
+            ex => ReportFailure(ex, _displayNames));
         VariableFill.RequestFill = FillVariablesWithProjectAiAsync;
         OpenVariableFillCommand = new RelayCommand(
             () => VariableFill.Open(ResolveVariableFillTarget()),
             // 画布上没有带变量的起始节点时不可用：Ctrl+K 开一个空面板等于摆死按钮。
             () => ResolveVariableFillTarget() is not null);
         _projectAiAnswer = displayNames.Text("ui.workspace.project_ai.empty");
+
+        // U206-B：跨章知识查询。两条出站通道都在这里注入 ——
+        // 查询直接走 resolve_project_reference（本地检索、零 token），
+        // 「问 AI」复用 project_ai_chat 的 references 参数（引用式数据流，不内联正文）。
+        KnowledgeLookup = new KnowledgeLookupPanelViewModel(
+            _displayNames.Text,
+            message => StatusText = message,
+            ex => ReportFailure(ex, _displayNames));
+        KnowledgeLookup.RequestLookup = reference => _backend.ResolveProjectReferenceAsync(reference);
+        KnowledgeLookup.RequestAskAi = AskAiAboutKnowledgeAsync;
 
         Nodes = new ObservableCollection<WorkflowNodeViewModel>();
         StartNodes = new ObservableCollection<WorkflowNodeViewModel>();
@@ -441,6 +450,10 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             AvailableModelOptions[0] = WorkflowModelOption.Inherited(ModelInheritGlobalText);
         }
+        // 知识查询面板是**常驻**在项目 AI 栏里的（不像 Ctrl+K 那个弹出面板可以靠
+        // 「关掉重开」换语言），它的文案属性挂在自己身上，页面这句
+        // OnPropertyChanged(string.Empty) 到不了 —— 必须显式转发。
+        KnowledgeLookup.RefreshLocalizedText();
         OnPropertyChanged(string.Empty);
     }
 
@@ -739,7 +752,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
     public RelayCommand ToggleCanvasFocusModeCommand { get; }
@@ -1035,12 +1048,14 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
     public VariableFillPanelViewModel VariableFill { get; }
     public RelayCommand OpenVariableFillCommand { get; }
 
+    /// <summary>项目 AI 栏里的跨章知识查询面板（U206-B）：`@知识:<词>` 的唯一前端入口。</summary>
+    public KnowledgeLookupPanelViewModel KnowledgeLookup { get; }
+
     public Action? RequestFitView { get; set; }
     public Action<double>? RequestCanvasZoomStep { get; set; }
     public Action? RequestResetCanvasZoom { get; set; }
     public Action<WorkflowNodeViewModel>? RequestEnsureNodeVisible { get; set; }
 
-    public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
     public string ProjectAiMessage
     {
         get => _projectAiMessage;
@@ -1981,12 +1996,66 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         {
             OnPropertyChanged(nameof(CurrentRunStatus));
         }
+        // U198-B：跨进 failed 的那一次跃迁，去后端把「为什么 + 下一步」取回来。
+        // 接在**跃迁边沿**（与 RunTerminalStateNotifier 同一取舍）：轮询每 750ms
+        // 一轮，接在 ApplyWorkflowEvents 里会重复发请求；而且控制指令直接 Attach
+        // 结果的那条路（点停止立刻拿到终态）根本不会再有下一轮回包。
+        if (string.Equals(current.Status, "failed", StringComparison.Ordinal)
+            && !string.Equals(previous.Status, "failed", StringComparison.Ordinal))
+        {
+            _ = LoadRunFailureRecoveryAsync(current.WorkflowId, current.RunId);
+        }
         NotifyRunCommandStates();
+    }
+
+    /// <summary>
+    /// 运行失败后把后端的补救建议取回来显示（U198-B / U196-E）。
+    ///
+    /// ## 为什么要多发一次请求
+    ///
+    /// 事件流里只有 `status = "failed"`，页面据此显示「已失败」——**为什么失败、
+    /// 下一步做什么，一个字都没有**。建议在 `WorkflowRunFailure.recovery_suggestion`
+    /// 里（后端 `workflow/runtime.rs` 按错误类别产出成文中文），只有
+    /// `get_workflow_run_state` 带得回来。运行失败一次只发一次，成本可以忽略。
+    ///
+    /// ## 为什么不解析事件的 metadata
+    ///
+    /// `run_failed` 事件的 metadata 里确实也有 `recovery_suggestion`，但前端
+    /// `WorkflowRuntimeEvent.Metadata` 是 `object?`（未定型 JSON）。
+    /// 走已定型的 `WorkflowRunFailure` 比在 UI 层手写 JSON 取值可靠得多，
+    /// 而且后端改字段时编译期就能发现。
+    /// </summary>
+    private async Task LoadRunFailureRecoveryAsync(string workflowId, string runId)
+    {
+        if (string.IsNullOrWhiteSpace(workflowId) || string.IsNullOrWhiteSpace(runId))
+        {
+            return;
+        }
+        try
+        {
+            var state = await _backend
+                .GetWorkflowRunStateAsync(workflowId, runId)
+                .ConfigureAwait(true);
+            // 会话可能已经换了（作者切了工作流 / 又起了一次跑）：迟到的建议不得
+            // 覆盖新会话的页面状态，否则作者看到的是上一次失败的「下一步」。
+            if (!string.Equals(workflowId, CurrentWorkflowId, StringComparison.Ordinal)
+                || !string.Equals(runId, CurrentRunId, StringComparison.Ordinal))
+            {
+                return;
+            }
+            SetRecoverySuggestion(state.Failure?.RecoverySuggestion, _displayNames);
+        }
+        catch (Exception)
+        {
+            // 取建议失败不改 StatusText：那里现在写着「已失败」，是这次运行的
+            // 真实结论。把它换成「无法连接服务」等于用取建议这条附带请求的失败，
+            // 盖掉作者真正要看的那条。静默降级为「没有建议」是正确的取舍。
+        }
     }
 
     private void OnRunSessionPollingFailed(Exception error)
     {
-        StatusText = UserFacingError.Format(error, _displayNames);
+        StatusText = ReportFailure(error, _displayNames);
     }
 
     private void NotifyConfirmationCommandStates()
@@ -2304,7 +2373,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -2934,7 +3003,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception error)
         {
-            UserFacingError.Format(error, _displayNames);
+            ReportFailure(error, _displayNames);
         }
         finally
         {
@@ -3066,7 +3135,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3099,7 +3168,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3153,7 +3222,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3216,7 +3285,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3270,8 +3339,8 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            node.StatusText = UserFacingError.Format(ex, _displayNames);
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            node.StatusText = ReportFailure(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3362,7 +3431,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3433,7 +3502,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3492,7 +3561,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3559,7 +3628,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3630,7 +3699,61 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
+        }
+    }
+
+    /// <summary>
+    /// 带着刚查到的知识条目去问项目 AI（U206-B）。
+    ///
+    /// 与 U139④ 走同一条出站通道，差别只有引用前缀（`@知识:` vs `@确认项:`）。
+    /// **不抽公共方法**：那两条路的上下文取值规则不同——确认项要把它自己的
+    /// workflow_id / run_id 顶掉当前值（审阅的可能是别的运行留下的确认项），
+    /// 知识查询与运行无关，传当前值即可。抽出来只能把这段差异变成一串开关参数。
+    /// </summary>
+    private async Task AskAiAboutKnowledgeAsync(string reference)
+    {
+        // 回答落在项目 AI 栏；用户手动切走后再点，把它切回来，否则答案落在看不见的页面上。
+        SetRightPanelTab(WorkspaceRightPanelTab.ProjectAi);
+        IsRightPanelOpen = true;
+        var question = _displayNames.Format(
+            "ui.workspace.knowledge_lookup.ask_ai.question",
+            new Dictionary<string, string> { ["reference"] = reference });
+        var sessionFence = _runSession.CaptureFence();
+        try
+        {
+            // 提问先进气泡：等回答可能要几秒，不回显的话点了像没反应。
+            ProjectAiBubbles.Add(new ChatBubbleViewModel("user", question));
+            OnPropertyChanged(nameof(HasProjectAiBubbles));
+            StatusText = _displayNames.Text("ui.workspace.knowledge_lookup.ask_ai.sent");
+            var result = await _backend.ProjectAiChatAsync(
+                question,
+                workflowIdToRun: null,
+                referenceWorkflowId: string.IsNullOrWhiteSpace(CurrentWorkflowId) ? null : CurrentWorkflowId,
+                referenceRunId: string.IsNullOrWhiteSpace(CurrentRunId) ? null : CurrentRunId,
+                conversationId: ProjectAiConversationId,
+                conversationRevision: _projectAiConversationRevision,
+                references: new[] { reference })
+                .ConfigureAwait(true);
+            _runSession.ThrowIfStale(sessionFence);
+            ProjectAiAnswer = result.Answer;
+            _projectAiConversationRevision = ProjectAiConversationUi.Apply(
+                result,
+                _projectAiHistory,
+                ProjectAiBubbles,
+                _projectAiConversationRevision);
+            OnPropertyChanged(nameof(HasProjectAiBubbles));
+            StatusText = ProjectAiConversationUi.ContextWasCompacted(result)
+                ? _displayNames.Text("ui.project_ai.context_compacted")
+                : _displayNames.Text("ui.common.configured");
+        }
+        catch (OperationCanceledException)
+        {
+            // 回答属于已切走的运行会话；丢弃其页面投影。
+        }
+        catch (Exception ex)
+        {
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3668,7 +3791,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3690,7 +3813,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3717,7 +3840,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3755,7 +3878,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3894,7 +4017,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -3966,7 +4089,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
@@ -4553,7 +4676,7 @@ public sealed class WorkspacePageViewModel : ViewModelBase, IUnsavedChangesGuard
         }
         catch (Exception ex)
         {
-            StatusText = UserFacingError.Format(ex, _displayNames);
+            StatusText = ReportFailure(ex, _displayNames);
         }
     }
 
