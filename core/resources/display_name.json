@@ -252,6 +252,7 @@
   "ui.settings.models.provider_type.other": "旧版自定义服务（仅迁移）",
   "ui.settings.models.provider_type.other.migration": "这是旧版自定义服务类型，当前版本无法执行或修改。请新建兼容服务，迁移模型与工作流引用后再删除此项。",
   "ui.settings.load_failure": "“{section}”未能加载。",
+  "ui.settings.load_failure_with_reason": "“{section}”未能加载：{reason}",
   "ui.settings.retry": "重试",
   "ui.settings.restore_current_tab": "恢复本页已保存值",
   "ui.settings.save_current_tab": "保存本页改动",
@@ -1487,5 +1488,6 @@
   "ui.recovery.not_found": "请刷新当前页面；若内容确实已删除，请重新选择或新建一个。",
   "ui.recovery.budget": "日预算上限在「配置 → 预算」里改；自动支出额度在同一分区。",
   "ui.recovery.external_outcome_unknown": "请到「运行记录」页核对这一步是否已经生效，再决定重试还是跳过。",
-  "ui.recovery.serialization": "可到「版本」页回到最近一次可用的存档点。"
+  "ui.recovery.serialization": "可到「版本」页回到最近一次可用的存档点。",
+  "ui.automation.auto_mode.needs_project": "还没打开项目 —— 先新建或打开一个，自动模式才能开。"
 }

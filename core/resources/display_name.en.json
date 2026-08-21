@@ -606,6 +606,7 @@
   "ui.settings.models.provider_type.other": "Legacy custom provider (migration only)",
   "ui.settings.models.provider_type.other.migration": "This legacy custom provider type cannot run or be edited. Create a compatible provider, migrate models and workflow references, then remove this entry.",
   "ui.settings.load_failure": "Could not load \"{section}\".",
+  "ui.settings.load_failure_with_reason": "Could not load \"{section}\": {reason}",
   "ui.settings.retry": "Retry",
   "ui.settings.restore_current_tab": "Restore saved values",
   "ui.settings.save_current_tab": "Save this page",
@@ -1393,5 +1394,6 @@
   "ui.recovery.not_found": "Refresh this page. If the content really was deleted, pick another one or create a new one.",
   "ui.recovery.budget": "The daily budget limit lives in Settings → Budget, together with the auto-spend allowance.",
   "ui.recovery.external_outcome_unknown": "Check the Run Log page to see whether this step already took effect, then decide to retry or skip.",
-  "ui.recovery.serialization": "You can return to the last usable checkpoint on the Version page."
+  "ui.recovery.serialization": "You can return to the last usable checkpoint on the Version page.",
+  "ui.automation.auto_mode.needs_project": "No project is open yet — create or open one before auto mode can be switched on."
 }

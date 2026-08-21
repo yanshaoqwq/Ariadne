@@ -355,6 +355,21 @@
                       <TextBlock Text="{Binding Message}"
                                  Classes="caption"
                                  TextWrapping="Wrap" />
+                      <!-- U213-A0：原因位。缺了这一行，横幅只会说「某个分区未能加载」，
+                           而「为什么」在整个屏幕上无处可查——用户唯一能做的就是猜
+                           （实测第一猜是「主密码没设」，猜错就没有下一步了）。
+                           次行刻意用等宽体：它是后端原文（多半英文、可能带 provider 名），
+                           与上面那句本地化主文案不是同一类文字，混排会让人以为是一句话。
+                           空诊断时整行收起，见 HasDiagnostic。
+                           ⚠️ 用 TextBlock 而不是 SelectableTextBlock：主题里的
+                           `TextBlock.mono` 是 OfType 选择器，**不匹配子类**
+                           （`SelectableTextBlock.*` 在 AriadneTheme 里全都得另写一条），
+                           换成子类会静默丢掉等宽与字号，看起来只是"和上一行一样"。 -->
+                      <TextBlock Text="{Binding Diagnostic}"
+                                 Classes="mono"
+                                 IsVisible="{Binding HasDiagnostic}"
+                                 TextWrapping="Wrap"
+                                 AutomationProperties.LiveSetting="Polite" />
                     </StackPanel>
                     <Button Grid.Column="2"
                             Classes="secondary btn-compact"
@@ -887,19 +902,34 @@
             </Border>
           </StackPanel>
 
-          <StackPanel IsVisible="{Binding IsPermissionsSelected}" IsEnabled="{Binding IsPermissionsEditable}" Spacing="18">
+          <!-- U213-A：本 StackPanel 只绑 IsVisible，**刻意不绑 IsEnabled**。
+               原先写的是 IsEnabled="{Binding IsPermissionsEditable}"，而
+               IsPermissionsEditable = CanSave("permissions")，它的第一个条件就是
+               「permissions 分区读取成功」⇒ 权限读取失败时整棵子树一起变灰，
+               连末尾那个「凭据保护」补救入口（设本地主密码 / 接受明文）也灰掉，
+               于是闭环死锁：**读取失败 → 提示要设主密码 → 设主密码的入口被读取失败禁用**。
+               ⚠️ Avalonia 的 IsEnabled 沿视觉树继承（实际可交互性看 IsEffectivelyEnabled），
+               子级再写 IsEnabled="True" 也**压不回来**——所以唯一的解法是
+               祖先链上不设这道门，而不是在子级上重设。
+               ⇒ 禁用门下沉到各个「有读取基线才能编辑」的小节自身，
+               与「模型」/「检索」/「版本控制」三页早已采用的写法一致
+               （那几页的根 StackPanel 也只绑 IsVisible，门逐个落在 settings-section 上）。
+               **新增小节时**：能编辑的表单要自己绑 IsEnabled；
+               不依赖读取基线的**补救类入口不要绑**，也不要为了省事把门重新提到这一层。 -->
+          <StackPanel IsVisible="{Binding IsPermissionsSelected}" Spacing="18">
             <TextBlock Text="{Binding PermissionsTitle}" Classes="title" />
             <TextBlock Text="{Binding PermissionsScopeHelpText}" Classes="caption" TextWrapping="Wrap" />
             <Border Classes="notice warning" Margin="0,0,0,4" IsVisible="{Binding HasCompatibilityPermissionScopes}">
               <TextBlock Text="{Binding CompatibilityPermissionScopesText}" Classes="caption" TextWrapping="Wrap" />
             </Border>
-            <Border Classes="settings-section" Padding="22">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPermissionsEditable}">
               <StackPanel Spacing="12">
                 <!-- 小节标题去掉：PermissionProfileLabel 既做标题又做下方 ComboBox 的
                      字段名，屏上重复两遍。ComboBox 已有 AutomationProperties.Name，
                      语义无损。CapabilitiesSectionAnchor 也从这里移走——它本应落在
                      真正的「能力」标题上（见下方 CapabilitiesSectionTitle）。 -->
                 <ComboBox ItemsSource="{Binding PermissionProfileOptions}"
+                          x:Name="PermissionProfileSelector"
                           SelectedItem="{Binding SelectedPermissionProfile, Mode=TwoWay}"
                           HorizontalAlignment="Stretch"
                           AutomationProperties.Name="{Binding PermissionProfileLabel}"
@@ -918,7 +948,7 @@
             <Expander Header="{Binding AdvancedPermissionsText}"
                       IsExpanded="{Binding AreAdvancedPermissionsExpanded, Mode=TwoWay}">
               <StackPanel Margin="0,12,0,0" Spacing="18">
-            <Border Classes="settings-section" Padding="22">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPermissionsEditable}">
               <StackPanel Spacing="12">
                 <!-- 索引锚点落在真正的「能力」标题上（原先错挂在权限档案标签，
                      导致左侧索引点「能力」会跳到上一小节）。 -->
@@ -936,7 +966,7 @@
                 </WrapPanel>
               </StackPanel>
             </Border>
-            <ItemsControl ItemsSource="{Binding ScopedPermissionProfiles}">
+            <ItemsControl ItemsSource="{Binding ScopedPermissionProfiles}" IsEnabled="{Binding IsPermissionsEditable}">
               <ItemsControl.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:PermissionScopeProfileViewModel}">
                   <Border Classes="settings-section" Padding="22" Margin="0,0,0,14">
@@ -972,7 +1002,7 @@
                 </DataTemplate>
               </ItemsControl.ItemTemplate>
             </ItemsControl>
-            <Border Classes="settings-section" Padding="22">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPermissionsEditable}">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="ToolControlsSectionAnchor" Text="{Binding ToolControlsSectionTitle}" Classes="subtitle" />
                 <ItemsControl ItemsSource="{Binding ToolControlGroups}">
@@ -1123,7 +1153,7 @@
                 </ItemsControl>
               </StackPanel>
             </Border>
-            <Border Classes="settings-section" Padding="22">
+            <Border Classes="settings-section" Padding="22" IsEnabled="{Binding IsPermissionsEditable}">
               <StackPanel Spacing="14">
                 <TextBlock x:Name="PathsSectionAnchor" Text="{Binding PathsSectionTitle}" Classes="subtitle" />
                 <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
@@ -1152,7 +1182,17 @@
                  IsEnabled 刻意**不绑** IsPermissionsEditable：这两个动作是即时命令，
                  不依赖权限 section 的读取基线。若权限读取失败就把它们灰掉，
                  恰恰会在「后端有问题」的时候锁死用户唯一的补救出路——
-                 与本条缺陷同型（把补救入口挡在故障后面）。 -->
+                 与本条缺陷同型（把补救入口挡在故障后面）。
+
+                 ⚠️ U213-A：上面这句判断是对的，但当年**只做到了「自己身上不绑」**——
+                 而祖先（权限页根 StackPanel）绑了，Avalonia 的 IsEnabled 沿视觉树
+                 继承，子级压不回来，于是死锁照旧成立：用户看到「六个分区未能加载」
+                 与「请设置主密码」同屏，而输入框和按钮全是灰的。
+                 真正的修法是**把门从祖先链上拿掉**（已下沉到各小节自身），
+                 不是在这个 Border 上写 IsEnabled="True"（那等于什么都没做）。
+                 判据必须落在 IsEffectivelyEnabled 上：本 Border 自己的 IsEnabled
+                 在缺陷版本里也是 true，断言它会恒绿。
+                 守卫见 `SecretRecoveryEscapesLoadFailureTests`。 -->
             <Border Classes="settings-section" Padding="22">
               <StackPanel Spacing="12">
                 <TextBlock x:Name="SecretProtectionSectionAnchor"
@@ -1171,6 +1211,7 @@
                 <TextBlock Text="{Binding SecretMasterPasswordLabel}" Classes="secondary" />
                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
                   <TextBox Grid.Column="0"
+                           x:Name="SecretMasterPasswordInput"
                            Text="{Binding SecretMasterPassword, Mode=TwoWay}"
                            PlaceholderText="{Binding SecretMasterPasswordPlaceholder}"
                            PasswordChar="*"
@@ -1181,6 +1222,7 @@
                     </TextBox.KeyBindings>
                   </TextBox>
                   <Button Grid.Column="1"
+                          x:Name="SetSecretMasterPasswordButton"
                           Classes="secondary"
                           Content="{Binding SetSecretMasterPasswordText}"
                           Command="{Binding SetSecretMasterPasswordCommand}" />
@@ -1198,6 +1240,7 @@
                            TextWrapping="Wrap"
                            Foreground="{DynamicResource Ariadne.StatusWarning}" />
                 <Button Classes="danger"
+                        x:Name="AllowUnprotectedSecretsButton"
                         HorizontalAlignment="Left"
                         Content="{Binding AllowPlaintextSecretsText}"
                         Command="{Binding AllowUnprotectedSecretsCommand}" />

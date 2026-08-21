@@ -601,6 +601,7 @@
   "ui.settings.models.provider_type.other": "旧式カスタムプロバイダー（移行専用）",
   "ui.settings.models.provider_type.other.migration": "この旧式カスタムプロバイダー種別は実行・編集できません。互換プロバイダーを新規作成し、モデルとワークフロー参照を移行してから削除してください。",
   "ui.settings.load_failure": "\"{section}\" を読み込めませんでした。",
+  "ui.settings.load_failure_with_reason": "\"{section}\" を読み込めませんでした：{reason}",
   "ui.settings.retry": "再試行",
   "ui.settings.restore_current_tab": "保存済みの値を復元",
   "ui.settings.save_current_tab": "このページを保存",
@@ -1374,5 +1375,6 @@
   "ui.recovery.not_found": "このページを再読み込みしてください。本当に削除されている場合は、別のものを選ぶか新規作成してください。",
   "ui.recovery.budget": "日次予算の上限は「設定 → 予算」にあります。自動支出の枠も同じセクションです。",
   "ui.recovery.external_outcome_unknown": "「実行記録」ページでこの手順が既に反映されているか確認し、再試行するか省略するかを決めてください。",
-  "ui.recovery.serialization": "「バージョン」ページで直近の利用可能なチェックポイントに戻せます。"
+  "ui.recovery.serialization": "「バージョン」ページで直近の利用可能なチェックポイントに戻せます。",
+  "ui.automation.auto_mode.needs_project": "プロジェクトがまだ開かれていません — 先に作成または開いてください。自動モードはそれから有効にできます。"
 }

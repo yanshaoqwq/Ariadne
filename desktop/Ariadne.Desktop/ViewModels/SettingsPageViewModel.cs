@@ -284,6 +284,16 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
     private readonly RequestGenerationSession _providerModelRefreshSession = new();
     private readonly RequestGenerationSession _diagnosticsRefreshSession = new();
     private readonly Dictionary<string, Func<Task<bool>>> _failedSectionRetries = new(StringComparer.Ordinal);
+    /// <summary>
+    /// 每个失败分区**当次的异常**（U213-A0）。与 <see cref="_failedSectionRetries"/> 同键同生命周期。
+    ///
+    /// 单独存一份而不是只在登记那一刻用完就丢：切换界面语言会走
+    /// <c>RefreshLocalizedText</c> 把所有失败横幅按新语言重建一遍
+    /// （见文件末尾那个 `foreach (var section in _failedSectionRetries.Keys)`），
+    /// 那时手上必须还有异常，否则切一次语言就把「原因」这一行静默清空——
+    /// 而横幅本身还在，用户看到的是「未能加载」退回到没有原因的旧形态。
+    /// </summary>
+    private readonly Dictionary<string, Exception?> _failedSectionErrors = new(StringComparer.Ordinal);
     private readonly Dictionary<string, PermissionPolicy?> _compatibilityScopedPolicies = new(StringComparer.Ordinal);
 
     private readonly record struct PendingSettingsNavigation(
@@ -2467,6 +2477,9 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         _providerModelRefreshSession.Invalidate();
         var generation = _draftState.BeginLoad();
         _failedSectionRetries.Clear();
+        // 与 _failedSectionRetries 严格同步清理：留下上一轮的异常会让本轮
+        // 「确实拿不到原因」的失败挂上一条过期原因，比没有原因更误导（U213-A0）。
+        _failedSectionErrors.Clear();
         SectionLoadFailures.Clear();
         OnPropertyChanged(nameof(HasSectionLoadFailures));
         var failed = false;
@@ -2510,6 +2523,13 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
             catch
             {
                 // 项目身份只服务目录浏览边界，失败不能拖垮项目配置和项目记忆的加载事务。
+                //
+                // U213-A0 复核：这里**刻意不带诊断**，理由是没有承载位——项目身份不属于
+                // 任何 section，`SectionLoadFailures` 横幅是按 section 组织的，
+                // 硬塞一条「项目身份」横幅会让用户去点一个不存在的分区重试。
+                // 代价（明说，别当成没有）：`ProjectRoot` 变空白，通用页的「项目根目录」
+                // 那一行没有解释。真要暴露它需要新建一个非分区的状态承载位，
+                // 属独立一条，不在 U213-A0 范围内。
                 ProjectRoot = string.Empty;
             }
 
@@ -2871,8 +2891,12 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         {
             throw;
         }
-        catch
+        catch (Exception ex)
         {
+            // U213-A0：`ex` 必须一路带到横幅。此前这里是裸 `catch`，异常整个丢弃，
+            // 横幅只剩「“{分区名}”未能加载。」——用户看到六个分区一起倒，
+            // 而屏幕上没有任何一处说得出为什么，连「是不是主密码没设」都只能靠猜
+            // （用户的第一反应正是猜这个，猜错了就再也没有下一步）。
             if (_draftState.IsCurrentLoad(generation))
             {
                 RegisterSectionLoadFailure(
@@ -2886,7 +2910,8 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
                         apply,
                         CancellationToken.None,
                         // 沿着链条传下去：重试再失败时，下一次重试仍要能重新发请求。
-                        retryRead));
+                        retryRead),
+                    ex);
             }
             return false;
         }
@@ -2896,9 +2921,28 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         }
     }
 
-    private void RegisterSectionLoadFailure(string section, Func<Task<bool>> retry)
+    /// <summary>
+    /// 登记一条分区加载失败横幅。
+    ///
+    /// <param name="error">
+    /// 当次失败的异常。**必填**（可以是 null，但必须显式传）——U213-A0 的教训是
+    /// 这个参数一旦可省，下一处新增的失败路径就会默默省掉它，横幅退回没有原因的形态。
+    /// 让编译器逼每个调用点当场回答「你手上有没有异常」，比事后靠源码断言去数可靠。
+    /// </param>
+    ///
+    /// 文案分两层，各自的存在理由不同：
+    /// - **主行**（<c>Message</c>）：拿得到原因时用 `ui.settings.load_failure_with_reason`
+    ///   （带 `{reason}`），拿不到就落回 `ui.settings.load_failure`。原因走
+    ///   <see cref="UserFacingError.Format"/>，也就是**按失败码取的本地化句子**，
+    ///   不是后端英文原文——这条线全应用统一（欢迎页、作品页、自动化状态都走它）。
+    /// - **次行**（<c>Diagnostic</c>）：脱敏后的工程细节（后端原文、provider 名字之类）。
+    ///   它才是「六个分区为什么一起倒」这种问题唯一能给出线索的一行：失败码只能告诉你
+    ///   「IO 错误」，而次行会带上后端那句具体的拒绝理由。
+    /// </summary>
+    private void RegisterSectionLoadFailure(string section, Func<Task<bool>> retry, Exception? error)
     {
         _failedSectionRetries[section] = retry;
+        _failedSectionErrors[section] = error;
         for (var index = SectionLoadFailures.Count - 1; index >= 0; index--)
         {
             if (string.Equals(SectionLoadFailures[index].Section, section, StringComparison.Ordinal))
@@ -2910,13 +2954,38 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         SectionLoadFailures.Add(new SettingsSectionLoadFailureViewModel(
             section,
             SectionTitle(section),
-            _displayNames.Format("ui.settings.load_failure", new Dictionary<string, string>
-            {
-                ["section"] = SectionTitle(section),
-            }),
+            ComposeSectionLoadFailureMessage(section, error),
+            // 次行取 RedactedDiagnostic 而不是 ex.Message：绝对路径会被替换成 `…`、
+            // 长度截到 96 字符。横幅要能说出原因，但不该把用户的目录结构印在屏幕上。
+            UserFacingError.FromException(error).RedactedDiagnostic ?? string.Empty,
             SectionLoadFailureRetryText,
             () => _ = RetryFailedSectionAsync(section)));
         OnPropertyChanged(nameof(HasSectionLoadFailures));
+    }
+
+    /// <summary>
+    /// 横幅主行文案。有原因用带 `{reason}` 的键，没有原因落回原键。
+    ///
+    /// ⚠️ 两个键都要留着，不是「新键取代旧键」：`error` 为 null 的路径真实存在
+    /// （切语言重建时若那条失败当初就没拿到异常），此时硬套带 `{reason}` 的键会印出
+    /// 「“模型”未能加载：」这样一句以冒号结尾的残句——比不说原因更像系统坏了。
+    /// </summary>
+    private string ComposeSectionLoadFailureMessage(string section, Exception? error)
+    {
+        var title = SectionTitle(section);
+        if (error is null)
+        {
+            return _displayNames.Format("ui.settings.load_failure", new Dictionary<string, string>
+            {
+                ["section"] = title,
+            });
+        }
+
+        return _displayNames.Format("ui.settings.load_failure_with_reason", new Dictionary<string, string>
+        {
+            ["section"] = title,
+            ["reason"] = UserFacingError.Format(error, _displayNames),
+        });
     }
 
     /// <summary>
@@ -2947,6 +3016,8 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
     private void ClearSectionLoadFailure(string section)
     {
         _failedSectionRetries.Remove(section);
+        // 异常表与重试表同键同生命周期：只清一边会让下一次失败拿到上一轮的原因。
+        _failedSectionErrors.Remove(section);
         for (var index = SectionLoadFailures.Count - 1; index >= 0; index--)
         {
             if (string.Equals(SectionLoadFailures[index].Section, section, StringComparison.Ordinal))
@@ -3353,6 +3424,12 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         }
         catch
         {
+            // U213-A0 复核：**刻意保持裸 catch**。这条读取的产物只有一个状态词
+            // （`SecretProtectionStatus` → 状态行显示「已加密 / 已锁定 / 状态未知」），
+            // 空串就是「状态未知」这一态本身，已经是诚实的表达。
+            // 给它接上异常诊断等于在补救入口旁边挂一段英文报错，
+            // 而这一节的全部意义是让用户**去设主密码**（U176）——
+            // 多一行工程文本只会把那两个按钮的存在感压下去。
             SecretProtectionStatus = string.Empty;
         }
     }
@@ -3587,6 +3664,11 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
     {
         var permissionsAccepted = false;
         var presetsAccepted = false;
+        // U213-A0：两条读取各自的异常要留到下面登记横幅那一刻才用得上
+        // （登记发生在两个 try 之外，因为「presets 成功但 permissions 失败」时
+        // presets 也不算落地，判定必须等两边都跑完）。
+        Exception? permissionsError = null;
+        Exception? presetsError = null;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -3625,9 +3707,10 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
             {
                 throw;
             }
-            catch
+            catch (Exception ex)
             {
                 permissions = null;
+                permissionsError = ex;
             }
 
             try
@@ -3668,9 +3751,10 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
             {
                 throw;
             }
-            catch
+            catch (Exception ex)
             {
                 presetsAccepted = false;
+                presetsError = ex;
             }
 
             if (_draftState.IsCurrentLoad(generation))
@@ -3681,7 +3765,8 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
                         PermissionsSection,
                         () => LoadPermissionPresetSectionsAsync(
                             _draftState.CurrentLoadGeneration,
-                            CancellationToken.None));
+                            CancellationToken.None),
+                        permissionsError);
                 }
                 if (!presetsAccepted)
                 {
@@ -3689,7 +3774,12 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
                         PresetsSection,
                         () => LoadPermissionPresetSectionsAsync(
                             _draftState.CurrentLoadGeneration,
-                            CancellationToken.None));
+                            CancellationToken.None),
+                        // 预设自己的读取可能是成功的：它被判为未落地，是因为权限没读上来
+                        // （投影依赖全局权限）。此时把权限那条异常当作原因，
+                        // 才能让「预设未能加载」这句话解释得通——否则这一条会是唯一
+                        // 没有原因的横幅，而它恰恰是被连坐的那个。
+                        presetsError ?? permissionsError);
                 }
             }
 
@@ -3699,20 +3789,24 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         {
             throw;
         }
-        catch
+        catch (Exception ex)
         {
+            // 外层兜的是「发请求本身就炸了」（后端句柄不可用之类），两个分区同因倒下，
+            // 所以两条横幅共用这一个异常作为原因（U213-A0）。
             if (_draftState.IsCurrentLoad(generation))
             {
                 RegisterSectionLoadFailure(
                     PermissionsSection,
                     () => LoadPermissionPresetSectionsAsync(
                         _draftState.CurrentLoadGeneration,
-                        CancellationToken.None));
+                        CancellationToken.None),
+                    ex);
                 RegisterSectionLoadFailure(
                     PresetsSection,
                     () => LoadPermissionPresetSectionsAsync(
                         _draftState.CurrentLoadGeneration,
-                        CancellationToken.None));
+                        CancellationToken.None),
+                    ex);
             }
             return false;
         }
@@ -4506,6 +4600,11 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         }
         catch
         {
+            // U213-A0 复核：**刻意保持裸 catch**。这里只是把用户刚敲进输入框的相对路径
+            // 规范化成绝对路径给他自己看；抛出说明这一刻的输入还不是合法路径
+            // （敲到一半、带非法字符），回落到原文正是用户想看到的那串字符。
+            // `ArgumentException: Illegal characters in path` 这类文本对作者零信息量，
+            // 而它会**随每次按键**出现在同一行上——那不是诊断，是抖动。
             return path.Trim();
         }
     }
@@ -4534,6 +4633,11 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         }
         catch
         {
+            // U213-A0 复核：**刻意保持裸 catch**。这一列已经有明确的用户可见文案
+            // （「状态不可用」），而它出现在目录切换确认表的一个单元格里——
+            // 单元格宽度只够几个字，塞进 IO 异常原文会把表格撑烂。
+            // 与横幅那条的区别在于：横幅本来一个字的原因都没有，这里已经说了「不可用」，
+            // 且这一格失败不阻断任何操作（确认表照样能提交）。
             return _displayNames.Text("ui.dialog.settings.directory_switch.status.unavailable");
         }
     }
@@ -6805,6 +6909,13 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
         }
         catch
         {
+            // U213-A0 复核：**刻意保持裸 catch**。真正会失败的那一环是
+            // `prepared.Save()`，它内部走 `RunSectionSaveAsync`，失败时已经调
+            // `HandleSettingsFailure(ex, section)` 把原因写进状态行——诊断在那儿产生，
+            // 这里再抓一遍只会把同一条原因说两遍（还会盖掉更精确的那句，
+            // 因为这里手上只有"某处炸了"，不知道是哪个 section）。
+            // 本 catch 兜的是 Save 之外的意外；返回 false 让导航守卫留在本页、
+            // 未保存标记保持原样，作者看到的仍是状态行里那句真正的原因。
             return false;
         }
         finally
@@ -7273,7 +7384,12 @@ public sealed class SettingsPageViewModel : PageViewModelBase, IUnsavedChangesGu
 
         foreach (var section in _failedSectionRetries.Keys.ToArray())
         {
-            RegisterSectionLoadFailure(section, _failedSectionRetries[section]);
+            // 切语言时按新语言重建横幅，异常从 _failedSectionErrors 取回：
+            // 传 null 会让「原因」这一行在切一次语言后静默消失（U213-A0）。
+            RegisterSectionLoadFailure(
+                section,
+                _failedSectionRetries[section],
+                _failedSectionErrors.TryGetValue(section, out var error) ? error : null);
         }
 
     }
@@ -8513,18 +8629,29 @@ public sealed class SettingsDiagnosticItemViewModel
     public string RecoveryAction { get; }
 }
 
+/// <summary>
+/// 一条分区加载失败横幅。
+///
+/// <see cref="Message"/> 回答「哪一块没加载上、大致因为什么」，
+/// <see cref="Diagnostic"/> 回答「后端到底说了什么」——两行分工刻意不合并：
+/// 主行是按失败码取的本地化句子（稳定、可翻译），次行是脱敏后的工程原文
+/// （多半是英文、可能带 provider 名字）。合并会把英文塞进主文案，
+/// 拆掉次行则会让「六个分区一起倒」这种问题彻底无线索可查（U213-A0）。
+/// </summary>
 public sealed class SettingsSectionLoadFailureViewModel
 {
     public SettingsSectionLoadFailureViewModel(
         string section,
         string title,
         string message,
+        string diagnostic,
         string retryText,
         Action retry)
     {
         Section = section;
         Title = title;
         Message = message;
+        Diagnostic = diagnostic;
         RetryText = retryText;
         RetryCommand = new RelayCommand(retry);
     }
@@ -8532,6 +8659,13 @@ public sealed class SettingsSectionLoadFailureViewModel
     public string Section { get; }
     public string Title { get; }
     public string Message { get; }
+
+    /// <summary>脱敏后的后端原文。拿不到时是空串，此时次行整行不显示。</summary>
+    public string Diagnostic { get; }
+
+    /// <summary>次行的可见性绑定。空诊断时必须收起来，否则横幅会多出一行空白。</summary>
+    public bool HasDiagnostic => !string.IsNullOrWhiteSpace(Diagnostic);
+
     public string RetryText { get; }
     public RelayCommand RetryCommand { get; }
 }
