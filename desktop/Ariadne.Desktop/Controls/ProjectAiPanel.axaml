@@ -84,6 +84,200 @@
                IsVisible="{Binding ProjectAutomation.IsBlockedWithoutProject}"
                Classes="caption"
                TextWrapping="Wrap" />
-    <ctl:ProjectAiComposer HorizontalAlignment="Stretch" />
+    <ctl:ProjectAiComposer x:Name="ProjectAiComposerSurface" HorizontalAlignment="Stretch" />
+    <!-- ============ U213-C：输入框**下方**的悬浮工具栏 ============
+         用户原话：「搜索应该是小图标放在合适的位置，不应该塞在顶端，
+         应该在输入框下面悬浮着做工具栏！」
+
+         # 为什么定义在本控件里，而不是两个宿主各写一份
+
+         本控件已经是「AutoMode 与对话框相对关系」的唯一定义处（见上），
+         工具栏属于同一组关系（输入框的另一侧），放这里两页自动一致。
+         U213-D 刚证明了反面代价：宿主那一层没有共用，作品页就独自长出了
+         一条发丝线和一份重复内边距，两页漂移了整整一轮才被发现。
+
+         # 三条几何约束沿用 AutoMode 那一行（理由同上，别动）
+
+         ⚠️ **左内边距必须是 0**：共同左基线由宿主 Padding 单独决定
+         （实测 AutoMode 首个墨点与对话框外框左缘同在 x=1153，对齐的是**列基线**）。
+         本 Grid 不设 Padding、图标不加左 Margin——一旦加，整条工具栏就从
+         右栏那一列的基线上掉下来。
+         ⚠️ 无底、无框：它「浮」在输入框下方，不是又一张卡片（U213-E 的教训）。
+         ⚠️ 不加底部内边距：它在框外，自己撑高只会把它推离输入框。
+
+         工具栏是横向的、右侧留白，将来要加第二个工具（比如「查伏笔」）
+         直接在这个 StackPanel 里追加即可，位置关系不必重新决定一遍。 -->
+    <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Left">
+      <!-- 折叠态：一个搜索小图标。tooltip 承接原先那整段说明（`HintText`），
+           于是「需要解释的人 hover 就有，不需要的人不必每次读一遍」——
+           那段文案原本是常驻的整行说明，占了六行里的一行。 -->
+      <Button x:Name="KnowledgeLookupToggle"
+              Classes="icon-btn"
+              Command="{Binding KnowledgeLookup.TogglePanelCommand}"
+              ToolTip.Tip="{Binding KnowledgeLookup.HintText}"
+              AutomationProperties.Name="{Binding KnowledgeLookup.ActionText}">
+        <Path Classes="icon" Width="14" Height="14"
+              Data="{StaticResource Ariadne.Icon.Search}" />
+      </Button>
+    </StackPanel>
+
+    <!-- ============ 展开态：向上弹的浮层 ============
+         # 为什么用 Popup 而不是 Panel + IsVisible
+
+         用户要的是「悬浮」：浮层**不参与布局**、不推开任何东西，盖在对话流上。
+         `Panel + IsVisible` 那条路会占掉本控件的高度，等于把输入框往上顶——
+         那正是原方案（常驻 Row 0）的病，换个位置重犯一遍没有意义。
+
+         # ⚠️ 锚点在**底部**，所以必须向上弹
+
+         **不要**沿用变量填值浮层那套「右下角 Margin 定位」（U213-C 的锚点与它
+         正好相反：那个长在画布行里、锚点在上方，这个锚点在整栏最下沿）。
+
+         🔴 **`TopEdgeAligned*` 的「Top」在生产几何下是意图声明，不是行为**
+         （变异测试证否，别再为它写断言）：本控件停在整栏最下沿，下方放不下浮层，
+         Avalonia 的定位器**无论声明哪个方向都会把它翻到上方**。
+         把它改成 `BottomEdgeAlignedRight` 跑用例全绿。保留 `Top` 是为了让
+         「意图」与「实际」一致（万一将来宿主几何变了，声明是对的那一个），
+         但**它不是那条「向上弹」性质的成因**——框架是。
+
+         ✅ 真正由这里决定的是 **`PlacementTarget`**（变异测试：改回那颗小图标
+         立刻红，浮层左缘 x=824 远远越出输入框左缘 x=1082、压到正文编辑器上）。
+         同理 `AlignedRight` vs `AlignedLeft` 在**锚定 composer** 之后两者都不越栏
+         （变异全绿）⇒ 它是观感取舍（右缘与输入框右缘齐），不是正确性约束。
+
+         ⚠️ **锚点取 composer 而不是那颗小图标**（实机截图三次纠正才定下来）：
+         - 锚在图标 + 左对齐：浮层从图标处向**右**展开，溢出窗口右缘
+           （第一版 340px，右侧被整齐切掉一条）；
+         - 锚在图标 + 右对齐：不溢出了，但图标在最左，右对齐是相对**图标**的
+           右缘算的 ⇒ 整块往左跑，压在正文编辑器上，读起来像「从别处飞来的板」；
+         - 锚在 composer + 右对齐：composer 是**满栏宽**的，它的右缘就是右栏的
+           右内缘 ⇒ 浮层右缘与输入框右缘对齐、向左展开，整块落在本栏内。
+         这就是「悬浮在输入框上方」该有的几何：它属于这个输入区，
+         而不是属于那颗恰好在最左边的小图标。
+         `Width` 也一并交给 composer 决定不了——Popup 不继承宿主宽度，
+         所以取 288（略窄于右栏实测内容宽），与右对齐一起保证不越栏。
+         ⇒ 这三步只有渲染出来才看得见：布局守卫量的是「浮层不参与布局」，
+         越栏发生在 Popup 自己的顶层里，量不到。
+
+         `IsOpen` 双向绑 `IsPanelOpen`：light dismiss（点浮层外）由 Popup 自己完成，
+         单向绑会让 VM 状态停在「开」上，下次点小图标变成「关」，图标像失灵了。
+
+         # 材料语汇
+
+         `Classes="glass-dialog"`（与确认弹窗、变量填值同一套：毛玻璃底 + 发丝边 +
+         圆角 + 投影）。⚠️ 刻意**不套** `ExperimentalAcrylicBorder`：它只有
+         None/Digger 两个 BackgroundSource，而 Digger 会挖穿所有渲染层
+         （主题注释已定论）——在 Popup 这个独立顶层里挖穿会露出桌面壁纸。 -->
+    <Popup Placement="TopEdgeAlignedRight"
+           PlacementTarget="{Binding #ProjectAiComposerSurface}"
+           IsLightDismissEnabled="True"
+           OverlayDismissEventPassThrough="True"
+           VerticalOffset="-6"
+           IsOpen="{Binding KnowledgeLookup.IsPanelOpen, Mode=TwoWay}">
+      <Border Classes="glass-dialog" Width="288" Padding="14,12">
+        <StackPanel Spacing="9">
+          <!-- 段 1：标题 + 关闭。浮层不带标题会让人不确定这是什么面板；
+               但**说明与示例词已不在这里**（见下面输入框的水印）。 -->
+          <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="7">
+            <Path Grid.Column="0" Classes="icon" Width="13" Height="13"
+                  VerticalAlignment="Center"
+                  Data="{StaticResource Ariadne.Icon.Search}" />
+            <TextBlock Grid.Column="1"
+                       Text="{Binding KnowledgeLookup.TitleText}"
+                       Classes="caption"
+                       FontWeight="SemiBold"
+                       VerticalAlignment="Center" />
+            <Button Grid.Column="2"
+                    Classes="subtle"
+                    Padding="6,2"
+                    Command="{Binding KnowledgeLookup.ClosePanelCommand}"
+                    ToolTip.Tip="{Binding KnowledgeLookup.CloseText}"
+                    AutomationProperties.Name="{Binding KnowledgeLookup.CloseText}">
+              <!-- 🔴 **必须是 `Path Classes="icon"`，不能用 `PathIcon`。**
+                   `Ariadne.Icon.Close` 是一条**只有描边、没有填充面积**的几何
+                   （`M6.5,6.5 L17.5,17.5 M17.5,6.5 L6.5,17.5` = 两条线段）。
+                   `PathIcon` 用 `Foreground` **填充**路径、不描边 ⇒ 填充一个
+                   零面积图形，结果是**什么都不画**：按钮在、能点、图标不可见。
+                   `Path.icon` 那套主题样式给的是 `Stroke` + `StrokeThickness=1.6`，
+                   才画得出这两条线。
+                   ⚠️ 这是实机截图抓出来的（第一版我用了 PathIcon，X 整个没渲染）——
+                   守卫量不到「画了没画」，只有渲染出来看才知道。
+                   同一个坑在别处也踩着：`Views/WorkspacePageView.axaml` 的变量填值
+                   浮层与 `Views/WorksPageView.axaml` 两处也是 PathIcon + 同一个键，
+                   那三颗关闭图标此刻同样是不可见的（本轮已报告，未在本改动范围内动）。 -->
+              <Path Classes="icon" Width="11" Height="11"
+                    Stroke="{DynamicResource Ariadne.TextSubtle}"
+                    Data="{StaticResource Ariadne.Icon.Close}" />
+            </Button>
+          </Grid>
+
+          <!-- 段 2：输入框。**满宽「查询」按钮已删**（U213-C）——
+               单输入框的表单里它多余，Enter 就够，而它原先是六行里的一整行。
+               ⚠️ `KeyBindings` 挂在 AutoCompleteBox 宿主上（写法同设置页主密码框）。
+               候选是**查过的词**（后端没有列举知识实体的命令，见 VM 注释）；
+               MinimumPrefixLength=0 + 不自动补全：作者输的是中文人名，
+               自动补全会在打字中途把词替换掉。
+
+               🔴 **顺带证否一条旧注释的前提**：搬走的那份代码里写着「这版 Avalonia 的
+               AutoCompleteBox 没有对外暴露水印属性，靠模板里的内层 TextBox 去设
+               会被 Template 优先级压掉」，所以示例词才单独占一行。
+               实测 `Avalonia 12.0.5` 的 `AutoCompleteBox` **有** `PlaceholderText`
+               （且把 `Watermark` 标了 obsolete、指向它）——设在**宿主**上就会顺着
+               模板自己的 TemplateBinding 流到内层，正是主题里那段
+               「必须设在宿主、不能走 /template/」讲的同一条路。
+               ⇒ 那一行独立的示例词从来就不是必需的。
+
+               ⚠️ 水印**只放短示例词**，不要把 `HintText` 也拼进来。我第一版拼了，
+               实机截图当场否掉：水印不折行，那句长说明被截断在浮层右缘外，
+               既没说明什么、又正是「做得丑」。说明改挂 tooltip（见下）。 -->
+          <AutoCompleteBox Text="{Binding KnowledgeLookup.Term, Mode=TwoWay}"
+                           ItemsSource="{Binding KnowledgeLookup.TermCandidates}"
+                           FilterMode="ContainsOrdinal"
+                           MinimumPrefixLength="0"
+                           IsTextCompletionEnabled="False"
+                           MaxDropDownHeight="200"
+                           PlaceholderText="{Binding KnowledgeLookup.PlaceholderText}"
+                           ToolTip.Tip="{Binding KnowledgeLookup.HintText}"
+                           AutomationProperties.Name="{Binding KnowledgeLookup.TitleText}">
+            <AutoCompleteBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding KnowledgeLookup.LookupCommand}" />
+            </AutoCompleteBox.KeyBindings>
+          </AutoCompleteBox>
+
+          <!-- 查询中那行状态字仍要有：没有它，按下 Enter 后浮层几秒钟毫无变化，
+               读作「没反应」。它只在查询中出现，不是常驻文案。 -->
+          <TextBlock Text="{Binding KnowledgeLookup.LookingText}"
+                     Classes="subtle"
+                     IsVisible="{Binding KnowledgeLookup.IsLooking}" />
+
+          <!-- 段 3：结果区。整块随 HasResult 显隐，没命中时不留空框（U130 同一条）。 -->
+          <StackPanel Spacing="4" IsVisible="{Binding KnowledgeLookup.HasResult}">
+            <TextBlock Text="{Binding KnowledgeLookup.ResultTitle}"
+                       Classes="caption" FontWeight="SemiBold" TextWrapping="Wrap" />
+            <!-- 出处这一行**就是作者问的那个答案**（「在哪一章定下的」），
+                 所以它跟标题同级、不缩进、**不折叠**。搬进浮层后这条不变。 -->
+            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+              <TextBlock Grid.Column="0"
+                         Text="{Binding KnowledgeLookup.SourceLabelText}"
+                         Classes="subtle" />
+              <TextBlock Grid.Column="1"
+                         Text="{Binding KnowledgeLookup.ResultSource}"
+                         Classes="caption"
+                         FontFamily="{DynamicResource Ariadne.Font.Mono}"
+                         TextWrapping="Wrap" />
+            </Grid>
+            <TextBlock Text="{Binding KnowledgeLookup.ResultText}"
+                       Classes="caption"
+                       FontFamily="{DynamicResource Ariadne.Font.Reading}"
+                       TextWrapping="Wrap"
+                       IsVisible="{Binding KnowledgeLookup.HasResultText}" />
+            <Button Classes="subtle" HorizontalAlignment="Left"
+                    Content="{Binding KnowledgeLookup.AskAiText}"
+                    AutomationProperties.Name="{Binding KnowledgeLookup.AskAiText}"
+                    Command="{Binding KnowledgeLookup.AskAiCommand}" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Popup>
   </StackPanel>
 </UserControl>

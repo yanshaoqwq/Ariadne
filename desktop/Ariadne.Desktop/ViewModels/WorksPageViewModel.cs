@@ -223,6 +223,22 @@ public sealed class WorksPageViewModel : PageViewModelBase, IUnsavedChangesGuard
             new("epub", displayNames.Text("ui.works.export_format.epub")),
             new("pdf", displayNames.Text("ui.works.export_format.pdf")),
         };
+        // U213-C：跨章知识查询也挂到作品页。
+        //
+        // **为什么必须同批接线，而不是「先在工作区做完再说」**：
+        // 这个查询的入口现在长在 `ProjectAiPanel` 里（输入框下方的悬浮工具栏），
+        // 而那个控件是作品页与工作区**共用**的。只给工作区注入 VM 的话，
+        // 作品页会出现一个点了什么都不发生的搜索小图标——比没有更糟，
+        // 而且「做一半的功能会掩盖没做的一半」这类缺陷正是这么来的。
+        //
+        // 顺带说，作品页其实是它**更该在**的地方：作者写第 40 章时想起
+        // 「阿青的性格是在哪一章定下的」，人就在正文编辑器里。
+        KnowledgeLookup = new KnowledgeLookupPanelViewModel(
+            _displayNames.Text,
+            message => StatusText = message,
+            ex => ReportFailure(ex, _displayNames));
+        KnowledgeLookup.RequestLookup = reference => _backend.ResolveProjectReferenceAsync(reference);
+        KnowledgeLookup.RequestAskAi = AskAiAboutKnowledgeAsync;
         CaptureSnapshot();
     }
 
@@ -233,9 +249,68 @@ public sealed class WorksPageViewModel : PageViewModelBase, IUnsavedChangesGuard
         ExportFormats[0] = new ExportFormatOption("markdown", _displayNames.Text("ui.works.export_format.markdown"));
         ExportFormats[1] = new ExportFormatOption("epub", _displayNames.Text("ui.works.export_format.epub"));
         ExportFormats[2] = new ExportFormatOption("pdf", _displayNames.Text("ui.works.export_format.pdf"));
+        // 子面板的静态文案不会被本页的 OnPropertyChanged(string.Empty) 波及
+        // （那只刷本 VM 自己的属性）⇒ 必须显式转发，否则切语言后浮层里
+        // 的标题/水印停在旧语言上（工作区那侧同样这么做）。
+        KnowledgeLookup.RefreshLocalizedText();
         OnPropertyChanged(string.Empty);
     }
     public ProjectAutomationState ProjectAutomation => _projectAutomation;
+
+    /// <summary>
+    /// 跨章知识查询面板（U213-C 起两页都有）。
+    /// 入口是 <c>ProjectAiPanel</c> 里输入框下方那条悬浮工具栏上的搜索小图标。
+    /// </summary>
+    public KnowledgeLookupPanelViewModel KnowledgeLookup { get; }
+
+    /// <summary>
+    /// 带着刚查到的知识条目去问项目 AI。
+    ///
+    /// 与工作区那份**刻意不抽公共方法**（那边的注释也写了同一条理由的另一半）：
+    /// 上下文取值规则两页不同——工作区要带 workflow_id / run_id（画布上正跑着一个流程），
+    /// 作品页与运行无关、只有自己的会话 id。抽出来只能把这点差异变成一串开关参数。
+    /// </summary>
+    private async Task AskAiAboutKnowledgeAsync(string reference)
+    {
+        // 答案落在项目 AI 页；作者手动切到导航树后再点，把它切回来，
+        // 否则回答落在一个看不见的标签页里（工作区同一处理）。
+        IsNavTreeTab = false;
+        IsRightPanelOpen = true;
+        var question = _displayNames.Format(
+            "ui.workspace.knowledge_lookup.ask_ai.question",
+            new Dictionary<string, string> { ["reference"] = reference });
+        try
+        {
+            // 提问先进气泡：等回答可能要几秒，不回显的话点了像没反应。
+            ProjectAiBubbles.Add(new ChatBubbleViewModel("user", question));
+            OnPropertyChanged(nameof(HasProjectAiBubbles));
+            StatusText = _displayNames.Text("ui.workspace.knowledge_lookup.ask_ai.sent");
+            // 引用式数据流：把引用串交给后端展开，**不**把检索到的正文拼进 message。
+            var result = await _backend.ProjectAiChatAsync(
+                question,
+                workflowIdToRun: null,
+                referenceWorkflowId: null,
+                referenceRunId: null,
+                conversationId: ProjectAiConversationId,
+                conversationRevision: _projectAiConversationRevision,
+                references: new[] { reference })
+                .ConfigureAwait(true);
+            ProjectAiAnswer = result.Answer;
+            _projectAiConversationRevision = ProjectAiConversationUi.Apply(
+                result,
+                _projectAiHistory,
+                ProjectAiBubbles,
+                _projectAiConversationRevision);
+            OnPropertyChanged(nameof(HasProjectAiBubbles));
+            StatusText = ProjectAiConversationUi.ContextWasCompacted(result)
+                ? _displayNames.Text("ui.project_ai.context_compacted")
+                : _displayNames.Text("ui.common.configured");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ReportFailure(ex, _displayNames);
+        }
+    }
 
     /// 右侧栏开合状态；开合入口由三页共用的边缘控制器承载。
     public bool IsRightPanelOpen

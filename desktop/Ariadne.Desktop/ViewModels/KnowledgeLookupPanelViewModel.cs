@@ -49,6 +49,7 @@ public sealed class KnowledgeLookupPanelViewModel : ViewModelBase
     private readonly Func<Exception, string> _describeError;
     private string _term = string.Empty;
     private bool _isLooking;
+    private bool _isPanelOpen;
     private ProjectReference? _result;
     private string _resultSource = string.Empty;
     private string _resultTitle = string.Empty;
@@ -64,6 +65,30 @@ public sealed class KnowledgeLookupPanelViewModel : ViewModelBase
         _describeError = describeError;
         LookupCommand = new RelayCommand(() => _ = LookupAsync(), CanLookup);
         AskAiCommand = new RelayCommand(() => _ = AskAiAsync(), CanAskAi);
+        TogglePanelCommand = new RelayCommand(() => IsPanelOpen = !IsPanelOpen);
+        ClosePanelCommand = new RelayCommand(() => IsPanelOpen = false);
+    }
+
+    /// <summary>
+    /// 折叠/展开。
+    ///
+    /// U213-C：这个面板原先**常驻**在对话流之上（右栏 Row 0），六行竖排
+    /// （标题 / 说明 / 输入框 / 示例 / 查询键 / 结果区）。用户否掉的不只是
+    /// 「太占地」，而是**位置本身**：「不应该塞在顶端，应该在输入框下面
+    /// 悬浮着做工具栏」。
+    ///
+    /// ⇒ 现在折叠态是输入框下方工具栏里的一个搜索小图标，展开态是向上弹的浮层。
+    ///
+    /// ⚠️ **不要因此把它塞回对话流的 ScrollViewer 里**。原注释里那条理由仍然成立：
+    /// 聊了十几轮之后要先滚回顶部才能查一次设定，而「这个设定当初在哪定的」
+    /// 恰恰是对话进行中最常要查的东西。搬到底部工具栏**同时**满足了
+    /// 「不随对话滚动」（它在 ScrollViewer 外）与「不占顶端」——
+    /// 这是本方案比「留在顶端只做折叠」更好的地方。
+    /// </summary>
+    public bool IsPanelOpen
+    {
+        get => _isPanelOpen;
+        set => SetProperty(ref _isPanelOpen, value);
     }
 
     /// <summary>发起 `resolve_project_reference` 的通道，由页面 VM 注入（这里够不到后端客户端）。</summary>
@@ -74,6 +99,13 @@ public sealed class KnowledgeLookupPanelViewModel : ViewModelBase
 
     public RelayCommand LookupCommand { get; }
     public RelayCommand AskAiCommand { get; }
+
+    /// <summary>工具栏上那个搜索小图标：开合浮层。</summary>
+    public RelayCommand TogglePanelCommand { get; }
+
+    /// <summary>浮层内的关闭键。开合各有独立命令而不是共用一个 Toggle：
+    /// 关闭键的语义是「关」，绑 Toggle 会让它在某些路径下反而把面板开回来。</summary>
+    public RelayCommand ClosePanelCommand { get; }
 
     /// <summary>
     /// 查过的关键词，供输入框做候选。
@@ -107,7 +139,7 @@ public sealed class KnowledgeLookupPanelViewModel : ViewModelBase
             {
                 LookupCommand.NotifyCanExecuteChanged();
                 AskAiCommand.NotifyCanExecuteChanged();
-                OnPropertyChanged(nameof(LookupButtonText));
+                OnPropertyChanged(nameof(LookingText));
             }
         }
     }
@@ -128,15 +160,49 @@ public sealed class KnowledgeLookupPanelViewModel : ViewModelBase
     public bool HasResultText => !string.IsNullOrWhiteSpace(_resultText);
 
     public string TitleText => _text("ui.workspace.knowledge_lookup.title");
+    /// <summary>
+    /// 说明文案的新归属：**tooltip**，不是浮层里的一行字（U213-C）。
+    ///
+    /// # 为什么不合进输入框水印（我先做了这个，被实机截图否掉）
+    ///
+    /// 第一版把 `PlaceholderText` 与 `HintText` 拼成一行当水印
+    /// （`"例如：阿青 — 输入人物、地点或设定关键词，直接查它在知识库里的出处，比如……"`）。
+    /// 渲染出来是**一行截断的长句**：水印不折行，后半截直接看不见——
+    /// 既没起到说明作用，又正是用户说的「做得丑」。
+    /// ⇒ 水印只放短示例词（`PlaceholderText`），这段解释挂 tooltip：
+    /// 需要的人 hover 就有，不需要的人不必每次读一遍，而且**不占任何版面**。
+    ///
+    /// 这条是「视觉改动必须真的渲染出来看」的又一个实例：
+    /// 三条布局守卫全绿，而水印被截断这件事只有截图能看见。
+    /// </summary>
     public string HintText => _text("ui.workspace.knowledge_lookup.hint");
     public string PlaceholderText => _text("ui.workspace.knowledge_lookup.placeholder");
     public string SourceLabelText => _text("ui.workspace.knowledge_lookup.source");
     public string AskAiText => _text("ui.workspace.knowledge_lookup.ask_ai");
+    public string CloseText => _text("ui.common.close");
 
-    /// <summary>查询中换文案而不是只灰掉：灰按钮说明「不能点」，说不出「已经在查了」。</summary>
-    public string LookupButtonText => _isLooking
-        ? _text("ui.workspace.knowledge_lookup.looking")
-        : _text("ui.workspace.knowledge_lookup.lookup");
+
+    /// <summary>
+    /// 折叠态那颗小图标的可及名称 = **动作**（「查出处」）。
+    ///
+    /// U213-C 删掉满宽查询按钮后，这个 key 差点变成「代码里还引用着、界面上
+    /// 永远不显示」的半死键：原 `LookupButtonText` 有两支，而查询中那一支
+    /// 才是唯一会露面的文案 ⇒ 「查出处」这一支不再有任何呈现位置。
+    /// 图标按钮本来就需要一个描述动作的可及名称（图标本身对读屏软件不可读），
+    /// 两个需求正好互补，于是它在这里落脚而不是被删。
+    /// </summary>
+    public string ActionText => _text("ui.workspace.knowledge_lookup.lookup");
+
+    /// <summary>
+    /// 查询中的状态文案。
+    ///
+    /// 只有这一支，**没有「空闲时显示什么」的对偶**：满宽查询按钮已删（U213-C），
+    /// 这行字只在等结果的那几秒出现。原先它是按钮文案的一支
+    /// （「查询中换文案而不是只灰掉」——灰按钮说明「不能点」，说不出「已经在查了」），
+    /// 按钮没了以后同一条理由落在这行独立状态字上：
+    /// 按下 Enter 后浮层几秒钟毫无变化会被读作「没反应」。
+    /// </summary>
+    public string LookingText => _text("ui.workspace.knowledge_lookup.looking");
 
     /// <summary>语言切换后刷新本面板的静态文案（页面 VM 统一转发）。</summary>
     public void RefreshLocalizedText()
@@ -144,9 +210,11 @@ public sealed class KnowledgeLookupPanelViewModel : ViewModelBase
         OnPropertyChanged(nameof(TitleText));
         OnPropertyChanged(nameof(HintText));
         OnPropertyChanged(nameof(PlaceholderText));
+        OnPropertyChanged(nameof(CloseText));
         OnPropertyChanged(nameof(SourceLabelText));
         OnPropertyChanged(nameof(AskAiText));
-        OnPropertyChanged(nameof(LookupButtonText));
+        OnPropertyChanged(nameof(ActionText));
+        OnPropertyChanged(nameof(LookingText));
     }
 
     /// <summary>关键词为空或正在查时不可点，而不是点了发一次注定被后端拒的空引用。</summary>

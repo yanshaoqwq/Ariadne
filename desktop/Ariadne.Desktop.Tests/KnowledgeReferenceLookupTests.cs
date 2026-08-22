@@ -151,6 +151,76 @@ public sealed class KnowledgeReferenceLookupTests
     }
 
     /// <summary>
+    /// U213-C：**作品页那一侧也必须真的接上**。
+    ///
+    /// # 为什么这条不可省
+    ///
+    /// 入口现在长在 `ProjectAiPanel` 里，而那个控件是作品页与工作区**共用**的。
+    /// 只给工作区注入 VM 的话，作品页会出现一个**点了什么都不发生的搜索小图标**
+    /// —— 比没有更糟：作者会以为功能坏了，而不是以为这一页没有这个功能。
+    ///
+    /// 而这种「半接线」在纯前端判据下**完全隐形**：`x:CompileBindings="False"` 下
+    /// 缺失的绑定只是空值，不报错、不抛、控件照样画出来。下面那条源码断言
+    /// （XAML 里有绑定）在作品页零接线时**照样全绿**——它读的是共用控件的标记，
+    /// 与哪个页面提供了 `KnowledgeLookup` 无关。
+    ///
+    /// ⇒ 判据必须落在**真实出站请求**上：作品页的这个面板一执行查询，
+    /// 伪后端就该收到一次 `resolve_project_reference`，且引用串带 `@知识:` 前缀
+    /// （裸关键词会被后端顶层解析器按「缺少 ':'」拒掉，见 `ComposeReference`）。
+    /// </summary>
+    [Fact]
+    public async Task TheWorksPageLookupAlsoSendsAResolveReferenceCall()
+    {
+        var backend = LookupBackend.Create();
+        var viewModel = new WorksPageViewModel(DisplayNameService.LoadDefault(), backend.Client);
+        viewModel.KnowledgeLookup.Term = Term;
+
+        Assert.True(viewModel.KnowledgeLookup.LookupCommand.TryExecute());
+        await WaitUntilAsync(() => backend.ResolveReferenceCalls.Count >= 1);
+
+        Assert.Equal($"@知识:{Term}", Assert.Single(backend.ResolveReferenceCalls));
+        await WaitUntilAsync(() => viewModel.KnowledgeLookup.HasResult);
+        // 出处就是作者问的那个答案；作品页拿到的必须是 payload.source 那个字段
+        // （值取自本文件的伪后端 fixture，不是随手编的字符串）。
+        Assert.Equal("chapters/003.md", viewModel.KnowledgeLookup.ResultSource);
+    }
+
+    /// <summary>
+    /// U213-C：作品页的「问 AI」同样走引用式数据流，并把答案带回项目 AI 页。
+    ///
+    /// 三条断言各自不可省：
+    /// 1. 出站 `references` 真的带上那个引用串（**不是**把检索到的正文拼进 message
+    ///    —— 百万字项目里内联正文是明令禁止的数据流）；
+    /// 2. 提问进了对话气泡（等回答要几秒，不回显的话点了像没反应）；
+    /// 3. 右栏被切回项目 AI 页（作者可能正看着导航树，答案落在看不见的页上等于没答）。
+    /// </summary>
+    [Fact]
+    public async Task TheWorksPageAskAiSendsTheReferenceAndLandsInTheChat()
+    {
+        var backend = LookupBackend.Create();
+        var viewModel = new WorksPageViewModel(DisplayNameService.LoadDefault(), backend.Client);
+        var panel = viewModel.KnowledgeLookup;
+        panel.Term = Term;
+        Assert.True(panel.LookupCommand.TryExecute());
+        await WaitUntilAsync(() => panel.HasResult);
+
+        // 自检：接线缺失时这里就该停下（CanExecute 依赖 RequestAskAi 非空）。
+        Assert.True(panel.AskAiCommand.CanExecute(null));
+        viewModel.IsNavTreeTab = true; // 先切到导航树，验证它会被切回来
+        Assert.True(panel.AskAiCommand.TryExecute());
+        await WaitUntilAsync(() => backend.ProjectAiReferences.Count >= 1);
+
+        var references = Assert.Single(backend.ProjectAiReferences);
+        Assert.NotNull(references);
+        Assert.Equal($"@知识:{Term}", Assert.Single(references!));
+        await WaitUntilAsync(() => viewModel.HasProjectAiBubbles);
+        Assert.Contains(
+            viewModel.ProjectAiBubbles,
+            bubble => bubble.Content.Contains($"@知识:{Term}", StringComparison.Ordinal));
+        Assert.False(viewModel.IsNavTreeTab);
+    }
+
+    /// <summary>
     /// 入口必须真的挂在**界面**上。
     ///
     /// 上面几条断言的是「命令一执行就发出正确的 IPC」，但命令挂不挂在 View 上它们
@@ -162,12 +232,19 @@ public sealed class KnowledgeReferenceLookupTests
     /// 要实体化就得起 headless 会话 + 展开右栏 + 切到那一页；本机 3.8G 内存下
     /// 多起会话会被静默 OOM。读源文件在这里是**更强**的判据 —— 它同时证明了
     /// 「绑定写在 XAML 里」，而实体化只能证明「此刻这一条路径下它在」。
+    ///
+    /// ⚠️ **U213-C 之后读的是 `Controls/ProjectAiPanel.axaml`，不再是
+    /// `Views/WorkspacePageView.axaml`。** 入口从右栏顶端（那个页面的 Row 0）
+    /// 搬到了输入框下方的悬浮工具栏，而工具栏定义在两页**共用**的
+    /// `ProjectAiPanel` 里（位置只定义一次，两页自动一致）。
+    /// 这是「改了产品要同批改用例」——路径没跟着改的话，
+    /// 这条会以「找不到绑定」失败，而那种失败最容易被误读成「测试过时了，删掉」。
     /// </summary>
     [Fact]
     public void TheProjectAiPanelActuallyMountsTheLookupEntry()
     {
         var xaml = File.ReadAllText(Path.Combine(
-            ResolveSolutionDir(), "Ariadne.Desktop", "Views", "WorkspacePageView.axaml"));
+            ResolveSolutionDir(), "Ariadne.Desktop", "Controls", "ProjectAiPanel.axaml"));
 
         // ⚠️ 断言必须带上绑定的**闭合花括号**：写成裸的
         // `Assert.Contains("KnowledgeLookup.LookupCommand", xaml)` 会被前缀吞并 ——
@@ -180,6 +257,39 @@ public sealed class KnowledgeReferenceLookupTests
         // 出处那一行是作者要的答案本身，不显示它等于查了个空。
         Assert.Contains("KnowledgeLookup.ResultSource}", xaml);
         Assert.Contains("KnowledgeLookup.AskAiCommand}", xaml);
+        // U213-C：折叠态那个搜索小图标就是现在唯一的入口，它没接上等于入口不存在。
+        Assert.Contains("KnowledgeLookup.TogglePanelCommand}", xaml);
+    }
+
+    /// <summary>
+    /// U213-C **反向**钉住：知识查询不许再回到右栏顶端。
+    ///
+    /// # 为什么是一条独立的反向用例，而不是把上面那条的路径一改了事
+    ///
+    /// 上面那条只保证「入口在共用控件里」。它管不了「有人又在
+    /// `WorkspacePageView` 的对话流上方加回一份常驻面板」——那时两处都有绑定，
+    /// 上面那条照样全绿，而用户明确否掉的形态（占着顶端）又回来了。
+    ///
+    /// 本仓已记：产品改了要同批改用例，且**正解是反转判据、不是删断言**——
+    /// 删掉的话旧形态被加回来不会有任何东西变红。
+    ///
+    /// ⚠️ 断言前先剥掉 XAML 注释：`WorkspacePageView.axaml` 那一行现在写着
+    /// 一整段「已搬走、别加回来」的说明，里面**必然**提到这些绑定名。
+    /// 不剥注释的话这条会被自己的说明文字命中而恒红（本仓踩过这坑）。
+    /// </summary>
+    [Fact]
+    public void TheWorkspacePageNoLongerHostsTheLookupPanelAboveTheConversation()
+    {
+        var markup = File.ReadAllText(Path.Combine(
+            ResolveSolutionDir(), "Ariadne.Desktop", "Views", "WorkspacePageView.axaml"));
+        var xaml = System.Text.RegularExpressions.Regex.Replace(
+            markup, "<!--.*?-->", string.Empty,
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        // 自检：剥注释后这份标记还是那个页面（否则下面的「找不到」是因为剥错了）。
+        Assert.Contains("ctl:ProjectAiPanel", xaml);
+
+        Assert.DoesNotContain("KnowledgeLookup.", xaml);
     }
 
     private static string ResolveSolutionDir()

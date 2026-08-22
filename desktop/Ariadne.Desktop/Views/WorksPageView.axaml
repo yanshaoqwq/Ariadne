@@ -335,9 +335,11 @@
                             Command="{Binding ToggleOutlinePanelCommand}"
                             ToolTip.Tip="{Binding OutlineCompareText}"
                             AutomationProperties.Name="{Binding OutlineCompareText}">
-                      <PathIcon Width="12" Height="12"
-                                Data="{DynamicResource Ariadne.Icon.Close}"
-                                Foreground="{DynamicResource Ariadne.TextSubtle}" />
+                      <!-- 🔴 `Path Classes="icon"` 而非 `PathIcon`：见 WorkspacePageView
+                           同处注释 —— Icon.Close 是零面积描边几何，填充它什么都不画。 -->
+                      <Path Classes="icon" Width="12" Height="12"
+                            Data="{DynamicResource Ariadne.Icon.Close}"
+                            Stroke="{DynamicResource Ariadne.TextSubtle}" />
                     </Button>
                   </Grid>
                   <ScrollViewer Grid.Row="1"
@@ -424,9 +426,10 @@
                           IsEnabled="{Binding IsQuickEditCloseEnabled}"
                           ToolTip.Tip="{Binding QuickEditCloseText}"
                           AutomationProperties.Name="{Binding QuickEditCloseText}">
-                    <PathIcon Width="12" Height="12"
-                              Data="{DynamicResource Ariadne.Icon.Close}"
-                              Foreground="{DynamicResource Ariadne.TextSubtle}" />
+                    <!-- 🔴 `Path Classes="icon"` 而非 `PathIcon`：同上，零面积描边几何。 -->
+                    <Path Classes="icon" Width="12" Height="12"
+                          Data="{DynamicResource Ariadne.Icon.Close}"
+                          Stroke="{DynamicResource Ariadne.TextSubtle}" />
                   </Button>
                 </Grid>
                 <TextBox x:Name="QuickEditInstructionBox" AutomationProperties.Name="{Binding QuickEditTitle}"
@@ -1044,9 +1047,40 @@
                 </ItemsControl>
               </StackPanel>
             </ScrollViewer>
-            <Border Grid.Row="1" Padding="12,10"
-                    HorizontalAlignment="Stretch"
-                    BorderBrush="{DynamicResource Ariadne.BorderMuted}" BorderThickness="0,1,0,0">
+            <!-- U213-D：输入面宿主。**这一层不许再有边线，也不许再叠一份内边距。**
+                 用户原话：「下面聊天框输出框外面竟然又套了一层，难看死了」。
+
+                 # 缺陷不在 composer，在这一层
+
+                 `ProjectAiComposer` 自带完整 chrome（圆角 + 主题色描边 + 12,10 内边距，
+                 是 U148 定下的「唯一允许主题色描边的输入面」，别去压平它）。
+                 而这里原本是 `Padding="12,10"` + `BorderThickness="0,1,0,0"`：
+                 于是从上往下依次是 发丝线 → 12/10 → composer 自己的框 → 又 12/10 → 文字，
+                 视觉上就是「框里又一个框」。缺陷是**宿主给一个自带 chrome 的控件
+                 再包了一层带边线的内边距容器**。
+
+                 # 为什么改成 dock-rail-header 而不是「两页一起改」
+
+                 报告写的是「工作区那侧要同批查，只改作品页会让两页再次漂移」——
+                 实测**两页已经漂移了，而工作区那侧是对的**：
+                 `WorkspacePageView.axaml` 的同一个位置用 `Classes="dock-rail-header"`
+                 （淡底色分层、零边框），注释写明「去掉顶部硬线」。
+                 ⇒ 正解是把作品页**对齐到工作区**，两处从此同一套手段。
+                 这也说明「两页共用 ProjectAiPanel」的保护只覆盖控件**内部**，
+                 宿主这一层的漂移它管不着 —— 所以这一层的写法必须逐字一致。
+
+                 # 为什么内边距仍是 12,10，没有跟着调小
+
+                 这一层的 12,10 是**外缘留白**（composer 的框与右栏边缘之间），
+                 composer 自己的 12,10 是**文字与框之间**——两者各有其职，
+                 谁少了都是缺陷（前者会让框贴死栏边，后者会让字贴死框）。
+                 「双层」的观感来自那条**边线**把外层留白也读成了一道框内缩，
+                 边线一去，剩下的就只是一块淡底带上放着一个框。
+                 ⇒ 取与工作区**逐字相同**的 12,10，两页从此不会再漂移。 -->
+            <Border Grid.Row="1"
+                    Classes="dock-rail-header"
+                    Padding="12,10"
+                    HorizontalAlignment="Stretch">
               <!-- 与工作区共用 ProjectAiPanel（U164-E 后 AutoMode 移到了对话框外，
                    两者的相对关系在该控件里定义一次，避免两页各自漂移）。
                    输入面始终跟随实际对话栏宽度。 -->

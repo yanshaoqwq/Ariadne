@@ -1164,9 +1164,16 @@
                       IsEnabled="{Binding VariableFill.IsCloseEnabled}"
                       ToolTip.Tip="{Binding VariableFill.CloseText}"
                       AutomationProperties.Name="{Binding VariableFill.CloseText}">
-                <PathIcon Width="12" Height="12"
-                          Data="{DynamicResource Ariadne.Icon.Close}"
-                          Foreground="{DynamicResource Ariadne.TextSubtle}" />
+                <!-- 🔴 必须是 `Path Classes="icon"`，不能用 `PathIcon`（U213-C 顺带修）：
+                     `Ariadne.Icon.Close` 是一条**只有描边、没有填充面积**的几何
+                     （两条线段），而 `PathIcon` 用 `Foreground` **填充**路径、不描边
+                     ⇒ 填充一个零面积图形 = **什么都不画**，按钮在屏上是空白的。
+                     Avalonia 不会为此报错（同「缺资源键静默失效」那族）。
+                     `Stroke` 显式给 TextSubtle：`Path.icon` 样式默认描 TextSecondary，
+                     而这里原本刻意用更淡的 TextSubtle（关闭键不该抢眼）。 -->
+                <Path Classes="icon" Width="12" Height="12"
+                      Data="{DynamicResource Ariadne.Icon.Close}"
+                      Stroke="{DynamicResource Ariadne.TextSubtle}" />
               </Button>
             </Grid>
 
@@ -1292,6 +1299,22 @@
                         AutomationProperties.Name="{Binding RunText}"
                         Command="{Binding RunWorkflowCommand}" />
               </Border>
+              <!-- U196-D：「从失败处重跑」。只在运行进 failed 且知道是哪个节点失败时出现。
+                   位置紧邻「运行」而不是另开一处：失败之后作者的目光就在这条带上
+                   （「运行」此刻正显示在这里），而两个选项的差别恰恰要并排比较
+                   ——「运行」是整条重跑（重新花钱），这颗只重跑失败那一步。
+                   隔一道组边界：它与「运行」在花费上不是同一量级，别做成等距误触。
+                   ToolTip 挂在按钮上而不是外层容器：这颗按钮出现时一定是可点的
+                   （显隐与 CanExecute 同源 CanRetryFailedNode），不存在
+                   「禁用态下看不到说明」的问题，那是 RunEntryHost 才有的顾虑。 -->
+              <Border Classes="group-divider" IsVisible="{Binding CanRetryFromFailedNode}" />
+              <Button x:Name="RetryFailedNodeButton"
+                      Classes="btn-compact"
+                      IsVisible="{Binding CanRetryFromFailedNode}"
+                      Content="{Binding RetryFailedNodeText}"
+                      AutomationProperties.Name="{Binding RetryFailedNodeText}"
+                      ToolTip.Tip="{Binding RetryFailedNodeTooltip}"
+                      Command="{Binding RetryFailedNodeCommand}" />
               <!-- 运行控制三键：只在「三者至少一个真能做事」时出现（ShowRunControls）。
                    终态（succeeded/failed/stopped）也算空闲，此时换回「运行」——
                    作者跑完一轮后下一件事通常是再跑一轮，不是停止一个已停的运行。 -->
@@ -1942,74 +1965,17 @@
           </Border>
 
           <Grid>
-            <Grid IsVisible="{Binding IsProjectAiTab}" RowDefinitions="Auto,*,Auto" HorizontalAlignment="Stretch">
-              <!-- U206-B：跨章知识查询。**常驻在对话流之上、不随它滚动**——
-                   放进 ScrollViewer 里的话，聊了十几轮之后要先滚回顶部才能查一次设定，
-                   而「这个设定当初在哪定的」恰恰是对话进行中最常要查的东西。
-                   分层用 dock-rail-header 的淡底色（与下方输入面同一套），不加硬分割线。 -->
-              <Border Grid.Row="0" Classes="dock-rail-header" Padding="12,10">
-                <StackPanel Spacing="6">
-                  <Grid ColumnDefinitions="Auto,*" ColumnSpacing="7">
-                    <Path Grid.Column="0" Classes="icon" Width="13" Height="13"
-                          VerticalAlignment="Center"
-                          Data="{StaticResource Ariadne.Icon.Search}" />
-                    <TextBlock Grid.Column="1"
-                               Text="{Binding KnowledgeLookup.TitleText}"
-                               Classes="caption"
-                               FontWeight="SemiBold"
-                               VerticalAlignment="Center" />
-                  </Grid>
-                  <TextBlock Text="{Binding KnowledgeLookup.HintText}"
-                             Classes="subtle" TextWrapping="Wrap" />
-                  <!-- 候选是**查过的词**（见 VM 注释：后端没有列举知识实体的命令）。
-                       MinimumPrefixLength=0 + 不自动补全：作者输的是中文人名，
-                       自动补全会在打字中途把词替换掉。 -->
-                  <AutoCompleteBox Text="{Binding KnowledgeLookup.Term, Mode=TwoWay}"
-                                   ItemsSource="{Binding KnowledgeLookup.TermCandidates}"
-                                   FilterMode="ContainsOrdinal"
-                                   MinimumPrefixLength="0"
-                                   IsTextCompletionEnabled="False"
-                                   MaxDropDownHeight="200"
-                                   AutomationProperties.Name="{Binding KnowledgeLookup.TitleText}" />
-                  <!-- 示例词单独一行而不是做输入框水印：这版 Avalonia 的 AutoCompleteBox
-                       没有对外暴露水印属性，靠模板里的内层 TextBox 去设会被 Template
-                       优先级压掉且**不报错**（缺资源/压优先级在 Avalonia 里都是静默失效）。 -->
-                  <TextBlock Text="{Binding KnowledgeLookup.PlaceholderText}"
-                             Classes="subtle" TextWrapping="Wrap" />
-                  <Button Classes="secondary" HorizontalAlignment="Stretch"
-                          Content="{Binding KnowledgeLookup.LookupButtonText}"
-                          AutomationProperties.Name="{Binding KnowledgeLookup.LookupButtonText}"
-                          Command="{Binding KnowledgeLookup.LookupCommand}" />
+            <Grid IsVisible="{Binding IsProjectAiTab}" RowDefinitions="*,Auto" HorizontalAlignment="Stretch">
+              <!-- U213-C：跨章知识查询**已从这里搬走**（原 Row 0，六行竖排常驻）。
+                   现在它是输入框下方悬浮工具栏里的一个搜索小图标 + 向上弹的浮层，
+                   定义处 = `Controls/ProjectAiPanel.axaml`（两页共用，位置只定义一次）。
 
-                  <!-- 结果区整块随 HasResult 显隐：没命中时不留一个空框（U130 同一条）。 -->
-                  <StackPanel Spacing="4" IsVisible="{Binding KnowledgeLookup.HasResult}">
-                    <TextBlock Text="{Binding KnowledgeLookup.ResultTitle}"
-                               Classes="caption" FontWeight="SemiBold" TextWrapping="Wrap" />
-                    <!-- 出处这一行就是作者问的那个答案（「在哪一章定下的」），
-                         所以它跟标题同级、不缩进、不折叠。 -->
-                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
-                      <TextBlock Grid.Column="0"
-                                 Text="{Binding KnowledgeLookup.SourceLabelText}"
-                                 Classes="subtle" />
-                      <TextBlock Grid.Column="1"
-                                 Text="{Binding KnowledgeLookup.ResultSource}"
-                                 Classes="caption"
-                                 FontFamily="{DynamicResource Ariadne.Font.Mono}"
-                                 TextWrapping="Wrap" />
-                    </Grid>
-                    <TextBlock Text="{Binding KnowledgeLookup.ResultText}"
-                               Classes="caption"
-                               FontFamily="{DynamicResource Ariadne.Font.Reading}"
-                               TextWrapping="Wrap"
-                               IsVisible="{Binding KnowledgeLookup.HasResultText}" />
-                    <Button Classes="subtle" HorizontalAlignment="Left"
-                            Content="{Binding KnowledgeLookup.AskAiText}"
-                            AutomationProperties.Name="{Binding KnowledgeLookup.AskAiText}"
-                            Command="{Binding KnowledgeLookup.AskAiCommand}" />
-                  </StackPanel>
-                </StackPanel>
-              </Border>
-              <ScrollViewer Grid.Row="1" Margin="12,10">
+                   ⚠️ 别把它加回这一行。用户否掉的是**顶端这个位置本身**：
+                   「不应该塞在顶端，应该在输入框下面悬浮着做工具栏」。
+                   而原注释里「不随对话流滚动」那条理由**仍然成立且已被满足**——
+                   工具栏在 ScrollViewer 外面，聊十几轮之后照样一眼就能点到。
+                   ⇒ 也不要为了「省一层控件」把它塞进下面那个 ScrollViewer。 -->
+              <ScrollViewer Grid.Row="0" Margin="12,10">
                 <StackPanel Spacing="10">
                   <Border Classes="empty-state" Padding="8,16" IsVisible="{Binding !HasProjectAiBubbles}">
                     <StackPanel Spacing="6">
@@ -2041,8 +2007,11 @@
                 </StackPanel>
               </ScrollViewer>
               <!-- 输入面：去掉顶部硬线，用一层更淡的底色把「输入区」从对话流里分出来。
-                   Row 2（U206-B 把知识查询插到 Row 0 后整体下移一行）。 -->
-              <Border Grid.Row="2"
+                   Row 1（U213-C 把知识查询从 Row 0 搬走后整体上移一行，回到两行布局）。
+                   ⚠️ 这一层的写法与作品页宿主**必须逐字一致**（U213-D）：
+                   两页共用 ProjectAiPanel 只保护控件**内部**，宿主这一层它管不着，
+                   作品页曾在这里独自长出一条发丝线 + 一份重复内边距。 -->
+              <Border Grid.Row="1"
                       Classes="dock-rail-header"
                       Padding="12,10"
                       HorizontalAlignment="Stretch">

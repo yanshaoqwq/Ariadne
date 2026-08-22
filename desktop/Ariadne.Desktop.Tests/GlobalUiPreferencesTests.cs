@@ -43,8 +43,19 @@ public sealed class GlobalUiPreferencesTests
         works.ApplyUiPreferences(Preferences(projectPanelVisible: false));
 
         Assert.False(works.IsProjectPanelVisible);
-        Assert.False(works.IsRightPanelToggleVisible);
         Assert.False(works.IsRightPanelVisible);
+        // ⚠️ 本行原先断言 `IsRightPanelToggleVisible` 为 **false**，即「隐藏偏好
+        // 连开合按钮一起收走」。U133 刻意取消了那个行为（`WorksPageViewModel.cs:359`
+        // 现在恒 true，注释写明理由）：偏好该决定的是「进页面时默认收着还是展开」，
+        // 不是「剥夺开合能力」—— 否则作者**在作品页内没有任何办法把导航树叫回来**，
+        // 只能回设置页重新勾选。一个个性化偏好不该把功能锁死。
+        //
+        // ⇒ 判据改成**反向钉住**那个决定，而不是删掉这一行：删掉的话
+        // 「哪天有人又让偏好把开合键收走」不会有任何东西变红。
+        Assert.True(
+            works.IsRightPanelToggleVisible,
+            "隐藏偏好把右栏开合键一起收走了 —— U133 刻意取消了这个行为"
+            + "（否则作者在页内无法把导航树叫回来，只能回设置页）。");
 
         works.OpenImportPanelCommand.Execute(null);
 
