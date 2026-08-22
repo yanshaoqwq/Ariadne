@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.LogicalTree;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
@@ -1302,7 +1303,7 @@ public partial class WorkspacePageView : UserControl
 
         // Ctrl/Cmd+K 开「让 AI 填变量值」（13C 第 5 项）。
         //
-        // 与 Ctrl+S 并列、刻意放在 IsTextInputFocused() 那道闸**之前**：作者按 Ctrl+K
+        // 与 Ctrl+S 并列、刻意放在 IsEditingKeyConsumerFocused() 那道闸**之前**：作者按 Ctrl+K
         // 的典型时刻正是手停在某个变量输入框上（「这几个我懒得一个个填」），
         // 闸之后就等于「光标在表单里时快捷键失灵」。
         // TextBox 不消费 Ctrl+K（它只认 Ctrl+A/C/V/X/Z 那几个编辑手势），无冲突。
@@ -1333,8 +1334,10 @@ public partial class WorkspacePageView : UserControl
             return;
         }
 
-        // 输入框内不劫持复制、剪切、粘贴、退格或删除。
-        if (IsTextInputFocused())
+        // 焦点在会自己消费编辑键的控件里时，画布不劫持复制、剪切、粘贴、退格或删除。
+        // ⚠️ 这道闸下面的每一条都是**破坏性或不可见**的：Delete 删节点、Ctrl+X 剪节点、
+        // Ctrl+V 往画布粘节点。作者在提示词里按 Delete 是想删一个字（U9999）。
+        if (IsEditingKeyConsumerFocused())
         {
             return;
         }
@@ -1467,33 +1470,79 @@ public partial class WorkspacePageView : UserControl
                && control.Focusable;
     }
 
-    private bool IsTextInputFocused()
+    /// <summary>
+    /// U9999：焦点是否落在**会自己消费编辑手势的控件**里。
+    ///
+    /// # 为什么不再叫 `IsTextInputFocused`
+    ///
+    /// 旧名承诺「文本输入」，于是白名单也只写了 `TextBox` / `ComboBox`——
+    /// 名字撒的谎正好掩护了缺陷：提示词编辑器是 `AvaloniaEdit`（焦点实际落在
+    /// 它模板里的 `TextArea`，既不是 `TextBox` 也不是它的子类），
+    /// 于是作者在提示词里按 Delete 想删一个字，画布弹出**「删除节点」确认框**；
+    /// Ctrl+C/X/V 同样被劫持成复制/剪切/粘贴节点。这是数据破坏级：
+    /// 以为在删一个字，实际在删整个节点。
+    ///
+    /// 现在的语义按调用点的实际需要写实：**任何自带复制/剪切/粘贴/退格/删除/
+    /// 方向键语义的控件持有焦点时，画布的同名快捷键一律让路。**
+    ///
+    /// # 白名单是实测清单，不是想象清单
+    ///
+    /// 逐项都在 headless 里把焦点真正设过去、确认焦点元素的实际类型之后才列入：
+    /// - `TextBox`：画布页 23 处 + 内嵌 `ProjectAiComposer` 9 处。
+    ///   它同时兜住 `AutoCompleteBox` / `NumericUpDown` / `MaskedTextBox` 的**内层编辑器**
+    ///   （实测焦点直接落在内层 `TextBox` 上），所以后三者不必单列。
+    /// - `ComboBox`：画布页 5 处。它吃方向键与首字母跳转。
+    /// - `AutoCompleteBox`：焦点通常落在内层 `TextBox`（已被上一条覆盖），
+    ///   列在这里是为了「宿主自己拿到焦点」那条路径（键盘 Tab 序、程序化 Focus()）。
+    /// - `TextEditor`（AvaloniaEdit）+ `TextArea`：**本缺陷的本体**。
+    ///   `TextEditor` 自身 `Focusable=false`，焦点必然落在模板内的 `TextArea` 上，
+    ///   ⇒ 只列 `TextEditor` 而不上溯是抓不到的，只列 `TextArea` 又漏掉宿主路径，两者都要。
+    /// - `SelectableTextBlock`：画布页 2 处（已决议确认项的理由/ID）。
+    ///   它自带 Ctrl+C 复制选区——Ctrl+C 必须给它，否则「理由可以被复制出去引用」
+    ///   这个刻意的设计（见 axaml 注释）等于没有。它不吃 Delete，但此时作者的手
+    ///   在读文本而不在画布上，删节点同样属于误伤。
+    ///
+    /// # 为什么两棵树都要走
+    ///
+    /// - **视觉树**兜住模板内层：`TextArea` 是 `TextEditor` 模板的一部分。
+    /// - **逻辑树**兜住弹出层：`Popup` 内容（下拉候选项）挂在独立的 `PopupRoot` 视觉根上，
+    ///   视觉上溯到不了宿主控件，而逻辑父仍指向宿主。
+    ///
+    /// 实测：这台机器上 `AutoCompleteBox` 内层 `TextBox` 与 `TextEditor` 的 `TextArea`
+    /// **两棵树都能上溯到宿主**（原实现的 `c.Parent` 逻辑树上溯在这两例里并没有断链——
+    /// 缺陷纯粹出在白名单缺项）。两棵树都走是为覆盖上面那条弹出层路径，
+    /// 而不是因为逻辑树在这两例失效；别把它当成「逻辑树不可用」的证据。
+    /// </summary>
+    private bool IsEditingKeyConsumerFocused()
     {
         var focus = TopLevel.GetTopLevel(this)?.FocusManager?.GetFocusedElement();
-        if (focus is null)
+        if (focus is not Control control)
         {
             return false;
         }
 
-        // 焦点在文本输入控件内时不拦截 Delete/Backspace
-        if (focus is TextBox or ComboBox)
+        // 自身命中：焦点直接落在输入控件上（TextBox / ComboBox / TextArea …）。
+        if (IsEditingKeyConsumer(control))
         {
             return true;
         }
 
-        if (focus is Control control)
-        {
-            for (var c = control; c is not null; c = c.Parent as Control)
-            {
-                if (c is TextBox or ComboBox)
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return control.GetVisualAncestors().Any(IsEditingKeyConsumer)
+               || control.GetLogicalAncestors().Any(IsEditingKeyConsumer);
     }
+
+    /// <summary>
+    /// 单个控件是否自带编辑手势语义。白名单的唯一收口——
+    /// 新增任何承载可编辑/可选中文本的控件都必须加到这里，
+    /// 否则画布快捷键会在那个控件里重演 U9999。
+    /// </summary>
+    private static bool IsEditingKeyConsumer(object? node) =>
+        node is TextBox
+            or ComboBox
+            or AutoCompleteBox
+            or SelectableTextBlock
+            or AvaloniaEdit.TextEditor
+            or AvaloniaEdit.Editing.TextArea;
 
     // ===================== 空白处左键框选 =====================
 
