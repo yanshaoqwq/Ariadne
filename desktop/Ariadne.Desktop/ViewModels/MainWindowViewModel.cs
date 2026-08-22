@@ -51,6 +51,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
     private string _projectTitle;
     private string _backendStatus;
     private string _notificationText = string.Empty;
+    // U194-B：顶栏那条消息的紧急度。默认 Info——空文案时它不参与呈现。
+    private HeaderNoticeSeverity _headerNoticeSeverity = HeaderNoticeSeverity.Info;
     private string _budgetStatusText;
     private double _budgetUsagePercent;
     private BudgetSeverity _budgetSeverity = BudgetSeverity.Normal;
@@ -280,7 +282,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
                     ["kind"] = kind,
                     ["phase"] = phase,
                 });
-        NotificationText = MaintenanceBannerText;
+        // U194-B：维护**失败**要报 Error（作者的项目维护没做完，后续检索/索引可能不完整），
+        // 进行中只是 Info。原先两者共用同一条灰字，「维护失败」与「正在维护」同形。
+        // 注：维护本身另有黄底常驻横幅（视觉阻断），这里的顶栏文案是它的补充位。
+        NotifyHeader(
+            MaintenanceBannerText,
+            state.Status == "failed" ? HeaderNoticeSeverity.Error : HeaderNoticeSeverity.Info);
     }
 
     private void ClearMaintenanceBanner()
@@ -326,8 +333,75 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
             if (SetProperty(ref _notificationText, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
+                // IsHeaderNoticeWarning/Error 都合取了 HasNotification，
+                // 而 HasNotification 读的就是本属性 ⇒ 文案变化必须一并通知，
+                // 否则清空文案后红点留在屏上（缺资源键那类静默失效的同族问题：
+                // 绑定不报错，只是永远不更新）。
+                OnPropertyChanged(nameof(IsHeaderNoticeWarning));
+                OnPropertyChanged(nameof(IsHeaderNoticeError));
+            }
+            // U194-B：直接赋值（不经 NotifyHeader）的路径按 Info 处理，
+            // 且**必须清掉旧档**——否则一次 Error 之后所有后续消息都继承红点，
+            // 那就从「都看不见」变成「都在喊」，分级作废。
+            // 清空文案（`= string.Empty`）也走这里，档位随之归零，符合直觉。
+            HeaderNoticeSeverity = HeaderNoticeSeverity.Info;
+        }
+    }
+
+    /// <summary>
+    /// 顶栏那条消息的紧急度（U194-B）。驱动 `MainWindow.axaml` 里的小圆点颜色与文字色。
+    ///
+    /// 只在 `NotificationText` 非空时有意义：为空时顶栏显示的是 `BackendStatus`
+    /// （见 <see cref="HeaderStatusText"/>），那条不参与分级。
+    /// </summary>
+    public HeaderNoticeSeverity HeaderNoticeSeverity
+    {
+        get => _headerNoticeSeverity;
+        private set
+        {
+            if (SetProperty(ref _headerNoticeSeverity, value))
+            {
+                OnPropertyChanged(nameof(IsHeaderNoticeWarning));
+                OnPropertyChanged(nameof(IsHeaderNoticeError));
             }
         }
+    }
+
+    /// <summary>
+    /// ⚠️ 这两个只在**有通知文案**时为真。缺了 `HasNotification` 这个合取项，
+    /// 一次 Error 之后把文案清空（`NotificationText = string.Empty`），
+    /// 顶栏会退回显示 `BackendStatus`（「就绪」），旁边却还挂着红点
+    /// —— 红点指控的那条消息已经不在屏幕上了。
+    /// </summary>
+    public bool IsHeaderNoticeWarning =>
+        HasNotification && HeaderNoticeSeverity == HeaderNoticeSeverity.Warning;
+
+    public bool IsHeaderNoticeError =>
+        HasNotification && HeaderNoticeSeverity == HeaderNoticeSeverity.Error;
+
+    private bool HasNotification => !string.IsNullOrWhiteSpace(NotificationText);
+
+    /// <summary>
+    /// 带分档的顶栏通知入口（U194-B）。**高档不被低档覆盖**。
+    ///
+    /// 原缺陷：所有消息直接写 `NotificationText`，于是「批量保存第 3 页失败」
+    /// （正文可能已丢）被随后任意一条「版本 0.x」静默顶掉。顶栏只有一行，
+    /// 覆盖本身不可避免，但覆盖的**方向**可以选：让更严重的那条留下。
+    ///
+    /// ⚠️ 降级不是无条件拒绝，而是「同一条消息还挂在屏上时才拒绝」：
+    /// 若当前文案已被清空（作者已处理完、或换了项目），下一条 Info 必须能写进去，
+    /// 否则一次 Error 会把顶栏**永久锁死**在那句话上——那比不分级更糟。
+    /// </summary>
+    private void NotifyHeader(string text, HeaderNoticeSeverity severity)
+    {
+        if (HasNotification && severity < HeaderNoticeSeverity)
+        {
+            return;
+        }
+        // 顺序要紧：先写文案（该 setter 会把档位打回 Info），再落档位。
+        // 反过来写档位会被紧随其后的文案赋值抹掉。
+        NotificationText = text;
+        HeaderNoticeSeverity = severity;
     }
 
     public string HeaderStatusText => string.IsNullOrWhiteSpace(NotificationText) ? BackendStatus : NotificationText;
@@ -519,6 +593,23 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
             return;
         }
         _lastRefreshedTerminalRun = identity;
+        // U194-C：终态在**顶栏**留一条通知。这才是「作者在别的页面也能知道」的那一环——
+        // 预算数字与角标是间接线索（作者不会盯着它们），而这条是结果本身。
+        //
+        // **只写顶栏、不弹窗**：U194-D 已留档「后台事件不弹窗是健康的」，
+        // 作者可能正在作品页打字，抢焦点是倒退。
+        //
+        // 分档取失败 > 停止 > 成功：跑失败要作者回去看为什么（且可能烧了钱），
+        // 主动停止是他自己按的（Info 足够），成功也只是好消息。
+        // 走 NotifyHeader ⇒ 「成功」这条**顶不掉**屏上还挂着的保存失败告警。
+        NotifyHeader(
+            _displayNames.Text(status switch
+            {
+                "failed" => "ui.layout.notice.run_failed",
+                "stopped" => "ui.layout.notice.run_stopped",
+                _ => "ui.layout.notice.run_succeeded",
+            }),
+            status == "failed" ? HeaderNoticeSeverity.Warning : HeaderNoticeSeverity.Info);
         _ = RefreshBudgetStatusAsync();
         // U198-B「顺带」：终态也要刷侧栏角标。
         //
@@ -568,7 +659,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
             // 初始化边界直接提交到当前窗口；UserFacingError 的普通调用按异步上下文隔离观察者。
             var failure = UserFacingError.FromException(ex);
             Observe(failure);
-            NotificationText = failure.PrimaryText(_displayNames);
+            // U194-B：后端起不来 = 整个应用不可用，最高档。
+            NotifyHeader(failure.PrimaryText(_displayNames), HeaderNoticeSeverity.Error);
             ResetProjectPageSession();
             CurrentPage = Welcome;
         }
@@ -660,7 +752,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
         }
         catch (Exception ex)
         {
-            NotificationText = UserFacingError.Format(ex, _displayNames);
+            // U194-B：离开项目失败——后端仍持着上个项目，作者接下来的操作会打到错的地方。
+            // 不是数据丢失（正文已在前一步保存过），故取 Warning 而非 Error。
+            NotifyHeader(UserFacingError.Format(ex, _displayNames), HeaderNoticeSeverity.Warning);
             return;
         }
         HasOpenProject = false;
@@ -725,19 +819,22 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
 
     private async Task ShowVersionAsync()
     {
-        NotificationText = VersionText;
+        // U194-B：纯信息。走 NotifyHeader 而非直接赋值，正是为了让它**不能**顶掉
+        // 还挂在屏上的失败消息——「批量保存第 3 页失败」被一条版本号顶掉是原缺陷本身。
+        NotifyHeader(VersionText, HeaderNoticeSeverity.Info);
         await DialogService.Current.ConfirmAsync(HelpDialogFactory.CreateVersionDialog(_displayNames, VersionText)).ConfigureAwait(true);
     }
 
     private async Task ShowFeedbackAsync()
     {
-        NotificationText = FeedbackText;
+        NotifyHeader(FeedbackText, HeaderNoticeSeverity.Info);
         var result = await DialogService.Current
             .ConfirmAsync(HelpDialogFactory.CreateFeedbackDialog(_displayNames))
             .ConfigureAwait(true);
         if (result == 1 && !ExternalLinkOpener.TryOpen(HelpDialogFactory.FeedbackIssueUrl))
         {
-            NotificationText = _displayNames.Text("ui.feedback.open_failed");
+            // 外链打不开：作者点了没反应，需要知道；但无数据风险。
+            NotifyHeader(_displayNames.Text("ui.feedback.open_failed"), HeaderNoticeSeverity.Warning);
         }
     }
 
@@ -1074,7 +1171,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
             // 只写 NotificationText（本地化摘要）时，排查者看不出异常类型与来源页——
             // 这正是「作品页莫名跳回欢迎界面」当初难以定位的原因。
             Observe(UserFacingError.FromException(ex));
-            NotificationText = UserFacingError.Format(ex, _displayNames);
+            // U194-B：打开项目失败并被弹回开始页，作者的工作上下文整个没了，最高档。
+            NotifyHeader(UserFacingError.Format(ex, _displayNames), HeaderNoticeSeverity.Error);
             CurrentPage = Welcome;
             foreach (var nav in AllNavigationItems())
             {
@@ -1207,21 +1305,28 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
                     return true;
                 }
 
+                // U194-B：这两条是全应用最高数据风险的通知——批量保存没成功，
+                // 作者的正文**留在内存里而项目已经在切换**。它们必须取 Error 档，
+                // 且不能被随后任意一条版本号/维护阶段静默顶掉（那正是原缺陷）。
                 if (result.CommittedPages.Count > 0)
                 {
-                    NotificationText = _displayNames.Format(
-                        "ui.dialog.unsaved.save_partial",
-                        new Dictionary<string, string>
-                        {
-                            ["page"] = result.FailedPage ?? "?",
-                            ["done"] = string.Join("、", result.CommittedPages),
-                        });
+                    NotifyHeader(
+                        _displayNames.Format(
+                            "ui.dialog.unsaved.save_partial",
+                            new Dictionary<string, string>
+                            {
+                                ["page"] = result.FailedPage ?? "?",
+                                ["done"] = string.Join("、", result.CommittedPages),
+                            }),
+                        HeaderNoticeSeverity.Error);
                 }
                 else
                 {
-                    NotificationText = _displayNames.Format(
-                        "ui.dialog.unsaved.save_failed",
-                        new Dictionary<string, string> { ["page"] = result.FailedPage ?? "?" });
+                    NotifyHeader(
+                        _displayNames.Format(
+                            "ui.dialog.unsaved.save_failed",
+                            new Dictionary<string, string> { ["page"] = result.FailedPage ?? "?" }),
+                        HeaderNoticeSeverity.Error);
                 }
 
                 return false;
@@ -1255,17 +1360,20 @@ public sealed class MainWindowViewModel : ViewModelBase, IUserFailureObserver, I
             var failedPage = journal.FailedPage
                 ?? journal.PlannedPages.FirstOrDefault(page => !journal.CommittedPages.Contains(page))
                 ?? "?";
-            NotificationText = journal.CommittedPages.Count > 0
-                ? _displayNames.Format(
-                    "ui.dialog.unsaved.save_partial",
-                    new Dictionary<string, string>
-                    {
-                        ["page"] = failedPage,
-                        ["done"] = string.Join("、", journal.CommittedPages),
-                    })
-                : _displayNames.Format(
-                    "ui.dialog.unsaved.save_failed",
-                    new Dictionary<string, string> { ["page"] = failedPage });
+            // U194-B：上次运行中断在批量保存途中——同上，数据风险，Error 档。
+            NotifyHeader(
+                journal.CommittedPages.Count > 0
+                    ? _displayNames.Format(
+                        "ui.dialog.unsaved.save_partial",
+                        new Dictionary<string, string>
+                        {
+                            ["page"] = failedPage,
+                            ["done"] = string.Join("、", journal.CommittedPages),
+                        })
+                    : _displayNames.Format(
+                        "ui.dialog.unsaved.save_failed",
+                        new Dictionary<string, string> { ["page"] = failedPage }),
+                HeaderNoticeSeverity.Error);
         }
 
         BatchLeaveSaveCoordinator.ClearJournal(BatchLeaveSaveCoordinator.DefaultJournalPath);

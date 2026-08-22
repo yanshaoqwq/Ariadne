@@ -41,6 +41,24 @@ public sealed class ThemeOverlayKeysTests
             .Select(m => m.Groups[1].Value)
             .ToHashSet(StringComparer.Ordinal);
 
+        // U181-D：焦点环的 `BoxShadows` 既不是画刷也不是颜色，所以它由
+        // `SetFocusRingShadow` 用 `resources[键] = 值` 直接写入，上面那条
+        // `Set(Brush|Color)(resources, "…")` 的正则**采集不到**。
+        //
+        // ⚠️ 这里刻意**不给它开豁免名单**，而是把采集面扩到「所有对 resources 的
+        // 键写入」—— 豁免会让"漏登记 Reset 键"这类真缺陷从此隐身，
+        // 而本守卫的全部价值就在于 Apply/Reset 两侧逐一对应。
+        // 新增任何写入形态时，扩这条正则、别加例外。
+        //
+        // ⚠️ 键名限定成 `Ariadne.` 前缀 + 只含标识符字符：不加限定时，
+        // **源码注释里出现的 `resources["…"] =` 字样会被当成真实写入采集进来**
+        // （我第一版就是这样，守卫红在一个只存在于注释里的键上）。
+        foreach (var match in Regex.Matches(source, @"resources\[""(Ariadne\.[A-Za-z0-9.]+)""\]\s*=")
+                     .Select(m => m.Groups[1].Value))
+        {
+            applied.Add(match);
+        }
+
         Assert.NotEmpty(applied);
 
         var declared = ThemeApplication.OverlayBrushKeys.ToHashSet(StringComparer.Ordinal);

@@ -54,6 +54,15 @@ public static class ThemeApplication
         "Ariadne.AccentLight",
         "Ariadne.AccentBorder",
         "Ariadne.FocusRing",
+        // U181-D：焦点环的 BoxShadows 形态。由 SetFocusRingShadow 用
+        // `resources["…"] = …` 直接写入（BoxShadows 既不是画刷也不是颜色，
+        // 走不了 SetBrush/SetColor）。`ThemeOverlayKeysTests` 的采集正则已扩到
+        // 覆盖这种写入形态，所以这两枚键**仍受 Apply/Reset 一致性守卫约束**。
+        // 登记在这里是为了 Reset 能删掉它们，否则切回预设主题会残留上一套焦点环色。
+        "Ariadne.Shadow.FocusRing",
+        // 卡片变体（环 + 卡片抬升）。BoxShadow 是整体替换，节点卡必须用这枚，
+        // 否则焦点态会把卡片的抬升投影删掉、两个变化互相抵消（截图才看得出来）。
+        "Ariadne.Shadow.FocusRingCard",
         "Ariadne.NodeSelected",
         "Ariadne.EdgeData",
         "Ariadne.RuntimeRunning",
@@ -297,6 +306,12 @@ public static class ThemeApplication
         SetBrush(resources, "Ariadne.AccentLight", WithAlpha(tokens.AccentPrimary, 0x1F));
         SetBrush(resources, "Ariadne.AccentBorder", WithAlpha(tokens.AccentPrimary, 0x66));
         SetBrush(resources, "Ariadne.FocusRing", tokens.AccentPrimary);
+        // U181-D：焦点环的 BoxShadows 形态必须跟着强调色走。
+        // `Ariadne.FocusRing` 这枚画刷此前**零消费者**（全仓无一处 DynamicResource 引用），
+        // 那条「焦点环随主题」的接线是空转的：焦点色实际硬编码在
+        // WorkspacePageView 里。现在焦点环由 `Ariadne.Shadow.FocusRing` 承载，
+        // 而 BoxShadows 不能绑画刷 ⇒ 只能在这里按同一个强调色现算一份。
+        SetFocusRingShadow(resources, tokens.AccentPrimary);
         SetBrush(resources, "Ariadne.NodeSelected", tokens.AccentPrimary);
         SetBrush(resources, "Ariadne.EdgeData", tokens.AccentPrimary);
         SetBrush(resources, "Ariadne.RuntimeRunning", tokens.AccentPrimary);
@@ -462,6 +477,46 @@ public static class ThemeApplication
     private static void SetBrush(IResourceDictionary resources, string key, Color color)
     {
         resources[key] = new SolidColorBrush(color);
+    }
+
+    /// <summary>
+    /// U181-D：写入焦点环的 `BoxShadows`（`Ariadne.Shadow.FocusRing`）。
+    ///
+    /// **为什么单独一个方法而不并进 <see cref="SetBrush"/>**：
+    /// `BoxShadows` 不是画刷，颜色是它字面量的一部分，没法绑到 `Ariadne.FocusRing`。
+    /// 这是「焦点环随个性化强调色」在运行时唯一能落地的地方。
+    ///
+    /// ⚠️ 方法名刻意不叫 `SetShadow`：`ThemeOverlayKeysTests` 用正则采集"被覆盖的键"，
+    /// 现已扩到覆盖 `resources["…"] = …` 这种写入形态，所以这两枚键仍在
+    /// Apply/Reset 一致性守卫的射程内。键名由 <see cref="OverlayBrushKeys"/>
+    /// 显式登记，Reset 靠那份名单删除。
+    /// </summary>
+    private static void SetFocusRingShadow(IResourceDictionary resources, Color accent)
+    {
+        // alpha 满值：3px 环在亮色纸背景上必须是一条实线。
+        // 原先用 0xB3（70%）时截图实测两态最大像素差只有 24/255 —— 属性变了但看不见。
+        var ring = new BoxShadow
+        {
+            OffsetX = 0,
+            OffsetY = 0,
+            Blur = 0,
+            Spread = 3,
+            Color = accent,
+        };
+        resources["Ariadne.Shadow.FocusRing"] = new BoxShadows(ring);
+
+        // 卡片变体：环 + 卡片原有的三层抬升。
+        // **`BoxShadow` 是整体替换而非叠加**，只设一圈环会把卡片抬升投影一并删掉，
+        // 「多一圈环、少一片阴影」两个变化在视觉上互相抵消（这是截图才发现的）。
+        // 三层抬升的数值与 `.selected` 那条保持一致：焦点态不该顺手改变卡片的立体感。
+        resources["Ariadne.Shadow.FocusRingCard"] = new BoxShadows(
+            ring,
+            new[]
+            {
+                new BoxShadow { OffsetX = 0, OffsetY = 2, Blur = 4, Spread = 0, Color = Color.FromArgb(0x1C, 0, 0, 0) },
+                new BoxShadow { OffsetX = 0, OffsetY = 14, Blur = 30, Spread = -8, Color = Color.FromArgb(0x38, 0, 0, 0) },
+                new BoxShadow { OffsetX = 0, OffsetY = 30, Blur = 64, Spread = -22, Color = Color.FromArgb(0x30, 0, 0, 0) },
+            });
     }
 
     /// <summary>写入 Color 键（供 XAML 里的渐变 GradientStop 直接绑色值使用）。</summary>

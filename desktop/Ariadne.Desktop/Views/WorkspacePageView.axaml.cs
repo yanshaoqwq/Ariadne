@@ -2177,6 +2177,21 @@ public partial class WorkspacePageView : UserControl
             _keyboardEdgeSourceHandle = handle;
             viewModel.BeginPortDragHighlight(node.Id, kind, direction);
             viewModel.NotifyKeyboardConnectStarted();
+
+            // U181-E：键盘路径也要画橡皮筋。
+            //
+            // 原缺陷：鼠标路径（OnPortPointerPressed）选完起点就 UpdateRubberBand，
+            // 而这里**什么都不画** ⇒ 键盘连线是零起点指示：状态条只说
+            // 「已选择连线起点，按 Tab 移到目标端口并按 Enter 或空格确认」，
+            // 至于**哪个**端口当了起点，屏幕上没有任何交代。
+            //
+            // 起点与终点同点（长度为 0 的橡皮筋）是刻意的：键盘路径没有指针位置，
+            // 没有「当前拖到哪」这个概念。它画出来的是**起点那一个锚点**，
+            // 作用是「告诉作者线从这里出发」，而不是模拟一次拖拽。
+            _rubberBandStartCanvas = TryGetControlCenter(sender as Control, out var keyboardCenter)
+                ? keyboardCenter
+                : LogicalToCanvasPoint(NodePortLogicalCenter(node, handle));
+            UpdateRubberBand(_rubberBandStartCanvas);
             e.Handled = true;
             return;
         }
@@ -2216,6 +2231,10 @@ public partial class WorkspacePageView : UserControl
 
         _keyboardEdgeSourceNode = null;
         _keyboardEdgeSourceHandle = null;
+        // U181-E：起点橡皮筋必须与起点状态同批清掉。
+        // 漏了这一步，取消/连成之后那条锚点线会一直留在画布上，
+        // 作者会以为连线还在进行中 —— 那是把「零指示」换成「假指示」，更糟。
+        ClearRubberBand();
     }
 
     public void OnPortPointerMoved(object? sender, PointerEventArgs e)

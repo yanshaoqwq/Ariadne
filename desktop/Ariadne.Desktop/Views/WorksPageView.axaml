@@ -50,7 +50,16 @@
                  「页」变成属性面板。同排显示也顺带消掉了原先「状态在顶栏印一遍、
                  又在刊头 DocumentInfoText 里印一遍」的重复。 -->
             <StackPanel Orientation="Horizontal" Spacing="12" IsVisible="{Binding HasCurrentDocument}">
-              <TextBlock Text="{Binding DocumentSaveStateText}" Classes="subtle" VerticalAlignment="Center" />
+              <!-- U194-A：保存失败挂在这个**常驻**位上，而不是另开一条会被覆盖的消息通道。
+                   `Classes.save-failed` 而非样式选择器比枚举：Avalonia 没有「按 DataContext
+                   属性值匹配」的选择器，`Classes.x="{Binding bool}"` 是唯一不需要 code-behind
+                   的路子（与顶栏预算分档同一手法）。
+                   失败档才挂类，其余三态保持 subtle 灰 —— 不许「一律醒目」，
+                   那只是把「都看不见」换成「都在喊」。 -->
+              <TextBlock Text="{Binding DocumentSaveStateText}" Classes="subtle"
+                         Classes.save-failed="{Binding HasSaveFailure}"
+                         VerticalAlignment="Center"
+                         AutomationProperties.LiveSetting="Polite" />
               <TextBlock Text="{Binding CharacterCountText}" Classes="subtle" VerticalAlignment="Center" />
             </StackPanel>
           </StackPanel>

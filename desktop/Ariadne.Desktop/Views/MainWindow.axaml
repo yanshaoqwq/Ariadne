@@ -137,12 +137,23 @@
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7"
                       HorizontalAlignment="Right" VerticalAlignment="Center"
                       Margin="8,0,14,0" MaxWidth="300">
-            <Ellipse Width="6" Height="6" Fill="{DynamicResource Ariadne.TextSubtle}" />
+            <!-- U194-B：这个小圆点原先 Fill 写死 `Ariadne.TextSubtle`，**恒定灰、
+                 不随严重度变**。三类紧急度完全不同的消息（版本号 / 初始化失败 /
+                 批量保存失败）挤在同一条灰字上，作者分不出哪条要立刻处理。
+                 现由 `HeaderNoticeSeverity` 驱动。Fill 走**样式**而非内联绑定：
+                 内联值优先级高于样式，挂了内联 Fill 后分档样式压根压不掉它
+                 （AGENTS「内联属性压不掉模板层样式」的同族陷阱）。 -->
+            <Ellipse Width="6" Height="6" Classes="header-notice"
+                     Classes.notice-warning="{Binding IsHeaderNoticeWarning}"
+                     Classes.notice-error="{Binding IsHeaderNoticeError}" />
             <TextBlock Text="{Binding HeaderStatusText}"
                        Classes="subtle"
+                       Classes.notice-warning="{Binding IsHeaderNoticeWarning}"
+                       Classes.notice-error="{Binding IsHeaderNoticeError}"
                        VerticalAlignment="Center"
                        TextTrimming="CharacterEllipsis"
                        MaxWidth="260"
+                       AutomationProperties.LiveSetting="Polite"
                        ToolTip.Tip="{Binding HeaderStatusText}" />
           </StackPanel>
         </Grid>
@@ -211,6 +222,34 @@
             <Path Classes="icon" Data="{StaticResource Ariadne.Icon.Close}" />
           </Button>
         </StackPanel>
+
+        <!-- U181-A：顶栏遮罩。**必须是独立的第二层遮罩，不能靠把全局 DialogScrim
+             的 RowSpan 加到 3 来解决** —— 那会连最小化/最大化/关闭三个窗口键一起盖住，
+             让弹窗成为退出应用的唯一出路（Windows 桌面应用的惯例是保留窗口控制）。
+
+             原缺陷：全局遮罩是 `Grid.Row="1" RowSpan="2"`（外层 `54,Auto,*` 三行），
+             顶栏在第 0 行 ⇒ 顶栏既没被压暗、也没被拦命中。于是「离开前要不要保存」
+             这个**唯一会丢正文**的守门弹窗开着时，作者能点顶栏的项目切换键
+             直接新建/打开另一个项目，菜单还弹在弹窗之上。
+
+             落点选在顶栏 Grid 内部而不是外层，是为了能按**列**划界：
+             `ColumnSpan="3"`（品牌轨 + 项目切换 + 预算遥测）被盖，
+             第 3 列的窗口控制键留在外面。外层遮罩是外层 Grid 的子级，
+             拿不到顶栏的列坐标，做不到这个划界。
+
+             ⚠️ 声明顺序必须在窗口控制键**之后**：同一 Grid 内后声明的在上层。
+             写在前面会被下面那批控件盖住，遮罩就成了一层看得见却拦不住的像素
+             （这正是原缺陷的形态之一，别复刻）。
+
+             复用 `dialog-scrim` 类而非自写一套 Opacity 过渡：两层遮罩的淡入淡出
+             必须同时同速，否则弹窗打开时会看到顶栏与正文分两拍变暗。 -->
+        <Border x:Name="TitleBarDialogScrim"
+                Grid.Column="0"
+                Grid.ColumnSpan="3"
+                Classes="dialog-scrim"
+                Classes.dialog-open="{Binding Dialog.IsOpen}"
+                Background="{DynamicResource Ariadne.Scrim}"
+                IsHitTestVisible="{Binding Dialog.IsOpen}" />
       </Grid>
 
       <!-- D3：项目维护门禁横幅（active/failed） -->
@@ -456,6 +495,7 @@
         <ContentControl Classes="dialog-panel"
                         Classes.dialog-open="{Binding Dialog.IsOpen}"
                         Content="{Binding Dialog.ActiveDialog}"
+                        KeyboardNavigation.TabNavigation="Cycle"
                         HorizontalAlignment="Center"
                         VerticalAlignment="Center"
                         Margin="24"

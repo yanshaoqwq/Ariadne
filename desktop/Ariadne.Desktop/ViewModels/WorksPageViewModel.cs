@@ -117,6 +117,9 @@ public sealed class WorksPageViewModel : PageViewModelBase, IUnsavedChangesGuard
     private long _documentLoadGeneration;
     private long _documentEditRevision;
     private bool _isDocumentSaving;
+    // U194-A：上一次保存是否失败。与 _hasUnsavedChanges 分开是因为两者语义不同——
+    // 「有未保存改动」是常态（打字就有），「保存失败」才是数据风险。
+    private bool _hasSaveFailure;
     private bool _isDocumentLoading;
     private string _documentLoadingTarget = string.Empty;
 
@@ -988,13 +991,50 @@ public sealed class WorksPageViewModel : PageViewModelBase, IUnsavedChangesGuard
 
     public string SavingText => _displayNames.Text("ui.works.saving");
 
+    /// <summary>
+    /// U194-A：**保存失败必须留下熬得过下一个动作的痕迹**。
+    ///
+    /// 原缺陷：保存失败只写 `StatusText`。U198-B 之后那句话确实有显示位了
+    /// （稿纸左下浮层），但 `StatusText` 会被作者的**下一个动作**覆盖
+    /// （全页 51 处赋值，随便点一下就顶掉）——失败痕迹消失，而正文仍未落盘。
+    /// 作者继续打字，`DocumentSaveStateText` 显示的是「未保存」，
+    /// 与「还没点过保存」**完全同形**（同一句话、同一个 subtle 灰），
+    /// 于是「点过保存但失败了」这个唯一有数据风险的状态在界面上没有任何表示。
+    ///
+    /// ⇒ 失败态挂在 `DocumentSaveStateText` 这个**常驻**显示位上，
+    /// 而不是又开一条会被覆盖的消息通道。
+    ///
+    /// 复位条件刻意只有两个：**保存成功**、**换文档**。
+    /// 特别地，**作者继续打字不复位**——那正是报告要求的「一直可见」。
+    /// 把它挂到 `TextChanged` 上复位等于让这个标志活不过一次击键。
+    /// </summary>
+    public bool HasSaveFailure
+    {
+        get => _hasSaveFailure;
+        private set
+        {
+            if (SetProperty(ref _hasSaveFailure, value))
+            {
+                OnPropertyChanged(nameof(DocumentSaveStateText));
+            }
+        }
+    }
+
+    /// <summary>
+    /// 三态变四态。判定顺序：保存中 → **失败** → 未保存 → 已保存。
+    ///
+    /// ⚠️ 失败档必须排在「未保存」**之前**：保存失败时 `HasUnsavedChanges` 必然为真
+    /// （内容没落盘），排在后面永远轮不到，等于这个档不存在。
+    /// </summary>
     public string DocumentSaveStateText => !HasCurrentDocument
         ? string.Empty
         : IsDocumentSaving
             ? SavingText
-            : HasUnsavedChanges
-                ? _displayNames.Text("ui.works.save_state.unsaved")
-                : _displayNames.Text("ui.works.save_state.saved");
+            : HasSaveFailure
+                ? _displayNames.Text("ui.works.save_state.save_failed")
+                : HasUnsavedChanges
+                    ? _displayNames.Text("ui.works.save_state.unsaved")
+                    : _displayNames.Text("ui.works.save_state.saved");
 
     public string ProjectAiMessage
     {
@@ -1579,6 +1619,9 @@ public sealed class WorksPageViewModel : PageViewModelBase, IUnsavedChangesGuard
 
     private void OnCurrentDocumentChanged()
     {
+        // U194-A：换文档时清失败痕迹。它记的是「**这一篇**没落盘」，
+        // 跟着到下一篇就是错的指控（新打开的那篇根本没被保存过）。
+        HasSaveFailure = false;
         RefreshCurrentWorksTreeNode();
         OnPropertyChanged(nameof(HasCurrentDocument));
         OnPropertyChanged(nameof(ShowNoDocumentEmpty));
@@ -2534,16 +2577,24 @@ public sealed class WorksPageViewModel : PageViewModelBase, IUnsavedChangesGuard
             if (unchangedSinceSave)
             {
                 CaptureSnapshot();
+                // U194-A：落盘成功是失败痕迹唯一该消失的时刻。
+                HasSaveFailure = false;
                 StatusText = _displayNames.Text("ui.common.save");
             }
             else
             {
+                // 存盘本身成功了（后端已收下 saveContent），只是期间又编辑了——
+                // 不是失败，痕迹要清掉，否则「保存失败」会挂在一次成功的写盘上。
+                HasSaveFailure = false;
                 StatusText = _displayNames.Text("ui.works.edited_during_save");
                 RefreshDirtyState();
             }
         }
         catch (Exception ex)
         {
+            // U194-A：正文没落盘。这一句会被作者的下一个动作覆盖，
+            // 所以真正承担「一直可见」的是 HasSaveFailure 驱动的 DocumentSaveStateText。
+            HasSaveFailure = true;
             StatusText = ReportFailure(ex, _displayNames);
         }
         finally

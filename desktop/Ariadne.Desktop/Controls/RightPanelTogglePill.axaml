@@ -11,11 +11,43 @@
              Cursor="Hand"
              AutomationProperties.Name="{Binding AccessibleName, ElementName=Root}"
              ToolTip.Tip="{Binding AccessibleName, ElementName=Root}">
-  <Border Background="{DynamicResource Ariadne.BackgroundSurface}"
-          BorderBrush="{DynamicResource Ariadne.BorderDefault}"
-          BorderThickness="{DynamicResource Ariadne.Stroke.HairlineAll}"
-          CornerRadius="8,0,0,8"
-          BoxShadow="-2 0 6 0 #10000000">
+  <!-- U181-F：焦点可见性。此前该控件 `Focusable="True"` 且接了 Enter/Space，
+       但整个文件无 `UserControl.Styles`、无任何 `:focus` 规则，主题里也没有
+       针对它的选择器 ⇒ **Tab 停在这上面时屏幕毫无变化**，作者不知道按 Enter
+       会发生什么。三个页面都在用它（画布 / 作品 / Git）。
+
+       ⚠️ 选择器落在 `Border#PillShell` 而不是 UserControl 自己：焦点在
+       UserControl 上，但可见变化必须画在那层有边框有底色的 Border 上。
+       Avalonia 支持「祖先带伪类 + 后代」这种选择器，所以
+       `:is(UserControl):focus Border#PillShell` 是能生效的。
+       ⚠️ **必须写 `:is(UserControl)` 而不是裸 `UserControl`**：Avalonia 的裸类型
+       选择器是**精确类型匹配**，不匹配子类 —— 本控件是 `RightPanelTogglePill`
+       （UserControl 的子类），裸写会一条都不命中、**且不报任何错**。
+       实测确认：改成 `:is(...)` 之前 F1 那条断言"描边色/描边宽/投影一个都没变"直接红。
+       ⚠️ 而 BorderBrush/BorderThickness **不能**用内联属性设成焦点值：
+       内联是 `BindingPriority.LocalValue`(0)，数字小的赢 ⇒ 会压过样式层，
+       焦点态永远改不动它（本仓已记这条）。所以静息值也留在下面的 Style 里，
+       两个态同层，靠文档顺序决定（`:focus` 那条写在后面）。
+
+       颜色走 `Ariadne.FocusRing` —— U181-D 要求的接线点之一。 -->
+  <UserControl.Styles>
+    <Style Selector="Border#PillShell">
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.BorderDefault}" />
+      <Setter Property="BorderThickness" Value="{DynamicResource Ariadne.Stroke.HairlineAll}" />
+      <!-- 静息投影原先是内联属性。**必须搬进样式层**：内联是 LocalValue(0)，
+           数字小的赢 ⇒ 留在内联会让下面那条焦点 BoxShadow 永远压不掉它，
+           焦点环压根画不出来（AGENTS「内联属性压不掉模板层样式」的同族陷阱）。 -->
+      <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.RailLeft}" />
+    </Style>
+    <Style Selector=":is(UserControl):focus Border#PillShell">
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.FocusRing}" />
+      <Setter Property="BorderThickness" Value="{DynamicResource Ariadne.Stroke.Emphasis}" />
+      <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.FocusRing}" />
+    </Style>
+  </UserControl.Styles>
+  <Border x:Name="PillShell"
+          Background="{DynamicResource Ariadne.BackgroundSurface}"
+          CornerRadius="8,0,0,8">
     <Panel>
       <Path Classes="icon"
             Width="14"

@@ -119,6 +119,18 @@
           <SolidColorBrush x:Key="Ariadne.BorderStrong" Color="{StaticResource Ariadne.Color.BorderStrong}" />
           <SolidColorBrush x:Key="Ariadne.BorderCard" Color="{StaticResource Ariadne.Color.BorderCard}" />
           <SolidColorBrush x:Key="Ariadne.FocusRing" Color="{StaticResource Ariadne.Color.FocusRing}" />
+          <!-- U181-C/D：键盘焦点环的 BoxShadows 形态。
+               **必须是每个变体各一份**，且必须放在 ThemeDictionaries 里：
+               `BoxShadows` 是不可拆的字面量类型，颜色部分**没法**绑到
+               `Ariadne.FocusRing` 画刷上 —— 所以这里是「焦点环颜色」在 XAML 侧
+               唯一能落脚的地方，`0 0 0 3 #B3xxxxxx` 里那个色值必须与本变体的
+               `Ariadne.Color.FocusRing` 同源，B3 = 70% alpha。
+               `ThemeApplication.SetFocusRingShadow` 会在个性化换色时按新强调色
+               重写这个键，所以它随主题走，不是一处写死的魔法值。
+               3px 而非 2px：环画在节点卡外缘，卡片本身已有 1px 描边 + 三层投影，
+               2px 会被投影吃掉（暗色主题下尤其明显）。 -->
+          <BoxShadows x:Key="Ariadne.Shadow.FocusRing">0 0 0 3 #FF2E726B</BoxShadows>
+          <BoxShadows x:Key="Ariadne.Shadow.FocusRingCard">0 0 0 3 #FF2E726B, 0 2 4 0 #1C000000, 0 14 30 -8 #38000000, 0 30 64 -22 #30000000</BoxShadows>
           <SolidColorBrush x:Key="Ariadne.AccentPrimary" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
           <SolidColorBrush x:Key="Ariadne.AccentHover" Color="{StaticResource Ariadne.Color.AccentHover}" />
           <SolidColorBrush x:Key="Ariadne.AccentPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
@@ -368,6 +380,18 @@
           <SolidColorBrush x:Key="Ariadne.BorderStrong" Color="{StaticResource Ariadne.Color.BorderStrong}" />
           <SolidColorBrush x:Key="Ariadne.BorderCard" Color="{StaticResource Ariadne.Color.BorderCard}" />
           <SolidColorBrush x:Key="Ariadne.FocusRing" Color="{StaticResource Ariadne.Color.FocusRing}" />
+          <!-- U181-C/D：键盘焦点环的 BoxShadows 形态。
+               **必须是每个变体各一份**，且必须放在 ThemeDictionaries 里：
+               `BoxShadows` 是不可拆的字面量类型，颜色部分**没法**绑到
+               `Ariadne.FocusRing` 画刷上 —— 所以这里是「焦点环颜色」在 XAML 侧
+               唯一能落脚的地方，`0 0 0 3 #B3xxxxxx` 里那个色值必须与本变体的
+               `Ariadne.Color.FocusRing` 同源，B3 = 70% alpha。
+               `ThemeApplication.SetFocusRingShadow` 会在个性化换色时按新强调色
+               重写这个键，所以它随主题走，不是一处写死的魔法值。
+               3px 而非 2px：环画在节点卡外缘，卡片本身已有 1px 描边 + 三层投影，
+               2px 会被投影吃掉（暗色主题下尤其明显）。 -->
+          <BoxShadows x:Key="Ariadne.Shadow.FocusRing">0 0 0 3 #FF6FB9AD</BoxShadows>
+          <BoxShadows x:Key="Ariadne.Shadow.FocusRingCard">0 0 0 3 #FF6FB9AD, 0 2 4 0 #1C000000, 0 14 30 -8 #38000000, 0 30 64 -22 #30000000</BoxShadows>
           <SolidColorBrush x:Key="Ariadne.AccentPrimary" Color="{StaticResource Ariadne.Color.AccentPrimary}" />
           <SolidColorBrush x:Key="Ariadne.AccentHover" Color="{StaticResource Ariadne.Color.AccentHover}" />
           <SolidColorBrush x:Key="Ariadne.AccentPressed" Color="{StaticResource Ariadne.Color.AccentPressed}" />
@@ -700,6 +724,14 @@
            （都是 1px 发丝线）的两种目标类型，改一个必须改另一个 ——
            守卫见 `ScaleTokenUsageTests` 的发丝线同源那条。 -->
       <Thickness x:Key="Ariadne.Stroke.HairlineAll">1</Thickness>
+
+      <!-- U181-E：强调描边（2px 四边）。用在「这一个是我刚选的」这类需要
+           **形状差异**而非明暗差异的态上（当前消费者：连线起点引脚 `.connect-origin`）。
+           为什么不复用 `Ariadne.Stroke.HairlineAll`：引脚只有 14×14，
+           1px 边在一排同款小圆点里读不出来 —— 那就等于又一次「只靠颜色区分状态」。
+           ⚠️ 同上：必须是 `Thickness`，`DynamicResource` 不跑类型转换器，
+           绑一个 `x:Double` 到 `BorderThickness` 会静默失效（描边整个消失）。 -->
+      <Thickness x:Key="Ariadne.Stroke.Emphasis">2</Thickness>
 
       <!-- ===== 可点目标尺度（U205-B）=====
            工具条图标按钮 30×26。**26 是权衡过的值、不是随手写的**，
@@ -2068,6 +2100,26 @@
   </Style>
   <Style Selector="Border.communication-port:pointerover Border.communication-core">
     <Setter Property="Background" Value="{DynamicResource Ariadne.EdgeCommunication}" />
+  </Style>
+
+  <!-- U181-E：连线**起点**引脚的「已选中」态。
+       原缺陷：作者按 Enter 选好连线起点后，那个起点反而比别的端口更淡
+       —— `BeginPortDragHighlight` 遍历全部节点含起点自己，同节点判 Self 失败
+       ⇒ 起点节点所有端口一起被打到 Opacity 0.22。VM 侧已把起点排除在淡出之外，
+       这里给它一个**看得出来**的态。
+
+       用一圈实边而不是只改透明度：与 U178 那批「状态不能只靠颜色/明暗」一致，
+       「比周围亮一点」在一堆同款小圆点里根本认不出来，实边才是形状差异。
+       ⚠️ 声明在 `pin-glass` / `pin-glass-soft` 基础样式**之后**：那两条都设了
+       `BorderThickness="0"`，写在前面会被整个盖掉（同优先级后者胜，U154）。
+
+       颜色走 `Ariadne.FocusRing` —— 这是该令牌**第一个真实消费者**（U181-D：
+       它此前只有定义与写入，全仓零引用，「焦点环随主题」那条接线是空转的）。
+       焦点色本来就该是独立的可个性化维度，`UI组件状态表.md` 的约定也早写了
+       「focus 统一使用全局 focus 环，各组件不另写 focus 颜色」。 -->
+  <Style Selector="Border.connect-origin">
+    <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.FocusRing}" />
+    <Setter Property="BorderThickness" Value="{DynamicResource Ariadne.Stroke.Emphasis}" />
   </Style>
 
   <!-- 选中环已由自定义 SelectionFlowRing 控件承担（流动渐变描边，主题色衍生），
@@ -3738,6 +3790,59 @@
   </Style>
   <Style Selector="Button.danger:disabled /template/ ContentPresenter">
     <Setter Property="Foreground" Value="{DynamicResource Ariadne.TextSubtle}" />
+  </Style>
+
+  <!-- ============================================================
+       U194-A：作品页「保存失败」的常驻标记
+
+       原缺陷：保存失败后 `DocumentSaveStateText` 显示「未保存」，
+       与「还没点过保存」**完全同形** —— 同一句话、同一个 subtle 灰。
+       于是唯一带数据风险的状态（点过保存、后端拒了、正文没落盘）
+       在界面上没有任何区别于常态的表示，作者继续写，以为存上了。
+
+       只有失败档挂类，保存中/未保存/已保存三态保持 subtle 灰：
+       「一律醒目」不是分级，只是把「都看不见」换成「都在喊」。
+
+       ⚠️ **必须留在 `TextBlock.subtle`（:1246）之后**：那条也设 Foreground，
+       而 Avalonia 同优先级按**文档顺序、后者胜**，没有 CSS 那种选择器特异性权重
+       —— `.subtle.save-failed` 比 `.subtle` 具体得多，但这不给它任何优先权。
+       ============================================================ -->
+  <Style Selector="TextBlock.save-failed">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+    <!-- 加粗与预算 error 档同一理由：只换颜色的话，色弱用户与低对比度屏上
+         这一档与常态几乎无差别，而它是「正文还没落盘」的唯一持续提示。 -->
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <!-- ============================================================
+       U194-B：顶栏通知分级
+
+       原缺陷：`NotificationText` 的 10 处赋值（版本号、初始化失败、离开项目失败、
+       外链打不开、维护阶段、批量保存部分失败/全失败、崩回欢迎页、中断日志）
+       全写同一属性，渲染成同一条 `subtle` 灰字 + 一个 Fill 写死
+       `Ariadne.TextSubtle` 的恒定灰小圆点 ⇒ 无分级、后写的静默覆盖先写的。
+       对照：弹窗**有**分级（`ConfirmDialogViewModel.DialogSeverity` 的
+       Warning/Danger）⇒ 有弹窗分级、非弹窗渠道零分级。
+
+       只有 warning/error 两档挂类，info 档保持原来的中性灰：
+       「一律醒目」不是分级，只是把「都看不见」换成「都在喊」。
+       ============================================================ -->
+  <Style Selector="Ellipse.header-notice">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.TextSubtle}" />
+  </Style>
+  <Style Selector="Ellipse.header-notice.notice-warning">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.StatusWarning}" />
+  </Style>
+  <Style Selector="Ellipse.header-notice.notice-error">
+    <Setter Property="Fill" Value="{DynamicResource Ariadne.StatusError}" />
+  </Style>
+  <!-- 文字色也跟着变：圆点只有 6×6，单靠它在 1440p 屏上几乎不可见，
+       而这条通知的整个价值就在于被看见。error 档加粗（与预算 error 档同规）。 -->
+  <Style Selector="TextBlock.notice-warning">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusWarning}" />
+  </Style>
+  <Style Selector="TextBlock.notice-error">
+    <Setter Property="Foreground" Value="{DynamicResource Ariadne.StatusError}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
   </Style>
 
 </Styles>

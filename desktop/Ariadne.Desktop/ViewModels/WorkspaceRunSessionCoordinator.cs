@@ -16,9 +16,15 @@ internal sealed class WorkspaceRunSessionCoordinator : IDisposable
 {
     private const int EventBatchSize = 100;
     private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromMilliseconds(750);
+    /// <summary>
+    /// U194-C：离页后「只查终态」的监视间隔。比事件轮询松 4 倍——
+    /// 作者在别的页面写作，完成通知晚几秒毫无影响，而 IPC 频次值得省。
+    /// </summary>
+    private static readonly TimeSpan DefaultBackgroundWatchInterval = TimeSpan.FromMilliseconds(3000);
 
     private readonly IAriadneBackendClient _backend;
     private readonly TimeSpan _pollInterval;
+    private readonly TimeSpan _backgroundWatchInterval;
     private CancellationTokenSource? _pollingCts;
     private long _eventCursor;
     private long _generation;
@@ -27,10 +33,12 @@ internal sealed class WorkspaceRunSessionCoordinator : IDisposable
 
     public WorkspaceRunSessionCoordinator(
         IAriadneBackendClient backend,
-        TimeSpan? pollInterval = null)
+        TimeSpan? pollInterval = null,
+        TimeSpan? backgroundWatchInterval = null)
     {
         _backend = backend;
         _pollInterval = pollInterval ?? DefaultPollInterval;
+        _backgroundWatchInterval = backgroundWatchInterval ?? DefaultBackgroundWatchInterval;
     }
 
     public event Action<WorkspaceRunSessionState, WorkspaceRunSessionState>? StateChanged;
@@ -175,6 +183,122 @@ internal sealed class WorkspaceRunSessionCoordinator : IDisposable
         _pollingCts?.Cancel();
         _pollingCts?.Dispose();
         _pollingCts = null;
+    }
+
+    /// <summary>
+    /// U194-C：**离开画布页时把事件轮询降级成「只查终态」的后台监视，而不是掐掉。**
+    ///
+    /// 原缺陷：`MainWindowViewModel` 切页时对离开的页调 `DeactivateProjectData()`，
+    /// 画布页的实现就是 `CancelPolling()` ⇒ 一离开画布页轮询就停。
+    /// 于是作者启动一个几十分钟的工作流、切到作品页写作，跑完了 / 失败了 / 停在待确认，
+    /// **界面上永远不会有任何变化**，只能定期切回画布页看。
+    ///
+    /// 这条同时让 U194-E 那套「终态刷预算 + 刷角标」真正生效：
+    /// 它挂在 <see cref="UpdateState"/> 的终态跃迁上，而状态跃迁只由轮询推进
+    /// ⇒ 轮询停了，那套刷新只在「作者一直盯着画布页」时有效，
+    /// 而 C 条描述的场景恰恰是他切走了。属「做一半的功能掩盖没做的一半」。
+    ///
+    /// ## 为什么不是继续跑原来那个轮询
+    ///
+    /// 原轮询每 750ms 拉最多 100 条事件（`GetWorkflowEventsAsync`），
+    /// 是为了让画布上的节点状态、日志流实时更新——那些在别的页面上**没有任何消费者**。
+    /// 后台只需要「跑完了吗」这一个比特，所以改调 `GetWorkflowRunStateAsync`
+    /// 并把间隔放宽到 <see cref="BackgroundWatchInterval"/>：
+    /// 作者在写作，一次完成通知晚几秒毫无影响，而 IPC 频次降到 1/4。
+    ///
+    /// ## 为什么不动 _eventCursor
+    ///
+    /// 后台监视**刻意不推进事件游标**：作者切回画布页时会重新 `Attach` 起完整轮询，
+    /// 那一轮要从原游标继续拉，日志才不缺段。若这里顺手推进了游标，
+    /// 离页期间产生的事件就永远拉不回来了——日志中间会出现一个静默的洞。
+    /// </summary>
+    public void WatchTerminalStateInBackground()
+    {
+        // 没在跑、或已经跑到终态：没有什么可等的。
+        // 这道闸是必需的——否则每次切页都会留下一个永不满足的轮询任务，
+        // 切十次页面就有十个后台循环在打 IPC。
+        if (string.IsNullOrWhiteSpace(WorkflowId)
+            || string.IsNullOrWhiteSpace(RunId)
+            || IsTerminal(Status))
+        {
+            CancelPolling();
+            return;
+        }
+
+        // 先掐掉重的那个（CancelPolling 会 ++_generation，让旧循环下一轮自行退出），
+        // 再用新代次起轻的。两者共用 _pollingCts 槽位与 _generation 判据，
+        // 所以「切回画布页 → Attach → StartPolling」会同样把后台监视顶掉，
+        // 不会出现两个循环并行打同一个 run。
+        CancelPolling();
+        var workflowId = WorkflowId;
+        var runId = RunId;
+        var generation = _generation;
+        var cts = new CancellationTokenSource();
+        _pollingCts = cts;
+        _ = WatchTerminalAsync(workflowId, runId, generation, cts);
+    }
+
+    private async Task WatchTerminalAsync(
+        string workflowId,
+        string runId,
+        long generation,
+        CancellationTokenSource cts)
+    {
+        var cancellationToken = cts.Token;
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(_backgroundWatchInterval, cancellationToken).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                WorkflowRunState state;
+                try
+                {
+                    state = await _backend
+                        .GetWorkflowRunStateAsync(workflowId, runId, cancellationToken)
+                        .ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch
+                {
+                    // 后台监视失败**刻意不报给 PollingFailed**：那个事件写的是画布页的
+                    // 状态行，而作者此刻在别的页面上——弹一条他看不见、也无从处置的
+                    // 「轮询失败」只会在他切回来时留下一句陈旧的错误。
+                    // 直接退出：切回画布页会重起完整轮询，那时的失败才有显示位。
+                    return;
+                }
+
+                if (!IsCurrent(generation, workflowId, runId))
+                {
+                    return;
+                }
+                // 走 UpdateState 这个统一收口，终态广播（U194-E 的预算/角标刷新
+                // 与 C 条的顶栏通知）便自动生效，不必在这里重复一遍判定逻辑。
+                UpdateState(_state with { Status = state.Status ?? Status });
+                if (IsTerminal(state.Status))
+                {
+                    return;
+                }
+            }
+        }
+        finally
+        {
+            if (generation == _generation && ReferenceEquals(_pollingCts, cts))
+            {
+                _pollingCts = null;
+                cts.Dispose();
+            }
+        }
     }
 
     public static bool IsTerminal(string? status) =>

@@ -58,7 +58,11 @@ public sealed class ScaleTokenUsageTests
         {
             ["FontSize"] = 18,
             ["CornerRadius"] = 44,
-            ["BorderThickness"] = 39,
+            // 39 → 38：U181-F 把 RightPanelTogglePill 的 BorderThickness 内联字面量
+            // 搬进了样式层并改成 `Ariadne.Stroke.*` 令牌（内联是 LocalValue(0)，
+            // 留着会让焦点态永远压不掉它）。基线必须跟着降，否则虚高的基线
+            // 挡不住下一次漂移 —— 这条守卫自己的失败信息就是这么要求的。
+            ["BorderThickness"] = 38,
         };
 
     [Theory]

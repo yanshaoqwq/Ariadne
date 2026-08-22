@@ -14,8 +14,11 @@
     <Style Selector="Border.bottom-pill">
       <Setter Property="BoxShadow" Value="0 -2 6 0 #10000000" />
     </Style>
+    <!-- 通用键盘目标焦点环（端口、底部胶囊、素材库 chip 都挂 keyboard-target）。
+         节点卡另有一条更靠后、更具体的规则（见下方 U181-C），因为它被三条
+         node-card 的 BoxShadow 压着。颜色统一走主题令牌，不写魔法值。 -->
     <Style Selector="Border.keyboard-target:focus">
-      <Setter Property="BoxShadow" Value="0 0 0 3 #B32E726B" />
+      <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.FocusRing}" />
     </Style>
     <!-- 画布微动效：短时、低幅度，只强化悬停/选中/视口操作反馈。 -->
     <Style Selector="Grid.canvas-node Border.node-card">
@@ -69,6 +72,46 @@
     <Style Selector="Grid.canvas-node.selected Border.node-card">
       <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.NodeSelected}" />
       <Setter Property="BoxShadow" Value="0 0 0 1 #4D2E726B, 0 2 4 0 #1C000000, 0 14 30 -8 #38000000, 0 30 64 -22 #30000000" />
+    </Style>
+    <!-- U181-C：键盘焦点环。**位置就是修复本身** —— 必须声明在上面那批
+         `Grid.canvas-node Border.node-card`（基础/pointerover/selected）之后。
+
+         原缺陷：焦点样式写在文件开头（`Border.keyboard-target:focus`，:17-19），
+         而节点卡挂着 `keyboard-target node-keyboard-target node-card` 三个类，
+         后面三条 `Grid.canvas-node Border.node-card*` 各自又设了 `BoxShadow`。
+         本项目已钉死的规则：**同优先级按文档顺序、后者胜**，没有 CSS 那种
+         选择器特异性权重（U154 就是这么失效的）⇒ 焦点环永不生效。
+         方向键路径必然踩中：`OnNodeCardKeyDown` 是 `SelectNode` + `FocusNodeCard`
+         成对调用，落进 `.selected` 分支。
+
+         ⚠️ 选择器刻意写成 `Grid.canvas-node Border.node-card:focus` 而不是继续用
+         `Border.keyboard-target:focus`：后者即便挪到这里，也与 `.selected` 那条
+         **同优先级**，一旦将来有人在它后面再加一条 node-card 的 BoxShadow 就又死了。
+         带 `Grid.canvas-node` 前缀后它比那三条都长，语义上也说明「这是画布节点的焦点环」。
+
+         ⚠️ **焦点环为什么必须由 `BorderBrush` 承担、`BoxShadow` 只作陪衬 ——
+         这是截图取证逼出来的结论，守卫和肉眼看图都拦不住**：
+         `BoxShadow` 画在控件**边界之外**，而节点卡所在的 `Grid.canvas-node`
+         单元格是定高的，外溢部分**会被裁掉**。实测探针（把环换成
+         绝不可能看错的 8px 洋红）证明：8px 的环只画出**约 1px 的发丝线**
+         —— 也就是说"环画了"和"环几乎看不见"同时成立。
+         第一版只改 BoxShadow 时两态最大像素差仅 24/255，
+         而 C1/C2 那两条断言"BoxShadow 变了且等于令牌"**照样全绿**：
+         属性确实变了，只是用户看不见。
+         ⇒ 焦点态改 `BorderBrush` + `BorderThickness`（画在**边界之内**，
+         永远不会被裁），`BoxShadow` 仍给 `FocusRingCard` 作外缘陪衬。
+         `FocusRingCard` = 环 + 卡片原本那三层抬升：`BoxShadow` 是**整体替换**
+         而非叠加，只写一圈环会把抬升投影一并删掉，
+         "多一圈环、少一片阴影"两个变化在视觉上互相抵消。
+
+         ⚠️ 颜色一律走主题令牌（`Ariadne.FocusRing` / `Ariadne.Shadow.FocusRingCard`，
+         亮暗各一份且个性化换色时由 ThemeApplication 重写）。
+         原先那个 `#B32E726B` 是硬编码魔法值，作者换强调色时焦点环纹丝不动
+         —— 那是 U181-D。 -->
+    <Style Selector="Grid.canvas-node Border.node-card:focus">
+      <Setter Property="BorderBrush" Value="{DynamicResource Ariadne.FocusRing}" />
+      <Setter Property="BorderThickness" Value="{DynamicResource Ariadne.Stroke.Emphasis}" />
+      <Setter Property="BoxShadow" Value="{DynamicResource Ariadne.Shadow.FocusRingCard}" />
     </Style>
     <!-- 玻璃头：透明底，让卡片的「毛玻璃→实心」渐变一路透上来。
          不画底部分隔线——标题与内容本就靠字号/字重分层，多一道线只是噪点。 -->
@@ -566,6 +609,7 @@
                         CornerRadius="5"
                         Background="Transparent"
                         Opacity="{Binding PortCommunicationOpacity}"
+                        Classes.connect-origin="{Binding PortCommunicationIsOrigin}"
                         Focusable="True"
                         AutomationProperties.Name="{loc:Text ui.workspace.port.communication}"
                         Cursor="Cross"
@@ -634,6 +678,7 @@
                                 CornerRadius="5"
                                 Background="Transparent"
                                 Opacity="{Binding PortControlInOpacity}"
+                                Classes.connect-origin="{Binding PortControlInIsOrigin}"
                                 Focusable="True"
                                 AutomationProperties.Name="{loc:Text ui.workspace.port.control_in}"
                                 Cursor="Cross"
@@ -692,6 +737,7 @@
                                 CornerRadius="5"
                                 Background="Transparent"
                                 Opacity="{Binding PortControlOutOpacity}"
+                                Classes.connect-origin="{Binding PortControlOutIsOrigin}"
                                 Focusable="True"
                                 AutomationProperties.Name="{loc:Text ui.workspace.port.control_out}"
                                 Cursor="Cross"
@@ -727,6 +773,7 @@
                                   CornerRadius="5"
                                   Background="Transparent"
                                   Opacity="{Binding PortControlOutOpacity}"
+                                  Classes.connect-origin="{Binding PortControlOutIsOrigin}"
                                   Focusable="True"
                                   AutomationProperties.Name="{loc:Text ui.workspace.port.control_out_true}"
                                   Cursor="Cross"
@@ -751,6 +798,7 @@
                                   CornerRadius="5"
                                   Background="Transparent"
                                   Opacity="{Binding PortControlOutOpacity}"
+                                  Classes.connect-origin="{Binding PortControlOutIsOrigin}"
                                   Focusable="True"
                                   AutomationProperties.Name="{loc:Text ui.workspace.port.control_out_false}"
                                   Cursor="Cross"
@@ -859,6 +907,7 @@
                                 CornerRadius="7"
                                 Background="Transparent"
                                 Opacity="{Binding PortDataOutOpacity}"
+                                Classes.connect-origin="{Binding PortDataOutIsOrigin}"
                                 Focusable="True"
                                 AutomationProperties.Name="{loc:Text ui.workspace.port.data_out}"
                                 Cursor="Cross"

@@ -1643,14 +1643,28 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
     public void BeginPortDragHighlight(
         string sourceNodeId, NodePortKind sourceKind, NodePortDirection sourceDirection)
     {
+        var sourceHandle = NodePortSpec.HandleName(sourceKind, sourceDirection);
         foreach (var node in Nodes)
         {
+            // U181-E：**起点端口自己不许被淡出。**
+            //
+            // 原缺陷：这个循环遍历全部 Nodes（含起点节点自己），而
+            // TryEvaluateConnection 对同节点必然判 Self 失败 ⇒ 起点节点的
+            // **所有**端口都走 SetPortDragHighlight 的 false 分支、Opacity 打到 0.22。
+            // 于是作者选完连线起点，那个起点反而比别的端口更淡 —— 键盘连线路径
+            // 因此是零起点指示（鼠标路径靠橡皮筋兜底，键盘路径连橡皮筋都没有）。
+            //
+            // 起点节点的其余端口仍然淡出：它们确实不可连（同节点），
+            // 保留淡出才让「哪些能落」这件事继续成立。只把**被选中的那一个**
+            // 拎出来给满不透明 + 一个明确的「已选为起点」态。
+            var isSourceNode = string.Equals(node.Id, sourceNodeId, StringComparison.Ordinal);
             node.SetPortDragHighlight(
                 controlIn: CanConnectPorts(sourceNodeId, sourceKind, sourceDirection, node.Id, NodePortKind.Control, NodePortDirection.In),
                 controlOut: CanConnectPorts(sourceNodeId, sourceKind, sourceDirection, node.Id, NodePortKind.Control, NodePortDirection.Out),
                 dataIn: CanConnectPorts(sourceNodeId, sourceKind, sourceDirection, node.Id, NodePortKind.Data, NodePortDirection.In),
                 dataOut: CanConnectPorts(sourceNodeId, sourceKind, sourceDirection, node.Id, NodePortKind.Data, NodePortDirection.Out),
-                communication: CanConnectPorts(sourceNodeId, sourceKind, sourceDirection, node.Id, NodePortKind.Communication, NodePortDirection.Both));
+                communication: CanConnectPorts(sourceNodeId, sourceKind, sourceDirection, node.Id, NodePortKind.Communication, NodePortDirection.Both),
+                originHandle: isSourceNode ? sourceHandle : null);
         }
     }
 
@@ -4373,7 +4387,12 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
     public void DeactivateProjectData()
     {
         _canvasLoading.Invalidate();
-        _runSession.CancelPolling();
+        // U194-C：原先这里是 `_runSession.CancelPolling()` ⇒ **一离开画布页轮询就停**，
+        // 作者启动一个几十分钟的工作流再切去写作，跑完/失败/停下都毫无提示。
+        // 改成降级为「只查终态」的后台监视：重的事件轮询（750ms 拉 100 条事件）
+        // 在别的页面上确实没有消费者，该停；但「跑完了吗」这一个比特必须继续问。
+        // 已在终态或压根没在跑时它会自行退化成 CancelPolling，不留空转任务。
+        _runSession.WatchTerminalStateInBackground();
     }
 
     private bool CanPersistWorkflow()
@@ -4585,6 +4604,16 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
     internal string LoadedWorkflowIdForTests => CurrentWorkflowId;
 
     internal string? WorkflowContentRevisionForTests => _workflowContentRevision;
+
+    /// <summary>
+    /// 测试用：把页面推到「有一个运行在跑」的状态，不真起一次工作流。
+    ///
+    /// 存在理由是 U194-C 的接线判据：`DeactivateProjectData()` 必须把轮询**降级**成
+    /// 后台终态监视而不是掐掉，而验证那一下需要先有个非终态的运行挂着。
+    /// 走真实运行会把整条工作流加载/后端回包都拉进来，失败面与本条要守的性质无关。
+    /// </summary>
+    internal void AttachRunForTests(string workflowId, string runId, string status) =>
+        _runSession.Attach(workflowId, runId, status, resetCursor: true);
 
     private string NodeLabel(string nodeType)
     {
@@ -5580,6 +5609,12 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     private bool _portDataInCompatible;
     private bool _portDataOutCompatible;
     private bool _portCommunicationCompatible;
+    // U181-E：连线起点标记（每个引脚一个）。
+    private bool _portControlInIsOrigin;
+    private bool _portControlOutIsOrigin;
+    private bool _portDataInIsOrigin;
+    private bool _portDataOutIsOrigin;
+    private bool _portCommunicationIsOrigin;
     private string _importPath = string.Empty;
     private bool _includeContent = true;
     private string _queryAlias = "query";
@@ -5995,6 +6030,19 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
     public bool PortDataOutCompatible { get => _portDataOutCompatible; private set => SetProperty(ref _portDataOutCompatible, value); }
     public bool PortCommunicationCompatible { get => _portCommunicationCompatible; private set => SetProperty(ref _portCommunicationCompatible, value); }
 
+    // U181-E：「这个引脚就是当前连线的起点」。
+    //
+    // 与 `*Compatible` 分开而不是复用它，是因为两者语义相反：
+    // Compatible = 「线可以落在这」，IsOrigin = 「线是从这出发的」。
+    // 视觉上也必须不同 —— 起点用一圈**实边**（与 U178 那批「状态不能只靠颜色」
+    // 一致），可落点用满不透明 + 兼容色。合并成一个标记会让作者
+    // 在一堆等价高亮里找不出自己刚选的那个。
+    public bool PortControlInIsOrigin { get => _portControlInIsOrigin; private set => SetProperty(ref _portControlInIsOrigin, value); }
+    public bool PortControlOutIsOrigin { get => _portControlOutIsOrigin; private set => SetProperty(ref _portControlOutIsOrigin, value); }
+    public bool PortDataInIsOrigin { get => _portDataInIsOrigin; private set => SetProperty(ref _portDataInIsOrigin, value); }
+    public bool PortDataOutIsOrigin { get => _portDataOutIsOrigin; private set => SetProperty(ref _portDataOutIsOrigin, value); }
+    public bool PortCommunicationIsOrigin { get => _portCommunicationIsOrigin; private set => SetProperty(ref _portCommunicationIsOrigin, value); }
+
     public bool PortControlInConnected => _portControlInConnected;
     public bool PortControlOutConnected => _portControlOutConnected;
     /// <summary>U125：condition「真」分支引脚是否已连线（实心/空心）。</summary>
@@ -6056,8 +6104,16 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         }
     }
 
+    /// <summary>
+    /// 拖线中的端口外观：可连满不透明、不可连淡出。
+    ///
+    /// <paramref name="originHandle"/> 是 U181-E：当本节点就是连线**起点**所在节点时，
+    /// 传入被选中的那个引脚名。该引脚会强制满不透明并置上「已选为起点」标记，
+    /// 不再跟着同节点其余端口一起淡出。
+    /// </summary>
     public void SetPortDragHighlight(
-        bool controlIn, bool controlOut, bool dataIn, bool dataOut, bool communication)
+        bool controlIn, bool controlOut, bool dataIn, bool dataOut, bool communication,
+        string? originHandle = null)
     {
         // 可连：满不透明 + 兼容标记；不可连：淡出。
         PortControlInCompatible = controlIn;
@@ -6065,11 +6121,20 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         PortDataInCompatible = dataIn;
         PortDataOutCompatible = dataOut;
         PortCommunicationCompatible = communication;
-        PortControlInOpacity = controlIn ? 1.0 : 0.22;
-        PortControlOutOpacity = controlOut ? 1.0 : 0.22;
-        PortDataInOpacity = dataIn ? 1.0 : 0.22;
-        PortDataOutOpacity = dataOut ? 1.0 : 0.22;
-        PortCommunicationOpacity = communication ? 1.0 : 0.22;
+
+        // 起点标记先算出来，再参与不透明度：起点必须压过「不可连 ⇒ 淡出」那条，
+        // 否则同节点判 Self 失败会把它一起淡掉（原缺陷）。
+        PortControlInIsOrigin = originHandle == NodePortSpec.HandleName(NodePortKind.Control, NodePortDirection.In);
+        PortControlOutIsOrigin = originHandle == NodePortSpec.HandleName(NodePortKind.Control, NodePortDirection.Out);
+        PortDataInIsOrigin = originHandle == NodePortSpec.HandleName(NodePortKind.Data, NodePortDirection.In);
+        PortDataOutIsOrigin = originHandle == NodePortSpec.HandleName(NodePortKind.Data, NodePortDirection.Out);
+        PortCommunicationIsOrigin = originHandle == NodePortSpec.HandleName(NodePortKind.Communication, NodePortDirection.Both);
+
+        PortControlInOpacity = controlIn || PortControlInIsOrigin ? 1.0 : 0.22;
+        PortControlOutOpacity = controlOut || PortControlOutIsOrigin ? 1.0 : 0.22;
+        PortDataInOpacity = dataIn || PortDataInIsOrigin ? 1.0 : 0.22;
+        PortDataOutOpacity = dataOut || PortDataOutIsOrigin ? 1.0 : 0.22;
+        PortCommunicationOpacity = communication || PortCommunicationIsOrigin ? 1.0 : 0.22;
     }
 
     public void ClearPortDragHighlight()
@@ -6079,6 +6144,13 @@ public sealed class WorkflowNodeViewModel : ViewModelBase
         PortDataInCompatible = false;
         PortDataOutCompatible = false;
         PortCommunicationCompatible = false;
+        // U181-E：起点标记必须与兼容标记同批清掉，否则取消连线后那圈「已选为起点」
+        // 的实边会留在画布上，作者会以为连线还没结束。
+        PortControlInIsOrigin = false;
+        PortControlOutIsOrigin = false;
+        PortDataInIsOrigin = false;
+        PortDataOutIsOrigin = false;
+        PortCommunicationIsOrigin = false;
         PortControlInOpacity = 1.0;
         PortControlOutOpacity = 1.0;
         PortDataInOpacity = 1.0;
