@@ -132,6 +132,19 @@ public interface IAriadneBackendClient
 
     Task<WorkflowActionResult> ResumeWorkflowAsync(string workflowId, string runId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// U196-D：从**失败的那个节点**重跑，已成功的上游产出保留。
+    ///
+    /// 与 <see cref="ResumeWorkflowAsync"/> 不能互换：后者走后端
+    /// `store::claim_resume`，那里只接受 `Paused | Queued | Running`，
+    /// 而节点不可重试地失败后运行是 `Failed`（终态）⇒ 会拿到 NotResumable。
+    /// 这条是唯一能从终态恢复的入口。
+    ///
+    /// <paramref name="nodeId"/> 取 `WorkflowRunState.Failure.Stage`
+    /// —— 后端把失败节点 id 放在那里（不是阶段名，尽管字段叫 stage）。
+    /// </summary>
+    Task<WorkflowActionResult> RetryFailedNodeAsync(string workflowId, string runId, string nodeId, CancellationToken cancellationToken = default);
+
     Task<WorkflowRunState> GetWorkflowRunStateAsync(string workflowId, string runId, CancellationToken cancellationToken = default);
 
     Task<WorkflowEventsResult> GetWorkflowEventsAsync(string workflowId, string runId, long afterSequence = 0, int? limit = null, CancellationToken cancellationToken = default);

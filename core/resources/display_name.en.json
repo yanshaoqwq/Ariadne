@@ -1396,5 +1396,7 @@
   "ui.recovery.budget": "The daily budget limit lives in Settings → Budget, together with the auto-spend allowance.",
   "ui.recovery.external_outcome_unknown": "Check the Run Log page to see whether this step already took effect, then decide to retry or skip.",
   "ui.recovery.serialization": "You can return to the last usable checkpoint on the Version page.",
-  "ui.automation.auto_mode.needs_project": "No project is open yet — create or open one before auto mode can be switched on."
+  "ui.automation.auto_mode.needs_project": "No project is open yet — create or open one before auto mode can be switched on.",
+  "ui.workspace.retry_failed_node": "Retry from failure",
+  "ui.workspace.retry_failed_node_tooltip": "Reruns only the step that failed. Steps that already succeeded are kept and are not paid for again."
 }

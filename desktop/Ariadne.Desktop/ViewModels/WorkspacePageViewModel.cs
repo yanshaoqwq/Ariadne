@@ -42,6 +42,8 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
     private bool _deferDirtyRefresh;
     private int _nextNodeNumber = 1;
     private string _projectAiMessage = string.Empty;
+    // U196-D：失败的那个节点 id（后端 WorkflowRunFailure.Stage）。
+    private string _failedNodeId = string.Empty;
     private string _projectAiAnswer;
     private bool _isConfirmationPanelExpanded = true;
     // 审批历史默认收起：进入审阅态第一眼该落在待审那一项上，历史是「想查才查」。
@@ -137,6 +139,11 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
         PauseWorkflowCommand = new RelayCommand(() => _ = PauseWorkflowAsync(), CanPauseWorkflow);
         StopWorkflowCommand = new RelayCommand(() => _ = StopWorkflowAsync(), CanStopWorkflow);
         ResumeWorkflowCommand = new RelayCommand(() => _ = ResumeWorkflowAsync(), CanResumeWorkflow);
+        // U196-D：从失败的那个节点重跑。它**不能**并进上面三键：那三键的 CanExecute
+        // 全部要求非终态（见 CanvasRunControlHelpers），而这颗恰恰只在终态 failed 下有用。
+        RetryFailedNodeCommand = new RelayCommand(
+            () => _ = RetryFailedNodeAsync(),
+            CanRetryFailedNode);
         // U207-C①：下栏标题栏的「开始运行」入口。原先此处只有暂停/继续/停止三个
         // **运行中**控制，空画布上一个开始入口都没有（起始节点卡上的三角要先有节点，
         // 执行面板的主按钮要先切 tab），作者只会把「继续」当播放键去点。
@@ -1005,6 +1012,9 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
     public RelayCommand PauseWorkflowCommand { get; }
     public RelayCommand StopWorkflowCommand { get; }
     public RelayCommand ResumeWorkflowCommand { get; }
+
+    /// <summary>U196-D：从失败的那个节点重跑，已完成的步骤不重跑。</summary>
+    public RelayCommand RetryFailedNodeCommand { get; }
     /// <summary>U207-C①：空闲态下栏标题栏那个「运行」主按钮。</summary>
     public RelayCommand RunWorkflowCommand { get; }
     public RelayCommand SendProjectAiCommand { get; }
@@ -1505,6 +1515,58 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
     public bool ShowRunEntry => !ShowRunControls;
 
     /// <summary>
+    /// U196-D：失败的那个节点 id。取自后端 <c>WorkflowRunFailure.Stage</c>
+    /// —— 字段叫 stage，但 <c>runtime.rs::record_node_error</c> 往里放的是节点 id
+    /// （注释写明「用户在画布上按它定位到具体哪个方块」）。
+    ///
+    /// 空串表示「不知道是哪个节点失败的」，此时入口不出现：给一颗不知道要重跑什么的
+    /// 「从失败处重跑」，比没有这颗更糟。
+    /// </summary>
+    public string FailedNodeId
+    {
+        get => _failedNodeId;
+        private set
+        {
+            if (SetProperty(ref _failedNodeId, value))
+            {
+                OnPropertyChanged(nameof(CanRetryFromFailedNode));
+                RetryFailedNodeCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// U196-D：「从失败处重跑」此刻能不能点。
+    ///
+    /// 三个条件都是必需的，缺一个就会造出一颗有害的按钮：
+    /// - 有 run id：没有运行可谈；
+    /// - 状态是 failed：其他状态下重跑要么无意义（succeeded）要么会与在跑的 worker 抢；
+    /// - 知道是哪个节点失败：见 <see cref="FailedNodeId"/>。
+    ///
+    /// ⚠️ 刻意**不**复用 <see cref="CanvasRunControlHelpers"/>：那套矩阵的三个判定
+    /// 全部把 failed 排除在外（`IsTerminal` 里就有 failed），这颗按钮恰恰只在
+    /// failed 下有用。往那套矩阵里塞一个「终态也算可用」的例外，会让暂停/停止
+    /// 在终态下一起亮起来。
+    /// </summary>
+    public bool CanRetryFailedNode() =>
+        HasCurrentRun()
+        && string.Equals(CurrentRunStatus, "failed", StringComparison.Ordinal)
+        && !string.IsNullOrWhiteSpace(FailedNodeId);
+
+    /// <summary>渲染位的显隐；与 <see cref="CanRetryFailedNode"/> 同源，不另设条件。</summary>
+    public bool CanRetryFromFailedNode => CanRetryFailedNode();
+
+    public string RetryFailedNodeText => _displayNames.Text("ui.workspace.retry_failed_node");
+
+    /// <summary>
+    /// 悬停说明。这颗按钮的字面意思（「从失败处重跑」）说不清最要紧的那件事
+    /// ——**前面已完成的步骤不会重复花钱**。作者失败一次之后最怕的正是这个，
+    /// 不写明的话他会宁愿什么都不点。
+    /// </summary>
+    public string RetryFailedNodeTooltip =>
+        _displayNames.Text("ui.workspace.retry_failed_node_tooltip");
+
+    /// <summary>
     /// 「运行」按钮能不能点。
     ///
     /// 没有起始节点时禁用——但**禁用理由必须配文字**（与 <see cref="RunNodeAsync"/>
@@ -1971,6 +2033,10 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
         // 漏了这两行的话，运行起来后「运行」按钮不会让位，三键也不会出现。
         OnPropertyChanged(nameof(ShowRunControls));
         OnPropertyChanged(nameof(ShowRunEntry));
+        // U196-D：「从失败处重跑」的可用性是 CurrentRunStatus 的函数，必须在同一处广播。
+        // 漏了这两行，值算对了但界面停在上一屏 —— 与「根本没接这条判定」在屏幕上同形。
+        RetryFailedNodeCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(CanRetryFromFailedNode));
         NotifyConfirmationCommandStates();
     }
 
@@ -2044,6 +2110,10 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
                 return;
             }
             SetRecoverySuggestion(state.Failure?.RecoverySuggestion, _displayNames);
+            // U196-D：同一次回包里把失败节点 id 也收下 —— 「从失败处重跑」需要它。
+            // 与建议同源不是省请求：两者必须来自**同一个** run state 快照，
+            // 否则会出现「建议说的是 A 节点、重跑打到 B 节点」。
+            FailedNodeId = state.Failure?.Stage ?? string.Empty;
         }
         catch (Exception)
         {
@@ -3411,6 +3481,29 @@ public sealed class WorkspacePageViewModel : PageViewModelBase, IUnsavedChangesG
     private async Task ResumeWorkflowAsync()
     {
         await RunControlAsync(() => _runSession.ResumeAsync());
+    }
+
+    /// <summary>
+    /// U196-D：从失败的那个节点重跑。
+    ///
+    /// 发出的是 `retry_failed_node` 而**不是** `resume_workflow`：后者在后端走
+    /// `store::claim_resume`，那里只接受 `Paused | Queued | Running`，
+    /// 失败的运行会拿到 NotResumable —— 换成它的话按钮点得动、请求发得出、
+    /// 回包也不报错，而运行状态一动不动。所以本条的判据必须落在
+    /// **真实出站请求的方法名与 node_id 上**，不能只测「命令能不能执行」。
+    ///
+    /// 重跑前清掉上一次的失败建议：那句话属于刚被撤销的那次失败，
+    /// 留在屏幕上会让作者以为重跑又立刻失败了。
+    /// </summary>
+    private async Task RetryFailedNodeAsync()
+    {
+        var nodeId = FailedNodeId;
+        if (string.IsNullOrWhiteSpace(nodeId))
+        {
+            return;
+        }
+        RecoveryText = string.Empty;
+        await RunControlAsync(() => _runSession.RetryFailedNodeAsync(nodeId));
     }
 
     private async Task RunControlAsync(Func<Task<WorkflowActionResult>> action)

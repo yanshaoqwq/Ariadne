@@ -1573,6 +1573,18 @@ pub struct ResumeFromNodeRequest {
     pub injected_outputs: crate::contracts::PortMap,
 }
 
+/// U196-D：从失败的那个节点重跑，已成功的上游产出保留。
+///
+/// 只需要节点 id —— 与 `ResumeFromNodeRequest` 的差别正在这里：
+/// 那条要作者提供 `injected_outputs`（外部正文），这条不要任何正文，
+/// 失败的节点会自己再跑一次。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryFailedNodeRequest {
+    pub workflow_id: String,
+    pub run_id: String,
+    pub node_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolveConfirmationResult {
     pub workflow: WorkflowActionResult,
@@ -3074,6 +3086,58 @@ pub fn resume_from_node(
                 request.injected_outputs.clone(),
             )
         },
+    )?;
+    if let Some(lease) = lease {
+        spawn_continue_workflow_worker_with_lease(
+            project_root,
+            Arc::clone(&state.secret_store),
+            Some(state.retrieval_runtime()?),
+            result.workflow_id.clone(),
+            result.run_id.clone(),
+            lease,
+            project_mutation,
+        )?;
+    }
+    state.ensure_workflow_scheduler()?;
+    Ok(result)
+}
+
+/// U196-D：从失败的那个节点重跑，前面成功的节点一个都不重跑。
+///
+/// # 为什么不能复用 `resume_workflow`
+///
+/// `resume_workflow` 走 `store::claim_resume`，那里只接受
+/// `Paused | Queued | Running`；节点不可重试地失败后运行是 `Failed`（终态），
+/// 会拿到 `NotResumable`。所以这条必须走 `mutate_workflow_run_and_claim`
+/// —— 它不判终态，且在 mutate 把状态改成 `Queued` **之后**才决定要不要领 lease，
+/// 于是「解除终态」与「领取 worker」在同一个 SQLite 事务里完成。
+/// 拆成两步（先改态、再 resume）会留一个窗口：改完态还没领到 worker 时，
+/// 孤儿恢复扫描会把它当成待领运行，两个 worker 同时跑同一条运行。
+pub fn retry_failed_node(
+    state: &AriadneAppState,
+    request: RetryFailedNodeRequest,
+) -> CommandResult<WorkflowActionResult> {
+    let project_root = project_root_from_state(state, None)?;
+    let project_mutation =
+        acquire_project_mutation_guard(&project_root, "workflow_retry_failed_node")?;
+    let workflow_id = WorkflowId::from(request.workflow_id.clone());
+    let run_id = RunId::from(request.run_id.clone());
+    let store = SqliteWorkflowRuntimeStore::open(&project_root).map_err(error_to_string)?;
+    let run_state = store
+        .load_state(&workflow_id, &run_id)
+        .map_err(error_to_string)?
+        .ok_or_else(|| {
+            CommandError::not_found(format!(
+                "workflow run not found: {}/{}",
+                request.workflow_id, request.run_id
+            ))
+        })?;
+    let (workflow, _) = workflow_for_run_state(&project_root, &workflow_id, &run_state)?;
+    let (result, lease) = mutate_workflow_run_and_claim(
+        &project_root,
+        request.workflow_id,
+        request.run_id,
+        |runtime| runtime.retry_failed_node(&workflow, &NodeId::from(request.node_id.clone())),
     )?;
     if let Some(lease) = lease {
         spawn_continue_workflow_worker_with_lease(

@@ -1490,5 +1490,7 @@
   "ui.recovery.budget": "日预算上限在「配置 → 预算」里改；自动支出额度在同一分区。",
   "ui.recovery.external_outcome_unknown": "请到「运行记录」页核对这一步是否已经生效，再决定重试还是跳过。",
   "ui.recovery.serialization": "可到「版本」页回到最近一次可用的存档点。",
-  "ui.automation.auto_mode.needs_project": "还没打开项目 —— 先新建或打开一个，自动模式才能开。"
+  "ui.automation.auto_mode.needs_project": "还没打开项目 —— 先新建或打开一个，自动模式才能开。",
+  "ui.workspace.retry_failed_node": "从失败处重跑",
+  "ui.workspace.retry_failed_node_tooltip": "只重跑失败的那个步骤，之前已完成的步骤不会重跑、不会重复花钱。"
 }

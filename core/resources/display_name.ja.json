@@ -1377,5 +1377,7 @@
   "ui.recovery.budget": "日次予算の上限は「設定 → 予算」にあります。自動支出の枠も同じセクションです。",
   "ui.recovery.external_outcome_unknown": "「実行記録」ページでこの手順が既に反映されているか確認し、再試行するか省略するかを決めてください。",
   "ui.recovery.serialization": "「バージョン」ページで直近の利用可能なチェックポイントに戻せます。",
-  "ui.automation.auto_mode.needs_project": "プロジェクトがまだ開かれていません — 先に作成または開いてください。自動モードはそれから有効にできます。"
+  "ui.automation.auto_mode.needs_project": "プロジェクトがまだ開かれていません — 先に作成または開いてください。自動モードはそれから有効にできます。",
+  "ui.workspace.retry_failed_node": "失敗した箇所から再実行",
+  "ui.workspace.retry_failed_node_tooltip": "失敗したステップのみを再実行します。成功済みのステップは保持され、再課金されません。"
 }

@@ -893,6 +893,12 @@ fn dispatch_request(
             let params: RequestParam<commands::ResumeFromNodeRequest> = params(request.params)?;
             ok(commands::resume_from_node(state, params.request)?)
         }
+        // U196-D：从失败的那个节点重跑，已成功的上游产出保留。
+        // 与上面那条同名相近但语义不同：这条不接收任何注入正文。
+        "retry_failed_node" => {
+            let params: RequestParam<commands::RetryFailedNodeRequest> = params(request.params)?;
+            ok(commands::retry_failed_node(state, params.request)?)
+        }
         "get_git_history" => ok(commands::get_git_history_with_cancellation(
             state,
             cancellation,

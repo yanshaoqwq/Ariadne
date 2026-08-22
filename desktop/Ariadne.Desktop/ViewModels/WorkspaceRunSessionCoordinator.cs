@@ -103,6 +103,24 @@ internal sealed class WorkspaceRunSessionCoordinator : IDisposable
                 runId,
                 cancellationToken));
 
+    /// <summary>
+    /// U196-D：从失败的那个节点重跑。
+    ///
+    /// 刻意走 <c>ControlAsync</c> 与其他三个控制指令同一条路：它在回包后
+    /// <c>Attach</c> 新状态，而 <c>Attach</c> 会**重新起轮询**——运行进终态时轮询
+    /// 已经停了，不重启的话重跑确实在后端跑着，而画布上一动不动、
+    /// 状态行永远停在「已失败」。那种缺陷与「重跑根本没发生」在屏幕上完全同形。
+    /// </summary>
+    public Task<WorkflowActionResult> RetryFailedNodeAsync(
+        string nodeId,
+        CancellationToken cancellationToken = default) =>
+        ControlAsync(
+            (workflowId, runId) => _backend.RetryFailedNodeAsync(
+                workflowId,
+                runId,
+                nodeId,
+                cancellationToken));
+
     public void Attach(
         string workflowId,
         string runId,

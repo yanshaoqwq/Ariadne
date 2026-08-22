@@ -132,6 +132,8 @@ pub enum WorkflowRuntimeEventType {
     ConfirmationOutputOverridden,
     /// 外部注入正文后从指定节点重入（路径 A）。
     NodeResumedWithInjection,
+    /// U196-D：失败的节点被就地重跑，已成功的上游产出全部保留。
+    NodeRetriedFromFailure,
     PatchWriteBackUpdated,
     CommunicationMessage,
     LoopUpdated,
@@ -1926,6 +1928,97 @@ impl WorkflowRuntime {
             self.state.next_retry_at_ms = None;
             self.state.status = RunStatus::Queued;
         }
+        Ok(())
+    }
+
+    /// U196-D：从**失败的那个节点**重跑，已成功的上游产出一律保留。
+    ///
+    /// # 与 `resume_from_node` 是两件不同的事，不要合并
+    ///
+    /// `resume_from_node` 的语义是「**注入外部正文**从指定节点重跑」：它把作者给的
+    /// 正文写成那个节点的输出并**置为成功**，节点本身不再执行（Prudent 拒绝处置路径 A）。
+    /// 本方法的语义是「**用已有产出续跑**」：失败节点的快照被清掉，它会**真的再跑一次**，
+    /// 前面成功的节点一个都不重跑。作者第 7 个节点失败时要的是后者——
+    /// 拿前者代替，等于要求他自己手写第 7 个节点本该产出的正文。
+    ///
+    /// # 为什么必须允许终态进入（这是本方法存在的全部理由）
+    ///
+    /// 节点不可重试地失败后 `record_node_error` 把运行置 `RunStatus::Failed`，
+    /// 而 `Failed` 是 `is_terminal()`。于是既有的三条恢复路全部拒绝它：
+    /// `resume()` / `skip_node()` / `resume_from_node()` 开头都是
+    /// `if self.state.status.is_terminal() { return Err(...) }`，
+    /// `store::claim_resume` 也只接受 `Paused | Queued | Running`。
+    /// ⇒ 作者唯一的出路是整条重跑，重烧前 6 步的钱和时间。
+    ///
+    /// # 门禁：只能重跑**真的失败了**的那个节点
+    ///
+    /// 若允许对任意节点调用，它就成了「重跑任意节点」——对着一个已成功的节点点下去，
+    /// 会清掉它和它下游的全部产出并重新花钱，而作者以为自己在补救一次失败。
+    /// 所以这里要求目标节点的快照存在且 `status == Failed`。
+    pub fn retry_failed_node(
+        &mut self,
+        workflow: &WorkflowDefinition,
+        node_id: &NodeId,
+    ) -> CoreResult<()> {
+        if self.state.status != RunStatus::Failed {
+            return Err(CoreError::validation(format!(
+                "workflow run is not failed; cannot retry node {} (status {:?})",
+                node_id.as_str(),
+                self.state.status
+            )));
+        }
+        if !workflow.nodes.iter().any(|node| node.id == *node_id) {
+            return Err(CoreError::validation(format!(
+                "node {} not found in workflow",
+                node_id.as_str()
+            )));
+        }
+        let node_failed = self
+            .state
+            .nodes
+            .get(node_id)
+            .is_some_and(|node| node.status == RunStatus::Failed);
+        if !node_failed {
+            return Err(CoreError::validation(format!(
+                "node {} did not fail; only the failed node can be retried",
+                node_id.as_str()
+            )));
+        }
+        // 清掉失败节点**自己**的快照（与 resume_from_node 的关键差别：那里要把
+        // 注入的输出写回去并置成功，这里要让节点真的再跑一次）。
+        // 下游快照一并清：它们即便有残留也是上一轮失败前的中间态。
+        let mut closure = Vec::new();
+        collect_downstream_closure(workflow, node_id, &mut closure);
+        for affected in &closure {
+            self.state.nodes.remove(affected);
+            // 与 resume_from_node 同一理由：已耗尽 max_iterations 的 loop 节点
+            // 不重置计数的话，重跑后会立刻再次暂停。
+            self.state.loop_iterations.remove(affected);
+        }
+        // 同 resume_from_node：completed=true 的 communication 边会让重跑被跳过。
+        reset_communication_edges_for_nodes(&mut self.state, &closure, workflow);
+        // `node_operation_sequences` **刻意不清**：它保证下一次执行拿到全新的
+        // operation_id。清掉的话新一轮会算出与失败那次相同的 operation_id，
+        // journal 把它认成同一请求的重放 ⇒ 直接把上次的失败结果replay回来，
+        // 「重跑」变成「再看一遍同一个错误」。
+        //
+        // `state.failure` 必须清：它是前端唯一显示的失败字段，留着的话重跑成功后
+        // 画布上仍写着上一次的失败原因（且 record_node_error 只在 is_none 时写入，
+        // 不清就永远停在第一次的根因上）。
+        self.state.failure = None;
+        self.state.control = RunControl::Continue;
+        self.state.pause_reason = None;
+        self.state.next_retry_at_ms = None;
+        self.state.status = RunStatus::Queued;
+        self.record_event(
+            WorkflowRuntimeEventType::NodeRetriedFromFailure,
+            Some(node_id.clone()),
+            format!(
+                "node {} retried from failure; upstream outputs preserved",
+                node_id.as_str()
+            ),
+            Value::Null,
+        );
         Ok(())
     }
 
